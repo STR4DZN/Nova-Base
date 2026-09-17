@@ -5,7 +5,7 @@
 > **Versão:** `0.0.2`  
 > **Data:** `2026-09-17`  
 > **Autoridade Normativa:** `Documentos/99_DOMAIN_MANAGER_MASTER_SPECIFICATION_V1.md` (§11–12, §6–7, §47–49)  
-> **Status de Conclusão:** `GATE_G2_ACCEPTED_EXTERNAL_AUDIT_RESOLVED` (233/233 testes verdes / 0 falhas / 0 regressões)
+> **Status de Conclusão:** `GATE_G2_ACCEPTED_AND_HOMOLOGATED` (233/233 testes verdes / 0 falhas / 0 regressões / In-World Foundry v13.351 + Socketlib PASS)
 
 ---
 
@@ -134,8 +134,15 @@ Executados localmente em `tests/multiplayer/multiplayer-harness.test.ts`:
 ---
 
 ## 6. Conclusão e Ponto de Parada
-
+ 
 O **Gate G2** está formalmente **RESOLVIDO, AUDITADO, HOMOLOGADO E VERIFICADO CONTRA TODOS OS 28 APONTAMENTOS DA AUDITORIA EXTERNA**.  
-Nenhum arquivo ou lógica do **Gate G3** foi iniciado.  
-O checkpoint final está pronto para auditoria externa conclusiva.
+A homologação in-world no Foundry VTT v13.351 com Socketlib 1.1.4 foi executada com 100% de aprovação em todos os checks normativos (`scripts/foundry-v13-socketlib-smoke-test.js`), confirmando:
+- Contrato canônico v1 (`contractVersion: 1`, `cmd_<UUID>`);
+- Pipeline real do CommandBus e MutationCoordinator executando sem falhas (`domain:restore` retornando `DM_DOMAIN_NOT_FOUND` de forma limpa e sem efeitos colaterais);
+- Chamadas não-autenticadas falhando closed com `DM_AUTH_UNAUTHENTICATED`;
+- Tentativas de spoofing de remetente ou de autoridade primária rejeitadas com `DM_SECURITY_SENDER_SPOOFED`;
+- Extração autoritativa de remetente exclusivamente via `this.socketdata.userId`.
+
+Com a aceitação e homologação externa do Gate G2 plenamente concluída, o **Gate G3 (Domain Lifecycle & State Machine / People)** está formalmente autorizado para planejamento e início.
+
 

@@ -18,8 +18,8 @@ Este repositório é a base canônica atual do projeto **Domain Manager**.
 |---|:---:|---|
 | **Gate G0** | CONCLUÍDO | Scaffold, contratos fundamentais, manifesto Foundry v13, scripts de build e validação de pacotes. |
 | **Gate G1** | CONCLUÍDO | Domain Repository, schema/validators v1, JournalEntry bridge, hierarquia por UUID, no-op revisions, cycle prevention e integrity check. |
-| **Gate G2** | CONCLUÍDO & AUDITADO (Ciclo 2) | Authority / Commands / MutationCoordinator completo. Eleição determinística com epoch, RPC dirigido via Socketlib com autenticação rigorosa via `this.socketdata.userId`, anti-spoofing fail-closed, deduplicação em memória, LockManager multi-chave deadlock-free, MutationCoordinator transacional, scheduler concorrente em CommandQueue (até 10 players), sanitização de saída pública e boundary de Transaction/Recovery shell. |
-| **Gate G3** | **PRÓXIMO GATE** | **Domain Lifecycle & State Machine / People** (Iniciação estritamente após homologação externa do G2). |
+| **Gate G2** | CONCLUÍDO, AUDITADO E HOMOLOGADO | Authority / Commands / MutationCoordinator completo. Eleição determinística com epoch, RPC dirigido via Socketlib com autenticação rigorosa via `this.socketdata.userId`, anti-spoofing fail-closed, deduplicação em memória, LockManager multi-chave deadlock-free, MutationCoordinator transacional, scheduler concorrente em CommandQueue (até 10 players), sanitização de saída pública e boundary de Transaction/Recovery shell. Homologado in-world no Foundry VTT v13.351 (100% checks PASS). |
+| **Gate G3** | **AUTORIZADO PARA INÍCIO** | **Domain Lifecycle & State Machine / People** (Iniciação mediante planejamento formal). |
 
 ---
 
@@ -40,7 +40,7 @@ Este repositório é a base canônica atual do projeto **Domain Manager**.
 
 ## 3. Próximo Gate
 
-Após a homologação externa final do Gate G2:
+Com a homologação externa do Gate G2 finalizada com sucesso (Foundry VTT v13.351 + Socketlib 1.1.4):
 - Avançar para o **Gate G3 — People / Domain Lifecycle & State Machine**.
 - Consultar a especificação normativa `Documentos/99_DOMAIN_MANAGER_MASTER_SPECIFICATION_V1.md` e o playbook do G3 antes de iniciar qualquer alteração.
 
