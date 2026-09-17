@@ -39,7 +39,10 @@ const requiredFiles = [
   "tests/mutations/mutation-coordinator-adversarial.test.ts",
   "tests/commands/foundry-transport-adversarial.test.ts",
   "tests/commands/revalidation-adversarial.test.ts",
-  "tests/commands/socketlib-upstream-real.test.ts"
+  "tests/commands/socketlib-upstream-real.test.ts",
+  "tests/commands/foundry-command-transport-socketlib-only.test.ts",
+  "tests/docs/build-state-validator.test.ts",
+  "docs/history/G2_BUILD_HISTORY.md"
 ];
 
 for (const path of requiredFiles) {

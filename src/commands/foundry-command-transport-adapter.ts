@@ -211,15 +211,6 @@ export class FoundryCommandTransportAdapter implements CommandTransport {
   readonly #socketlib: SocketlibSocketLike | null;
   #inboundHandler: TransportInboundHandler | null = null;
   #statusQueryHandler: CommandStatusQueryHandler | null = null;
-  #socketListener: ((packet: unknown, ...args: unknown[]) => void) | null = null;
-  readonly #pendingRequests = new Map<
-    string,
-    {
-      resolve: (value: Result<TransportReceipt<unknown>, PublicError>) => void;
-      reject: (reason: unknown) => void;
-      timer: ReturnType<typeof setTimeout> | null;
-    }
-  >();
 
   constructor(options: FoundryCommandTransportAdapterOptions) {
     this.#runtime = options.runtime ?? resolveFoundryRuntime();
@@ -229,15 +220,13 @@ export class FoundryCommandTransportAdapter implements CommandTransport {
     this.#socketlib = options.socketlib ?? resolveSocketlib() ?? null;
 
     this.#initSocketlib();
-    this.#initSocketListener();
   }
 
   get isAvailable(): boolean {
     if (this.#authorityService.isCurrentUser()) {
       return true;
     }
-    const hasTransport = Boolean(this.#socketlib) || Boolean(this.#runtime.socket);
-    return hasTransport && this.#authorityService.getStatus().available;
+    return Boolean(this.#socketlib) && this.#authorityService.getStatus().available;
   }
 
   get currentUserId(): string | null {
@@ -263,26 +252,8 @@ export class FoundryCommandTransportAdapter implements CommandTransport {
   }
 
   destroy(): void {
-    if (this.#socketListener && this.#runtime.socket?.off) {
-      this.#runtime.socket.off(DOMAIN_MANAGER_SOCKET_CHANNEL, this.#socketListener);
-    }
-    this.#socketListener = null;
     this.#inboundHandler = null;
     this.#statusQueryHandler = null;
-
-    for (const [, pending] of this.#pendingRequests) {
-      if (pending.timer) clearTimeout(pending.timer);
-      pending.resolve(
-        err(
-          createPublicError({
-            code: "DM_TRANSPORT_ABORTED",
-            category: "busy",
-            message: "Transport adapter destroyed while request was pending"
-          })
-        )
-      );
-    }
-    this.#pendingRequests.clear();
   }
 
   async send<TPayload, TResponse = unknown>(
@@ -310,8 +281,14 @@ export class FoundryCommandTransportAdapter implements CommandTransport {
       return this.#sendSocketlibRPC(command, options);
     }
 
-    // Remote socket fallback path: dispatch to authority via socket
-    return this.#sendRemoteSocket(command, options);
+    // Remote socket fallback is strictly forbidden for mutations (G2 boundary invariant)
+    return err(
+      createPublicError({
+        code: "DM_TRANSPORT_UNAVAILABLE",
+        category: "busy",
+        message: "Remote command execution requires Socketlib, which is not available"
+      })
+    );
   }
 
   /**
@@ -364,7 +341,13 @@ export class FoundryCommandTransportAdapter implements CommandTransport {
       }
     }
 
-    return this.#sendStatusQuerySocket<TResponse>(commandId, authorityStatus);
+    return err(
+      createPublicError({
+        code: "DM_TRANSPORT_UNAVAILABLE",
+        category: "busy",
+        message: "Remote status query requires Socketlib, which is not available"
+      })
+    );
   }
 
   async #sendLocalLoopback<TPayload, TResponse>(
@@ -453,187 +436,6 @@ export class FoundryCommandTransportAdapter implements CommandTransport {
     }
   }
 
-  async #sendRemoteSocket<TPayload, TResponse>(
-    command: DomainCommand<TPayload>,
-    options?: TransportSendOptions
-  ): Promise<Result<TransportReceipt<TResponse>, PublicError>> {
-    const socket = this.#runtime.socket;
-    if (!socket) {
-      return err(
-        createPublicError({
-          code: "DM_TRANSPORT_UNAVAILABLE",
-          category: "busy",
-          message: "Foundry socket runtime is not available"
-        })
-      );
-    }
-
-    const authorityStatus = this.#authorityService.getStatus();
-    if (!authorityStatus.available || !authorityStatus.authorityUserId) {
-      return err(
-        createPublicError({
-          code: "DM_AUTHORITY_UNAVAILABLE",
-          category: "busy",
-          message: "No primary authority is available for socket transmission"
-        })
-      );
-    }
-    const senderUserId = this.currentUserId;
-    if (!senderUserId) {
-      return err(
-        createPublicError({
-          code: "DM_AUTH_UNAUTHENTICATED",
-          category: "permission",
-          message: "Cannot send command without an active user session"
-        })
-      );
-    }
-
-    const correlationId =
-      options?.correlationId ??
-      `corr_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
-
-    if (this.#pendingRequests.has(correlationId)) {
-      return err(
-        createPublicError({
-          code: "DM_TRANSPORT_CORRELATION_COLLISION",
-          category: "conflict",
-          message: `Pending request with correlationId '${correlationId}' already exists`
-        })
-      );
-    }
-
-    const timeoutMs = options?.timeoutMs ?? this.#defaultTimeoutMs;
-
-    const requestPacket: SocketRequestPacket = {
-      protocol: "dm-command-v1",
-      kind: "DM_CMD_REQUEST",
-      correlationId,
-      command,
-      targetAuthorityUserId: authorityStatus.authorityUserId,
-      targetAuthorityEpoch: authorityStatus.authorityEpoch,
-      declaredSenderUserId: senderUserId
-    };
-
-    return new Promise<Result<TransportReceipt<TResponse>, PublicError>>((resolve, reject) => {
-      let timer: ReturnType<typeof setTimeout> | null = null;
-      if (timeoutMs > 0) {
-        timer = setTimeout(() => {
-          this.#pendingRequests.delete(correlationId);
-          resolve(
-            err(
-              createPublicError({
-                code: "DM_TRANSPORT_TIMEOUT",
-                category: "timeout",
-                message: `Command socket request timed out after ${timeoutMs}ms`
-              })
-            )
-          );
-        }, timeoutMs);
-      }
-
-      this.#pendingRequests.set(correlationId, {
-        resolve: (res) => resolve(res as Result<TransportReceipt<TResponse>, PublicError>),
-        reject,
-        timer
-      });
-
-      try {
-        socket.emit(DOMAIN_MANAGER_SOCKET_CHANNEL, requestPacket, { userId: senderUserId });
-      } catch (error) {
-        if (timer) clearTimeout(timer);
-        this.#pendingRequests.delete(correlationId);
-        resolve(
-          err(
-            createPublicError({
-              code: "DM_TRANSPORT_SEND_FAILED",
-              category: "provider",
-              message: error instanceof Error ? error.message : "Socket emit failed"
-            })
-          )
-        );
-      }
-    });
-  }
-
-  async #sendStatusQuerySocket<TResponse>(
-    commandId: CommandId,
-    authorityStatus: { authorityUserId: string | null; authorityEpoch: number }
-  ): Promise<Result<TransportReceipt<TResponse>, PublicError>> {
-    const socket = this.#runtime.socket;
-    if (!socket) {
-      return err(
-        createPublicError({
-          code: "DM_TRANSPORT_UNAVAILABLE",
-          category: "busy",
-          message: "Foundry socket runtime is not available"
-        })
-      );
-    }
-
-    const senderUserId = this.currentUserId;
-    if (!senderUserId) {
-      return err(
-        createPublicError({
-          code: "DM_AUTH_UNAUTHENTICATED",
-          category: "permission",
-          message: "Cannot query status without an active user session"
-        })
-      );
-    }
-
-    const correlationId = `status_corr_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
-    const packet: SocketStatusQueryPacket = {
-      protocol: "dm-command-v1",
-      kind: "DM_CMD_STATUS_QUERY",
-      correlationId,
-      commandId,
-      targetAuthorityUserId: authorityStatus.authorityUserId!,
-      targetAuthorityEpoch: authorityStatus.authorityEpoch,
-      declaredSenderUserId: senderUserId
-    };
-
-    return new Promise<Result<TransportReceipt<TResponse>, PublicError>>((resolve, reject) => {
-      let timer: ReturnType<typeof setTimeout> | null = null;
-      if (this.#defaultTimeoutMs > 0) {
-        timer = setTimeout(() => {
-          this.#pendingRequests.delete(correlationId);
-          resolve(
-            err(
-              createPublicError({
-                code: "DM_TRANSPORT_TIMEOUT",
-                category: "timeout",
-                message: `Status query socket request timed out after ${this.#defaultTimeoutMs}ms`
-              })
-            )
-          );
-        }, this.#defaultTimeoutMs);
-      }
-
-      this.#pendingRequests.set(correlationId, {
-        resolve: (res) => resolve(res as Result<TransportReceipt<TResponse>, PublicError>),
-        reject,
-        timer
-      });
-
-      try {
-        socket.emit(DOMAIN_MANAGER_SOCKET_CHANNEL, packet, { userId: senderUserId });
-      } catch (error) {
-        if (timer) clearTimeout(timer);
-        this.#pendingRequests.delete(correlationId);
-        resolve(
-          err(
-            createPublicError({
-              code: "DM_TRANSPORT_SEND_FAILED",
-              category: "provider",
-              message: error instanceof Error ? error.message : "Socket status query emit failed"
-            })
-          )
-        );
-      }
-    });
-  }
-
   #initSocketlib(): void {
     if (!this.#socketlib) return;
     const adapter = this;
@@ -674,161 +476,6 @@ export class FoundryCommandTransportAdapter implements CommandTransport {
         return adapter.#handleInboundStatusQuery(commandId, socketdataUserId);
       }
     );
-  }
-
-  #initSocketListener(): void {
-    const socket = this.#runtime.socket;
-    if (!socket) return;
-
-    this.#socketListener = (packet: unknown, ...args: unknown[]) => {
-      this.#handleSocketPacket(packet, ...args).catch((err) => {
-        console.error("[Domain Manager] Error processing socket packet:", err);
-      });
-    };
-
-    socket.on(DOMAIN_MANAGER_SOCKET_CHANNEL, this.#socketListener);
-  }
-
-  async #handleSocketPacket(packet: unknown, ...args: unknown[]): Promise<void> {
-    if (isSocketResponsePacket(packet)) {
-      this.#handleResponsePacket(packet, ...args);
-      return;
-    }
-
-    if (isSocketStatusResponsePacket(packet)) {
-      this.#handleResponsePacket(packet as any, ...args);
-      return;
-    }
-
-    if (isSocketStatusQueryPacket(packet)) {
-      await this.#handleStatusQueryPacket(packet, ...args);
-      return;
-    }
-
-    if (isSocketRequestPacket(packet)) {
-      await this.#handleRequestPacket(packet, ...args);
-      return;
-    }
-  }
-
-  #handleResponsePacket(packet: SocketResponsePacket, ...transportArgs: unknown[]): void {
-    const currentId = this.currentUserId;
-    // Discard response if not targeted to this client
-    if (currentId && packet.targetUserId !== currentId) {
-      return;
-    }
-
-    const pending = this.#pendingRequests.get(packet.correlationId);
-    if (!pending) return;
-
-    // G2-AUD-003: Verify that response originated from the active elected Primary Authority
-    const authorityStatus = this.#authorityService.getStatus();
-    if (
-      !authorityStatus.available ||
-      !authorityStatus.authorityUserId ||
-      packet.authorityUserId !== authorityStatus.authorityUserId ||
-      packet.authorityEpoch !== authorityStatus.authorityEpoch
-    ) {
-      // Discard forged or stale response packet
-      return;
-    }
-
-    // G2-AUD-003: Verify that transport layer arguments confirm the response came strictly from Primary Authority
-    let responseSender: string | null = null;
-    if (this.#senderResolver) {
-      responseSender = this.#senderResolver(packet, ...transportArgs);
-    } else if (transportArgs.length > 0) {
-      const firstArg = transportArgs[0];
-      if (typeof firstArg === "string" && firstArg.trim().length > 0) {
-        responseSender = firstArg.trim();
-      } else if (typeof firstArg === "object" && firstArg !== null) {
-        const candidate = firstArg as Record<string, unknown>;
-        if (typeof candidate.userId === "string" && candidate.userId.trim().length > 0) {
-          responseSender = candidate.userId.trim();
-        } else if (typeof candidate.id === "string" && candidate.id.trim().length > 0) {
-          responseSender = candidate.id.trim();
-        }
-      }
-    }
-
-    if (responseSender === null || responseSender !== authorityStatus.authorityUserId) {
-      // Discard forged response packet from non-authority client or unverified transport sender!
-      return;
-    }
-
-    this.#pendingRequests.delete(packet.correlationId);
-    if (pending.timer) {
-      clearTimeout(pending.timer);
-    }
-    pending.resolve(packet.response);
-  }
-
-  async #handleStatusQueryPacket(
-    packet: SocketStatusQueryPacket,
-    ...transportArgs: unknown[]
-  ): Promise<void> {
-    if (
-      !this.#authorityService.isCurrentUser() ||
-      (packet.targetAuthorityUserId !== undefined && packet.targetAuthorityUserId !== this.currentUserId)
-    ) {
-      return;
-    }
-
-    const socket = this.#runtime.socket;
-    if (!socket) return;
-
-    const authorityStatus = this.#authorityService.getStatus();
-    const declaredSenderUserId = packet.declaredSenderUserId;
-
-    // Authenticate sender
-    let authenticatedSenderUserId: string | null = null;
-    if (this.#senderResolver) {
-      authenticatedSenderUserId = this.#senderResolver(packet, ...transportArgs);
-    } else if (transportArgs.length > 0) {
-      const firstArg = transportArgs[0];
-      if (typeof firstArg === "string" && firstArg.trim().length > 0) {
-        authenticatedSenderUserId = firstArg.trim();
-      } else if (typeof firstArg === "object" && firstArg !== null) {
-        const candidate = firstArg as Record<string, unknown>;
-        if (typeof candidate.userId === "string" && candidate.userId.trim().length > 0) {
-          authenticatedSenderUserId = candidate.userId.trim();
-        } else if (typeof candidate.id === "string" && candidate.id.trim().length > 0) {
-          authenticatedSenderUserId = candidate.id.trim();
-        }
-      }
-    }
-
-    if (authenticatedSenderUserId === null || authenticatedSenderUserId !== declaredSenderUserId) {
-      return; // Discard unauthenticated or spoofed status query
-    }
-
-    const res = this.#statusQueryHandler
-      ? await this.#statusQueryHandler(packet.commandId)
-      : err(
-          createPublicError({
-            code: "DM_COMMAND_NOT_FOUND",
-            category: "not-found",
-            message: "Status query handler is not registered on authority"
-          })
-        );
-
-    const sanitizedRes = res.ok ? ok(sanitizeTransportReceiptForPublic(res.value)) : res;
-
-    const responsePacket: SocketStatusResponsePacket = {
-      protocol: "dm-command-v1",
-      kind: "DM_CMD_STATUS_RESPONSE",
-      correlationId: packet.correlationId,
-      targetUserId: authenticatedSenderUserId,
-      authorityUserId: authorityStatus.authorityUserId!,
-      authorityEpoch: authorityStatus.authorityEpoch,
-      response: sanitizedRes
-    };
-
-    try {
-      socket.emit(DOMAIN_MANAGER_SOCKET_CHANNEL, responsePacket, { userId: authorityStatus.authorityUserId });
-    } catch (err) {
-      console.error("[Domain Manager] Failed to emit status query response:", err);
-    }
   }
 
   async #handleInboundStatusQuery(
@@ -1041,45 +688,5 @@ export class FoundryCommandTransportAdapter implements CommandTransport {
     // G2-AUD-018: Sanitize response receipt before returning over remote transport
     return response.ok ? ok(sanitizeTransportReceiptForPublic(response.value)) : response;
   }
-
-  async #handleRequestPacket(packet: SocketRequestPacket, ...transportArgs: unknown[]): Promise<void> {
-    if (
-      !this.#authorityService.isCurrentUser() ||
-      (packet.targetAuthorityUserId !== undefined && packet.targetAuthorityUserId !== this.currentUserId)
-    ) {
-      return; // Silently ignore: not directed to this host
-    }
-
-    const socket = this.#runtime.socket;
-    if (!socket) {
-      return;
-    }
-
-    const authorityStatus = this.#authorityService.getStatus();
-    const declaredSenderUserId =
-      (typeof packet.declaredSenderUserId === "string" && packet.declaredSenderUserId.trim().length > 0
-        ? packet.declaredSenderUserId.trim()
-        : null) ??
-      (typeof packet.senderUserId === "string" && packet.senderUserId.trim().length > 0
-        ? packet.senderUserId.trim()
-        : "");
-
-    const response = await this.#processInboundRequest(packet, undefined, ...transportArgs);
-
-    const responsePacket: SocketResponsePacket = {
-      protocol: "dm-command-v1",
-      kind: "DM_CMD_RESPONSE",
-      correlationId: packet.correlationId,
-      targetUserId: declaredSenderUserId,
-      authorityUserId: authorityStatus.authorityUserId!,
-      authorityEpoch: authorityStatus.authorityEpoch,
-      response
-    };
-
-    try {
-      socket.emit(DOMAIN_MANAGER_SOCKET_CHANNEL, responsePacket, { userId: authorityStatus.authorityUserId });
-    } catch (error) {
-      console.error("[Domain Manager] Failed to emit command response:", error);
-    }
-  }
 }
+

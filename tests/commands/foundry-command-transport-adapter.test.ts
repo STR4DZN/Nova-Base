@@ -116,18 +116,32 @@ test("FoundryCommandTransportAdapter performs local loopback when current user i
   transport.destroy();
 });
 
-test("FoundryCommandTransportAdapter dispatches via socket when client is not authority", async () => {
-  const sharedSocket = new MockSocket();
+test("FoundryCommandTransportAdapter dispatches via Socketlib RPC when client is not authority", async () => {
+  const gmRegistry = new Map<string, Function>();
+  const gmSocketlib: SocketlibSocketLike = {
+    register: (name, fn) => { gmRegistry.set(name, fn); },
+    executeAsUser: async () => { throw new Error("Not implemented in test"); }
+  };
+
+  const playerSocketlib: SocketlibSocketLike = {
+    register: () => {},
+    executeAsUser: async (handlerName, targetUserId, ...args) => {
+      assert.equal(targetUserId, "gm-1");
+      const fn = gmRegistry.get(handlerName);
+      if (!fn) throw new Error(`Handler '${handlerName}' not found on GM`);
+      return fn.call({ socketdata: { userId: "player-1" } }, ...args);
+    }
+  };
 
   // 1. Setup GM Authority instance
   const gmAuthority = createAuthorityHarness("gm-1", "gm-1");
   const gmRuntime: FoundrySocketRuntimeLike = {
-    socket: sharedSocket,
     user: { id: "gm-1", name: "Gamemaster", isGM: true }
   };
   const gmTransport = new FoundryCommandTransportAdapter({
     runtime: gmRuntime,
-    authorityService: gmAuthority
+    authorityService: gmAuthority,
+    socketlib: gmSocketlib
   });
 
   let gmReceivedSender: string | null = null;
@@ -143,12 +157,12 @@ test("FoundryCommandTransportAdapter dispatches via socket when client is not au
   // 2. Setup Player instance
   const playerAuthority = createAuthorityHarness("player-1", "gm-1");
   const playerRuntime: FoundrySocketRuntimeLike = {
-    socket: sharedSocket,
     user: { id: "player-1", name: "Player One", isGM: false }
   };
   const playerTransport = new FoundryCommandTransportAdapter({
     runtime: playerRuntime,
-    authorityService: playerAuthority
+    authorityService: playerAuthority,
+    socketlib: playerSocketlib
   });
 
   const command = createTestCommand();
@@ -191,10 +205,8 @@ test("FoundryCommandTransportAdapter rejects send if authority is not available"
   transport.destroy();
 });
 
-test("FoundryCommandTransportAdapter handles remote timeout", async () => {
+test("FoundryCommandTransportAdapter fails closed with DM_TRANSPORT_UNAVAILABLE when Socketlib is absent for remote dispatch", async () => {
   const sharedSocket = new MockSocket();
-
-  // Player sends to GM, but GM is not registered / not responding
   const authorityService = createAuthorityHarness("player-1", "gm-1");
   const runtime: FoundrySocketRuntimeLike = {
     socket: sharedSocket,
@@ -203,24 +215,31 @@ test("FoundryCommandTransportAdapter handles remote timeout", async () => {
 
   const transport = new FoundryCommandTransportAdapter({
     runtime,
-    authorityService,
-    defaultTimeoutMs: 25
+    authorityService
   });
 
-  const result = await transport.send(createTestCommand(), { timeoutMs: 20 });
+  assert.equal(transport.isAvailable, false);
+  const result = await transport.send(createTestCommand());
 
   assert.equal(result.ok, false);
   if (!result.ok) {
-    assert.equal(result.error.code, "DM_TRANSPORT_TIMEOUT");
+    assert.equal(result.error.code, "DM_TRANSPORT_UNAVAILABLE");
   }
+
+  // Socket emit should NEVER occur
+  assert.equal(sharedSocket.emitted.length, 0);
 
   transport.destroy();
 });
 
 test("FoundryCommandTransportAdapter rejects unauthenticated send", async () => {
   const runtime: FoundrySocketRuntimeLike = {
-    socket: new MockSocket(),
     user: null // unauthenticated
+  };
+
+  const mockSocketlib: SocketlibSocketLike = {
+    register: () => {},
+    executeAsUser: async () => ({})
   };
 
   // Remote authority
@@ -228,7 +247,8 @@ test("FoundryCommandTransportAdapter rejects unauthenticated send", async () => 
 
   const transport = new FoundryCommandTransportAdapter({
     runtime,
-    authorityService: remoteAuthority
+    authorityService: remoteAuthority,
+    socketlib: mockSocketlib
   });
 
   const result = await transport.send(createTestCommand());
@@ -241,23 +261,3 @@ test("FoundryCommandTransportAdapter rejects unauthenticated send", async () => 
   transport.destroy();
 });
 
-test("FoundryCommandTransportAdapter destroy aborts pending requests and cleans up socket", async () => {
-  const socket = new MockSocket();
-  const authorityService = createAuthorityHarness("player-1", "gm-1");
-
-  const transport = new FoundryCommandTransportAdapter({
-    runtime: { socket, user: { id: "player-1" } },
-    authorityService,
-    defaultTimeoutMs: 5000
-  });
-
-  const sendPromise = transport.send(createTestCommand());
-  // Immediately destroy
-  transport.destroy();
-
-  const result = await sendPromise;
-  assert.equal(result.ok, false);
-  if (!result.ok) {
-    assert.equal(result.error.code, "DM_TRANSPORT_ABORTED");
-  }
-});

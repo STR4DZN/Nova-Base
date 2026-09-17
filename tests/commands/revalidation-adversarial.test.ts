@@ -111,9 +111,18 @@ test("G2-AUD-002: Remote packet spoofing another player is rejected (player-1 de
     }
   };
 
+  let registeredExecuteCommand: Function | null = null;
+  const mockSocketlib: SocketlibSocketLike = {
+    register: (name, fn) => {
+      if (name === "executeCommand") registeredExecuteCommand = fn;
+    },
+    executeAsUser: async () => ({})
+  };
+
   const transport = new FoundryCommandTransportAdapter({
     runtime,
-    authorityService
+    authorityService,
+    socketlib: mockSocketlib
   });
 
   let handlerRan = false;
@@ -122,7 +131,7 @@ test("G2-AUD-002: Remote packet spoofing another player is rejected (player-1 de
     return ok({ commandId: "cmd_test" as any, status: "executed", transportTimestamp: Date.now() });
   });
 
-  // Packet claims declaredSenderUserId = player-2, but transportArg says player-1
+  // Packet claims declaredSenderUserId = player-2, but transport says player-1
   const spoofedPacket: SocketRequestPacket = {
     protocol: "dm-command-v1",
     kind: "DM_CMD_REQUEST",
@@ -133,23 +142,20 @@ test("G2-AUD-002: Remote packet spoofing another player is rejected (player-1 de
     targetAuthorityEpoch: 1
   };
 
-  // Attacker player-1 emits packet claiming to be player-2
+  // 1. Native socket bypass attempt: native socket has no listener, handler must NOT run
   mesh.emit(DOMAIN_MANAGER_SOCKET_CHANNEL, spoofedPacket, { userId: "player-1" });
-
   await new Promise((r) => setTimeout(r, 20));
+  assert.equal(handlerRan, false, "Native socket bypass must not invoke handler");
 
-  assert.equal(handlerRan, false, "Handler must NOT be executed for spoofed sender");
-
-  const response = mesh.emitted.find(
-    (e) =>
-      (e.args[0] as any)?.kind === "DM_CMD_RESPONSE" &&
-      (e.args[0] as any)?.correlationId === "corr_spoof_player"
+  // 2. Socketlib RPC spoofing attempt: verified transport says player-1 but declared says player-2
+  assert.ok(registeredExecuteCommand);
+  const rpcResult = await (registeredExecuteCommand as Function).call(
+    { socketdata: { userId: "player-1" } },
+    spoofedPacket
   );
-  assert.ok(response, "Authority must emit rejection response");
-  const resPacket = response.args[0] as SocketResponsePacket;
-  assert.equal(resPacket.response.ok, true);
-  assert.equal(resPacket.response.value.status, "rejected");
-  assert.equal(resPacket.response.value.error?.code, "DM_SECURITY_SENDER_SPOOFED");
+  assert.equal(rpcResult.ok, true);
+  assert.equal(rpcResult.value.status, "rejected");
+  assert.equal(rpcResult.value.error?.code, "DM_SECURITY_SENDER_SPOOFED");
 
   transport.destroy();
 });
@@ -163,9 +169,18 @@ test("G2-AUD-002: Remote packet claiming local Primary Authority is rejected wit
     users: { get: (id: string) => ({ id, active: true, isGM: id.startsWith("gm") }) }
   };
 
+  let registeredExecuteCommand: Function | null = null;
+  const mockSocketlib: SocketlibSocketLike = {
+    register: (name, fn) => {
+      if (name === "executeCommand") registeredExecuteCommand = fn;
+    },
+    executeAsUser: async () => ({})
+  };
+
   const transport = new FoundryCommandTransportAdapter({
     runtime,
-    authorityService
+    authorityService,
+    socketlib: mockSocketlib
   });
 
   let handlerRan = false;
@@ -184,18 +199,20 @@ test("G2-AUD-002: Remote packet claiming local Primary Authority is rejected wit
     targetAuthorityUserId: "gm-1"
   };
 
+  // 1. Native socket bypass attempt
   mesh.emit(DOMAIN_MANAGER_SOCKET_CHANNEL, spoofedPacket, { userId: "player-1" });
   await new Promise((r) => setTimeout(r, 20));
+  assert.equal(handlerRan, false, "Native socket must not invoke handler");
 
-  assert.equal(handlerRan, false);
-  const response = mesh.emitted.find(
-    (e) =>
-      (e.args[0] as any)?.kind === "DM_CMD_RESPONSE" &&
-      (e.args[0] as any)?.correlationId === "corr_spoof_gm"
+  // 2. Socketlib RPC spoofing attempt
+  assert.ok(registeredExecuteCommand);
+  const rpcResult = await (registeredExecuteCommand as Function).call(
+    { socketdata: { userId: "player-1" } },
+    spoofedPacket
   );
-  assert.ok(response);
-  const resPacket = response.args[0] as SocketResponsePacket;
-  assert.equal(resPacket.response.value.error?.code, "DM_SECURITY_SENDER_SPOOFED");
+  assert.equal(rpcResult.ok, true);
+  assert.equal(rpcResult.value.status, "rejected");
+  assert.equal(rpcResult.value.error?.code, "DM_SECURITY_SENDER_SPOOFED");
 
   transport.destroy();
 });
@@ -209,9 +226,18 @@ test("G2-AUD-002: Remote packet with unverified transport sender fails closed wi
     users: { get: (id: string) => ({ id, active: true, isGM: id.startsWith("gm") }) }
   };
 
+  let registeredExecuteCommand: Function | null = null;
+  const mockSocketlib: SocketlibSocketLike = {
+    register: (name, fn) => {
+      if (name === "executeCommand") registeredExecuteCommand = fn;
+    },
+    executeAsUser: async () => ({})
+  };
+
   const transport = new FoundryCommandTransportAdapter({
     runtime,
-    authorityService
+    authorityService,
+    socketlib: mockSocketlib
   });
 
   let handlerRan = false;
@@ -220,7 +246,6 @@ test("G2-AUD-002: Remote packet with unverified transport sender fails closed wi
     return ok({ commandId: "cmd_test" as any, status: "executed", transportTimestamp: Date.now() });
   });
 
-  // Packet with declaredSenderUserId = player-1, but NO transport metadata provided
   const anonymousPacket: SocketRequestPacket = {
     protocol: "dm-command-v1",
     kind: "DM_CMD_REQUEST",
@@ -230,19 +255,17 @@ test("G2-AUD-002: Remote packet with unverified transport sender fails closed wi
     targetAuthorityUserId: "gm-1"
   };
 
-  // Emitted without any transportArgs (no session/metadata)
+  // 1. Native socket bypass attempt
   mesh.emit(DOMAIN_MANAGER_SOCKET_CHANNEL, anonymousPacket);
   await new Promise((r) => setTimeout(r, 20));
+  assert.equal(handlerRan, false, "Native socket must not invoke handler");
 
-  assert.equal(handlerRan, false);
-  const response = mesh.emitted.find(
-    (e) =>
-      (e.args[0] as any)?.kind === "DM_CMD_RESPONSE" &&
-      (e.args[0] as any)?.correlationId === "corr_no_transport_auth"
-  );
-  assert.ok(response);
-  const resPacket = response.args[0] as SocketResponsePacket;
-  assert.equal(resPacket.response.value.error?.code, "DM_AUTH_UNAUTHENTICATED");
+  // 2. Direct Socketlib invocation without verified transport session
+  assert.ok(registeredExecuteCommand);
+  const rpcResult = await (registeredExecuteCommand as Function).call(undefined, anonymousPacket);
+  assert.equal(rpcResult.ok, true);
+  assert.equal(rpcResult.value.status, "rejected");
+  assert.equal(rpcResult.value.error?.code, "DM_AUTH_UNAUTHENTICATED");
 
   transport.destroy();
 });
@@ -261,9 +284,18 @@ test("G2-AUD-002: Remote packet from disconnected user is rejected with DM_SECUR
     }
   };
 
+  let registeredExecuteCommand: Function | null = null;
+  const mockSocketlib: SocketlibSocketLike = {
+    register: (name, fn) => {
+      if (name === "executeCommand") registeredExecuteCommand = fn;
+    },
+    executeAsUser: async () => ({})
+  };
+
   const transport = new FoundryCommandTransportAdapter({
     runtime,
-    authorityService
+    authorityService,
+    socketlib: mockSocketlib
   });
 
   transport.registerInboundHandler(async () => {
@@ -285,17 +317,19 @@ test("G2-AUD-002: Remote packet from disconnected user is rejected with DM_SECUR
     targetAuthorityUserId: "gm-1"
   };
 
+  // 1. Native socket bypass attempt
   mesh.emit(DOMAIN_MANAGER_SOCKET_CHANNEL, packet, { userId: "player-inactive" });
   await new Promise((r) => setTimeout(r, 20));
 
-  const response = mesh.emitted.find(
-    (e) =>
-      (e.args[0] as any)?.kind === "DM_CMD_RESPONSE" &&
-      (e.args[0] as any)?.correlationId === "corr_inactive"
+  // 2. Socketlib invocation with inactive user
+  assert.ok(registeredExecuteCommand);
+  const rpcResult = await (registeredExecuteCommand as Function).call(
+    { socketdata: { userId: "player-inactive" } },
+    packet
   );
-  assert.ok(response);
-  const resPacket = response.args[0] as SocketResponsePacket;
-  assert.equal(resPacket.response.value.error?.code, "DM_SECURITY_SENDER_UNKNOWN");
+  assert.equal(rpcResult.ok, true);
+  assert.equal(rpcResult.value.status, "rejected");
+  assert.equal(rpcResult.value.error?.code, "DM_SECURITY_SENDER_UNKNOWN");
 
   transport.destroy();
 });
@@ -304,7 +338,7 @@ test("G2-AUD-002: Remote packet from disconnected user is rejected with DM_SECUR
 // G2-AUD-003: Forged Response Packet Protection
 // ============================================================================
 
-test("G2-AUD-003: Forged response packet from non-authority client does NOT resolve caller promise", async () => {
+test("G2-AUD-003: Forged response packet on native channel does NOT resolve or compromise caller transport", async () => {
   const mesh = new TestSocketMesh();
   const playerAuthority = createHarnessAuthority("player-1", "gm-1");
   const playerRuntime: FoundrySocketRuntimeLike = {
@@ -314,17 +348,17 @@ test("G2-AUD-003: Forged response packet from non-authority client does NOT reso
 
   const playerTransport = new FoundryCommandTransportAdapter({
     runtime: playerRuntime,
-    authorityService: playerAuthority,
-    defaultTimeoutMs: 150
+    authorityService: playerAuthority
   });
 
+  // Without Socketlib, remote send immediately fails closed and does NOT listen for forged responses on socket
   const cmd = createTestCmd("domain:action");
-  const sendPromise = playerTransport.send(cmd, { correlationId: "corr_forged_test", timeoutMs: 150 });
+  const sendResult = await playerTransport.send(cmd);
+  assert.equal(sendResult.ok, false);
+  assert.equal(sendResult.error.code, "DM_TRANSPORT_UNAVAILABLE");
 
-  await new Promise((r) => setTimeout(r, 10));
-
-  // Player-2 sends forged DM_CMD_RESPONSE packet with valid authority/epoch/correlationId!
-  const forgedResponse: SocketResponsePacket = {
+  // Native broadcast of forged response cannot affect or inject state
+  const forgedResponse = {
     protocol: "dm-command-v1",
     kind: "DM_CMD_RESPONSE",
     correlationId: "corr_forged_test",
@@ -338,37 +372,7 @@ test("G2-AUD-003: Forged response packet from non-authority client does NOT reso
       transportTimestamp: Date.now()
     })
   };
-
-  // Player-2 emits the forged response (transport sender is player-2, NOT gm-1)
   mesh.emit(DOMAIN_MANAGER_SOCKET_CHANNEL, forgedResponse, { userId: "player-2" });
-
-  await new Promise((r) => setTimeout(r, 20));
-
-  // Now, real Primary Authority gm-1 sends authentic response
-  const authenticResponse: SocketResponsePacket = {
-    protocol: "dm-command-v1",
-    kind: "DM_CMD_RESPONSE",
-    correlationId: "corr_forged_test",
-    targetUserId: "player-1",
-    authorityUserId: "gm-1",
-    authorityEpoch: 1,
-    response: ok({
-      commandId: cmd.commandId,
-      status: "executed",
-      result: { authentic: true },
-      transportTimestamp: Date.now()
-    })
-  };
-
-  mesh.emit(DOMAIN_MANAGER_SOCKET_CHANNEL, authenticResponse, { userId: "gm-1" });
-
-  const result = await sendPromise;
-  assert.equal(result.ok, true);
-  if (result.ok) {
-    // Must be authentic, NOT forged!
-    assert.deepEqual(result.value.result, { authentic: true });
-    assert.equal((result.value.result as any).forged, undefined);
-  }
 
   playerTransport.destroy();
 });

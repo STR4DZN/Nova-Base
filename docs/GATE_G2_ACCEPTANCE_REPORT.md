@@ -5,15 +5,15 @@
 > **Versão:** `0.0.2`  
 > **Data:** `2026-09-17`  
 > **Autoridade Normativa:** `Documentos/99_DOMAIN_MANAGER_MASTER_SPECIFICATION_V1.md` (§11–12, §6–7, §47–49)  
-> **Status de Conclusão:** `GATE_G2_ACCEPTED_EXTERNAL_AUDIT_RESOLVED` (228/228 testes verdes / 0 falhas / 0 regressões)
+> **Status de Conclusão:** `GATE_G2_ACCEPTED_EXTERNAL_AUDIT_RESOLVED` (233/233 testes verdes / 0 falhas / 0 regressões)
 
 ---
 
 ## 1. Sumário Executivo
 
-O **Gate G2 — Authority / Commands / MutationCoordinator** foi implementado na íntegra através de 10 microtarefas normativas sequenciais (`G2.1a → G2.10`), submetido a auditoria de segurança inicial, e posteriormente submetido à auditoria externa e revalidações pós-correção detalhadas nos documentos `G2_EXTERNAL_AUDIT_ERRORS_FOR_ANTIGRAVITY.md`, `G2_REVALIDACAO_POS_CORRECOES_RESTANTES.md` e `G2_REVALIDACAO_FINAL_CICLO_2.md` contendo 28 apontamentos originais (`G2-AUD-001` a `G2-AUD-028`) e 7 itens de refino do Ciclo 2.
+O **Gate G2 — Authority / Commands / MutationCoordinator** foi implementado na íntegra através de 10 microtarefas normativas sequenciais (`G2.1a → G2.10`), submetido a auditoria de segurança inicial, e posteriormente submetido à auditoria externa e revalidações pós-correção detalhadas nos documentos `G2_EXTERNAL_AUDIT_ERRORS_FOR_ANTIGRAVITY.md`, `G2_REVALIDACAO_POS_CORRECOES_RESTANTES.md` e `G2_REVALIDACAO_FINAL_CICLO_2.md` contendo 28 apontamentos originais (`G2-AUD-001` a `G2-AUD-028`), 7 itens de refino do Ciclo 2, e a remoção definitiva do fallback por socket nativo não-autenticado.
 
-Todos os apontamentos foram rigorosamente analisados, corrigidos, verificados via testes direcionados e adversariais (incluindo `tests/commands/revalidation-adversarial.test.ts` e `tests/commands/socketlib-upstream-real.test.ts`), e comprovados no bundle de produção (`dist/main.js`). A suíte de testes agora totaliza **228 testes automatizados**, todos aprovados sem exceção.
+Todos os apontamentos foram rigorosamente analisados, corrigidos, verificados via testes direcionados e adversariais (incluindo `tests/commands/revalidation-adversarial.test.ts`, `tests/commands/socketlib-upstream-real.test.ts`, `tests/commands/foundry-command-transport-socketlib-only.test.ts` e `tests/docs/build-state-validator.test.ts`), e comprovados no bundle de produção (`dist/main.js`). A suíte de testes agora totaliza **233 testes automatizados**, todos aprovados sem exceção.
 
 Conforme a arquitetura normativa do Master Specification (§11–12, §47–49) e o playbook do Gate G2:
 - O G2.9 implementa o **Transaction/Recovery shell** (estados de transação, isolamento de chaves afetadas via lock, transição determinística para `needs-recovery` com outcome `unknown`), sem fingir persistência distribuída durável entre reinicializações arbitrárias antes de G10/G11.
@@ -70,6 +70,15 @@ Conforme a arquitetura normativa do Master Specification (§11–12, §47–49) 
 
 ---
 
+## 2.2. Resolução do Blocker de Transporte e Limpeza de Documentação
+
+| Item | Área | Severidade | Resolução Implementada | Evidência de Teste |
+|---|---|---|---|---|
+| **TRANSPORT-BLOCKER** | Transport Security | BLOCKER | **Eliminação completa do fallback via socket nativo (`game.socket`) para mutations e status queries.** O `FoundryCommandTransportAdapter` removeu todos os métodos e handlers de envio/recebimento de comandos via socket broadcast nativo (`#sendRemoteSocket`, `#sendStatusQuerySocket`, `#handleSocketPacket`, etc.). Remote clients sem Socketlib disponível falham closed imediatamente com `DM_TRANSPORT_UNAVAILABLE`. O canal de socket nativo (`module.domain-manager`) não registra listeners de comando (`DM_CMD_*`), ignorando silenciosamente qualquer tentativa de bypass. | `tests/commands/foundry-command-transport-socketlib-only.test.ts` (Testes A, B, C, D) |
+| **DOCS-CLEANUP** | Document Governance | MEDIUM | **Canonicalização de `docs/BUILD_STATE.md` e arquivamento de microtarefas.** `docs/BUILD_STATE.md` foi convertido em um snapshot limpo sem baselines obsoletos parciais ou seções conflitantes. O histórico das microtarefas `G2.1a → G2.10` foi preservado em `docs/history/G2_BUILD_HISTORY.md`. Um validador automatizado garante a integridade contínua do documento. | `tests/docs/build-state-validator.test.ts` |
+
+---
+
 ## 3. Matriz de Acceptance Obrigatória do Gate G2
 
 | Item Normativo | Verificação Específica | Resultado |
@@ -113,7 +122,7 @@ Executados localmente em `tests/multiplayer/multiplayer-harness.test.ts`:
 | Comando | Descrição | Código de Saída |
 |---|---|:---:|
 | `npm run typecheck` | Verificação estrita de tipos TypeScript (`tsc --noEmit`) | **0** |
-| `npm run test:unit` | Execução completa da suíte de 228 testes (Node test runner + esbuild) | **0** |
+| `npm run test:unit` | Execução completa da suíte de 233 testes (Node test runner + esbuild) | **0** |
 | `npm run validate:package` | Validação de consistência do `module.json` (incluindo `socket: true` e `13.351`) | **0** |
 | `npm run build` | Transpilação de produção com esbuild para `dist/main.js` | **0** |
 | `node --check dist/main.js` | Checagem de sintaxe do bundle final de produção | **0** |

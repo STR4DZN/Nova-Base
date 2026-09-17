@@ -92,15 +92,9 @@ test("Adversarial: FoundryCommandTransportAdapter rejects remote packet spoofing
     "Inbound handler must NOT be invoked when remote socket packet claims to be the local Primary Authority"
   );
 
-  // Response packet should indicate security rejection
-  const response = socket.emitted.find(
-    (e) => (e.data as any)?.correlationId === "corr_spoof_1"
-  );
-  assert.ok(response, "Should emit an error response for spoofing attempt");
-  const responseData = response.data as any;
-  assert.equal(responseData.response.ok, true);
-  assert.equal(responseData.response.value.status, "rejected");
-  assert.equal(responseData.response.value.error?.code, "DM_SECURITY_SENDER_SPOOFED");
+  // Native socket has no listener for command transport, so no response is emitted on broadcast channel
+  assert.equal(socket.emitted.length, 0);
 
   adapter.destroy();
 });
+
