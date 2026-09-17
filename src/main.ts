@@ -47,6 +47,10 @@ Hooks.once("init", () => {
 
 Hooks.once("ready", () => {
   runtime = composeDomainManagerRuntime();
+  const module = (globalThis as any).game?.modules?.get?.("domain-manager");
+  if (module) {
+    module.api = runtime;
+  }
   reconcileAuthority();
 
   // If this host is the elected Primary Authority at startup, run recovery scan

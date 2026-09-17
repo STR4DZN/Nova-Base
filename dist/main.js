@@ -4634,6 +4634,10 @@ Hooks.once("init", () => {
 });
 Hooks.once("ready", () => {
   runtime = composeDomainManagerRuntime();
+  const module = globalThis.game?.modules?.get?.("domain-manager");
+  if (module) {
+    module.api = runtime;
+  }
   reconcileAuthority();
   if (runtime.authority.service.isCurrentUser()) {
     const currentEpoch = runtime.authority.service.getStatus().authorityEpoch;
