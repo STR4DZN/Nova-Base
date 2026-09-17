@@ -37,7 +37,9 @@ const requiredFiles = [
   "src/mutations/recovery-service.ts",
   "tests/multiplayer/multiplayer-harness.test.ts",
   "tests/mutations/mutation-coordinator-adversarial.test.ts",
-  "tests/commands/foundry-transport-adversarial.test.ts"
+  "tests/commands/foundry-transport-adversarial.test.ts",
+  "tests/commands/revalidation-adversarial.test.ts",
+  "tests/commands/socketlib-upstream-real.test.ts"
 ];
 
 for (const path of requiredFiles) {
@@ -83,7 +85,15 @@ if (moduleJson.socket !== true) {
 if (moduleJson.compatibility?.verified !== "13.351") {
   throw new Error("[G2 Full Validator] module.json compatibility.verified must be '13.351'");
 }
-console.info("[G2 Full Validator] Manifest compliance verified (socket: true, verified: 13.351).");
+const socketlibDep = moduleJson.relationships?.requires?.find((r) => r.id === "socketlib");
+if (!socketlibDep) throw new Error("[G2 Full Validator] module.json must declare socketlib in relationships.requires");
+if (socketlibDep.compatibility?.minimum !== "1.1.3") {
+  throw new Error(`[G2 Full Validator] Socketlib minimum compatibility must be 1.1.3 for Foundry v13, got ${socketlibDep.compatibility?.minimum}`);
+}
+if (socketlibDep.compatibility?.verified !== "1.1.4") {
+  throw new Error(`[G2 Full Validator] Socketlib verified compatibility must be 1.1.4, got ${socketlibDep.compatibility?.verified}`);
+}
+console.info("[G2 Full Validator] Manifest compliance verified (socket: true, verified: 13.351, socketlib: 1.1.3/1.1.4).");
 
 console.info("[G2 Full Validator] 4. Executing TypeScript typecheck...");
 execSync("npm run typecheck", {

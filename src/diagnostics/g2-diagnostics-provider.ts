@@ -6,6 +6,7 @@ import type { TransactionStore } from "../mutations/transaction-store.js";
 import type { TransactionRecord } from "../mutations/transaction-record.js";
 import type { CommandRegistry } from "../commands/command-registry.js";
 import type { CommandTransport } from "../commands/command-transport.js";
+import type { RateLimiter, AbuseIncident } from "../commands/rate-limiter.js";
 
 export interface G2DiagnosticsSnapshot {
   readonly authority: {
@@ -39,6 +40,10 @@ export interface G2DiagnosticsSnapshot {
       readonly lockKeys: readonly string[];
     }[];
   };
+  readonly abuse: {
+    readonly totalIncidents: number;
+    readonly records: readonly AbuseIncident[];
+  };
   readonly collectedAtReal: number;
 }
 
@@ -49,6 +54,7 @@ export interface G2DiagnosticsProviderOptions {
   readonly transactionStore: TransactionStore;
   readonly registry: CommandRegistry;
   readonly transport: CommandTransport;
+  readonly rateLimiter?: RateLimiter;
 }
 
 /**
@@ -69,6 +75,7 @@ export class G2DiagnosticsProvider {
   readonly #transactionStore: TransactionStore;
   readonly #registry: CommandRegistry;
   readonly #transport: CommandTransport;
+  readonly #rateLimiter: RateLimiter | null;
 
   constructor(options: G2DiagnosticsProviderOptions) {
     this.#authorityService = options.authorityService;
@@ -77,6 +84,7 @@ export class G2DiagnosticsProvider {
     this.#transactionStore = options.transactionStore;
     this.#registry = options.registry;
     this.#transport = options.transport;
+    this.#rateLimiter = options.rateLimiter ?? null;
   }
 
   getSnapshot(): G2DiagnosticsSnapshot {
@@ -87,6 +95,9 @@ export class G2DiagnosticsProvider {
 
     const queueDiags = this.#commandQueue.getDiagnostics();
     const unresolvedTxs = this.#transactionStore.listUnresolved();
+
+    const abuseRecords = this.#rateLimiter?.getAbuseRecords() ?? [];
+    const totalAbuseIncidents = abuseRecords.reduce((acc, r) => acc + r.count, 0);
 
     return Object.freeze({
       authority: Object.freeze({
@@ -123,6 +134,10 @@ export class G2DiagnosticsProvider {
             })
           )
         )
+      }),
+      abuse: Object.freeze({
+        totalIncidents: totalAbuseIncidents,
+        records: Object.freeze(abuseRecords.map((r) => Object.freeze({ ...r })))
       }),
       collectedAtReal: Date.now()
     });

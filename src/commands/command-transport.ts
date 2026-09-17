@@ -2,6 +2,7 @@ import type { PublicError } from "../core/contracts/public-error.js";
 import type { Result } from "../core/contracts/result.js";
 import type { CommandId, DomainCommand } from "./command-envelope.js";
 import type { OperationSource } from "./authenticated-command-context.js";
+import { sanitizeDiagnosticsValue } from "../diagnostics/sanitize.js";
 
 /**
  * Transport receipt statuses as defined by Master Spec DEC-541–552 and §11.3.
@@ -26,6 +27,43 @@ export interface TransportReceipt<T = unknown> {
   readonly result?: T;
   readonly error?: PublicError;
   readonly transportTimestamp: number;
+}
+
+/**
+ * Deeply sanitizes a TransportReceipt for public transmission over remote transport.
+ *
+ * Enforces G2-AUD-018: Redacts sensitive keys (tokens, passwords, secrets, etc.)
+ * in both `result` and `error.details`.
+ */
+export function sanitizeTransportReceiptForPublic<T = unknown>(
+  receipt: TransportReceipt<T>
+): TransportReceipt<T> {
+  const sanitizedError = receipt.error
+    ? Object.freeze({
+        code: receipt.error.code,
+        category: receipt.error.category,
+        message: receipt.error.message,
+        details:
+          receipt.error.details !== undefined
+            ? (sanitizeDiagnosticsValue(receipt.error.details) as any)
+            : undefined,
+        retryable: receipt.error.retryable,
+        userActionRequired: receipt.error.userActionRequired,
+        correlationId: receipt.error.correlationId
+      })
+    : undefined;
+
+  return Object.freeze({
+    commandId: receipt.commandId,
+    status: receipt.status,
+    correlationId: receipt.correlationId,
+    result:
+      receipt.result !== undefined
+        ? (sanitizeDiagnosticsValue(receipt.result) as T)
+        : undefined,
+    error: sanitizedError,
+    transportTimestamp: receipt.transportTimestamp
+  });
 }
 
 export interface TransportSendOptions {
@@ -74,6 +112,10 @@ export interface CommandTransport {
   send<TPayload, TResponse = unknown>(
     command: DomainCommand<TPayload>,
     options?: TransportSendOptions
+  ): Promise<Result<TransportReceipt<TResponse>, PublicError>>;
+
+  getStatus?<TResponse = unknown>(
+    commandId: CommandId
   ): Promise<Result<TransportReceipt<TResponse>, PublicError>>;
 
   registerInboundHandler(

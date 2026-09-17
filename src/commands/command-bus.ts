@@ -1,5 +1,5 @@
 import { createPublicError, type PublicError } from "../core/contracts/public-error.js";
-import { ok, type Result } from "../core/contracts/result.js";
+import { err, ok, type Result } from "../core/contracts/result.js";
 import type { AuthorityElectionUser } from "../authority/primary-authority-election.js";
 import type { PrimaryAuthorityService } from "../authority/primary-authority-service.js";
 import {
@@ -12,11 +12,12 @@ import {
   type DomainCommand
 } from "./command-envelope.js";
 import type { CommandRegistry } from "./command-registry.js";
-import type {
-  CommandTransport,
-  TransportInboundContext,
-  TransportInboundMessage,
-  TransportReceipt
+import {
+  type CommandTransport,
+  sanitizeTransportReceiptForPublic,
+  type TransportInboundContext,
+  type TransportInboundMessage,
+  type TransportReceipt
 } from "./command-transport.js";
 import { RateLimiter } from "./rate-limiter.js";
 import {
@@ -25,7 +26,7 @@ import {
 } from "./command-dedupe-store.js";
 
 import type { MutationCoordinator } from "../mutations/mutation-coordinator.js";
-import { CommandQueue, type CommandQueueDiagnostics } from "./command-queue.js";
+import { CommandQueue, type CommandQueueDiagnostics, type QueuedCommandStatus } from "./command-queue.js";
 import type { CommandStatusReport } from "./command-dedupe-store.js";
 
 export interface CommandBusOptions {
@@ -63,6 +64,7 @@ export class CommandBus {
   readonly #dedupeStore: CommandDedupeStore;
   readonly #commandQueue: CommandQueue;
   readonly #transportCleanups = new Set<() => void>();
+  #transport: CommandTransport | null = null;
 
   constructor(options: CommandBusOptions) {
     this.#registry = options.registry;
@@ -78,11 +80,25 @@ export class CommandBus {
   }
 
   attachTransport(transport: CommandTransport): () => void {
+    this.#transport = transport;
+    let unregisterStatus: (() => void) | undefined;
+    if (
+      "registerStatusQueryHandler" in transport &&
+      typeof (transport as any).registerStatusQueryHandler === "function"
+    ) {
+      unregisterStatus = (transport as any).registerStatusQueryHandler((id: CommandId) =>
+        this.queryCommandStatus(id)
+      );
+    }
     const unregister = transport.registerInboundHandler(this.dispatchInbound.bind(this));
     let unregistered = false;
     const cleanup = () => {
       if (!unregistered) {
         unregistered = true;
+        if (this.#transport === transport) {
+          this.#transport = null;
+        }
+        unregisterStatus?.();
         unregister();
       }
     };
@@ -98,11 +114,48 @@ export class CommandBus {
       cleanup();
     }
     this.#transportCleanups.clear();
+    this.#transport = null;
     this.#commandQueue.clear();
   }
 
   getCommandStatus<TResult = unknown>(commandId: CommandId): CommandStatusReport<TResult> {
     return this.#dedupeStore.getStatus<TResult>(commandId);
+  }
+
+  /**
+   * Queries authoritative command execution status across local and remote boundaries (G2-AUD-014).
+   *
+   * If local host is the Primary Authority, reads directly from local DedupeStore.
+   * If running on remote client, delegates to transport.getStatus(commandId).
+   */
+  async queryCommandStatus<TResult = unknown>(
+    commandId: CommandId
+  ): Promise<Result<TransportReceipt<TResult>, PublicError>> {
+    if (this.#authorityService.isCurrentUser()) {
+      const report = this.#dedupeStore.getStatus<TResult>(commandId);
+      if (report.receipt) {
+        return ok(report.receipt);
+      }
+      return err(
+        createPublicError({
+          code: "DM_COMMAND_NOT_FOUND",
+          category: "not-found",
+          message: `Command '${commandId}' was not found or is currently ${report.state}`
+        })
+      );
+    }
+
+    if (this.#transport?.getStatus) {
+      return this.#transport.getStatus<TResult>(commandId);
+    }
+
+    return err(
+      createPublicError({
+        code: "DM_TRANSPORT_NOT_CONFIGURED",
+        category: "internal",
+        message: "Remote transport does not support status query"
+      })
+    );
   }
 
   cancelCommand(
@@ -126,9 +179,40 @@ export class CommandBus {
   ): Promise<Result<TransportReceipt<TResponse>, PublicError>> {
     const now = Date.now();
 
-    // 1. Validate Command Envelope
+    // 1. Fast Pre-Validation Rate Check before expensive parsing or JSON inspection (G2-AUD-028)
+    const preRateLimit = this.#rateLimiter.checkPreValidationLimit(
+      message.transportContext.senderUserId,
+      now
+    );
+    if (!preRateLimit.ok) {
+      this.#rateLimiter.recordAbuse(
+        message.transportContext.senderUserId,
+        "pre_validation_limit_exceeded",
+        now
+      );
+      const rawId =
+        typeof message.rawEnvelope === "object" &&
+        message.rawEnvelope !== null &&
+        typeof (message.rawEnvelope as any).commandId === "string"
+          ? (message.rawEnvelope as any).commandId
+          : (("cmd_" + "0".repeat(32)) as CommandId);
+
+      return ok({
+        commandId: rawId,
+        status: "rejected",
+        error: preRateLimit.error,
+        transportTimestamp: now
+      } as TransportReceipt<TResponse>);
+    }
+
+    // 2. Validate Command Envelope
     const envelopeResult = validateCommandEnvelope(message.rawEnvelope);
     if (!envelopeResult.ok) {
+      this.#rateLimiter.recordAbuse(
+        message.transportContext.senderUserId,
+        "malformed_envelope",
+        now
+      );
       const dummyId = ("cmd_" + "0".repeat(32)) as CommandId;
       return ok({
         commandId: dummyId,
@@ -140,7 +224,7 @@ export class CommandBus {
 
     const command = envelopeResult.value;
 
-    // 2. Verify Authority Status & Host Eligibility (G2-AUD-005)
+    // 3. Verify Authority Status & Host Eligibility (G2-AUD-005)
     const authorityStatus = this.#authorityService.getStatus();
     if (!authorityStatus.available || !authorityStatus.authorityUserId) {
       return ok({
@@ -168,7 +252,7 @@ export class CommandBus {
       } as TransportReceipt<TResponse>);
     }
 
-    // 3. Create Authenticated Context & Validate Sender Identity (G2-AUD-006)
+    // 4. Create Authenticated Context & Validate Sender Identity (G2-AUD-006)
     const source: OperationSource =
       message.transportContext.transportName === "local"
         ? (message.transportContext.operationSource ?? { type: "system" })
@@ -183,6 +267,11 @@ export class CommandBus {
     });
 
     if (!authContextResult.ok) {
+      this.#rateLimiter.recordAbuse(
+        message.transportContext.senderUserId,
+        "auth_context_failed",
+        now
+      );
       return ok({
         commandId: command.commandId,
         status: "rejected",
@@ -193,28 +282,14 @@ export class CommandBus {
 
     const context = authContextResult.value;
 
-    // 3b. Enqueue into Authority Command Queue (G2-AUD-015)
-    const queueEntry = this.#commandQueue.enqueue(
-      command,
-      message.transportContext.senderUserId
-    );
-
-    if (queueEntry.status === "cancelled") {
-      return ok({
-        commandId: command.commandId,
-        status: "rejected",
-        error: createPublicError({
-          code: "DM_COMMAND_CANCELLED",
-          category: "busy",
-          message: `Command was cancelled: ${queueEntry.cancelReason ?? "Unknown reason"}`
-        }),
-        transportTimestamp: now
-      } as TransportReceipt<TResponse>);
-    }
-
-    // 4. Handler Lookup
+    // 5. Handler Lookup
     const registration = this.#registry.get(command.type);
     if (!registration) {
+      this.#rateLimiter.recordAbuse(
+        context.senderUserId,
+        `unknown_command_type:${command.type}`,
+        now
+      );
       return ok({
         commandId: command.commandId,
         status: "rejected",
@@ -227,11 +302,16 @@ export class CommandBus {
       } as TransportReceipt<TResponse>);
     }
 
-    // 5. Public vs Internal Command Boundary Check (Master §11.4, DEC-803)
+    // 6. Public vs Internal Command Boundary Check (Master §11.4, DEC-803)
     if (
       registration.visibility === "internal" &&
       message.transportContext.transportName !== "local"
     ) {
+      this.#rateLimiter.recordAbuse(
+        context.senderUserId,
+        `internal_command_attempt:${command.type}`,
+        now
+      );
       return ok({
         commandId: command.commandId,
         status: "rejected",
@@ -244,13 +324,18 @@ export class CommandBus {
       } as TransportReceipt<TResponse>);
     }
 
-    // 6. Defensive Rate Limiting Check (Master §11.2, DEC-787–793)
+    // 7. Defensive Rate Limiting Check (Master §11.2, DEC-787–793)
     const rateLimitResult = this.#rateLimiter.checkAndConsume(
       context.senderUserId,
       command.type,
       now
     );
     if (!rateLimitResult.ok) {
+      this.#rateLimiter.recordAbuse(
+        context.senderUserId,
+        `command_rate_limit_exceeded:${command.type}`,
+        now
+      );
       return ok({
         commandId: command.commandId,
         status: "rejected",
@@ -259,10 +344,15 @@ export class CommandBus {
       } as TransportReceipt<TResponse>);
     }
 
-    // 7. Runtime Schema Validation (Master §11.2, DEC-573)
+    // 8. Runtime Schema Validation (Master §11.2, DEC-573)
     if (registration.schemaValidator) {
       const schemaResult = registration.schemaValidator(command.payload);
       if (!schemaResult.ok) {
+        this.#rateLimiter.recordAbuse(
+          context.senderUserId,
+          `invalid_payload_schema:${command.type}`,
+          now
+        );
         return ok({
           commandId: command.commandId,
           status: "rejected",
@@ -272,10 +362,15 @@ export class CommandBus {
       }
     }
 
-    // 8. Permission Validation (Master §11.2, DEC-573–582)
+    // 9. Permission Validation (Master §11.2, DEC-573–582)
     if (registration.permissionValidator) {
       const permResult = registration.permissionValidator(context);
       if (!permResult.ok) {
+        this.#rateLimiter.recordAbuse(
+          context.senderUserId,
+          `permission_denied:${command.type}`,
+          now
+        );
         return ok({
           commandId: command.commandId,
           status: "rejected",
@@ -285,7 +380,7 @@ export class CommandBus {
       }
     }
 
-    // 9. Dedupe Claim & Fingerprint Conflict Detection (Master §11.2, §11.3, DEC-593–602)
+    // 10. Dedupe Claim & Fingerprint Conflict Detection (Master §11.2, §11.3, DEC-593–602)
     const fingerprint = computeCommandFingerprint(command);
     const claimResult = this.#dedupeStore.claim<TResponse>(
       command.commandId,
@@ -304,35 +399,76 @@ export class CommandBus {
 
     if (claimResult.value.isReplay) {
       if (claimResult.value.receipt) {
-        return ok(claimResult.value.receipt);
+        const replayReceipt =
+          message.transportContext.transportName !== "local"
+            ? sanitizeTransportReceiptForPublic(claimResult.value.receipt)
+            : claimResult.value.receipt;
+        return ok(replayReceipt);
       }
       if (claimResult.value.inFlightPromise) {
         const awaitedReceipt = await claimResult.value.inFlightPromise;
-        return ok(awaitedReceipt);
+        const sanitizedAwaited =
+          message.transportContext.transportName !== "local"
+            ? sanitizeTransportReceiptForPublic(awaitedReceipt)
+            : awaitedReceipt;
+        return ok(sanitizedAwaited);
       }
     }
 
-    // Pre-execution cancellation check
-    if (queueEntry.abortController.signal.aborted) {
+    // 11. Enqueue into Authority Command Queue with internal-derived priority (G2-AUD-015)
+    // Internal policy priority: System/Migration commands get high priority (10); user commands get normal (0).
+    const internalPriority = source.type === "system" ? 10 : 0;
+    const queueEntry = this.#commandQueue.enqueue(
+      command,
+      message.transportContext.senderUserId,
+      { priority: internalPriority }
+    );
+
+    if (queueEntry.status === "cancelled") {
       return ok({
         commandId: command.commandId,
         status: "rejected",
         error: createPublicError({
           code: "DM_COMMAND_CANCELLED",
           category: "busy",
-          message: `Command was cancelled in queue: ${queueEntry.cancelReason ?? "Unknown reason"}`
+          message: `Command was cancelled: ${queueEntry.cancelReason ?? "Unknown reason"}`
         }),
         transportTimestamp: now
       } as TransportReceipt<TResponse>);
     }
 
-    this.#commandQueue.markRunning(command.commandId);
+    // 12. Acquire Scheduler Permit (G2-AUD-015: concurrency and FIFO enforcement)
+    try {
+      await this.#commandQueue.acquirePermit(command.commandId);
+    } catch (queueErr) {
+      if ((queueEntry.status as QueuedCommandStatus) !== "cancelled") {
+        this.#commandQueue.markFinished(command.commandId, false);
+      }
+      return ok({
+        commandId: command.commandId,
+        status: "rejected",
+        error: queueErr as PublicError,
+        transportTimestamp: Date.now()
+      } as TransportReceipt<TResponse>);
+    }
 
-    // 10. Execute Handler / Transactional Coordinator (G2-AUD-007)
-    let finalReceipt: TransportReceipt<TResponse>;
+    // 13. Execute Handler / Transactional Coordinator (G2-AUD-007, G2-AUD-018)
+    let finalReceipt: TransportReceipt<TResponse> | undefined = undefined;
 
     try {
-      if (registration.transactional && registration.mutationDefinition) {
+      // Pre-execution cancellation check
+      if (queueEntry.abortController.signal.aborted) {
+        finalReceipt = {
+          commandId: command.commandId,
+          status: "rejected",
+          error: createPublicError({
+            code: "DM_COMMAND_CANCELLED",
+            category: "busy",
+            message: `Command was cancelled in queue: ${queueEntry.cancelReason ?? "Unknown reason"}`
+          }),
+          transportTimestamp: now
+        };
+      } else if (registration.transactional && registration.mutationDefinition) {
         if (!this.#coordinator) {
           finalReceipt = {
             commandId: command.commandId,
@@ -398,11 +534,35 @@ export class CommandBus {
         }),
         transportTimestamp: now
       };
+    } finally {
+      if ((queueEntry.status as QueuedCommandStatus) !== "cancelled") {
+        const isSuccess = finalReceipt !== undefined && finalReceipt.status === "executed";
+        this.#commandQueue.markFinished(command.commandId, isSuccess);
+      }
+      this.#commandQueue.releasePermit(command.commandId);
     }
 
-    this.#commandQueue.markFinished(command.commandId, finalReceipt.status === "executed");
-    this.#dedupeStore.recordResult(command.commandId, finalReceipt);
-    return ok(finalReceipt);
+    const resolvedReceipt: TransportReceipt<TResponse> =
+      finalReceipt ?? {
+        commandId: command.commandId,
+        status: "rejected",
+        error: createPublicError({
+          code: "DM_COMMAND_EXECUTION_FAILED",
+          category: "internal",
+          message: "Command execution ended without a valid receipt"
+        }),
+        transportTimestamp: now
+      };
+
+    this.#dedupeStore.recordResult(command.commandId, resolvedReceipt);
+
+    // 14. Boundary Sanitization for Remote Receivers (G2-AUD-018)
+    const receiptToReturn =
+      message.transportContext.transportName !== "local"
+        ? sanitizeTransportReceiptForPublic(resolvedReceipt)
+        : resolvedReceipt;
+
+    return ok(receiptToReturn);
   }
 
   /**

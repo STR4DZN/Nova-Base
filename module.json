@@ -8,6 +8,19 @@
     "verified": "13.351"
   },
   "socket": true,
+  "relationships": {
+    "requires": [
+      {
+        "id": "socketlib",
+        "type": "module",
+        "manifest": "https://github.com/farling42/foundryvtt-socketlib/releases/latest/download/module.json",
+        "compatibility": {
+          "minimum": "1.1.3",
+          "verified": "1.1.4"
+        }
+      }
+    ]
+  },
   "scripts": [
     "dist/main.js"
   ]

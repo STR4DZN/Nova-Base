@@ -29,14 +29,14 @@ class MockSocket implements FoundrySocketLike {
     this.listeners.get(event)?.delete(callback);
   }
 
-  emit(event: string, data: unknown): void {
-    this.emitted.push({ event, data });
+  emit(event: string, ...args: unknown[]): void {
+    this.emitted.push({ event, data: args[0] });
     // In a connected socket mesh, emit broadcasts to other listeners
     const handlers = this.listeners.get(event);
     if (handlers) {
       for (const handler of handlers) {
         // Asynchronous dispatch to simulate real socket event loop
-        queueMicrotask(() => handler(data));
+        queueMicrotask(() => handler(...args));
       }
     }
   }

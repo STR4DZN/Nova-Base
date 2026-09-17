@@ -16,4 +16,13 @@ if (manifest.socket !== true) {
   throw new Error("Manifest must specify socket: true for Foundry v13 module socket routing");
 }
 
+const socketlibDep = manifest.relationships?.requires?.find((r) => r.id === "socketlib");
+if (!socketlibDep) throw new Error("Manifest must declare socketlib in relationships.requires");
+if (socketlibDep.compatibility?.minimum !== "1.1.3") {
+  throw new Error(`Socketlib minimum compatibility must be 1.1.3 for Foundry v13, got ${socketlibDep.compatibility?.minimum}`);
+}
+if (socketlibDep.compatibility?.verified !== "1.1.4") {
+  throw new Error(`Socketlib verified compatibility must be 1.1.4, got ${socketlibDep.compatibility?.verified}`);
+}
+
 console.info("Package validation passed");

@@ -38,6 +38,18 @@ export interface CommandQueueDiagnostics {
   }[];
 }
 
+export interface CommandQueueOptions {
+  readonly maxConcurrency?: number;
+}
+
+interface CommandWaiter {
+  readonly commandId: CommandId;
+  readonly priority: number;
+  readonly enqueuedAt: number;
+  readonly resolve: () => void;
+  readonly reject: (error: PublicError) => void;
+}
+
 /**
  * Authority Command Queue & Scheduler (Master Spec §11.2, §11.4, DEC-541–552, G2-AUD-015).
  *
@@ -47,11 +59,20 @@ export interface CommandQueueDiagnostics {
  * 3. Pre-commit authenticated command cancellation via AbortSignal.
  * 4. Diagnostics on queue length, running tasks, and cancellation state.
  */
+export const DEFAULT_COMMAND_QUEUE_CONCURRENCY = 10;
+
 export class CommandQueue {
   readonly #entries = new Map<CommandId, QueuedCommandEntry>();
+  readonly #waitingQueue: CommandWaiter[] = [];
+  readonly #maxConcurrency: number;
+  #runningCount = 0;
   #cancelledCount = 0;
   #completedCount = 0;
   #failedCount = 0;
+
+  constructor(options?: CommandQueueOptions) {
+    this.#maxConcurrency = options?.maxConcurrency ?? DEFAULT_COMMAND_QUEUE_CONCURRENCY;
+  }
 
   enqueue<TPayload>(
     command: DomainCommand<TPayload>,
@@ -78,6 +99,102 @@ export class CommandQueue {
     return entry;
   }
 
+  /**
+   * Waits for scheduler permit before executing the command handler.
+   *
+   * Enforces FIFO within the same priority level, and processes higher priority
+   * commands first. Unblocks immediately if concurrency slot is free.
+   */
+  async acquirePermit(commandId: CommandId): Promise<void> {
+    const entry = this.#entries.get(commandId);
+    if (!entry) {
+      throw createPublicError({
+        code: "DM_COMMAND_NOT_FOUND",
+        category: "not-found",
+        message: `Command '${commandId}' was not enqueued`
+      });
+    }
+
+    if (entry.status === "cancelled") {
+      throw createPublicError({
+        code: "DM_COMMAND_CANCELLED",
+        category: "busy",
+        message: `Command was cancelled in queue: ${entry.cancelReason ?? "Unknown reason"}`
+      });
+    }
+
+    if (this.#runningCount < this.#maxConcurrency) {
+      this.#runningCount++;
+      this.markRunning(commandId);
+      return;
+    }
+
+    return new Promise<void>((resolve, reject) => {
+      const waiter: CommandWaiter = {
+        commandId,
+        priority: entry.priority,
+        enqueuedAt: entry.enqueuedAt,
+        resolve: () => {
+          this.markRunning(commandId);
+          resolve();
+        },
+        reject
+      };
+
+      this.#insertWaiter(waiter);
+    });
+  }
+
+  /**
+   * Releases an execution permit after command finishes or fails, unblocking
+   * the next waiting command in the queue.
+   */
+  releasePermit(commandId: CommandId): void {
+    const entry = this.#entries.get(commandId);
+    if (entry && (entry.status === "running" || entry.status === "committing")) {
+      this.markFinished(commandId, false);
+    }
+    this.#runningCount = Math.max(0, this.#runningCount - 1);
+    this.#processQueue();
+  }
+
+  #insertWaiter(waiter: CommandWaiter): void {
+    // Sort order: higher priority first; if equal priority, earlier enqueuedAt first (FIFO)
+    let idx = this.#waitingQueue.length;
+    for (let i = 0; i < this.#waitingQueue.length; i++) {
+      const other = this.#waitingQueue[i];
+      if (
+        waiter.priority > other.priority ||
+        (waiter.priority === other.priority && waiter.enqueuedAt < other.enqueuedAt)
+      ) {
+        idx = i;
+        break;
+      }
+    }
+    this.#waitingQueue.splice(idx, 0, waiter);
+  }
+
+  #processQueue(): void {
+    while (this.#runningCount < this.#maxConcurrency && this.#waitingQueue.length > 0) {
+      const waiter = this.#waitingQueue.shift()!;
+      const entry = this.#entries.get(waiter.commandId);
+
+      if (entry && entry.status === "cancelled") {
+        waiter.reject(
+          createPublicError({
+            code: "DM_COMMAND_CANCELLED",
+            category: "busy",
+            message: `Command was cancelled: ${entry.cancelReason ?? "Cancelled in queue"}`
+          })
+        );
+        continue;
+      }
+
+      this.#runningCount++;
+      waiter.resolve();
+    }
+  }
+
   get(commandId: CommandId): QueuedCommandEntry | undefined {
     return this.#entries.get(commandId);
   }
@@ -102,7 +219,7 @@ export class CommandQueue {
   markFinished(commandId: CommandId, success: boolean): void {
     const entry = this.#entries.get(commandId);
     if (!entry) return;
-    if (entry.status === "cancelled") return;
+    if (entry.status === "cancelled" || entry.status === "completed" || entry.status === "failed") return;
 
     entry.finishedAt = Date.now();
     if (success) {
@@ -171,6 +288,21 @@ export class CommandQueue {
     entry.finishedAt = Date.now();
     this.#cancelledCount++;
     entry.abortController.abort();
+
+    // If waiting in queue, remove waiter and reject it
+    const waiterIdx = this.#waitingQueue.findIndex((w) => w.commandId === commandId);
+    if (waiterIdx !== -1) {
+      const waiter = this.#waitingQueue.splice(waiterIdx, 1)[0];
+      waiter.reject(
+        createPublicError({
+          code: "DM_COMMAND_CANCELLED",
+          category: "busy",
+          message: reason
+        })
+      );
+      this.#processQueue(); // Unblock next waiter immediately
+    }
+
     return ok(undefined);
   }
 

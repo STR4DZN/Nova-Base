@@ -9,10 +9,18 @@ export interface RateLimitRule {
 export interface RateLimiterOptions {
   readonly defaultRule?: RateLimitRule;
   readonly commandRules?: Readonly<Record<string, RateLimitRule>>;
+  readonly preValidationRule?: RateLimitRule;
   /**
    * Maximum loop protection limit for system/internal callers (null userId).
    */
   readonly systemMaxRequestsPerSecond?: number;
+}
+
+export interface AbuseIncident {
+  readonly senderUserId: string | null;
+  readonly reason: string;
+  count: number;
+  lastOccurrenceAt: number;
 }
 
 interface UserRequestBucket {
@@ -27,12 +35,19 @@ interface UserRequestBucket {
  */
 export class RateLimiter {
   readonly #defaultRule: RateLimitRule;
+  readonly #preValidationRule: RateLimitRule;
   readonly #commandRules: Map<string, RateLimitRule>;
   readonly #systemMaxPerSecond: number;
   readonly #buckets = new Map<string, UserRequestBucket>();
+  readonly #abuseRecords = new Map<string, AbuseIncident>();
 
   constructor(options?: RateLimiterOptions) {
     this.#defaultRule = options?.defaultRule ?? {
+      windowMs: 1000,
+      maxRequests: 50
+    };
+
+    this.#preValidationRule = options?.preValidationRule ?? {
       windowMs: 1000,
       maxRequests: 50
     };
@@ -45,6 +60,38 @@ export class RateLimiter {
     }
 
     this.#systemMaxPerSecond = options?.systemMaxRequestsPerSecond ?? 1000;
+  }
+
+  /**
+   * Fast pre-validation rate check for authenticated callers before running
+   * expensive envelope parsing, JSON validation, or handler lookups (G2-AUD-028).
+   */
+  checkPreValidationLimit(
+    userId: string | null,
+    now: number = Date.now()
+  ): Result<boolean, PublicError> {
+    const key = userId ? `${userId}:__pre_validation__` : `__system__:__pre_validation__`;
+    let bucket = this.#buckets.get(key);
+    if (!bucket) {
+      bucket = { timestamps: [] };
+      this.#buckets.set(key, bucket);
+    }
+
+    const cutoff = now - this.#preValidationRule.windowMs;
+    bucket.timestamps = bucket.timestamps.filter((t) => t > cutoff);
+
+    if (bucket.timestamps.length >= this.#preValidationRule.maxRequests) {
+      return err(
+        createPublicError({
+          code: "DM_RATE_LIMIT_EXCEEDED",
+          category: "busy",
+          message: `Pre-validation request rate limit exceeded for ${userId ? `user '${userId}'` : "system"}. Maximum ${this.#preValidationRule.maxRequests} requests per ${this.#preValidationRule.windowMs}ms.`
+        })
+      );
+    }
+
+    bucket.timestamps.push(now);
+    return ok(true);
   }
 
   checkAndConsume(
@@ -93,7 +140,32 @@ export class RateLimiter {
     return ok(true);
   }
 
+  recordAbuse(
+    userId: string | null,
+    reason: string,
+    now: number = Date.now()
+  ): void {
+    const key = `${userId ?? "__system__"}:${reason}`;
+    const existing = this.#abuseRecords.get(key);
+    if (existing) {
+      existing.count++;
+      existing.lastOccurrenceAt = now;
+    } else {
+      this.#abuseRecords.set(key, {
+        senderUserId: userId,
+        reason,
+        count: 1,
+        lastOccurrenceAt: now
+      });
+    }
+  }
+
+  getAbuseRecords(): readonly AbuseIncident[] {
+    return Array.from(this.#abuseRecords.values());
+  }
+
   reset(): void {
     this.#buckets.clear();
+    this.#abuseRecords.clear();
   }
 }

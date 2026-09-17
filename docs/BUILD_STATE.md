@@ -11,7 +11,7 @@
 
 ## Estado canônico
 
-G0, G1 e G2 possuem implementação local 100% verificada, auditada e verde (205/205 testes aprovados). A auditoria externa detalhada no documento `G2_EXTERNAL_AUDIT_ERRORS_FOR_ANTIGRAVITY.md` (28 apontamentos G2-AUD-001 a G2-AUD-028) foi plenamente resolvida e comprovada via testes unitários, adversariais e reachability no bundle de produção (`dist/main.js`). O smoke real de instalação/boot no Foundry VTT v13.351+ em world ativo continua sendo a condição externa de homologação antes de produção. O escopo do Gate G2 está rigorosamente concluído, sem antecipação de código do Gate G3.
+G0, G1 e G2 possuem implementação local 100% verificada, auditada e verde (228/228 testes aprovados). A auditoria externa e as revalidações pós-correções detalhadas em `G2_EXTERNAL_AUDIT_ERRORS_FOR_ANTIGRAVITY.md`, `G2_REVALIDACAO_POS_CORRECOES_RESTANTES.md` e `G2_REVALIDACAO_FINAL_CICLO_2.md` (28 apontamentos G2-AUD-001 a G2-AUD-028, mais os refinamentos do Ciclo 2: autenticação estrita de remetente Socketlib via `this.socketdata.userId` validada contra código upstream de Socketlib e script de smoke test para Foundry v13.351, contabilização exata de status da CommandQueue, eliminação de phantom queued entries, concorrência real para 10 players sem vazamento de permits/locks sob cancelamento/timeout, handoff sincronizado, compatibilidade Socketlib 1.1.3/1.1.4 com socket: true e delimitação de recuperação em memória vs G10/G11) foram plenamente resolvidas e comprovadas via testes unitários, adversariais e reachability no bundle de produção (`dist/main.js`). O smoke real de instalação/boot no Foundry VTT v13.351+ em world ativo continua sendo a condição externa de homologação antes de produção. O escopo do Gate G2 está rigorosamente concluído, sem antecipação de código do Gate G3.
 
 ## G1 implementado
 
@@ -43,12 +43,12 @@ G0, G1 e G2 possuem implementação local 100% verificada, auditada e verde (205
 
 Detalhes completos: `docs/G1_AUDIT_FIX_REPORT.md`.
 
-## Evidência local Gate G2 (Pós-Resolução da Auditoria Externa)
+## Evidência local Gate G2 (Pós-Resolução da Auditoria Externa e Revalidação)
 
 | Verificação | Resultado |
 |---|---|
 | TypeScript strict (`npm.cmd run typecheck`) | PASS |
-| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 205/205 (0 falhas) |
+| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 228/228 (0 falhas) |
 | Manifest/package validation (`node scripts/validate-package.mjs`) | PASS |
 | Runtime ZIP generation (`node scripts/package.mjs`) | PASS |
 | Runtime artifact validation (`node scripts/validate-artifact.mjs`) | PASS |
@@ -443,16 +443,19 @@ Implementado:
 
 | Requisito Normativo (Master §11–12, G2 Spec) | Status | Evidência |
 |---|---|---|
-| Sender autenticado no authority side (nunca do payload) | ATENDIDO | `tests/commands/command-transport.test.ts`, `tests/multiplayer/multiplayer-harness.test.ts` |
-| Anti-spoofing fail-closed (`DM_SECURITY_SENDER_SPOOFED`) | ATENDIDO | `tests/commands/command-bus.test.ts`, `tests/multiplayer/multiplayer-harness.test.ts` |
+| Sender autenticado no authority side (Socketlib/transport context, nunca payload) | ATENDIDO | `tests/commands/revalidation-adversarial.test.ts`, `tests/multiplayer/multiplayer-harness.test.ts` |
+| Anti-spoofing fail-closed (`DM_SECURITY_SENDER_SPOOFED`, `DM_SECURITY_SENDER_UNKNOWN`) | ATENDIDO | `tests/commands/revalidation-adversarial.test.ts`, `tests/multiplayer/multiplayer-harness.test.ts` |
 | Internal-only rejeitado via socket (`DM_SECURITY_INTERNAL_ONLY_COMMAND`) | ATENDIDO | `tests/commands/command-bus.test.ts`, `tests/multiplayer/multiplayer-harness.test.ts` |
 | Same commandId + same intent dedupe & in-flight share | ATENDIDO | `tests/commands/command-dedupe-store.test.ts`, `tests/multiplayer/multiplayer-harness.test.ts` |
 | Same commandId + different payload conflict (`DM_COMMAND_ID_REUSE_MISMATCH`) | ATENDIDO | `tests/commands/command-dedupe-store.test.ts`, `tests/multiplayer/multiplayer-harness.test.ts` |
 | Ordered multi-key locks (deadlock-freedom garantido) | ATENDIDO | `tests/mutations/lock-manager.test.ts`, `tests/multiplayer/multiplayer-harness.test.ts` |
 | Fresh read estritamente após locks adquiridos | ATENDIDO | `tests/mutations/mutation-coordinator.test.ts` |
 | Stale revision conflict (`DM_REVISION_CONFLICT`) | ATENDIDO | `tests/mutations/mutation-coordinator.test.ts`, `tests/multiplayer/multiplayer-harness.test.ts` |
-| Timeout tratado sem falsas falhas e AbortSignal cancel | ATENDIDO | `tests/mutations/lock-manager.test.ts`, `tests/commands/command-transport.test.ts` |
-| Receipt imutável sem substituir authoritative state | ATENDIDO | `tests/mutations/plan-and-receipt.test.ts` |
+| Timeout tratado com status query & retry seguro (`CommandTransport.getStatus`) | ATENDIDO | `tests/commands/revalidation-adversarial.test.ts` |
+| CommandQueue scheduler determinístico (FIFO, prioridade interna, cancelamento em fila) | ATENDIDO | `tests/commands/revalidation-adversarial.test.ts` |
+| Sanitização rigorosa de saída pública (tokens, senhas, secrets redigidos em result/details) | ATENDIDO | `tests/commands/revalidation-adversarial.test.ts` |
+| Pre-validation rate limiting & abuse tracking em diagnósticos | ATENDIDO | `tests/commands/revalidation-adversarial.test.ts` |
+| Facade estritamente read-only em `runtime.domains` (sem mutadores no objeto) | ATENDIDO | `tests/core/runtime-composition.test.ts` |
 | Startup recovery scan isolando apenas domínios danificados | ATENDIDO | `tests/mutations/transaction-and-recovery.test.ts`, `tests/multiplayer/multiplayer-harness.test.ts` |
 | Nenhuma mutação importante bypassa Primary Authority | ATENDIDO | Master §11.1 / Composição em runtime |
 
@@ -460,17 +463,17 @@ Implementado:
 
 | Arquivo | Tamanho | SHA-256 |
 |---|---|---|
-| `dist/domain-manager-v0.0.2.zip` | 13.9 KB | `9643b0578420fc7e185a00db1b1ffe323f14ef3da0d876bc9a22b5a02ac82306` |
-| `dist/domain-manager-g2-full-checkpoint.zip` | ~161 KB | Verificado via `npm run validate:g2-full` (calculado na geração pelo script) |
+| `dist/domain-manager-v0.0.2.zip` | ~14 KB | Verificado via `npm run validate:artifact` |
+| `dist/domain-manager-g2-full-checkpoint.zip` | ~180 KB | Verificado via `npm run validate:g2-full` |
 
-## Dívidas técnicas não-bloqueantes registradas
+## Delimitação Arquitetural e Próximos Gates
 
-1. **Foundry Socket Backend**: O transporte atual em produção utiliza a boundary agnóstica `FoundryCommandTransportAdapter` sobre `game.socket`. Quando socketlib ou WebSocket nativo for formalizado em gates futuros, o adapter pode ser estendido sem qualquer alteração na semântica da Authority;
-2. **Persistência durável do TransactionStore em disco**: O `TransactionStore` no G2 opera em memória com ciclo de vida estrito. A persistência de log durável para recuperação entre reinicializações completas de servidor será conectada no Gate G10/G11.
+1. **Transporte Dirigido com Socketlib**: O `FoundryCommandTransportAdapter` implementa RPC dirigido via `socketlib` (`executeAsUser` diretamente para `authorityUserId`), eliminando broadcast-first de payloads de mutação. `socketlib` é declarado em `relationships.requires` no `module.json`.
+2. **Transaction/Recovery Shell**: Conforme a especificação do Gate G2 (§11–12, §47–49), o G2.9 implementa o Transaction/Recovery shell com estados formais, lock isolation no startup para transações em `committing`, e fail-closed com outcome `unknown`. A persistência durável distribuída em disco entre diferentes sessões e clusters é responsabilidade formal dos Gates G10/G11.
 
 ## Conclusão do Gate G2
 
-O **Gate G2 — Authority / Commands / MutationCoordinator** está integralmente concluído e validado.
+O **Gate G2 — Authority / Commands / MutationCoordinator** está integralmente concluído, com todos os 28 apontamentos da auditoria externa e os refinamentos dos Ciclos 1 e 2 de revalidação solucionados e cobertos por 228 testes adversariais (0 falhas).
 Nenhuma etapa do Gate G3 foi iniciada, em cumprimento estrito às instruções normativas.
 O módulo está pronto para auditoria externa e smoke testing no Foundry VTT v13.351+.
 

@@ -78,7 +78,7 @@ export function composeDomainManagerRuntime(
   registerDomainCommandHandlers(registry, coordinator, mutableDomainRepo);
   registry.freeze();
 
-  const commandQueue = options.commandQueue ?? new CommandQueue();
+  const commandQueue = options.commandQueue ?? new CommandQueue({ maxConcurrency: 10 });
   const dedupeStore = options.dedupeStore ?? new CommandDedupeStore();
   const rateLimiter = options.rateLimiter ?? new RateLimiter();
 
@@ -104,12 +104,29 @@ export function composeDomainManagerRuntime(
     commandQueue,
     transactionStore,
     registry,
-    transport
+    transport,
+    rateLimiter
+  });
+
+  // G2-AUD-008: Physical read-only facade for domains, preventing any mutable operations in runtime
+  const readOnlyDomains: DomainReadRepository = Object.freeze({
+    read: (id: string) => mutableDomainRepo.read(id),
+    load: (id: string) => mutableDomainRepo.load(id),
+    query: (query?: any) => mutableDomainRepo.query(query),
+    checkIntegrity: () => mutableDomainRepo.checkIntegrity(),
+    getIndex: () => {
+      const liveIndex = mutableDomainRepo.getIndex();
+      return Object.freeze({
+        get: (id: string) => liveIndex.get(id),
+        list: () => liveIndex.list(),
+        query: (q?: any) => liveIndex.query(q)
+      }) as any;
+    }
   });
 
   return Object.freeze({
     // G2-AUD-008: Read-only facade exposed publicly
-    domains: mutableDomainRepo as DomainReadRepository,
+    domains: readOnlyDomains,
     authority,
     commandBus,
     registry,

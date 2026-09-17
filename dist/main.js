@@ -1894,14 +1894,79 @@ function createAuthenticatedCommandContext(params) {
   return ok(context);
 }
 
+// src/diagnostics/sanitize.ts
+var SENSITIVE_KEY = /(secret|token|password|api[-_]?key|credential|authorization)/i;
+function sanitizeDiagnosticsValue(value, ancestors = /* @__PURE__ */ new WeakSet()) {
+  if (typeof value === "bigint") {
+    return `${value.toString()}n`;
+  }
+  if (typeof value === "symbol") {
+    return value.toString();
+  }
+  if (typeof value === "function") {
+    return `[Function: ${value.name || "anonymous"}]`;
+  }
+  if (Array.isArray(value)) {
+    if (ancestors.has(value)) return "[Circular]";
+    ancestors.add(value);
+    const result = value.map((item) => sanitizeDiagnosticsValue(item, ancestors));
+    ancestors.delete(value);
+    return result;
+  }
+  if (typeof value !== "object" || value === null) return value;
+  if (value instanceof Date) return value.toISOString();
+  if (value instanceof Error) {
+    return {
+      name: value.name,
+      message: value.message,
+      ...value.stack ? { stack: value.stack } : {}
+    };
+  }
+  if (ancestors.has(value)) return "[Circular]";
+  ancestors.add(value);
+  const sanitized = {};
+  for (const [key, child] of Object.entries(value)) {
+    sanitized[key] = SENSITIVE_KEY.test(key) ? "[REDACTED]" : sanitizeDiagnosticsValue(child, ancestors);
+  }
+  ancestors.delete(value);
+  return sanitized;
+}
+
+// src/commands/command-transport.ts
+function sanitizeTransportReceiptForPublic(receipt) {
+  const sanitizedError = receipt.error ? Object.freeze({
+    code: receipt.error.code,
+    category: receipt.error.category,
+    message: receipt.error.message,
+    details: receipt.error.details !== void 0 ? sanitizeDiagnosticsValue(receipt.error.details) : void 0,
+    retryable: receipt.error.retryable,
+    userActionRequired: receipt.error.userActionRequired,
+    correlationId: receipt.error.correlationId
+  }) : void 0;
+  return Object.freeze({
+    commandId: receipt.commandId,
+    status: receipt.status,
+    correlationId: receipt.correlationId,
+    result: receipt.result !== void 0 ? sanitizeDiagnosticsValue(receipt.result) : void 0,
+    error: sanitizedError,
+    transportTimestamp: receipt.transportTimestamp
+  });
+}
+
 // src/commands/rate-limiter.ts
 var RateLimiter = class {
   #defaultRule;
+  #preValidationRule;
   #commandRules;
   #systemMaxPerSecond;
   #buckets = /* @__PURE__ */ new Map();
+  #abuseRecords = /* @__PURE__ */ new Map();
   constructor(options) {
     this.#defaultRule = options?.defaultRule ?? {
+      windowMs: 1e3,
+      maxRequests: 50
+    };
+    this.#preValidationRule = options?.preValidationRule ?? {
       windowMs: 1e3,
       maxRequests: 50
     };
@@ -1912,6 +1977,31 @@ var RateLimiter = class {
       }
     }
     this.#systemMaxPerSecond = options?.systemMaxRequestsPerSecond ?? 1e3;
+  }
+  /**
+   * Fast pre-validation rate check for authenticated callers before running
+   * expensive envelope parsing, JSON validation, or handler lookups (G2-AUD-028).
+   */
+  checkPreValidationLimit(userId, now = Date.now()) {
+    const key = userId ? `${userId}:__pre_validation__` : `__system__:__pre_validation__`;
+    let bucket = this.#buckets.get(key);
+    if (!bucket) {
+      bucket = { timestamps: [] };
+      this.#buckets.set(key, bucket);
+    }
+    const cutoff = now - this.#preValidationRule.windowMs;
+    bucket.timestamps = bucket.timestamps.filter((t) => t > cutoff);
+    if (bucket.timestamps.length >= this.#preValidationRule.maxRequests) {
+      return err(
+        createPublicError({
+          code: "DM_RATE_LIMIT_EXCEEDED",
+          category: "busy",
+          message: `Pre-validation request rate limit exceeded for ${userId ? `user '${userId}'` : "system"}. Maximum ${this.#preValidationRule.maxRequests} requests per ${this.#preValidationRule.windowMs}ms.`
+        })
+      );
+    }
+    bucket.timestamps.push(now);
+    return ok(true);
   }
   checkAndConsume(userId, commandType, now = Date.now()) {
     const key = userId ? `${userId}:${commandType}` : `__system__:${commandType}`;
@@ -1942,8 +2032,27 @@ var RateLimiter = class {
     }
     return ok(true);
   }
+  recordAbuse(userId, reason, now = Date.now()) {
+    const key = `${userId ?? "__system__"}:${reason}`;
+    const existing = this.#abuseRecords.get(key);
+    if (existing) {
+      existing.count++;
+      existing.lastOccurrenceAt = now;
+    } else {
+      this.#abuseRecords.set(key, {
+        senderUserId: userId,
+        reason,
+        count: 1,
+        lastOccurrenceAt: now
+      });
+    }
+  }
+  getAbuseRecords() {
+    return Array.from(this.#abuseRecords.values());
+  }
   reset() {
     this.#buckets.clear();
+    this.#abuseRecords.clear();
   }
 };
 
@@ -2095,11 +2204,18 @@ var CommandDedupeStore = class {
 };
 
 // src/commands/command-queue.ts
+var DEFAULT_COMMAND_QUEUE_CONCURRENCY = 10;
 var CommandQueue = class {
   #entries = /* @__PURE__ */ new Map();
+  #waitingQueue = [];
+  #maxConcurrency;
+  #runningCount = 0;
   #cancelledCount = 0;
   #completedCount = 0;
   #failedCount = 0;
+  constructor(options) {
+    this.#maxConcurrency = options?.maxConcurrency ?? DEFAULT_COMMAND_QUEUE_CONCURRENCY;
+  }
   enqueue(command, senderUserId, options) {
     const existing = this.#entries.get(command.commandId);
     if (existing) {
@@ -2117,6 +2233,88 @@ var CommandQueue = class {
     };
     this.#entries.set(command.commandId, entry);
     return entry;
+  }
+  /**
+   * Waits for scheduler permit before executing the command handler.
+   *
+   * Enforces FIFO within the same priority level, and processes higher priority
+   * commands first. Unblocks immediately if concurrency slot is free.
+   */
+  async acquirePermit(commandId) {
+    const entry = this.#entries.get(commandId);
+    if (!entry) {
+      throw createPublicError({
+        code: "DM_COMMAND_NOT_FOUND",
+        category: "not-found",
+        message: `Command '${commandId}' was not enqueued`
+      });
+    }
+    if (entry.status === "cancelled") {
+      throw createPublicError({
+        code: "DM_COMMAND_CANCELLED",
+        category: "busy",
+        message: `Command was cancelled in queue: ${entry.cancelReason ?? "Unknown reason"}`
+      });
+    }
+    if (this.#runningCount < this.#maxConcurrency) {
+      this.#runningCount++;
+      this.markRunning(commandId);
+      return;
+    }
+    return new Promise((resolve, reject) => {
+      const waiter = {
+        commandId,
+        priority: entry.priority,
+        enqueuedAt: entry.enqueuedAt,
+        resolve: () => {
+          this.markRunning(commandId);
+          resolve();
+        },
+        reject
+      };
+      this.#insertWaiter(waiter);
+    });
+  }
+  /**
+   * Releases an execution permit after command finishes or fails, unblocking
+   * the next waiting command in the queue.
+   */
+  releasePermit(commandId) {
+    const entry = this.#entries.get(commandId);
+    if (entry && (entry.status === "running" || entry.status === "committing")) {
+      this.markFinished(commandId, false);
+    }
+    this.#runningCount = Math.max(0, this.#runningCount - 1);
+    this.#processQueue();
+  }
+  #insertWaiter(waiter) {
+    let idx = this.#waitingQueue.length;
+    for (let i = 0; i < this.#waitingQueue.length; i++) {
+      const other = this.#waitingQueue[i];
+      if (waiter.priority > other.priority || waiter.priority === other.priority && waiter.enqueuedAt < other.enqueuedAt) {
+        idx = i;
+        break;
+      }
+    }
+    this.#waitingQueue.splice(idx, 0, waiter);
+  }
+  #processQueue() {
+    while (this.#runningCount < this.#maxConcurrency && this.#waitingQueue.length > 0) {
+      const waiter = this.#waitingQueue.shift();
+      const entry = this.#entries.get(waiter.commandId);
+      if (entry && entry.status === "cancelled") {
+        waiter.reject(
+          createPublicError({
+            code: "DM_COMMAND_CANCELLED",
+            category: "busy",
+            message: `Command was cancelled: ${entry.cancelReason ?? "Cancelled in queue"}`
+          })
+        );
+        continue;
+      }
+      this.#runningCount++;
+      waiter.resolve();
+    }
   }
   get(commandId) {
     return this.#entries.get(commandId);
@@ -2139,7 +2337,7 @@ var CommandQueue = class {
   markFinished(commandId, success) {
     const entry = this.#entries.get(commandId);
     if (!entry) return;
-    if (entry.status === "cancelled") return;
+    if (entry.status === "cancelled" || entry.status === "completed" || entry.status === "failed") return;
     entry.finishedAt = Date.now();
     if (success) {
       entry.status = "completed";
@@ -2195,6 +2393,18 @@ var CommandQueue = class {
     entry.finishedAt = Date.now();
     this.#cancelledCount++;
     entry.abortController.abort();
+    const waiterIdx = this.#waitingQueue.findIndex((w) => w.commandId === commandId);
+    if (waiterIdx !== -1) {
+      const waiter = this.#waitingQueue.splice(waiterIdx, 1)[0];
+      waiter.reject(
+        createPublicError({
+          code: "DM_COMMAND_CANCELLED",
+          category: "busy",
+          message: reason
+        })
+      );
+      this.#processQueue();
+    }
     return ok(void 0);
   }
   getDiagnostics() {
@@ -2242,6 +2452,7 @@ var CommandBus = class {
   #dedupeStore;
   #commandQueue;
   #transportCleanups = /* @__PURE__ */ new Set();
+  #transport = null;
   constructor(options) {
     this.#registry = options.registry;
     this.#authorityService = options.authorityService;
@@ -2254,11 +2465,22 @@ var CommandBus = class {
     }
   }
   attachTransport(transport) {
+    this.#transport = transport;
+    let unregisterStatus;
+    if ("registerStatusQueryHandler" in transport && typeof transport.registerStatusQueryHandler === "function") {
+      unregisterStatus = transport.registerStatusQueryHandler(
+        (id) => this.queryCommandStatus(id)
+      );
+    }
     const unregister = transport.registerInboundHandler(this.dispatchInbound.bind(this));
     let unregistered = false;
     const cleanup = () => {
       if (!unregistered) {
         unregistered = true;
+        if (this.#transport === transport) {
+          this.#transport = null;
+        }
+        unregisterStatus?.();
         unregister();
       }
     };
@@ -2273,10 +2495,42 @@ var CommandBus = class {
       cleanup();
     }
     this.#transportCleanups.clear();
+    this.#transport = null;
     this.#commandQueue.clear();
   }
   getCommandStatus(commandId) {
     return this.#dedupeStore.getStatus(commandId);
+  }
+  /**
+   * Queries authoritative command execution status across local and remote boundaries (G2-AUD-014).
+   *
+   * If local host is the Primary Authority, reads directly from local DedupeStore.
+   * If running on remote client, delegates to transport.getStatus(commandId).
+   */
+  async queryCommandStatus(commandId) {
+    if (this.#authorityService.isCurrentUser()) {
+      const report = this.#dedupeStore.getStatus(commandId);
+      if (report.receipt) {
+        return ok(report.receipt);
+      }
+      return err(
+        createPublicError({
+          code: "DM_COMMAND_NOT_FOUND",
+          category: "not-found",
+          message: `Command '${commandId}' was not found or is currently ${report.state}`
+        })
+      );
+    }
+    if (this.#transport?.getStatus) {
+      return this.#transport.getStatus(commandId);
+    }
+    return err(
+      createPublicError({
+        code: "DM_TRANSPORT_NOT_CONFIGURED",
+        category: "internal",
+        message: "Remote transport does not support status query"
+      })
+    );
   }
   cancelCommand(commandId, requesterUserId, isGM, reason) {
     return this.#commandQueue.cancel(commandId, requesterUserId, isGM, reason);
@@ -2289,8 +2543,31 @@ var CommandBus = class {
    */
   async dispatchInbound(message) {
     const now = Date.now();
+    const preRateLimit = this.#rateLimiter.checkPreValidationLimit(
+      message.transportContext.senderUserId,
+      now
+    );
+    if (!preRateLimit.ok) {
+      this.#rateLimiter.recordAbuse(
+        message.transportContext.senderUserId,
+        "pre_validation_limit_exceeded",
+        now
+      );
+      const rawId = typeof message.rawEnvelope === "object" && message.rawEnvelope !== null && typeof message.rawEnvelope.commandId === "string" ? message.rawEnvelope.commandId : "cmd_" + "0".repeat(32);
+      return ok({
+        commandId: rawId,
+        status: "rejected",
+        error: preRateLimit.error,
+        transportTimestamp: now
+      });
+    }
     const envelopeResult = validateCommandEnvelope(message.rawEnvelope);
     if (!envelopeResult.ok) {
+      this.#rateLimiter.recordAbuse(
+        message.transportContext.senderUserId,
+        "malformed_envelope",
+        now
+      );
       const dummyId = "cmd_" + "0".repeat(32);
       return ok({
         commandId: dummyId,
@@ -2334,6 +2611,11 @@ var CommandBus = class {
       source
     });
     if (!authContextResult.ok) {
+      this.#rateLimiter.recordAbuse(
+        message.transportContext.senderUserId,
+        "auth_context_failed",
+        now
+      );
       return ok({
         commandId: command.commandId,
         status: "rejected",
@@ -2342,24 +2624,13 @@ var CommandBus = class {
       });
     }
     const context = authContextResult.value;
-    const queueEntry = this.#commandQueue.enqueue(
-      command,
-      message.transportContext.senderUserId
-    );
-    if (queueEntry.status === "cancelled") {
-      return ok({
-        commandId: command.commandId,
-        status: "rejected",
-        error: createPublicError({
-          code: "DM_COMMAND_CANCELLED",
-          category: "busy",
-          message: `Command was cancelled: ${queueEntry.cancelReason ?? "Unknown reason"}`
-        }),
-        transportTimestamp: now
-      });
-    }
     const registration = this.#registry.get(command.type);
     if (!registration) {
+      this.#rateLimiter.recordAbuse(
+        context.senderUserId,
+        `unknown_command_type:${command.type}`,
+        now
+      );
       return ok({
         commandId: command.commandId,
         status: "rejected",
@@ -2372,6 +2643,11 @@ var CommandBus = class {
       });
     }
     if (registration.visibility === "internal" && message.transportContext.transportName !== "local") {
+      this.#rateLimiter.recordAbuse(
+        context.senderUserId,
+        `internal_command_attempt:${command.type}`,
+        now
+      );
       return ok({
         commandId: command.commandId,
         status: "rejected",
@@ -2389,6 +2665,11 @@ var CommandBus = class {
       now
     );
     if (!rateLimitResult.ok) {
+      this.#rateLimiter.recordAbuse(
+        context.senderUserId,
+        `command_rate_limit_exceeded:${command.type}`,
+        now
+      );
       return ok({
         commandId: command.commandId,
         status: "rejected",
@@ -2399,6 +2680,11 @@ var CommandBus = class {
     if (registration.schemaValidator) {
       const schemaResult = registration.schemaValidator(command.payload);
       if (!schemaResult.ok) {
+        this.#rateLimiter.recordAbuse(
+          context.senderUserId,
+          `invalid_payload_schema:${command.type}`,
+          now
+        );
         return ok({
           commandId: command.commandId,
           status: "rejected",
@@ -2410,6 +2696,11 @@ var CommandBus = class {
     if (registration.permissionValidator) {
       const permResult = registration.permissionValidator(context);
       if (!permResult.ok) {
+        this.#rateLimiter.recordAbuse(
+          context.senderUserId,
+          `permission_denied:${command.type}`,
+          now
+        );
         return ok({
           commandId: command.commandId,
           status: "rejected",
@@ -2434,29 +2725,60 @@ var CommandBus = class {
     }
     if (claimResult.value.isReplay) {
       if (claimResult.value.receipt) {
-        return ok(claimResult.value.receipt);
+        const replayReceipt = message.transportContext.transportName !== "local" ? sanitizeTransportReceiptForPublic(claimResult.value.receipt) : claimResult.value.receipt;
+        return ok(replayReceipt);
       }
       if (claimResult.value.inFlightPromise) {
         const awaitedReceipt = await claimResult.value.inFlightPromise;
-        return ok(awaitedReceipt);
+        const sanitizedAwaited = message.transportContext.transportName !== "local" ? sanitizeTransportReceiptForPublic(awaitedReceipt) : awaitedReceipt;
+        return ok(sanitizedAwaited);
       }
     }
-    if (queueEntry.abortController.signal.aborted) {
+    const internalPriority = source.type === "system" ? 10 : 0;
+    const queueEntry = this.#commandQueue.enqueue(
+      command,
+      message.transportContext.senderUserId,
+      { priority: internalPriority }
+    );
+    if (queueEntry.status === "cancelled") {
       return ok({
         commandId: command.commandId,
         status: "rejected",
         error: createPublicError({
           code: "DM_COMMAND_CANCELLED",
           category: "busy",
-          message: `Command was cancelled in queue: ${queueEntry.cancelReason ?? "Unknown reason"}`
+          message: `Command was cancelled: ${queueEntry.cancelReason ?? "Unknown reason"}`
         }),
         transportTimestamp: now
       });
     }
-    this.#commandQueue.markRunning(command.commandId);
-    let finalReceipt;
     try {
-      if (registration.transactional && registration.mutationDefinition) {
+      await this.#commandQueue.acquirePermit(command.commandId);
+    } catch (queueErr) {
+      if (queueEntry.status !== "cancelled") {
+        this.#commandQueue.markFinished(command.commandId, false);
+      }
+      return ok({
+        commandId: command.commandId,
+        status: "rejected",
+        error: queueErr,
+        transportTimestamp: Date.now()
+      });
+    }
+    let finalReceipt = void 0;
+    try {
+      if (queueEntry.abortController.signal.aborted) {
+        finalReceipt = {
+          commandId: command.commandId,
+          status: "rejected",
+          error: createPublicError({
+            code: "DM_COMMAND_CANCELLED",
+            category: "busy",
+            message: `Command was cancelled in queue: ${queueEntry.cancelReason ?? "Unknown reason"}`
+          }),
+          transportTimestamp: now
+        };
+      } else if (registration.transactional && registration.mutationDefinition) {
         if (!this.#coordinator) {
           finalReceipt = {
             commandId: command.commandId,
@@ -2522,10 +2844,26 @@ var CommandBus = class {
         }),
         transportTimestamp: now
       };
+    } finally {
+      if (queueEntry.status !== "cancelled") {
+        const isSuccess = finalReceipt !== void 0 && finalReceipt.status === "executed";
+        this.#commandQueue.markFinished(command.commandId, isSuccess);
+      }
+      this.#commandQueue.releasePermit(command.commandId);
     }
-    this.#commandQueue.markFinished(command.commandId, finalReceipt.status === "executed");
-    this.#dedupeStore.recordResult(command.commandId, finalReceipt);
-    return ok(finalReceipt);
+    const resolvedReceipt = finalReceipt ?? {
+      commandId: command.commandId,
+      status: "rejected",
+      error: createPublicError({
+        code: "DM_COMMAND_EXECUTION_FAILED",
+        category: "internal",
+        message: "Command execution ended without a valid receipt"
+      }),
+      transportTimestamp: now
+    };
+    this.#dedupeStore.recordResult(command.commandId, resolvedReceipt);
+    const receiptToReturn = message.transportContext.transportName !== "local" ? sanitizeTransportReceiptForPublic(resolvedReceipt) : resolvedReceipt;
+    return ok(receiptToReturn);
   }
   /**
    * Executes a command within the local authority host context (e.g. ticks, internal orchestration).
@@ -2573,9 +2911,27 @@ function isSocketResponsePacket(packet) {
   const p = packet;
   return p.protocol === "dm-command-v1" && p.kind === "DM_CMD_RESPONSE" && typeof p.correlationId === "string" && typeof p.targetUserId === "string" && typeof p.authorityUserId === "string" && typeof p.authorityEpoch === "number" && typeof p.response === "object" && p.response !== null;
 }
+function isSocketStatusQueryPacket(packet) {
+  if (typeof packet !== "object" || packet === null) return false;
+  const p = packet;
+  return p.protocol === "dm-command-v1" && p.kind === "DM_CMD_STATUS_QUERY" && typeof p.correlationId === "string" && p.correlationId.trim().length > 0 && typeof p.commandId === "string" && p.commandId.trim().length > 0 && typeof p.targetAuthorityUserId === "string" && typeof p.declaredSenderUserId === "string";
+}
+function isSocketStatusResponsePacket(packet) {
+  if (typeof packet !== "object" || packet === null) return false;
+  const p = packet;
+  return p.protocol === "dm-command-v1" && p.kind === "DM_CMD_STATUS_RESPONSE" && typeof p.correlationId === "string" && typeof p.targetUserId === "string" && typeof p.authorityUserId === "string" && typeof p.authorityEpoch === "number" && typeof p.response === "object" && p.response !== null;
+}
 function resolveFoundryRuntime() {
   const globals = globalThis;
   return globals.game ?? {};
+}
+function resolveSocketlib() {
+  const globals = globalThis;
+  try {
+    return globals.socketlib?.registerModule("domain-manager");
+  } catch {
+    return void 0;
+  }
 }
 var FoundryCommandTransportAdapter = class {
   name = "foundry-socket";
@@ -2583,7 +2939,9 @@ var FoundryCommandTransportAdapter = class {
   #authorityService;
   #defaultTimeoutMs;
   #senderResolver;
+  #socketlib;
   #inboundHandler = null;
+  #statusQueryHandler = null;
   #socketListener = null;
   #pendingRequests = /* @__PURE__ */ new Map();
   constructor(options) {
@@ -2591,13 +2949,16 @@ var FoundryCommandTransportAdapter = class {
     this.#authorityService = options.authorityService;
     this.#defaultTimeoutMs = options.defaultTimeoutMs ?? 1e4;
     this.#senderResolver = options.senderResolver;
+    this.#socketlib = options.socketlib ?? resolveSocketlib() ?? null;
+    this.#initSocketlib();
     this.#initSocketListener();
   }
   get isAvailable() {
     if (this.#authorityService.isCurrentUser()) {
       return true;
     }
-    return Boolean(this.#runtime.socket) && this.#authorityService.getStatus().available;
+    const hasTransport = Boolean(this.#socketlib) || Boolean(this.#runtime.socket);
+    return hasTransport && this.#authorityService.getStatus().available;
   }
   get currentUserId() {
     return this.#runtime.user?.id ?? null;
@@ -2610,12 +2971,21 @@ var FoundryCommandTransportAdapter = class {
       }
     };
   }
+  registerStatusQueryHandler(handler) {
+    this.#statusQueryHandler = handler;
+    return () => {
+      if (this.#statusQueryHandler === handler) {
+        this.#statusQueryHandler = null;
+      }
+    };
+  }
   destroy() {
     if (this.#socketListener && this.#runtime.socket?.off) {
       this.#runtime.socket.off(DOMAIN_MANAGER_SOCKET_CHANNEL, this.#socketListener);
     }
     this.#socketListener = null;
     this.#inboundHandler = null;
+    this.#statusQueryHandler = null;
     for (const [, pending] of this.#pendingRequests) {
       if (pending.timer) clearTimeout(pending.timer);
       pending.resolve(
@@ -2644,7 +3014,56 @@ var FoundryCommandTransportAdapter = class {
     if (this.#authorityService.isCurrentUser()) {
       return this.#sendLocalLoopback(command);
     }
+    if (this.#socketlib) {
+      return this.#sendSocketlibRPC(command, options);
+    }
     return this.#sendRemoteSocket(command, options);
+  }
+  /**
+   * Queries authoritative command execution status across network boundaries (G2-AUD-014).
+   */
+  async getStatus(commandId) {
+    if (this.#authorityService.isCurrentUser()) {
+      if (this.#statusQueryHandler) {
+        return this.#statusQueryHandler(commandId);
+      }
+      return err(
+        createPublicError({
+          code: "DM_COMMAND_NOT_FOUND",
+          category: "not-found",
+          message: `Command '${commandId}' status could not be queried locally`
+        })
+      );
+    }
+    const authorityStatus = this.#authorityService.getStatus();
+    if (!authorityStatus.available || !authorityStatus.authorityUserId) {
+      return err(
+        createPublicError({
+          code: "DM_AUTHORITY_UNAVAILABLE",
+          category: "busy",
+          message: "No primary authority is available for status query"
+        })
+      );
+    }
+    if (this.#socketlib) {
+      try {
+        const response = await this.#socketlib.executeAsUser(
+          "queryCommandStatus",
+          authorityStatus.authorityUserId,
+          commandId
+        );
+        return response;
+      } catch (error) {
+        return err(
+          createPublicError({
+            code: "DM_TRANSPORT_QUERY_FAILED",
+            category: "provider",
+            message: error instanceof Error ? error.message : "Socketlib status query failed"
+          })
+        );
+      }
+    }
+    return this.#sendStatusQuerySocket(commandId, authorityStatus);
   }
   async #sendLocalLoopback(command) {
     if (!this.#inboundHandler) {
@@ -2667,6 +3086,54 @@ var FoundryCommandTransportAdapter = class {
     };
     const result = await this.#inboundHandler(inboundMessage);
     return result;
+  }
+  async #sendSocketlibRPC(command, options) {
+    const authorityStatus = this.#authorityService.getStatus();
+    if (!authorityStatus.available || !authorityStatus.authorityUserId) {
+      return err(
+        createPublicError({
+          code: "DM_AUTHORITY_UNAVAILABLE",
+          category: "busy",
+          message: "No primary authority is available for RPC transmission"
+        })
+      );
+    }
+    const senderUserId = this.currentUserId;
+    if (!senderUserId) {
+      return err(
+        createPublicError({
+          code: "DM_AUTH_UNAUTHENTICATED",
+          category: "permission",
+          message: "Cannot send command without an active user session"
+        })
+      );
+    }
+    const correlationId = options?.correlationId ?? `corr_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+    const requestPacket = {
+      protocol: "dm-command-v1",
+      kind: "DM_CMD_REQUEST",
+      correlationId,
+      command,
+      targetAuthorityUserId: authorityStatus.authorityUserId,
+      targetAuthorityEpoch: authorityStatus.authorityEpoch,
+      declaredSenderUserId: senderUserId
+    };
+    try {
+      const response = await this.#socketlib.executeAsUser(
+        "executeCommand",
+        authorityStatus.authorityUserId,
+        requestPacket
+      );
+      return response;
+    } catch (error) {
+      return err(
+        createPublicError({
+          code: "DM_TRANSPORT_SEND_FAILED",
+          category: "provider",
+          message: error instanceof Error ? error.message : "Socketlib RPC execution failed"
+        })
+      );
+    }
   }
   async #sendRemoteSocket(command, options) {
     const socket = this.#runtime.socket;
@@ -2741,7 +3208,7 @@ var FoundryCommandTransportAdapter = class {
         timer
       });
       try {
-        socket.emit(DOMAIN_MANAGER_SOCKET_CHANNEL, requestPacket);
+        socket.emit(DOMAIN_MANAGER_SOCKET_CHANNEL, requestPacket, { userId: senderUserId });
       } catch (error) {
         if (timer) clearTimeout(timer);
         this.#pendingRequests.delete(correlationId);
@@ -2757,6 +3224,102 @@ var FoundryCommandTransportAdapter = class {
       }
     });
   }
+  async #sendStatusQuerySocket(commandId, authorityStatus) {
+    const socket = this.#runtime.socket;
+    if (!socket) {
+      return err(
+        createPublicError({
+          code: "DM_TRANSPORT_UNAVAILABLE",
+          category: "busy",
+          message: "Foundry socket runtime is not available"
+        })
+      );
+    }
+    const senderUserId = this.currentUserId;
+    if (!senderUserId) {
+      return err(
+        createPublicError({
+          code: "DM_AUTH_UNAUTHENTICATED",
+          category: "permission",
+          message: "Cannot query status without an active user session"
+        })
+      );
+    }
+    const correlationId = `status_corr_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+    const packet = {
+      protocol: "dm-command-v1",
+      kind: "DM_CMD_STATUS_QUERY",
+      correlationId,
+      commandId,
+      targetAuthorityUserId: authorityStatus.authorityUserId,
+      targetAuthorityEpoch: authorityStatus.authorityEpoch,
+      declaredSenderUserId: senderUserId
+    };
+    return new Promise((resolve, reject) => {
+      let timer = null;
+      if (this.#defaultTimeoutMs > 0) {
+        timer = setTimeout(() => {
+          this.#pendingRequests.delete(correlationId);
+          resolve(
+            err(
+              createPublicError({
+                code: "DM_TRANSPORT_TIMEOUT",
+                category: "timeout",
+                message: `Status query socket request timed out after ${this.#defaultTimeoutMs}ms`
+              })
+            )
+          );
+        }, this.#defaultTimeoutMs);
+      }
+      this.#pendingRequests.set(correlationId, {
+        resolve: (res) => resolve(res),
+        reject,
+        timer
+      });
+      try {
+        socket.emit(DOMAIN_MANAGER_SOCKET_CHANNEL, packet, { userId: senderUserId });
+      } catch (error) {
+        if (timer) clearTimeout(timer);
+        this.#pendingRequests.delete(correlationId);
+        resolve(
+          err(
+            createPublicError({
+              code: "DM_TRANSPORT_SEND_FAILED",
+              category: "provider",
+              message: error instanceof Error ? error.message : "Socket status query emit failed"
+            })
+          )
+        );
+      }
+    });
+  }
+  #initSocketlib() {
+    if (!this.#socketlib) return;
+    const adapter = this;
+    this.#socketlib.register(
+      "executeCommand",
+      async function(packet, ..._extraArgs) {
+        const socketdataUserId = this && typeof this === "object" && "socketdata" in this && this.socketdata ? typeof this.socketdata.userId === "string" && this.socketdata.userId.trim().length > 0 ? this.socketdata.userId.trim() : null : null;
+        if (isSocketRequestPacket(packet)) {
+          return adapter.#processInboundRequest(packet, socketdataUserId);
+        }
+        return err(
+          createPublicError({
+            code: "DM_INVALID_ENVELOPE",
+            category: "validation",
+            message: "Invalid RPC request packet"
+          })
+        );
+      }
+    );
+    this.#socketlib.register(
+      "queryCommandStatus",
+      async function(commandId, ..._extraArgs) {
+        const socketdataUserId = this && typeof this === "object" && "socketdata" in this && this.socketdata ? typeof this.socketdata.userId === "string" && this.socketdata.userId.trim().length > 0 ? this.socketdata.userId.trim() : null : null;
+        return adapter.#handleInboundStatusQuery(commandId, socketdataUserId);
+      }
+    );
+  }
   #initSocketListener() {
     const socket = this.#runtime.socket;
     if (!socket) return;
@@ -2770,6 +3333,14 @@ var FoundryCommandTransportAdapter = class {
   async #handleSocketPacket(packet, ...args) {
     if (isSocketResponsePacket(packet)) {
       this.#handleResponsePacket(packet, ...args);
+      return;
+    }
+    if (isSocketStatusResponsePacket(packet)) {
+      this.#handleResponsePacket(packet, ...args);
+      return;
+    }
+    if (isSocketStatusQueryPacket(packet)) {
+      await this.#handleStatusQueryPacket(packet, ...args);
       return;
     }
     if (isSocketRequestPacket(packet)) {
@@ -2788,11 +3359,24 @@ var FoundryCommandTransportAdapter = class {
     if (!authorityStatus.available || !authorityStatus.authorityUserId || packet.authorityUserId !== authorityStatus.authorityUserId || packet.authorityEpoch !== authorityStatus.authorityEpoch) {
       return;
     }
-    if (transportArgs.length > 0) {
-      const responseSender = typeof transportArgs[0] === "string" ? transportArgs[0] : typeof transportArgs[0] === "object" && transportArgs[0] !== null ? transportArgs[0].userId ?? transportArgs[0].id : null;
-      if (responseSender && responseSender !== authorityStatus.authorityUserId) {
-        return;
+    let responseSender = null;
+    if (this.#senderResolver) {
+      responseSender = this.#senderResolver(packet, ...transportArgs);
+    } else if (transportArgs.length > 0) {
+      const firstArg = transportArgs[0];
+      if (typeof firstArg === "string" && firstArg.trim().length > 0) {
+        responseSender = firstArg.trim();
+      } else if (typeof firstArg === "object" && firstArg !== null) {
+        const candidate = firstArg;
+        if (typeof candidate.userId === "string" && candidate.userId.trim().length > 0) {
+          responseSender = candidate.userId.trim();
+        } else if (typeof candidate.id === "string" && candidate.id.trim().length > 0) {
+          responseSender = candidate.id.trim();
+        }
       }
+    }
+    if (responseSender === null || responseSender !== authorityStatus.authorityUserId) {
+      return;
     }
     this.#pendingRequests.delete(packet.correlationId);
     if (pending.timer) {
@@ -2800,43 +3384,14 @@ var FoundryCommandTransportAdapter = class {
     }
     pending.resolve(packet.response);
   }
-  async #handleRequestPacket(packet, ...transportArgs) {
-    const declaredSenderUserId = (typeof packet.declaredSenderUserId === "string" && packet.declaredSenderUserId.trim().length > 0 ? packet.declaredSenderUserId.trim() : null) ?? (typeof packet.senderUserId === "string" && packet.senderUserId.trim().length > 0 ? packet.senderUserId.trim() : "");
+  async #handleStatusQueryPacket(packet, ...transportArgs) {
     if (!this.#authorityService.isCurrentUser() || packet.targetAuthorityUserId !== void 0 && packet.targetAuthorityUserId !== this.currentUserId) {
       return;
     }
     const socket = this.#runtime.socket;
-    if (!socket || !this.#inboundHandler) {
-      return;
-    }
+    if (!socket) return;
     const authorityStatus = this.#authorityService.getStatus();
-    if (packet.targetAuthorityEpoch !== void 0 && packet.targetAuthorityEpoch !== authorityStatus.authorityEpoch) {
-      const commandId2 = typeof packet.command === "object" && packet.command !== null ? packet.command.commandId ?? "cmd_" + "0".repeat(32) : "cmd_" + "0".repeat(32);
-      const responsePacket2 = {
-        protocol: "dm-command-v1",
-        kind: "DM_CMD_RESPONSE",
-        correlationId: packet.correlationId,
-        targetUserId: declaredSenderUserId,
-        authorityUserId: authorityStatus.authorityUserId,
-        authorityEpoch: authorityStatus.authorityEpoch,
-        response: ok({
-          commandId: commandId2,
-          status: "rejected",
-          error: createPublicError({
-            code: "DM_AUTHORITY_EPOCH_MISMATCH",
-            category: "conflict",
-            message: `Command targeted epoch ${packet.targetAuthorityEpoch}, but current authority epoch is ${authorityStatus.authorityEpoch}`
-          }),
-          transportTimestamp: Date.now()
-        })
-      };
-      try {
-        socket.emit(DOMAIN_MANAGER_SOCKET_CHANNEL, responsePacket2);
-      } catch (err2) {
-        console.error("[Domain Manager] Failed to emit epoch mismatch response:", err2);
-      }
-      return;
-    }
+    const declaredSenderUserId = packet.declaredSenderUserId;
     let authenticatedSenderUserId = null;
     if (this.#senderResolver) {
       authenticatedSenderUserId = this.#senderResolver(packet, ...transportArgs);
@@ -2853,91 +3408,178 @@ var FoundryCommandTransportAdapter = class {
         }
       }
     }
-    if (authenticatedSenderUserId === null) {
-      authenticatedSenderUserId = declaredSenderUserId;
-    }
-    const commandId = typeof packet.command === "object" && packet.command !== null ? packet.command.commandId ?? "cmd_" + "0".repeat(32) : "cmd_" + "0".repeat(32);
-    const localUserId = this.currentUserId;
-    if (localUserId !== null && (declaredSenderUserId === localUserId || authenticatedSenderUserId === localUserId) || authorityStatus.authorityUserId !== null && (declaredSenderUserId === authorityStatus.authorityUserId || authenticatedSenderUserId === authorityStatus.authorityUserId)) {
-      const responsePacket2 = {
-        protocol: "dm-command-v1",
-        kind: "DM_CMD_RESPONSE",
-        correlationId: packet.correlationId,
-        targetUserId: declaredSenderUserId,
-        authorityUserId: authorityStatus.authorityUserId,
-        authorityEpoch: authorityStatus.authorityEpoch,
-        response: ok({
-          commandId,
-          status: "rejected",
-          error: createPublicError({
-            code: "DM_SECURITY_SENDER_SPOOFED",
-            category: "permission",
-            message: `Remote socket packet cannot claim identity of the local Primary Authority '${declaredSenderUserId}'`
-          }),
-          transportTimestamp: Date.now()
-        })
-      };
-      try {
-        socket.emit(DOMAIN_MANAGER_SOCKET_CHANNEL, responsePacket2);
-      } catch (error) {
-        console.error("[Domain Manager] Failed to emit spoofing rejection response:", error);
-      }
+    if (authenticatedSenderUserId === null || authenticatedSenderUserId !== declaredSenderUserId) {
       return;
+    }
+    const res = this.#statusQueryHandler ? await this.#statusQueryHandler(packet.commandId) : err(
+      createPublicError({
+        code: "DM_COMMAND_NOT_FOUND",
+        category: "not-found",
+        message: "Status query handler is not registered on authority"
+      })
+    );
+    const sanitizedRes = res.ok ? ok(sanitizeTransportReceiptForPublic(res.value)) : res;
+    const responsePacket = {
+      protocol: "dm-command-v1",
+      kind: "DM_CMD_STATUS_RESPONSE",
+      correlationId: packet.correlationId,
+      targetUserId: authenticatedSenderUserId,
+      authorityUserId: authorityStatus.authorityUserId,
+      authorityEpoch: authorityStatus.authorityEpoch,
+      response: sanitizedRes
+    };
+    try {
+      socket.emit(DOMAIN_MANAGER_SOCKET_CHANNEL, responsePacket, { userId: authorityStatus.authorityUserId });
+    } catch (err2) {
+      console.error("[Domain Manager] Failed to emit status query response:", err2);
+    }
+  }
+  async #handleInboundStatusQuery(commandId, trustedSenderUserId) {
+    if (!this.#authorityService.isCurrentUser()) {
+      return err(
+        createPublicError({
+          code: "DM_AUTHORITY_NOT_LOCAL",
+          category: "permission",
+          message: "Status query can only be answered by the active Primary Authority"
+        })
+      );
+    }
+    if (trustedSenderUserId === null) {
+      return err(
+        createPublicError({
+          code: "DM_AUTH_UNAUTHENTICATED",
+          category: "permission",
+          message: "Status query requires authenticated transport session"
+        })
+      );
+    }
+    if (typeof commandId !== "string" || !commandId.startsWith("cmd_")) {
+      return err(
+        createPublicError({
+          code: "DM_INVALID_COMMAND_ID",
+          category: "validation",
+          message: `Invalid commandId for status query: '${String(commandId)}'`
+        })
+      );
+    }
+    if (!this.#statusQueryHandler) {
+      return err(
+        createPublicError({
+          code: "DM_COMMAND_NOT_FOUND",
+          category: "not-found",
+          message: "Status query handler is not registered on authority"
+        })
+      );
+    }
+    const res = await this.#statusQueryHandler(commandId);
+    return res.ok ? ok(sanitizeTransportReceiptForPublic(res.value)) : res;
+  }
+  async #processInboundRequest(packet, trustedSenderUserId, ...transportArgs) {
+    const declaredSenderUserId = (typeof packet.declaredSenderUserId === "string" && packet.declaredSenderUserId.trim().length > 0 ? packet.declaredSenderUserId.trim() : null) ?? (typeof packet.senderUserId === "string" && packet.senderUserId.trim().length > 0 ? packet.senderUserId.trim() : "");
+    const commandId = typeof packet.command === "object" && packet.command !== null ? packet.command.commandId ?? "cmd_" + "0".repeat(32) : "cmd_" + "0".repeat(32);
+    const authorityStatus = this.#authorityService.getStatus();
+    if (packet.targetAuthorityEpoch !== void 0 && packet.targetAuthorityEpoch !== authorityStatus.authorityEpoch) {
+      return ok({
+        commandId,
+        status: "rejected",
+        error: createPublicError({
+          code: "DM_AUTHORITY_EPOCH_MISMATCH",
+          category: "conflict",
+          message: `Command targeted epoch ${packet.targetAuthorityEpoch}, but current authority epoch is ${authorityStatus.authorityEpoch}`
+        }),
+        transportTimestamp: Date.now()
+      });
+    }
+    let authenticatedSenderUserId = null;
+    if (trustedSenderUserId && typeof trustedSenderUserId === "string" && trustedSenderUserId.trim().length > 0) {
+      authenticatedSenderUserId = trustedSenderUserId.trim();
+    } else if (this.#senderResolver) {
+      authenticatedSenderUserId = this.#senderResolver(packet, ...transportArgs);
+    } else if (transportArgs.length > 0) {
+      const firstArg = transportArgs[0];
+      if (typeof firstArg === "string" && firstArg.trim().length > 0) {
+        authenticatedSenderUserId = firstArg.trim();
+      } else if (typeof firstArg === "object" && firstArg !== null) {
+        const candidate = firstArg;
+        if (typeof candidate.userId === "string" && candidate.userId.trim().length > 0) {
+          authenticatedSenderUserId = candidate.userId.trim();
+        } else if (typeof candidate.id === "string" && candidate.id.trim().length > 0) {
+          authenticatedSenderUserId = candidate.id.trim();
+        }
+      }
+    }
+    const localUserId = this.currentUserId;
+    if (localUserId !== null && declaredSenderUserId === localUserId || authorityStatus.authorityUserId !== null && declaredSenderUserId === authorityStatus.authorityUserId) {
+      return ok({
+        commandId,
+        status: "rejected",
+        error: createPublicError({
+          code: "DM_SECURITY_SENDER_SPOOFED",
+          category: "permission",
+          message: `Remote socket packet cannot claim identity of the local Primary Authority '${declaredSenderUserId}'`
+        }),
+        transportTimestamp: Date.now()
+      });
+    }
+    if (authenticatedSenderUserId === null) {
+      return ok({
+        commandId,
+        status: "rejected",
+        error: createPublicError({
+          code: "DM_AUTH_UNAUTHENTICATED",
+          category: "permission",
+          message: "Remote socket request has no verified transport sender identity"
+        }),
+        transportTimestamp: Date.now()
+      });
+    }
+    if (localUserId !== null && authenticatedSenderUserId === localUserId || authorityStatus.authorityUserId !== null && authenticatedSenderUserId === authorityStatus.authorityUserId) {
+      return ok({
+        commandId,
+        status: "rejected",
+        error: createPublicError({
+          code: "DM_SECURITY_SENDER_SPOOFED",
+          category: "permission",
+          message: `Remote socket packet cannot claim identity of the local Primary Authority '${declaredSenderUserId}'`
+        }),
+        transportTimestamp: Date.now()
+      });
     }
     if (authenticatedSenderUserId !== declaredSenderUserId) {
-      const responsePacket2 = {
-        protocol: "dm-command-v1",
-        kind: "DM_CMD_RESPONSE",
-        correlationId: packet.correlationId,
-        targetUserId: declaredSenderUserId,
-        authorityUserId: authorityStatus.authorityUserId,
-        authorityEpoch: authorityStatus.authorityEpoch,
-        response: ok({
-          commandId,
-          status: "rejected",
-          error: createPublicError({
-            code: "DM_SECURITY_SENDER_SPOOFED",
-            category: "permission",
-            message: `Declared sender '${declaredSenderUserId}' does not match transport authenticated sender '${authenticatedSenderUserId}'`
-          }),
-          transportTimestamp: Date.now()
-        })
-      };
-      try {
-        socket.emit(DOMAIN_MANAGER_SOCKET_CHANNEL, responsePacket2);
-      } catch (error) {
-        console.error("[Domain Manager] Failed to emit spoofing rejection response:", error);
-      }
-      return;
+      return ok({
+        commandId,
+        status: "rejected",
+        error: createPublicError({
+          code: "DM_SECURITY_SENDER_SPOOFED",
+          category: "permission",
+          message: `Declared sender '${declaredSenderUserId}' does not match transport authenticated sender '${authenticatedSenderUserId}'`
+        }),
+        transportTimestamp: Date.now()
+      });
     }
     if (this.#runtime.users) {
       const senderUser = this.#runtime.users.get(authenticatedSenderUserId);
       if (!senderUser || senderUser.active === false) {
-        const responsePacket2 = {
-          protocol: "dm-command-v1",
-          kind: "DM_CMD_RESPONSE",
-          correlationId: packet.correlationId,
-          targetUserId: declaredSenderUserId,
-          authorityUserId: authorityStatus.authorityUserId,
-          authorityEpoch: authorityStatus.authorityEpoch,
-          response: ok({
-            commandId,
-            status: "rejected",
-            error: createPublicError({
-              code: "DM_SECURITY_SENDER_UNKNOWN",
-              category: "permission",
-              message: `Remote socket sender '${authenticatedSenderUserId}' is not an active connected user`
-            }),
-            transportTimestamp: Date.now()
-          })
-        };
-        try {
-          socket.emit(DOMAIN_MANAGER_SOCKET_CHANNEL, responsePacket2);
-        } catch (error) {
-          console.error("[Domain Manager] Failed to emit unknown sender rejection response:", error);
-        }
-        return;
+        return ok({
+          commandId,
+          status: "rejected",
+          error: createPublicError({
+            code: "DM_SECURITY_SENDER_UNKNOWN",
+            category: "permission",
+            message: `Remote socket sender '${authenticatedSenderUserId}' is not an active connected user`
+          }),
+          transportTimestamp: Date.now()
+        });
       }
+    }
+    if (!this.#inboundHandler) {
+      return err(
+        createPublicError({
+          code: "DM_TRANSPORT_NO_RECEIVER",
+          category: "provider",
+          message: "Primary authority local inbound handler is not registered"
+        })
+      );
     }
     const transportContext = {
       senderUserId: authenticatedSenderUserId,
@@ -2949,17 +3591,30 @@ var FoundryCommandTransportAdapter = class {
       transportContext
     };
     const response = await this.#inboundHandler(inboundMessage);
+    return response.ok ? ok(sanitizeTransportReceiptForPublic(response.value)) : response;
+  }
+  async #handleRequestPacket(packet, ...transportArgs) {
+    if (!this.#authorityService.isCurrentUser() || packet.targetAuthorityUserId !== void 0 && packet.targetAuthorityUserId !== this.currentUserId) {
+      return;
+    }
+    const socket = this.#runtime.socket;
+    if (!socket) {
+      return;
+    }
+    const authorityStatus = this.#authorityService.getStatus();
+    const declaredSenderUserId = (typeof packet.declaredSenderUserId === "string" && packet.declaredSenderUserId.trim().length > 0 ? packet.declaredSenderUserId.trim() : null) ?? (typeof packet.senderUserId === "string" && packet.senderUserId.trim().length > 0 ? packet.senderUserId.trim() : "");
+    const response = await this.#processInboundRequest(packet, void 0, ...transportArgs);
     const responsePacket = {
       protocol: "dm-command-v1",
       kind: "DM_CMD_RESPONSE",
       correlationId: packet.correlationId,
-      targetUserId: authenticatedSenderUserId,
+      targetUserId: declaredSenderUserId,
       authorityUserId: authorityStatus.authorityUserId,
       authorityEpoch: authorityStatus.authorityEpoch,
       response
     };
     try {
-      socket.emit(DOMAIN_MANAGER_SOCKET_CHANNEL, responsePacket);
+      socket.emit(DOMAIN_MANAGER_SOCKET_CHANNEL, responsePacket, { userId: authorityStatus.authorityUserId });
     } catch (error) {
       console.error("[Domain Manager] Failed to emit command response:", error);
     }
@@ -3237,44 +3892,6 @@ var LockManager = class {
     });
   }
 };
-
-// src/diagnostics/sanitize.ts
-var SENSITIVE_KEY = /(secret|token|password|api[-_]?key|credential|authorization)/i;
-function sanitizeDiagnosticsValue(value, ancestors = /* @__PURE__ */ new WeakSet()) {
-  if (typeof value === "bigint") {
-    return `${value.toString()}n`;
-  }
-  if (typeof value === "symbol") {
-    return value.toString();
-  }
-  if (typeof value === "function") {
-    return `[Function: ${value.name || "anonymous"}]`;
-  }
-  if (Array.isArray(value)) {
-    if (ancestors.has(value)) return "[Circular]";
-    ancestors.add(value);
-    const result = value.map((item) => sanitizeDiagnosticsValue(item, ancestors));
-    ancestors.delete(value);
-    return result;
-  }
-  if (typeof value !== "object" || value === null) return value;
-  if (value instanceof Date) return value.toISOString();
-  if (value instanceof Error) {
-    return {
-      name: value.name,
-      message: value.message,
-      ...value.stack ? { stack: value.stack } : {}
-    };
-  }
-  if (ancestors.has(value)) return "[Circular]";
-  ancestors.add(value);
-  const sanitized = {};
-  for (const [key, child] of Object.entries(value)) {
-    sanitized[key] = SENSITIVE_KEY.test(key) ? "[REDACTED]" : sanitizeDiagnosticsValue(child, ancestors);
-  }
-  ancestors.delete(value);
-  return sanitized;
-}
 
 // src/mutations/receipt-contract.ts
 function createMutationReceipt(params) {
@@ -4133,6 +4750,7 @@ var G2DiagnosticsProvider = class {
   #transactionStore;
   #registry;
   #transport;
+  #rateLimiter;
   constructor(options) {
     this.#authorityService = options.authorityService;
     this.#lockManager = options.lockManager;
@@ -4140,6 +4758,7 @@ var G2DiagnosticsProvider = class {
     this.#transactionStore = options.transactionStore;
     this.#registry = options.registry;
     this.#transport = options.transport;
+    this.#rateLimiter = options.rateLimiter ?? null;
   }
   getSnapshot() {
     const authStatus = this.#authorityService.getStatus();
@@ -4148,6 +4767,8 @@ var G2DiagnosticsProvider = class {
     const waitingLockCount = lockDiags.reduce((acc, d) => acc + d.waitingCount, 0);
     const queueDiags = this.#commandQueue.getDiagnostics();
     const unresolvedTxs = this.#transactionStore.listUnresolved();
+    const abuseRecords = this.#rateLimiter?.getAbuseRecords() ?? [];
+    const totalAbuseIncidents = abuseRecords.reduce((acc, r) => acc + r.count, 0);
     return Object.freeze({
       authority: Object.freeze({
         available: authStatus.available,
@@ -4184,6 +4805,10 @@ var G2DiagnosticsProvider = class {
           )
         )
       }),
+      abuse: Object.freeze({
+        totalIncidents: totalAbuseIncidents,
+        records: Object.freeze(abuseRecords.map((r) => Object.freeze({ ...r })))
+      }),
       collectedAtReal: Date.now()
     });
   }
@@ -4201,7 +4826,7 @@ function composeDomainManagerRuntime(options = {}) {
   const registry = new CommandRegistry();
   registerDomainCommandHandlers(registry, coordinator, mutableDomainRepo);
   registry.freeze();
-  const commandQueue = options.commandQueue ?? new CommandQueue();
+  const commandQueue = options.commandQueue ?? new CommandQueue({ maxConcurrency: 10 });
   const dedupeStore = options.dedupeStore ?? new CommandDedupeStore();
   const rateLimiter = options.rateLimiter ?? new RateLimiter();
   const transport = options.transport ?? new FoundryCommandTransportAdapter({
@@ -4222,11 +4847,26 @@ function composeDomainManagerRuntime(options = {}) {
     commandQueue,
     transactionStore,
     registry,
-    transport
+    transport,
+    rateLimiter
+  });
+  const readOnlyDomains = Object.freeze({
+    read: (id) => mutableDomainRepo.read(id),
+    load: (id) => mutableDomainRepo.load(id),
+    query: (query) => mutableDomainRepo.query(query),
+    checkIntegrity: () => mutableDomainRepo.checkIntegrity(),
+    getIndex: () => {
+      const liveIndex = mutableDomainRepo.getIndex();
+      return Object.freeze({
+        get: (id) => liveIndex.get(id),
+        list: () => liveIndex.list(),
+        query: (q) => liveIndex.query(q)
+      });
+    }
   });
   return Object.freeze({
     // G2-AUD-008: Read-only facade exposed publicly
-    domains: mutableDomainRepo,
+    domains: readOnlyDomains,
     authority,
     commandBus,
     registry,
