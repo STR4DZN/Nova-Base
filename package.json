@@ -1,0 +1,23 @@
+{
+  "name": "domain-manager",
+  "version": "0.0.2",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test:unit": "node tests/run-tests.mjs",
+    "validate:package": "node scripts/validate-package.mjs",
+    "package": "node scripts/package.mjs",
+    "validate:artifact": "node scripts/validate-artifact.mjs",
+    "package:gate1-full": "node scripts/package-gate1-full.mjs",
+    "package:checkpoint": "node scripts/package-checkpoint.mjs",
+    "validate:checkpoint": "node scripts/validate-g2-full.mjs",
+    "package:g2-full": "node scripts/package-checkpoint.mjs",
+    "validate:g2-full": "node scripts/validate-g2-full.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "0.27.2",
+    "typescript": "5.9.2"
+  }
+}

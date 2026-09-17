@@ -1,0 +1,14 @@
+{
+  "id": "domain-manager",
+  "title": "Domain Manager",
+  "description": "Foundry VTT infrastructure module for managing domains and related operational data.",
+  "version": "0.0.2",
+  "compatibility": {
+    "minimum": "13.351",
+    "verified": "13.351"
+  },
+  "socket": true,
+  "scripts": [
+    "dist/main.js"
+  ]
+}

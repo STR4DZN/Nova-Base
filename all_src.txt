@@ -1,0 +1,1833 @@
+--- /mnt/data/dm_g2_work/src/core/contracts/public-error.ts
+export type PublicErrorCategory =
+  | "validation"
+  | "permission"
+  | "conflict"
+  | "not-found"
+  | "busy"
+  | "provider"
+  | "timeout"
+  | "integrity"
+  | "recovery"
+  | "internal";
+
+export const PUBLIC_ERROR_CATEGORIES: readonly PublicErrorCategory[] = [
+  "validation", "permission", "conflict", "not-found", "busy",
+  "provider", "timeout", "integrity", "recovery", "internal"
+];
+
+export function isPublicErrorCategory(value: unknown): value is PublicErrorCategory {
+  return typeof value === "string" && PUBLIC_ERROR_CATEGORIES.includes(value as PublicErrorCategory);
+}
+
+export interface PublicError {
+  readonly code: `DM_${string}`;
+  readonly category: PublicErrorCategory;
+  readonly message: string;
+  readonly details?: unknown;
+  readonly retryable?: boolean;
+  readonly userActionRequired?: boolean;
+  readonly correlationId?: string;
+}
+
+export interface Warning {
+  readonly code: `DM_${string}`;
+  readonly message: string;
+  readonly details?: unknown;
+}
+
+export function createPublicError(
+  error: PublicError
+): PublicError {
+  return Object.freeze({ ...error });
+}
+
+export function isPublicError(value: unknown): value is PublicError {
+  if (typeof value !== "object" || value === null) return false;
+
+  const candidate = value as Partial<PublicError>;
+  return (
+    typeof candidate.code === "string" &&
+    candidate.code.startsWith("DM_") &&
+    isPublicErrorCategory(candidate.category) &&
+    typeof candidate.message === "string" &&
+    (candidate.retryable === undefined || typeof candidate.retryable === "boolean") &&
+    (candidate.userActionRequired === undefined || typeof candidate.userActionRequired === "boolean") &&
+    (candidate.correlationId === undefined || typeof candidate.correlationId === "string")
+  );
+}
+--- /mnt/data/dm_g2_work/src/core/contracts/result.ts
+import type { PublicError, Warning } from "./public-error.js";
+
+export type Result<T, E extends PublicError = PublicError> =
+  | { readonly ok: true; readonly value: T; readonly warnings?: readonly Warning[] }
+  | { readonly ok: false; readonly error: E };
+
+export function ok<T>(value: T, warnings?: readonly Warning[]): Result<T> {
+  return warnings === undefined ? { ok: true, value } : { ok: true, value, warnings };
+}
+
+export function err<E extends PublicError>(error: E): Result<never, E> {
+  return { ok: false, error };
+}
+
+export function isOk<T, E extends PublicError>(result: Result<T, E>): result is Extract<Result<T, E>, { ok: true }> {
+  return result.ok;
+}
+
+export function isErr<T, E extends PublicError>(result: Result<T, E>): result is Extract<Result<T, E>, { ok: false }> {
+  return !result.ok;
+}
+--- /mnt/data/dm_g2_work/src/core/identity/ids.ts
+export const ID_PREFIXES = [
+  "cmd",
+  "tx",
+  "prj",
+  "rel",
+  "rep",
+  "led",
+  "resv",
+  "req",
+  "role"
+] as const;
+
+export type IdPrefix = (typeof ID_PREFIXES)[number];
+export type OpaqueId = `${IdPrefix}_${string}`;
+
+export function createOpaqueId(prefix: IdPrefix): OpaqueId {
+  return `${prefix}_${crypto.randomUUID()}`;
+}
+
+export function isOpaqueId(value: unknown, prefix?: IdPrefix): value is OpaqueId {
+  if (typeof value !== "string") return false;
+
+  const pattern = prefix === undefined
+    ? /^(cmd|tx|prj|rel|rep|led|resv|req|role)_[0-9a-f-]{36}$/
+    : new RegExp(`^${prefix}_[0-9a-f-]{36}$`);
+
+  return pattern.test(value);
+}
+--- /mnt/data/dm_g2_work/src/core/identity/namespaces.ts
+export type Namespace = `${string}:${string}`;
+
+export function normalizeNamespace(value: string): Namespace {
+  const normalized = value.trim().toLowerCase();
+  if (!isNamespace(normalized)) {
+    throw new Error("Namespace must use the <owner>:<id> format");
+  }
+
+  return normalized as Namespace;
+}
+
+export function isNamespace(value: unknown): value is Namespace {
+  return typeof value === "string" && /^[a-z0-9-]+:[a-z0-9-]+$/.test(value);
+}
+--- /mnt/data/dm_g2_work/src/core/identity/refs.ts
+export interface DocumentRef {
+  readonly uuid: string;
+  readonly lastKnownName?: string;
+  readonly lastKnownImg?: string;
+}
+
+export interface TypedRef {
+  readonly type: string;
+  readonly id?: string;
+  readonly uuid?: string;
+}
+
+/**
+ * Runtime validation for canonical Foundry document UUIDs.
+ *
+ * World documents use `<DocumentName>.<id>`. Compendium documents keep the
+ * `Compendium.<package>.<pack>.<DocumentName>.<id>` shape. Embedded-document
+ * UUIDs remain valid because they add further non-empty segment pairs.
+ */
+export function isFoundryUuid(value: unknown): value is string {
+  if (typeof value !== "string" || value.trim() !== value || value.length === 0) return false;
+  const segments = value.split(".");
+  if (segments.some((segment) => segment.length === 0)) return false;
+  if (segments[0] === "Compendium") return segments.length >= 6;
+  return segments.length >= 2;
+}
+
+export function isJournalEntryUuid(value: unknown): value is string {
+  if (!isFoundryUuid(value)) return false;
+  const segments = value.split(".");
+  if (segments[0] === "JournalEntry") return segments.length >= 2;
+  if (segments[0] !== "Compendium") return false;
+  return segments.includes("JournalEntry");
+}
+
+export function worldJournalEntryUuid(id: string): string {
+  if (typeof id !== "string" || id.trim().length === 0 || id.includes(".")) {
+    throw new Error("JournalEntry id must be a non-empty local document id");
+  }
+  return `JournalEntry.${id}`;
+}
+--- /mnt/data/dm_g2_work/src/core/registries/base-extensions.ts
+import { Registry } from "./registry.js";
+
+export interface BaseExtensionDefinition {
+  readonly id: string;
+  readonly version: string;
+  readonly label: string;
+}
+
+export const baseExtensionRegistry = new Registry<BaseExtensionDefinition>(
+  "base-extensions"
+);
+
+export function registerBaseExtension(extension: BaseExtensionDefinition): void {
+  baseExtensionRegistry.register(extension.id, extension);
+}
+
+export function freezeBaseExtensions(): void {
+  baseExtensionRegistry.freeze();
+}
+--- /mnt/data/dm_g2_work/src/core/registries/registry.ts
+export class RegistryCollisionError extends Error {
+  readonly code = "DM_REGISTRY_COLLISION";
+
+  constructor(readonly registryId: string, readonly entryId: string) {
+    super(`Registry '${registryId}' already contains '${entryId}'`);
+    this.name = "RegistryCollisionError";
+  }
+}
+
+export class RegistryFrozenError extends Error {
+  readonly code = "DM_REGISTRY_FROZEN";
+
+  constructor(readonly registryId: string) {
+    super(`Registry '${registryId}' is frozen`);
+    this.name = "RegistryFrozenError";
+  }
+}
+
+export class Registry<T> {
+  private readonly entries = new Map<string, T>();
+  private frozen = false;
+
+  constructor(readonly registryId: string) {}
+
+  register(entryId: string, entry: T): void {
+    if (this.frozen) throw new RegistryFrozenError(this.registryId);
+    if (this.entries.has(entryId)) {
+      throw new RegistryCollisionError(this.registryId, entryId);
+    }
+    this.entries.set(entryId, entry);
+  }
+
+  get(entryId: string): T | undefined {
+    return this.entries.get(entryId);
+  }
+
+  has(entryId: string): boolean {
+    return this.entries.has(entryId);
+  }
+
+  freeze(): void {
+    this.frozen = true;
+  }
+
+  isFrozen(): boolean {
+    return this.frozen;
+  }
+}
+--- /mnt/data/dm_g2_work/src/core/versioning/build-metadata.ts
+export const BUILD_METADATA = Object.freeze({
+  moduleVersion: "0.0.2",
+  buildChannel: "dev",
+  target: "foundry-vtt"
+} as const);
+--- /mnt/data/dm_g2_work/src/diagnostics/build-diagnostics.ts
+import { BUILD_METADATA } from "../core/versioning/build-metadata.js";
+
+export function getBuildDiagnostics() {
+  return {
+    ...BUILD_METADATA
+  };
+}
+--- /mnt/data/dm_g2_work/src/diagnostics/diagnostics-snapshot.ts
+import { BUILD_METADATA } from "../core/versioning/build-metadata.js";
+
+export interface DiagnosticsSnapshot {
+  readonly moduleVersion: string;
+  readonly buildChannel: string;
+  readonly target: string;
+  readonly diagnosticScope: "bootstrap";
+}
+
+export function createDiagnosticsSnapshot(): DiagnosticsSnapshot {
+  return Object.freeze({
+    ...BUILD_METADATA,
+    diagnosticScope: "bootstrap"
+  });
+}
+--- /mnt/data/dm_g2_work/src/diagnostics/logger.ts
+export type LogLevel = "debug" | "info" | "warn" | "error";
+
+export interface LogContext {
+  readonly correlationId?: string;
+  readonly [key: string]: unknown;
+}
+
+export interface LogEntry {
+  readonly level: LogLevel;
+  readonly message: string;
+  readonly context?: LogContext;
+}
+
+export class Logger {
+  constructor(readonly scope: string) {}
+
+  debug(message: string, context?: LogContext): LogEntry {
+    return this.write("debug", message, context);
+  }
+
+  info(message: string, context?: LogContext): LogEntry {
+    return this.write("info", message, context);
+  }
+
+  warn(message: string, context?: LogContext): LogEntry {
+    return this.write("warn", message, context);
+  }
+
+  error(message: string, context?: LogContext): LogEntry {
+    return this.write("error", message, context);
+  }
+
+  private write(level: LogLevel, message: string, context?: LogContext): LogEntry {
+    const safeContext = context === undefined
+      ? undefined
+      : sanitizeDiagnosticsValue(context) as LogContext;
+    const entry = safeContext === undefined ? { level, message } : { level, message, context: safeContext };
+    const output = `[${this.scope}] ${message}`;
+
+    if (level === "error") console.error(output, safeContext ?? "");
+    else if (level === "warn") console.warn(output, safeContext ?? "");
+    else console.info(output, safeContext ?? "");
+
+    return entry;
+  }
+}
+import { sanitizeDiagnosticsValue } from "./sanitize.js";
+--- /mnt/data/dm_g2_work/src/diagnostics/sanitize.ts
+const SENSITIVE_KEY = /(secret|token|password|api[-_]?key|credential|authorization)/i;
+
+export function sanitizeDiagnosticsValue(value: unknown, ancestors = new WeakSet<object>()): unknown {
+  if (Array.isArray(value)) {
+    if (ancestors.has(value)) return "[Circular]";
+    ancestors.add(value);
+    const result = value.map((item) => sanitizeDiagnosticsValue(item, ancestors));
+    ancestors.delete(value);
+    return result;
+  }
+  if (typeof value !== "object" || value === null) return value;
+  if (ancestors.has(value)) return "[Circular]";
+  ancestors.add(value);
+
+  const sanitized: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(value)) {
+    sanitized[key] = SENSITIVE_KEY.test(key)
+      ? "[REDACTED]"
+      : sanitizeDiagnosticsValue(child, ancestors);
+  }
+  ancestors.delete(value);
+  return sanitized;
+}
+--- /mnt/data/dm_g2_work/src/domains/domain-capabilities.ts
+import { err, ok, type Result } from "../core/contracts/result.js";
+import { createPublicError, type Warning } from "../core/contracts/public-error.js";
+import type { DomainCapabilities } from "./domain-schema.js";
+
+export type CapabilityConfigValidator = (config: unknown) => Result<void>;
+
+export interface CapabilityDefinition {
+  readonly id: string;
+  readonly label: string;
+  readonly functional: boolean;
+  readonly validateConfig?: CapabilityConfigValidator;
+}
+
+export class CapabilityRegistry {
+  private readonly definitions = new Map<string, CapabilityDefinition>();
+  private frozen = false;
+
+  register(definition: CapabilityDefinition): void {
+    if (this.frozen) throw new Error("Capability registry is frozen");
+    if (!isNamespacedCapabilityId(definition.id)) throw new Error(`Invalid capability ID: ${definition.id}`);
+    if (this.definitions.has(definition.id)) throw new Error(`Capability already registered: ${definition.id}`);
+    this.definitions.set(definition.id, definition);
+  }
+
+  get(id: string): CapabilityDefinition | undefined {
+    return this.definitions.get(id);
+  }
+
+  freeze(): void {
+    this.frozen = true;
+  }
+}
+
+export function isNamespacedCapabilityId(value: unknown): value is string {
+  return typeof value === "string" && /^[a-z0-9][a-z0-9._-]*:[a-z0-9][a-z0-9._-]*$/.test(value);
+}
+
+export interface CapabilityGrantSource {
+  readonly type: "explicit";
+  readonly ref: "definition.capabilities.enabled";
+}
+
+export interface CapabilityGrant {
+  readonly capabilityId: string;
+  readonly source: CapabilityGrantSource;
+}
+
+export interface EffectiveCapability {
+  readonly capabilityId: string;
+  readonly enabled: boolean;
+  readonly functional: boolean;
+  readonly sources: readonly CapabilityGrant[];
+  readonly warnings?: readonly string[];
+  readonly degraded?: boolean;
+}
+
+export interface DomainCapabilityResolution {
+  readonly effective: readonly EffectiveCapability[];
+}
+
+function invalid(message: string): Result<never> {
+  return err(createPublicError({
+    code: "DM_INVALID_CAPABILITY_CONFIG",
+    category: "validation",
+    message
+  }));
+}
+
+function warningForUnavailable(id: string): Warning {
+  return {
+    code: "DM_CAPABILITY_UNAVAILABLE",
+    message: `Capability is preserved but unavailable: ${id}`,
+    details: { capabilityId: id }
+  };
+}
+
+function sourceFor(id: string): CapabilityGrant[] {
+  return [{
+    capabilityId: id,
+    source: { type: "explicit", ref: "definition.capabilities.enabled" }
+  }];
+}
+
+function validateShape(capabilities: DomainCapabilities): Result<void> {
+  const seen = new Set<string>();
+  for (const id of capabilities.enabled) {
+    if (!isNamespacedCapabilityId(id)) return invalid(`Invalid namespaced capability ID: ${id}`);
+    if (seen.has(id)) return invalid(`Duplicate enabled capability: ${id}`);
+    seen.add(id);
+  }
+  return ok(undefined);
+}
+
+export function resolveEffectiveCapabilities(
+  capabilities: DomainCapabilities,
+  registry: CapabilityRegistry
+): Result<readonly EffectiveCapability[]> {
+  const shape = validateShape(capabilities);
+  if (!shape.ok) return shape;
+
+  const effective: EffectiveCapability[] = [];
+  const warnings: Warning[] = [];
+  for (const id of capabilities.enabled) {
+    const definition = registry.get(id);
+    const sources = sourceFor(id);
+    if (definition === undefined) {
+      const warning = warningForUnavailable(id);
+      warnings.push(warning);
+      effective.push({
+        capabilityId: id,
+        enabled: false,
+        functional: false,
+        sources,
+        warnings: [warning.message],
+        degraded: true
+      });
+      continue;
+    }
+
+    const config = capabilities.config[id];
+    const configResult = definition.validateConfig?.(config);
+    if (configResult !== undefined && !configResult.ok) {
+      const warning: Warning = {
+        code: "DM_CAPABILITY_CONFIG_INVALID",
+        message: `Capability config is invalid: ${id}`,
+        details: configResult.error
+      };
+      warnings.push(warning);
+      effective.push({
+        capabilityId: id,
+        enabled: false,
+        functional: definition.functional,
+        sources,
+        warnings: [warning.message],
+        degraded: true
+      });
+      continue;
+    }
+
+    effective.push({
+      capabilityId: id,
+      enabled: true,
+      functional: definition.functional,
+      sources
+    });
+  }
+
+  return ok(effective, warnings);
+}
+
+export function validateDomainCapabilities(
+  capabilities: DomainCapabilities,
+  registry: CapabilityRegistry
+): Result<DomainCapabilityResolution> {
+  const shape = validateShape(capabilities);
+  if (!shape.ok) return shape;
+
+  for (const id of capabilities.enabled) {
+    const definition = registry.get(id);
+    if (definition === undefined) continue;
+    const configResult = definition.validateConfig?.(capabilities.config[id]);
+    if (configResult !== undefined && !configResult.ok) {
+      return err(createPublicError({
+        code: "DM_INVALID_CAPABILITY_CONFIG",
+        category: "validation",
+        message: `Capability config is invalid: ${id}`,
+        details: configResult.error
+      }));
+    }
+  }
+
+  const resolved = resolveEffectiveCapabilities(capabilities, registry);
+  if (!resolved.ok) return resolved;
+  if (!resolved.value.some((capability) => capability.enabled && capability.functional)) {
+    return err(createPublicError({
+      code: "DM_NO_FUNCTIONAL_CAPABILITY",
+      category: "validation",
+      message: "Domain must have at least one enabled functional capability"
+    }));
+  }
+  return ok({ effective: resolved.value }, resolved.warnings);
+}
+
+export function createDefaultCapabilityRegistry(): CapabilityRegistry {
+  const registry = new CapabilityRegistry();
+  registry.register({ id: "domain-manager:core", label: "Core technical shell", functional: false });
+  registry.register({ id: "domain-manager:domain", label: "Domain management", functional: true });
+  return registry;
+}
+
+export const domainCapabilityRegistry = createDefaultCapabilityRegistry();
+--- /mnt/data/dm_g2_work/src/domains/domain-hierarchy-validator.ts
+import { err, ok, type Result } from "../core/contracts/result.js";
+import { createPublicError, type Warning } from "../core/contracts/public-error.js";
+import { isJournalEntryUuid } from "../core/identity/refs.js";
+
+export interface DomainHierarchyNode {
+  readonly uuid: string;
+  readonly parentDomainUuid: string | null;
+}
+
+function invalid(message: string): Result<never> {
+  return err(createPublicError({
+    code: "DM_INVALID_DOMAIN_HIERARCHY",
+    category: "validation",
+    message
+  }));
+}
+
+function cycle(nodeUuid: string): Result<never> {
+  return err(createPublicError({
+    code: "DM_DOMAIN_HIERARCHY_CYCLE",
+    category: "integrity",
+    message: `Domain hierarchy contains a cycle involving ${nodeUuid}`
+  }));
+}
+
+function missingNode(nodeUuid: string): Result<never> {
+  return err(createPublicError({
+    code: "DM_DOMAIN_HIERARCHY_NODE_NOT_FOUND",
+    category: "not-found",
+    message: `Domain hierarchy node was not found: ${nodeUuid}`
+  }));
+}
+
+function missingParent(parentUuid: string): Result<never> {
+  return err(createPublicError({
+    code: "DM_DOMAIN_PARENT_NOT_FOUND",
+    category: "not-found",
+    message: `Domain parent was not found: ${parentUuid}`
+  }));
+}
+
+function validateNodeShape(node: DomainHierarchyNode): Result<void> {
+  if (!isJournalEntryUuid(node.uuid)) return invalid("Domain hierarchy node uuid must be a full JournalEntry UUID");
+  if (node.parentDomainUuid !== null && !isJournalEntryUuid(node.parentDomainUuid)) {
+    return invalid("Domain parentDomainUuid must be null or a full JournalEntry UUID");
+  }
+  return ok(undefined);
+}
+
+function orphanWarning(nodeUuid: string, parentUuid: string): Warning {
+  return {
+    code: "DM_DOMAIN_ORPHAN_PARENT",
+    message: `Domain ${nodeUuid} references a missing parent ${parentUuid}`,
+    details: { nodeUuid, parentUuid }
+  };
+}
+
+export function validateDomainHierarchy(nodes: readonly DomainHierarchyNode[]): Result<void> {
+  const byUuid = new Map<string, DomainHierarchyNode>();
+  const warnings: Warning[] = [];
+
+  for (const node of nodes) {
+    const shape = validateNodeShape(node);
+    if (!shape.ok) return shape;
+    if (byUuid.has(node.uuid)) return invalid(`Duplicate Domain hierarchy UUID: ${node.uuid}`);
+    byUuid.set(node.uuid, node);
+  }
+
+  for (const node of nodes) {
+    if (node.parentDomainUuid !== null && !byUuid.has(node.parentDomainUuid)) {
+      warnings.push(orphanWarning(node.uuid, node.parentDomainUuid));
+    }
+  }
+
+  for (const node of nodes) {
+    const visited = new Set<string>();
+    let current: string | null = node.uuid;
+    while (current !== null) {
+      if (visited.has(current)) return cycle(current);
+      visited.add(current);
+      const currentNode = byUuid.get(current);
+      if (currentNode === undefined) break;
+      current = currentNode.parentDomainUuid;
+    }
+  }
+
+  return ok(undefined, warnings);
+}
+
+export function validateDomainReparent(
+  nodes: readonly DomainHierarchyNode[],
+  nodeUuid: string,
+  parentDomainUuid: string | null
+): Result<void> {
+  if (!isJournalEntryUuid(nodeUuid)) return invalid("Domain uuid must be a full JournalEntry UUID");
+  if (parentDomainUuid !== null && !isJournalEntryUuid(parentDomainUuid)) {
+    return invalid("Domain parentDomainUuid must be null or a full JournalEntry UUID");
+  }
+
+  const current = nodes.find((node) => node.uuid === nodeUuid);
+  if (current === undefined) return missingNode(nodeUuid);
+  if (parentDomainUuid !== null && !nodes.some((node) => node.uuid === parentDomainUuid)) return missingParent(parentDomainUuid);
+  if (parentDomainUuid === nodeUuid) return cycle(nodeUuid);
+
+  const proposed = nodes.map((node) => (
+    node.uuid === nodeUuid ? { ...node, parentDomainUuid } : node
+  ));
+  return validateDomainHierarchy(proposed);
+}
+--- /mnt/data/dm_g2_work/src/domains/domain-schema.ts
+export type DomainLifecycle = "active" | "inactive" | "archived";
+
+export const DOMAIN_SCHEMA_VERSION = 1 as const;
+
+export interface DomainIdentity {
+  readonly aliases: readonly string[];
+  readonly summary: string;
+  readonly description: string;
+}
+
+export interface DomainClassification {
+  readonly kind: string;
+  readonly scale: string;
+  readonly tags: readonly string[];
+}
+
+export interface DomainHierarchy {
+  readonly parentDomainUuid: string | null;
+}
+
+export interface DomainCapabilities {
+  readonly enabled: readonly string[];
+  readonly config: Readonly<Record<string, unknown>>;
+}
+
+export interface DomainRecord {
+  readonly schemaVersion: number;
+  readonly revision: number;
+  readonly definition: {
+    readonly identity: DomainIdentity;
+    readonly classification: DomainClassification;
+    readonly hierarchy: DomainHierarchy;
+    readonly capabilities: DomainCapabilities;
+  };
+  readonly state: {
+    readonly lifecycle: DomainLifecycle;
+  };
+  readonly metadata: {
+    readonly createdByUserId: string | null;
+    readonly archivedAt: number | null;
+    readonly source: {
+      readonly type: "manual" | "template" | "import" | "migration";
+      readonly ref: string | null;
+    };
+  };
+}
+--- /mnt/data/dm_g2_work/src/domains/domain-validator.ts
+import { err, ok, type Result } from "../core/contracts/result.js";
+import { createPublicError } from "../core/contracts/public-error.js";
+import { isJournalEntryUuid } from "../core/identity/refs.js";
+import type { DomainRecord } from "./domain-schema.js";
+
+function invalid(message: string): Result<void> {
+  return err(createPublicError({
+    code: "DM_INVALID_DOMAIN_SCHEMA",
+    category: "validation",
+    message
+  }));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function stringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function hasCaseInsensitiveDuplicates(values: readonly string[]): boolean {
+  const seen = new Set<string>();
+  for (const value of values) {
+    const key = value.trim().toLocaleLowerCase();
+    if (seen.has(key)) return true;
+    seen.add(key);
+  }
+  return false;
+}
+
+export function validateDomainRecord(value: unknown): Result<void> {
+  if (!isRecord(value)) return invalid("Domain must be an object");
+
+  const schemaVersion = value.schemaVersion;
+  const revision = value.revision;
+  const definition = value.definition;
+  const state = value.state;
+  const metadata = value.metadata;
+
+  if (!Number.isSafeInteger(schemaVersion) || (schemaVersion as number) < 1) return invalid("Invalid schemaVersion");
+  if (!Number.isSafeInteger(revision) || (revision as number) < 0) return invalid("Invalid revision");
+  if (!isRecord(definition) || !isRecord(state) || !isRecord(metadata)) return invalid("Missing Domain sections");
+
+  const identity = definition.identity;
+  const classification = definition.classification;
+  const hierarchy = definition.hierarchy;
+  const capabilities = definition.capabilities;
+  if (!isRecord(identity) || !isRecord(classification) || !isRecord(hierarchy) || !isRecord(capabilities)) {
+    return invalid("Missing definition sections");
+  }
+
+  if (!stringArray(identity.aliases)) return invalid("Invalid aliases");
+  if (identity.aliases.length > 20) return invalid("Domain cannot have more than 20 aliases");
+  if (identity.aliases.some((item) => item.trim().length === 0 || item !== item.trim())) return invalid("Aliases must be non-empty and trimmed");
+  if (hasCaseInsensitiveDuplicates(identity.aliases)) return invalid("Aliases must be unique case-insensitively");
+  if (typeof identity.summary !== "string" || identity.summary.length > 500 || identity.summary !== identity.summary.trim() || typeof identity.description !== "string") {
+    return invalid("Invalid identity");
+  }
+
+  const technicalId = /^[a-z0-9][a-z0-9._:-]*$/;
+  if (typeof classification.kind !== "string" || !technicalId.test(classification.kind)) return invalid("Invalid kind");
+  if (typeof classification.scale !== "string" || !technicalId.test(classification.scale)) return invalid("Invalid scale");
+  if (!stringArray(classification.tags)) return invalid("Invalid tags");
+  if (classification.tags.length > 50) return invalid("Domain cannot have more than 50 tags");
+  if (classification.tags.some((item) => !technicalId.test(item))) return invalid("Tags must use canonical technical IDs");
+  if (hasCaseInsensitiveDuplicates(classification.tags)) return invalid("Tags must be unique");
+
+  const parentDomainUuid = hierarchy.parentDomainUuid;
+  if (parentDomainUuid !== null && !isJournalEntryUuid(parentDomainUuid)) return invalid("Invalid parentDomainUuid");
+
+  if (!stringArray(capabilities.enabled)) return invalid("Invalid capabilities");
+  if (!isRecord(capabilities.config)) return invalid("Invalid capability config");
+
+  const lifecycle = state.lifecycle;
+  if (lifecycle !== "active" && lifecycle !== "inactive" && lifecycle !== "archived") return invalid("Invalid lifecycle");
+
+  if (metadata.createdByUserId !== null && typeof metadata.createdByUserId !== "string") return invalid("Invalid createdByUserId");
+  if (metadata.archivedAt !== null && (typeof metadata.archivedAt !== "number" || !Number.isFinite(metadata.archivedAt) || metadata.archivedAt < 0)) {
+    return invalid("Invalid archivedAt");
+  }
+  if (!isRecord(metadata.source)) return invalid("Invalid source");
+  if (metadata.source.type !== "manual" && metadata.source.type !== "template" && metadata.source.type !== "import" && metadata.source.type !== "migration") {
+    return invalid("Invalid source type");
+  }
+  if (metadata.source.ref !== null && typeof metadata.source.ref !== "string") return invalid("Invalid source ref");
+
+  return ok(undefined);
+}
+--- /mnt/data/dm_g2_work/src/foundry-globals.d.ts
+declare const Hooks: {
+  once(event: "init" | "ready", callback: () => void): void;
+};
+--- /mnt/data/dm_g2_work/src/main.ts
+import { BUILD_METADATA } from "./core/versioning/build-metadata.js";
+import { getBuildDiagnostics } from "./diagnostics/build-diagnostics.js";
+
+/**
+ * Minimal Domain Manager bootstrap.
+ *
+ * G0.1.3 intentionally registers lifecycle hooks only. Domain behavior,
+ * authority, persistence, diagnostics, and UI belong to later microbuilds.
+ */
+
+Hooks.once("init", () => {
+  console.info("[Domain Manager] init");
+});
+
+Hooks.once("ready", () => {
+  console.info("[Domain Manager] ready", BUILD_METADATA);
+  console.info("[Domain Manager] build diagnostics", getBuildDiagnostics());
+});
+--- /mnt/data/dm_g2_work/src/storage/adapters/domain-journal-entry-adapter.ts
+import { err, ok, type Result } from "../../core/contracts/result.js";
+import { createPublicError } from "../../core/contracts/public-error.js";
+import type { DomainRecord } from "../../domains/domain-schema.js";
+import {
+  decodeDomainRecord,
+  DOMAIN_FLAG_NAMESPACE,
+  encodeDomainRecord
+} from "../codecs/domain-codec.js";
+
+export interface JournalEntryDocumentLike {
+  readonly name: string;
+  readonly flags?: Readonly<Record<string, unknown>>;
+  update(data: Record<string, unknown>): Promise<void>;
+}
+
+export class DomainJournalEntryAdapter {
+  constructor(private readonly document: JournalEntryDocumentLike) {}
+
+  read(): Result<{ readonly name: string; readonly record: DomainRecord }> {
+    const payload = this.document.flags?.[DOMAIN_FLAG_NAMESPACE];
+    const decoded = decodeDomainRecord(payload);
+    if (!decoded.ok) return decoded;
+    return ok({ name: this.document.name, record: decoded.value });
+  }
+
+  async write(name: string, record: DomainRecord): Promise<Result<void>> {
+    if (name.trim().length === 0) {
+      return err(createPublicError({
+        code: "DM_INVALID_DOMAIN_NAME",
+        category: "validation",
+        message: "Domain name cannot be empty"
+      }));
+    }
+
+    await this.document.update({
+      name,
+      [`flags.${DOMAIN_FLAG_NAMESPACE}`]: encodeDomainRecord(record)
+    });
+    return ok(undefined);
+  }
+}
+--- /mnt/data/dm_g2_work/src/storage/adapters/foundry-domain-document-store.ts
+import { DOMAIN_FLAG_NAMESPACE } from "../codecs/domain-codec.js";
+import type {
+  DomainDocumentStore,
+  IdentifiedJournalEntryDocumentLike
+} from "../repositories/domain-repository.js";
+
+export interface FoundryJournalCollectionLike {
+  readonly contents: readonly IdentifiedJournalEntryDocumentLike[];
+  get(id: string): IdentifiedJournalEntryDocumentLike | undefined;
+}
+
+export interface FoundryDomainStoreRuntime {
+  readonly journal: FoundryJournalCollectionLike;
+  createJournalEntry(data: {
+    readonly name: string;
+    readonly flags: Readonly<Record<string, unknown>>;
+  }): Promise<IdentifiedJournalEntryDocumentLike | null | undefined>;
+}
+
+function runtimeFromGlobals(): FoundryDomainStoreRuntime {
+  const globals = globalThis as unknown as {
+    game?: { journal?: FoundryJournalCollectionLike };
+    JournalEntry?: {
+      create(data: {
+        readonly name: string;
+        readonly flags: Readonly<Record<string, unknown>>;
+      }): Promise<IdentifiedJournalEntryDocumentLike | null | undefined>;
+    };
+  };
+
+  const journal = globals.game?.journal;
+  const JournalEntry = globals.JournalEntry;
+  if (journal === undefined || JournalEntry === undefined || typeof JournalEntry.create !== "function") {
+    throw new Error("Foundry JournalEntry runtime is not available");
+  }
+
+  return {
+    journal,
+    createJournalEntry: (data) => JournalEntry.create(data)
+  };
+}
+
+/**
+ * Production storage boundary for canonical Domain JournalEntries.
+ *
+ * The runtime is injectable so unit tests do not require Foundry. With no
+ * argument it resolves `game.journal` and `JournalEntry.create` at call time.
+ */
+function isDomainDocument(document: IdentifiedJournalEntryDocumentLike | undefined): document is IdentifiedJournalEntryDocumentLike {
+  return document !== undefined && Object.prototype.hasOwnProperty.call(document.flags ?? {}, DOMAIN_FLAG_NAMESPACE);
+}
+
+export class FoundryDomainDocumentStore implements DomainDocumentStore {
+  private readonly runtime: FoundryDomainStoreRuntime;
+
+  constructor(runtime: FoundryDomainStoreRuntime = runtimeFromGlobals()) {
+    this.runtime = runtime;
+  }
+
+  get(id: string): IdentifiedJournalEntryDocumentLike | undefined {
+    const document = this.runtime.journal.get(id);
+    return isDomainDocument(document) ? document : undefined;
+  }
+
+  list(): readonly IdentifiedJournalEntryDocumentLike[] {
+    return this.runtime.journal.contents.filter(isDomainDocument);
+  }
+
+  async create(data: {
+    readonly name: string;
+    readonly flags: Readonly<Record<string, unknown>>;
+  }): Promise<IdentifiedJournalEntryDocumentLike> {
+    const created = await this.runtime.createJournalEntry(data);
+    if (created === null || created === undefined) {
+      throw new Error("Foundry did not return the created JournalEntry");
+    }
+    return created;
+  }
+}
+--- /mnt/data/dm_g2_work/src/storage/codecs/domain-codec.ts
+import { err, ok, type Result } from "../../core/contracts/result.js";
+import { createPublicError } from "../../core/contracts/public-error.js";
+import type { DomainRecord } from "../../domains/domain-schema.js";
+import { validateDomainRecord } from "../../domains/domain-validator.js";
+
+export const DOMAIN_FLAG_NAMESPACE = "domain-manager";
+
+export type DomainFlagPayload = Omit<DomainRecord, never>;
+
+function normalizeTechnicalId(value: string): string {
+  return value.trim().toLowerCase().replace(/\s+/g, "-");
+}
+
+function normalizeTag(value: string): string {
+  return normalizeTechnicalId(value)
+    .normalize("NFKD")
+    .replace(/\p{Diacritic}/gu, "")
+    .replace(/[^a-z0-9._:-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+}
+
+function uniqueBy<T>(values: readonly T[], key: (value: T) => string): T[] {
+  const seen = new Set<string>();
+  const output: T[] = [];
+  for (const value of values) {
+    const id = key(value);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    output.push(value);
+  }
+  return output;
+}
+
+/** Canonicalize persistence-facing fields without inventing business data. */
+export function normalizeDomainRecord(record: DomainRecord, primaryName?: string): DomainRecord {
+  const nameKey = primaryName?.trim().toLocaleLowerCase();
+  const aliases = uniqueBy(
+    record.definition.identity.aliases
+      .map((alias) => alias.trim())
+      .filter((alias) => alias.length > 0)
+      .filter((alias) => nameKey === undefined || alias.toLocaleLowerCase() !== nameKey),
+    (alias) => alias.toLocaleLowerCase()
+  );
+
+  const tags = uniqueBy(
+    record.definition.classification.tags.map(normalizeTag).filter((tag) => tag.length > 0),
+    (tag) => tag
+  );
+
+  const enabled = uniqueBy(
+    record.definition.capabilities.enabled.map(normalizeTechnicalId).filter((id) => id.length > 0),
+    (id) => id
+  );
+  const config: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(record.definition.capabilities.config)) {
+    config[normalizeTechnicalId(key)] = value;
+  }
+
+  return {
+    ...record,
+    definition: {
+      ...record.definition,
+      identity: {
+        ...record.definition.identity,
+        aliases,
+        summary: record.definition.identity.summary.trim()
+      },
+      classification: {
+        ...record.definition.classification,
+        kind: normalizeTechnicalId(record.definition.classification.kind),
+        scale: normalizeTechnicalId(record.definition.classification.scale),
+        tags
+      },
+      capabilities: { enabled, config }
+    }
+  };
+}
+
+export function encodeDomainRecord(record: DomainRecord): DomainFlagPayload {
+  return JSON.parse(JSON.stringify(normalizeDomainRecord(record))) as DomainFlagPayload;
+}
+
+export function decodeDomainRecord(payload: unknown): Result<DomainRecord> {
+  const validation = validateDomainRecord(payload);
+  if (!validation.ok) {
+    return err(createPublicError({
+      code: "DM_INVALID_DOMAIN_PAYLOAD",
+      category: "integrity",
+      message: "Domain flag payload failed schema validation",
+      details: validation.error
+    }));
+  }
+  return ok(payload as DomainRecord);
+}
+--- /mnt/data/dm_g2_work/src/storage/indexes/domain-index.ts
+import { err, ok, type Result } from "../../core/contracts/result.js";
+import { createPublicError } from "../../core/contracts/public-error.js";
+import { validateDomainRecord } from "../../domains/domain-validator.js";
+import type { DomainDocument } from "../repositories/domain-repository.js";
+
+export interface DomainIndexEntry {
+  readonly id: string;
+  readonly uuid: string;
+  readonly name: string;
+  readonly aliases: readonly string[];
+  readonly kind: string;
+  readonly scale: string;
+  readonly parentDomainUuid: string | null;
+  readonly tags: readonly string[];
+  readonly capabilities: readonly string[];
+  readonly lifecycle: DomainDocument["record"]["state"]["lifecycle"];
+}
+
+export interface DomainIndexQuery {
+  readonly uuid?: string;
+  readonly name?: string;
+  readonly alias?: string;
+  readonly kind?: string;
+  readonly scale?: string;
+  readonly parentDomainUuid?: string | null;
+  readonly tag?: string;
+  readonly capabilityId?: string;
+  readonly lifecycle?: DomainIndexEntry["lifecycle"];
+}
+
+function invalid(message: string): Result<never> {
+  return err(createPublicError({
+    code: "DM_INVALID_DOMAIN_INDEX_ENTRY",
+    category: "integrity",
+    message
+  }));
+}
+
+function keyForParent(parentDomainUuid: string | null): string {
+  return parentDomainUuid === null ? "<root>" : parentDomainUuid;
+}
+
+function addToIndex(index: Map<string, Set<string>>, key: string, id: string): void {
+  const ids = index.get(key) ?? new Set<string>();
+  ids.add(id);
+  index.set(key, ids);
+}
+
+function removeFromIndex(index: Map<string, Set<string>>, key: string, id: string): void {
+  const ids = index.get(key);
+  if (ids === undefined) return;
+  ids.delete(id);
+  if (ids.size === 0) index.delete(key);
+}
+
+function toEntry(document: DomainDocument): Result<DomainIndexEntry> {
+  if (typeof document.id !== "string" || document.id.trim().length === 0) return invalid("Domain index entry id cannot be empty");
+  if (typeof document.name !== "string" || document.name.trim().length === 0) return invalid("Domain index entry name cannot be empty");
+  const validation = validateDomainRecord(document.record);
+  if (!validation.ok) return invalid("Domain index entry record failed schema validation");
+
+  return ok(Object.freeze({
+    id: document.id,
+    uuid: document.uuid,
+    name: document.name,
+    aliases: Object.freeze([...document.record.definition.identity.aliases]),
+    kind: document.record.definition.classification.kind,
+    scale: document.record.definition.classification.scale,
+    parentDomainUuid: document.record.definition.hierarchy.parentDomainUuid,
+    tags: Object.freeze([...document.record.definition.classification.tags]),
+    capabilities: Object.freeze([...document.record.definition.capabilities.enabled]),
+    lifecycle: document.record.state.lifecycle
+  }));
+}
+
+export class DomainIndex {
+  private entries = new Map<string, DomainIndexEntry>();
+  private byUuid = new Map<string, Set<string>>();
+  private byName = new Map<string, Set<string>>();
+  private byAlias = new Map<string, Set<string>>();
+  private byKind = new Map<string, Set<string>>();
+  private byScale = new Map<string, Set<string>>();
+  private byParent = new Map<string, Set<string>>();
+  private byTag = new Map<string, Set<string>>();
+  private byCapability = new Map<string, Set<string>>();
+  private byLifecycle = new Map<string, Set<string>>();
+
+  private add(entry: DomainIndexEntry): void {
+    this.entries.set(entry.id, entry);
+    addToIndex(this.byUuid, entry.uuid, entry.id);
+    addToIndex(this.byName, entry.name, entry.id);
+    for (const alias of entry.aliases) addToIndex(this.byAlias, alias, entry.id);
+    addToIndex(this.byKind, entry.kind, entry.id);
+    addToIndex(this.byScale, entry.scale, entry.id);
+    addToIndex(this.byParent, keyForParent(entry.parentDomainUuid), entry.id);
+    for (const tag of entry.tags) addToIndex(this.byTag, tag, entry.id);
+    for (const capability of entry.capabilities) addToIndex(this.byCapability, capability, entry.id);
+    addToIndex(this.byLifecycle, entry.lifecycle, entry.id);
+  }
+
+  private removeEntry(entry: DomainIndexEntry): void {
+    this.entries.delete(entry.id);
+    removeFromIndex(this.byUuid, entry.uuid, entry.id);
+    removeFromIndex(this.byName, entry.name, entry.id);
+    for (const alias of entry.aliases) removeFromIndex(this.byAlias, alias, entry.id);
+    removeFromIndex(this.byKind, entry.kind, entry.id);
+    removeFromIndex(this.byScale, entry.scale, entry.id);
+    removeFromIndex(this.byParent, keyForParent(entry.parentDomainUuid), entry.id);
+    for (const tag of entry.tags) removeFromIndex(this.byTag, tag, entry.id);
+    for (const capability of entry.capabilities) removeFromIndex(this.byCapability, capability, entry.id);
+    removeFromIndex(this.byLifecycle, entry.lifecycle, entry.id);
+  }
+
+  upsert(document: DomainDocument): Result<void> {
+    const entry = toEntry(document);
+    if (!entry.ok) return entry;
+    const previous = this.entries.get(entry.value.id);
+    if (previous !== undefined) this.removeEntry(previous);
+    this.add(entry.value);
+    return ok(undefined);
+  }
+
+  rebuild(documents: readonly DomainDocument[]): Result<void> {
+    const rebuilt = new DomainIndex();
+    const seen = new Set<string>();
+    for (const document of documents) {
+      if (seen.has(document.id)) return invalid(`Duplicate Domain index entry id: ${document.id}`);
+      seen.add(document.id);
+      const result = rebuilt.upsert(document);
+      if (!result.ok) return result;
+    }
+
+    this.entries = rebuilt.entries;
+    this.byUuid = rebuilt.byUuid;
+    this.byName = rebuilt.byName;
+    this.byAlias = rebuilt.byAlias;
+    this.byKind = rebuilt.byKind;
+    this.byScale = rebuilt.byScale;
+    this.byParent = rebuilt.byParent;
+    this.byTag = rebuilt.byTag;
+    this.byCapability = rebuilt.byCapability;
+    this.byLifecycle = rebuilt.byLifecycle;
+    return ok(undefined);
+  }
+
+  remove(id: string): boolean {
+    const entry = this.entries.get(id);
+    if (entry === undefined) return false;
+    this.removeEntry(entry);
+    return true;
+  }
+
+  get(id: string): DomainIndexEntry | undefined {
+    return this.entries.get(id);
+  }
+
+  list(): readonly DomainIndexEntry[] {
+    return [...this.entries.values()];
+  }
+
+  query(query: DomainIndexQuery = {}): readonly DomainIndexEntry[] {
+    const sets: readonly (Set<string> | undefined)[] = [
+      query.uuid === undefined ? undefined : this.byUuid.get(query.uuid) ?? new Set<string>(),
+      query.name === undefined ? undefined : this.byName.get(query.name) ?? new Set<string>(),
+      query.alias === undefined ? undefined : this.byAlias.get(query.alias) ?? new Set<string>(),
+      query.kind === undefined ? undefined : this.byKind.get(query.kind) ?? new Set<string>(),
+      query.scale === undefined ? undefined : this.byScale.get(query.scale) ?? new Set<string>(),
+      query.parentDomainUuid === undefined ? undefined : this.byParent.get(keyForParent(query.parentDomainUuid)) ?? new Set<string>(),
+      query.tag === undefined ? undefined : this.byTag.get(query.tag) ?? new Set<string>(),
+      query.capabilityId === undefined ? undefined : this.byCapability.get(query.capabilityId) ?? new Set<string>(),
+      query.lifecycle === undefined ? undefined : this.byLifecycle.get(query.lifecycle) ?? new Set<string>()
+    ];
+    const constrained = sets.filter((set): set is Set<string> => set !== undefined);
+    if (constrained.some((set) => set.size === 0)) return [];
+
+    const candidateIds = constrained.length === 0
+      ? undefined
+      : new Set([...constrained[0]].filter((id) => constrained.every((set) => set.has(id))));
+    return [...this.entries.values()].filter((entry) => candidateIds === undefined || candidateIds.has(entry.id));
+  }
+}
+--- /mnt/data/dm_g2_work/src/storage/integrity/domain-integrity-checker.ts
+import { createPublicError, type PublicError } from "../../core/contracts/public-error.js";
+import { isJournalEntryUuid } from "../../core/identity/refs.js";
+import { resolveEffectiveCapabilities, type CapabilityRegistry } from "../../domains/domain-capabilities.js";
+import { validateDomainHierarchy, type DomainHierarchyNode } from "../../domains/domain-hierarchy-validator.js";
+import { DOMAIN_SCHEMA_VERSION, type DomainRecord } from "../../domains/domain-schema.js";
+import { validateDomainRecord } from "../../domains/domain-validator.js";
+
+export type DomainIntegritySeverity = "error" | "warning";
+
+export interface DomainIntegrityDocument {
+  readonly id: string;
+  readonly uuid: string;
+  readonly name: string;
+  readonly record: unknown;
+  readonly decodeError?: PublicError;
+}
+
+export interface DomainIntegrityIssue {
+  readonly code: `DM_${string}`;
+  readonly severity: DomainIntegritySeverity;
+  readonly message: string;
+  readonly domainId?: string;
+  readonly details?: unknown;
+}
+
+export interface DomainIntegrityReport {
+  readonly checked: number;
+  readonly healthy: boolean;
+  readonly errorCount: number;
+  readonly warningCount: number;
+  readonly issues: readonly DomainIntegrityIssue[];
+}
+
+export interface DomainIntegrityCheckerOptions {
+  readonly expectedSchemaVersion?: number;
+  readonly capabilityRegistry: CapabilityRegistry;
+}
+
+function issue(
+  code: `DM_${string}`,
+  severity: DomainIntegritySeverity,
+  message: string,
+  domainId?: string,
+  details?: unknown
+): DomainIntegrityIssue {
+  return { code, severity, message, domainId, details };
+}
+
+export function createDomainIntegrityReport(
+  checked: number,
+  issues: readonly DomainIntegrityIssue[]
+): DomainIntegrityReport {
+  const errorCount = issues.filter((item) => item.severity === "error").length;
+  const warningCount = issues.length - errorCount;
+  return Object.freeze({
+    checked,
+    healthy: errorCount === 0,
+    errorCount,
+    warningCount,
+    issues: Object.freeze([...issues])
+  });
+}
+
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function addRecoverableShapeDiagnostics(
+  value: unknown,
+  domainId: string,
+  expectedSchemaVersion: number,
+  issues: DomainIntegrityIssue[]
+): void {
+  if (!isRecord(value)) return;
+  if (typeof value.schemaVersion === "number" && value.schemaVersion !== expectedSchemaVersion) {
+    issues.push(issue(
+      "DM_DOMAIN_SCHEMA_MISMATCH",
+      "error",
+      "Domain schemaVersion is not the expected canonical version",
+      domainId,
+      { expected: expectedSchemaVersion, actual: value.schemaVersion }
+    ));
+  }
+  if (typeof value.revision === "number" && (!Number.isSafeInteger(value.revision) || value.revision < 0)) {
+    issues.push(issue(
+      "DM_DOMAIN_REVISION_INVALID",
+      "error",
+      "Domain revision is not a safe non-negative integer",
+      domainId,
+      { revision: value.revision }
+    ));
+  }
+  if (isRecord(value.state) && isRecord(value.metadata)) {
+    const lifecycle = value.state.lifecycle;
+    const archivedAt = value.metadata.archivedAt;
+    if (lifecycle === "active" || lifecycle === "inactive" || lifecycle === "archived") {
+      const archived = lifecycle === "archived";
+      if ((archived && archivedAt === null) || (!archived && archivedAt !== null)) {
+        issues.push(issue(
+          "DM_DOMAIN_LIFECYCLE_INCONSISTENT",
+          "error",
+          "Domain lifecycle and archivedAt are inconsistent",
+          domainId,
+          { lifecycle, archivedAt }
+        ));
+      }
+    }
+  }
+}
+
+function lifecycleIsValid(value: unknown): value is DomainRecord["state"]["lifecycle"] {
+  return value === "active" || value === "inactive" || value === "archived";
+}
+
+function addLifecycleIssues(
+  record: Partial<DomainRecord>,
+  domainId: string,
+  issues: DomainIntegrityIssue[]
+): void {
+  const lifecycle = record.state?.lifecycle;
+  if (!lifecycleIsValid(lifecycle)) {
+    issues.push(issue(
+      "DM_DOMAIN_LIFECYCLE_INVALID",
+      "error",
+      "Domain lifecycle is not a supported value",
+      domainId,
+      { lifecycle }
+    ));
+    return;
+  }
+
+  const archivedAt = record.metadata?.archivedAt;
+  const isArchived = lifecycle === "archived";
+  if ((isArchived && archivedAt === null) || (!isArchived && archivedAt !== null)) {
+    issues.push(issue(
+      "DM_DOMAIN_LIFECYCLE_INCONSISTENT",
+      "error",
+      "Domain lifecycle and archivedAt are inconsistent",
+      domainId,
+      { lifecycle, archivedAt }
+    ));
+  }
+}
+
+function addCapabilityIssues(
+  record: Partial<DomainRecord>,
+  domainId: string,
+  registry: CapabilityRegistry,
+  issues: DomainIntegrityIssue[]
+): void {
+  const capabilities = record.definition?.capabilities;
+  if (capabilities === undefined) return;
+  const resolved = resolveEffectiveCapabilities(capabilities, registry);
+  if (!resolved.ok) {
+    issues.push(issue(
+      resolved.error.code,
+      "error",
+      resolved.error.message,
+      domainId,
+      resolved.error.details
+    ));
+    return;
+  }
+
+  for (const warning of resolved.warnings ?? []) {
+    issues.push(issue(
+      warning.code,
+      warning.code === "DM_CAPABILITY_CONFIG_INVALID" ? "error" : "warning",
+      warning.message,
+      domainId,
+      warning.details
+    ));
+  }
+
+  if (!resolved.value.some((capability) => capability.enabled && capability.functional)) {
+    issues.push(issue(
+      "DM_NO_FUNCTIONAL_CAPABILITY",
+      "error",
+      "Domain has no enabled functional capability",
+      domainId
+    ));
+  }
+}
+
+function addSchemaIssues(
+  document: DomainIntegrityDocument,
+  expectedSchemaVersion: number,
+  capabilityRegistry: CapabilityRegistry,
+  issues: DomainIntegrityIssue[],
+  hierarchyNodes: DomainHierarchyNode[]
+): void {
+  if (document.decodeError !== undefined) {
+    issues.push(issue(
+      "DM_DOMAIN_PAYLOAD_INVALID",
+      "error",
+      "Domain payload could not be decoded",
+      document.id,
+      { sourceCode: document.decodeError.code }
+    ));
+    return;
+  }
+
+  let validation;
+  try {
+    validation = validateDomainRecord(document.record);
+  } catch {
+    validation = { ok: false as const, error: createPublicError({
+      code: "DM_DOMAIN_SCHEMA_MISMATCH",
+      category: "integrity",
+      message: "Domain schema validation threw unexpectedly"
+    }) };
+  }
+
+  if (!validation.ok) {
+    issues.push(issue(
+      "DM_DOMAIN_SCHEMA_MISMATCH",
+      "error",
+      "Domain record failed schema validation",
+      document.id,
+      { sourceCode: validation.error.code }
+    ));
+    addRecoverableShapeDiagnostics(document.record, document.id, expectedSchemaVersion, issues);
+    return;
+  }
+
+  const record = document.record as DomainRecord;
+  if (record.schemaVersion !== expectedSchemaVersion) {
+    issues.push(issue(
+      "DM_DOMAIN_SCHEMA_MISMATCH",
+      "error",
+      "Domain schemaVersion is not the expected canonical version",
+      document.id,
+      { expected: expectedSchemaVersion, actual: record.schemaVersion }
+    ));
+  }
+  if (!Number.isSafeInteger(record.revision) || record.revision < 0) {
+    issues.push(issue(
+      "DM_DOMAIN_REVISION_INVALID",
+      "error",
+--- /mnt/data/dm_g2_work/src/storage/migrations/domain-migration-seed.ts
+import { err, ok, type Result } from "../../core/contracts/result.js";
+import { createPublicError } from "../../core/contracts/public-error.js";
+import {
+  createDefaultCapabilityRegistry,
+  validateDomainCapabilities
+} from "../../domains/domain-capabilities.js";
+import { DOMAIN_SCHEMA_VERSION, type DomainRecord } from "../../domains/domain-schema.js";
+import { validateDomainRecord } from "../../domains/domain-validator.js";
+
+export const DOMAIN_SCHEMA_V1_MIGRATION_ID = "domain-schema-v1-seed" as const;
+
+export interface DomainMigrationSeed {
+  readonly id: typeof DOMAIN_SCHEMA_V1_MIGRATION_ID;
+  readonly fromVersion: typeof DOMAIN_SCHEMA_VERSION;
+  readonly toVersion: typeof DOMAIN_SCHEMA_VERSION;
+  readonly kind: "canonical-baseline";
+  readonly idempotent: true;
+  readonly preconditions: readonly string[];
+  readonly postconditions: readonly string[];
+  readonly record: DomainRecord;
+}
+
+function createCanonicalRecord(): DomainRecord {
+  return {
+    schemaVersion: DOMAIN_SCHEMA_VERSION,
+    revision: 0,
+    definition: {
+      identity: {
+        aliases: [],
+        summary: "",
+        description: ""
+      },
+      classification: {
+        kind: "domain",
+        scale: "domain",
+        tags: []
+      },
+      hierarchy: {
+        parentDomainUuid: null
+      },
+      capabilities: {
+        enabled: ["domain-manager:domain"],
+        config: {}
+      }
+    },
+    state: {
+      lifecycle: "active"
+    },
+    metadata: {
+      createdByUserId: null,
+      archivedAt: null,
+      source: {
+        type: "migration",
+        ref: DOMAIN_SCHEMA_V1_MIGRATION_ID
+      }
+    }
+  };
+}
+
+export function createDomainSchemaV1MigrationSeed(): DomainMigrationSeed {
+  return Object.freeze({
+    id: DOMAIN_SCHEMA_V1_MIGRATION_ID,
+    fromVersion: DOMAIN_SCHEMA_VERSION,
+    toVersion: DOMAIN_SCHEMA_VERSION,
+    kind: "canonical-baseline",
+    idempotent: true,
+    preconditions: Object.freeze([
+      "No earlier Domain schema is declared by the canonical contract"
+    ]),
+    postconditions: Object.freeze([
+      `Domain record uses schemaVersion ${DOMAIN_SCHEMA_VERSION}`,
+      "Domain record passes structural and capability validation"
+    ]),
+    record: createCanonicalRecord()
+  });
+}
+
+export const DOMAIN_SCHEMA_V1_MIGRATION_SEED = createDomainSchemaV1MigrationSeed();
+
+export function validateDomainSchemaV1MigrationSeed(
+  seed: DomainMigrationSeed = DOMAIN_SCHEMA_V1_MIGRATION_SEED
+): Result<DomainRecord> {
+  if (
+    seed.id !== DOMAIN_SCHEMA_V1_MIGRATION_ID ||
+    seed.fromVersion !== DOMAIN_SCHEMA_VERSION ||
+    seed.toVersion !== DOMAIN_SCHEMA_VERSION ||
+    seed.kind !== "canonical-baseline" ||
+    seed.idempotent !== true
+  ) {
+    return err(createPublicError({
+      code: "DM_DOMAIN_MIGRATION_SEED_INVALID",
+      category: "integrity",
+      message: "Domain migration seed metadata is invalid"
+    }));
+  }
+
+  const recordValidation = validateDomainRecord(seed.record);
+  if (!recordValidation.ok || seed.record.schemaVersion !== DOMAIN_SCHEMA_VERSION) {
+    return err(createPublicError({
+      code: "DM_DOMAIN_MIGRATION_SEED_INVALID",
+      category: "integrity",
+      message: "Domain migration seed record failed canonical validation",
+      details: recordValidation.ok ? { schemaVersion: seed.record.schemaVersion } : recordValidation.error
+    }));
+  }
+
+  const capabilityValidation = validateDomainCapabilities(
+    seed.record.definition.capabilities,
+    createDefaultCapabilityRegistry()
+  );
+  if (!capabilityValidation.ok) {
+    return err(createPublicError({
+      code: "DM_DOMAIN_MIGRATION_SEED_INVALID",
+      category: "integrity",
+      message: "Domain migration seed capabilities failed canonical validation",
+      details: capabilityValidation.error
+    }));
+  }
+
+  return ok(seed.record);
+}
+--- /mnt/data/dm_g2_work/src/storage/repositories/contracts/repository.ts
+export interface Repository<T, TId extends string = string> {
+  get(id: TId): Promise<T | undefined>;
+  has(id: TId): Promise<boolean>;
+  list(): Promise<readonly T[]>;
+}
+--- /mnt/data/dm_g2_work/src/storage/repositories/domain-repository.ts
+import { err, ok, type Result } from "../../core/contracts/result.js";
+import { createPublicError, type Warning } from "../../core/contracts/public-error.js";
+import { isJournalEntryUuid } from "../../core/identity/refs.js";
+import {
+  domainCapabilityRegistry,
+  validateDomainCapabilities,
+  type CapabilityRegistry
+} from "../../domains/domain-capabilities.js";
+import { validateDomainHierarchy, validateDomainReparent } from "../../domains/domain-hierarchy-validator.js";
+import type { DomainLifecycle, DomainRecord } from "../../domains/domain-schema.js";
+import { validateDomainRecord } from "../../domains/domain-validator.js";
+import {
+  DomainJournalEntryAdapter,
+  type JournalEntryDocumentLike
+} from "../adapters/domain-journal-entry-adapter.js";
+import { DOMAIN_FLAG_NAMESPACE, encodeDomainRecord, normalizeDomainRecord } from "../codecs/domain-codec.js";
+import { DomainIndex, type DomainIndexQuery } from "../indexes/domain-index.js";
+import {
+  createDomainIntegrityReport,
+  DomainIntegrityChecker,
+  type DomainIntegrityDocument,
+  type DomainIntegrityReport
+} from "../integrity/domain-integrity-checker.js";
+
+export interface IdentifiedJournalEntryDocumentLike extends JournalEntryDocumentLike {
+  readonly id: string;
+  readonly uuid: string;
+}
+
+export interface DomainDocumentStore {
+  get(id: string): IdentifiedJournalEntryDocumentLike | undefined;
+  list(): readonly IdentifiedJournalEntryDocumentLike[];
+  create(data: {
+    readonly name: string;
+    readonly flags: Readonly<Record<string, unknown>>;
+  }): Promise<IdentifiedJournalEntryDocumentLike>;
+}
+
+export interface DomainDocument {
+  readonly id: string;
+  readonly uuid: string;
+  readonly name: string;
+  readonly record: DomainRecord;
+}
+
+export interface DomainQuery {
+  readonly uuid?: string;
+  readonly name?: string;
+  readonly alias?: string;
+  readonly lifecycle?: DomainLifecycle;
+  readonly kind?: string;
+  readonly scale?: string;
+  readonly tag?: string;
+  readonly capabilityId?: string;
+  readonly parentDomainUuid?: string | null;
+}
+
+export interface DomainCreateInput {
+  readonly name: string;
+  readonly record: DomainRecord;
+}
+
+export interface DomainRepositoryOptions {
+  readonly now?: () => number;
+  readonly capabilityRegistry?: CapabilityRegistry;
+  readonly index?: DomainIndex;
+}
+
+export interface DomainMutationOptions {
+  readonly expectedRevision?: number;
+}
+
+export type DomainMutationStatus = "updated" | "no-op";
+
+export interface DomainMutationResult {
+  readonly status: DomainMutationStatus;
+  readonly revision: number;
+}
+
+export interface DomainRepositoryContract {
+  create(input: DomainCreateInput): Promise<Result<DomainDocument>>;
+  read(id: string): Result<DomainDocument>;
+  load(id: string): Result<DomainDocument>;
+  query(query?: DomainQuery): Result<readonly DomainDocument[]>;
+  save(document: DomainDocument, options?: DomainMutationOptions): Promise<Result<DomainMutationResult>>;
+  update(document: DomainDocument, options?: DomainMutationOptions): Promise<Result<DomainMutationResult>>;
+  reparent(id: string, parentDomainUuid: string | null, options?: DomainMutationOptions): Promise<Result<DomainMutationResult>>;
+  archive(id: string, archivedAt?: number, options?: DomainMutationOptions): Promise<Result<DomainMutationResult>>;
+  restore(id: string, options?: DomainMutationOptions): Promise<Result<DomainMutationResult>>;
+  getIndex(): DomainIndex;
+  rebuildIndex(): Result<void>;
+  checkIntegrity(): DomainIntegrityReport;
+}
+
+function invalid(message: string): Result<never> {
+  return err(createPublicError({
+    code: "DM_INVALID_DOMAIN_REPOSITORY_INPUT",
+    category: "validation",
+    message
+  }));
+}
+
+function notFound(id: string): Result<never> {
+  return err(createPublicError({
+    code: "DM_DOMAIN_NOT_FOUND",
+    category: "not-found",
+    message: `Domain document was not found: ${id}`
+  }));
+}
+
+function storageFailure(operation: string): Result<never> {
+  return err(createPublicError({
+    code: "DM_DOMAIN_STORAGE_ERROR",
+    category: "provider",
+    message: `Domain storage failed during ${operation}`,
+    retryable: true
+  }));
+}
+
+function indexFailure(): Result<never> {
+  return err(createPublicError({
+    code: "DM_DOMAIN_INDEX_ERROR",
+    category: "recovery",
+    message: "Domain index could not be updated"
+  }));
+}
+
+function validateDocument(document: DomainDocument, capabilityRegistry: CapabilityRegistry): Result<void> {
+  if (typeof document.id !== "string" || document.id.trim().length === 0) return invalid("Domain document id cannot be empty");
+  if (!isJournalEntryUuid(document.uuid)) return invalid("Domain document uuid must be a full JournalEntry UUID");
+  if (typeof document.name !== "string" || document.name.trim().length === 0) return invalid("Domain name cannot be empty");
+
+  const validation = validateDomainRecord(document.record);
+  if (!validation.ok) {
+    return err(createPublicError({
+      code: "DM_INVALID_DOMAIN_REPOSITORY_RECORD",
+      category: "validation",
+      message: "Domain repository record failed schema validation",
+      details: validation.error
+    }));
+  }
+  const capabilities = validateDomainCapabilities(document.record.definition.capabilities, capabilityRegistry);
+  if (!capabilities.ok) return err(capabilities.error);
+  return ok(undefined, capabilities.warnings);
+}
+
+function validateCreateInput(input: DomainCreateInput, capabilityRegistry: CapabilityRegistry): Result<void> {
+  if (typeof input.name !== "string" || input.name.trim().length === 0) return invalid("Domain name cannot be empty");
+  if (input.record.revision !== 0) return invalid("New Domain revision must start at 0");
+
+  const validation = validateDomainRecord(input.record);
+  if (!validation.ok) {
+    return err(createPublicError({
+      code: "DM_INVALID_DOMAIN_REPOSITORY_RECORD",
+      category: "validation",
+      message: "Domain repository record failed schema validation",
+      details: validation.error
+    }));
+  }
+  const capabilities = validateDomainCapabilities(input.record.definition.capabilities, capabilityRegistry);
+  if (!capabilities.ok) return err(capabilities.error);
+  return ok(undefined, capabilities.warnings);
+}
+
+function validateMutationInput(document: DomainDocument, options: DomainMutationOptions): Result<number> {
+  const expectedRevision = options.expectedRevision ?? document.record.revision;
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) return invalid("expectedRevision must be a non-negative safe integer");
+  if (document.record.revision !== expectedRevision) return invalid("Domain record revision must match expectedRevision");
+  return ok(expectedRevision);
+}
+
+function revisionConflict(expectedRevision: number, actualRevision: number): Result<never> {
+  return err(createPublicError({
+    code: "DM_DOMAIN_REVISION_CONFLICT",
+    category: "conflict",
+    message: "Domain revision is stale",
+    details: { expectedRevision, actualRevision },
+    userActionRequired: true
+  }));
+}
+
+function valuesEqual(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (typeof left !== "object" || left === null || typeof right !== "object" || right === null) return false;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+    return left.every((value, index) => valuesEqual(value, right[index]));
+  }
+  const leftKeys = Object.keys(left as Record<string, unknown>);
+  const rightKeys = Object.keys(right as Record<string, unknown>);
+  if (leftKeys.length !== rightKeys.length) return false;
+  return leftKeys.every((key) => (
+    Object.prototype.hasOwnProperty.call(right, key) &&
+    valuesEqual((left as Record<string, unknown>)[key], (right as Record<string, unknown>)[key])
+  ));
+}
+
+function toDomainDocument(document: IdentifiedJournalEntryDocumentLike): Result<DomainDocument> {
+  if (!isJournalEntryUuid(document.uuid)) return invalid("Stored Domain document has an invalid JournalEntry UUID");
+  const decoded = new DomainJournalEntryAdapter(document).read();
+  if (!decoded.ok) return decoded;
+  return ok({ id: document.id, uuid: document.uuid, name: decoded.value.name, record: decoded.value.record });
+}
+
+export class DomainRepository implements DomainRepositoryContract {
+  private readonly now: () => number;
+  private readonly capabilityRegistry: CapabilityRegistry;
+  private readonly index: DomainIndex;
+  private readonly integrityChecker: DomainIntegrityChecker;
+  private indexReady = false;
+  private indexWarnings: readonly Warning[] = [];
+
+  constructor(private readonly store: DomainDocumentStore, options: DomainRepositoryOptions = {}) {
+    this.now = options.now ?? Date.now;
+    this.capabilityRegistry = options.capabilityRegistry ?? domainCapabilityRegistry;
+    this.index = options.index ?? new DomainIndex();
+    this.integrityChecker = new DomainIntegrityChecker({ capabilityRegistry: this.capabilityRegistry });
+  }
+
+  private loadAllDocuments(): Result<readonly DomainDocument[]> {
+    const documents: DomainDocument[] = [];
+    try {
+      for (const source of this.store.list()) {
+        const decoded = toDomainDocument(source);
+        if (!decoded.ok) return decoded;
+        documents.push(decoded.value);
+      }
+    } catch {
+      return storageFailure("list");
+    }
+
+    const hierarchy = validateDomainHierarchy(documents.map((document) => ({
+      uuid: document.uuid,
+      parentDomainUuid: document.record.definition.hierarchy.parentDomainUuid
+    })));
+    if (!hierarchy.ok) return err(hierarchy.error);
+    return ok(documents, hierarchy.warnings);
+  }
+
+  private ensureIndex(): Result<void> {
+--- /mnt/data/dm_g2_work/src/storage/repositories/in-memory-repository.ts
+import type { Repository } from "./contracts/repository.js";
+
+export class InMemoryRepository<T, TId extends string = string>
+  implements Repository<T, TId>
+{
+  private readonly entries: ReadonlyMap<TId, T>;
+
+  constructor(items: readonly T[], getId: (item: T) => TId) {
+    this.entries = new Map(items.map((item) => [getId(item), item]));
+  }
+
+  async get(id: TId): Promise<T | undefined> {
+    return this.entries.get(id);
+  }
+
+  async has(id: TId): Promise<boolean> {
+    return this.entries.has(id);
+  }
+
+  async list(): Promise<readonly T[]> {
+    return [...this.entries.values()];
+  }
+}

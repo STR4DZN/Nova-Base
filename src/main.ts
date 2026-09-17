@@ -1,0 +1,83 @@
+import {
+  registerFoundryPrimaryAuthoritySettings
+} from "./authority/foundry-primary-authority-adapter.js";
+import { composeDomainManagerRuntime, type DomainManagerRuntime } from "./bootstrap/domain-manager-runtime.js";
+import { BUILD_METADATA } from "./core/versioning/build-metadata.js";
+import { getBuildDiagnostics } from "./diagnostics/build-diagnostics.js";
+import { Logger } from "./diagnostics/logger.js";
+
+/**
+ * Domain Manager composition entrypoint.
+ *
+ * Settings are registered during `init`. Runtime services that depend on
+ * Foundry world collections are composed and authority is first resolved at
+ * `ready`, matching the approved authority lifecycle.
+ */
+
+const logger = new Logger("Domain Manager");
+let runtime: DomainManagerRuntime | null = null;
+
+function reconcileAuthority(): void {
+  const authority = runtime?.authority;
+  if (authority === undefined) return;
+
+  void authority.reconcile().catch((error: unknown) => {
+    logger.error("Primary Authority reconciliation failed", {
+      error: error instanceof Error ? error.message : String(error)
+    });
+  });
+}
+
+Hooks.once("init", () => {
+  registerFoundryPrimaryAuthoritySettings({
+    onPreferredChanged: reconcileAuthority,
+    onAuthorityStateChanged: (value) => {
+      try {
+        runtime?.authority.synchronizePersistedState(value);
+      } catch (error) {
+        logger.error("Primary Authority state synchronization failed", {
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+  });
+
+  logger.info("init");
+});
+
+Hooks.once("ready", () => {
+  runtime = composeDomainManagerRuntime();
+  reconcileAuthority();
+
+  // If this host is the elected Primary Authority at startup, run recovery scan
+  if (runtime.authority.service.isCurrentUser()) {
+    const currentEpoch = runtime.authority.service.getStatus().authorityEpoch;
+    void runtime.recovery
+      .scanOnStartup(currentEpoch)
+      .then((unresolved) => {
+        if (unresolved.length > 0) {
+          logger.warn(
+            `Startup recovery scan discovered ${unresolved.length} unresolved transactions`,
+            { unresolvedCount: unresolved.length }
+          );
+        }
+      })
+      .catch((error: unknown) => {
+        logger.error("Startup recovery scan failed", {
+          error: error instanceof Error ? error.message : String(error)
+        });
+      });
+  }
+
+  Hooks.on("userConnected", () => {
+    reconcileAuthority();
+  });
+
+  logger.info("ready", BUILD_METADATA);
+  logger.info("build diagnostics", getBuildDiagnostics());
+  logger.info("runtime composed", {
+    domains: runtime.domains.constructor.name,
+    authority: runtime.authority.service.getStatus(),
+    g2Diagnostics: runtime.diagnostics.getSnapshot()
+  });
+});
