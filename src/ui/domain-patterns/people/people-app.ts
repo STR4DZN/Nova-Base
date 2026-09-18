@@ -98,7 +98,7 @@ export class PeopleApplicationController {
   }
 
   async #executeCommand<T>(cmd: DomainCommand<T>): Promise<Result<unknown>> {
-    const res = await this.#commandBus.executeLocal(cmd);
+    const res = await this.#commandBus.execute(cmd);
     if (!res.ok) return res;
     if (res.value.status === "rejected") {
       return err(
@@ -537,4 +537,223 @@ export class PeopleApplicationController {
 
     return `<div class="dm-inspector-empty">Unknown entity type.</div>`;
   }
+
+  openCreateModal(createType: string): { readonly type: string; readonly html: string } {
+    const html = this.renderCreateModal(createType);
+    return { type: createType, html };
+  }
+
+  renderCreateModal(createType: string): string {
+    switch (createType) {
+      case "notables":
+        return `
+          <div class="dm-modal dm-create-notable-modal" data-modal-type="notable">
+            <h3>Create Notable</h3>
+            <form data-action="submitCreate" data-create-type="notable">
+              <label>Name: <input type="text" name="name" required /></label>
+              <label>Type: 
+                <select name="type">
+                  <option value="inline">Inline</option>
+                  <option value="actor">Actor</option>
+                </select>
+              </label>
+              <label>Actor UUID (optional): <input type="text" name="actorUuid" /></label>
+              <label>Description: <textarea name="description"></textarea></label>
+              <label>Visibility:
+                <select name="visibility">
+                  <option value="public">Public</option>
+                  <option value="secret">Secret</option>
+                </select>
+              </label>
+              <button type="submit" class="dm-btn dm-btn-primary">Create</button>
+            </form>
+          </div>
+        `;
+      case "roles":
+        return `
+          <div class="dm-modal dm-create-role-modal" data-modal-type="role">
+            <h3>Create Role</h3>
+            <form data-action="submitCreate" data-create-type="role">
+              <label>Title/Label: <input type="text" name="name" required /></label>
+              <label>Definition ID: <input type="text" name="definitionId" required /></label>
+              <label>Scope:
+                <select name="scope">
+                  <option value="domain">Domain</option>
+                  <option value="operational-group">Operational Group</option>
+                </select>
+              </label>
+              <button type="submit" class="dm-btn dm-btn-primary">Create</button>
+            </form>
+          </div>
+        `;
+      case "operationalGroups":
+        return `
+          <div class="dm-modal dm-create-group-modal" data-modal-type="group">
+            <h3>Create Operational Group</h3>
+            <form data-action="submitCreate" data-create-type="group">
+              <label>Name: <input type="text" name="name" required /></label>
+              <label>Type: <input type="text" name="type" required /></label>
+              <label>Membership Mode:
+                <select name="membershipMode">
+                  <option value="abstract">Abstract</option>
+                  <option value="explicit">Explicit</option>
+                </select>
+              </label>
+              <button type="submit" class="dm-btn dm-btn-primary">Create</button>
+            </form>
+          </div>
+        `;
+      default:
+        return `
+          <div class="dm-modal dm-create-default-modal">
+            <h3>Create ${escapeHtml(createType)}</h3>
+            <form data-action="submitCreate" data-create-type="${escapeAttribute(createType)}">
+              <label>Name: <input type="text" name="name" required /></label>
+              <button type="submit" class="dm-btn dm-btn-primary">Create</button>
+            </form>
+          </div>
+        `;
+    }
+  }
 }
+
+const BaseApp =
+  (globalThis as any).foundry?.applications?.api?.ApplicationV2 ??
+  class MockApplicationV2 {
+    options: any;
+    constructor(options: any = {}) {
+      this.options = options;
+    }
+    async render(force?: boolean): Promise<this> {
+      return this;
+    }
+    async close(): Promise<void> {}
+  };
+
+/**
+ * Foundry VTT V13 ApplicationV2 implementation for People & Governance.
+ */
+export class PeopleApplication extends BaseApp {
+  static DEFAULT_OPTIONS = {
+    id: "domain-manager-people-{id}",
+    classes: ["domain-manager", "dm-people-app-v2"],
+    tag: "div",
+    window: {
+      title: "People & Governance",
+      icon: "fas fa-users-crown",
+      resizable: true,
+      minimizable: true
+    },
+    position: {
+      width: 820,
+      height: 640
+    },
+    actions: {
+      selectTab: PeopleApplication.#onSelectTab,
+      selectEntity: PeopleApplication.#onSelectEntity,
+      openCreateModal: PeopleApplication.#onOpenCreateModal,
+      submitCreate: PeopleApplication.#onSubmitCreate
+    }
+  };
+
+  readonly #controller: PeopleApplicationController;
+  #element: HTMLElement | null = null;
+
+  constructor(options: PeopleAppOptions) {
+    super(options);
+    this.#controller = new PeopleApplicationController(options);
+  }
+
+  get controller(): PeopleApplicationController {
+    return this.#controller;
+  }
+
+  async _prepareContext(options?: any): Promise<{ viewModel: PeopleSubsystemViewModel | null; error: any }> {
+    const vmRes = await this.#controller.loadViewModel();
+    return {
+      viewModel: vmRes.ok ? vmRes.value : null,
+      error: !vmRes.ok ? vmRes.error : null
+    };
+  }
+
+  _renderHTML(context: any, options?: any): string {
+    if (context.error) {
+      return `<div class="dm-error-state">${escapeHtml(context.error.message)}</div>`;
+    }
+    return this.#controller.render(context.viewModel);
+  }
+
+  attachEventListeners(element: HTMLElement): void {
+    this.#element = element;
+    element.addEventListener("click", async (event) => {
+      const target = (event.target as HTMLElement).closest?.("[data-action]") as HTMLElement | null;
+      if (!target) return;
+      const action = target.getAttribute("data-action");
+
+      if (action === "selectTab") {
+        const tab = target.getAttribute("data-tab") as PeopleTab;
+        if (tab) {
+          this.#controller.selectTab(tab);
+          const vmRes = await this.#controller.loadViewModel();
+          if (vmRes.ok) {
+            element.innerHTML = this.#controller.render(vmRes.value);
+          }
+        }
+      } else if (action === "selectEntity") {
+        const type = target.getAttribute("data-entity-type") as SelectedEntity["type"];
+        const id = target.getAttribute("data-entity-id");
+        if (type && id) {
+          this.#controller.selectEntity(type, id);
+          const vmRes = await this.#controller.loadViewModel();
+          if (vmRes.ok) {
+            element.innerHTML = this.#controller.render(vmRes.value);
+          }
+        }
+      } else if (action === "openCreateModal") {
+        const createType = target.getAttribute("data-create-type") ?? this.#controller.activeTab;
+        this.openCreateModal(createType);
+      }
+    });
+  }
+
+  openCreateModal(createType: string): { readonly type: string; readonly html: string } {
+    const modal = this.#controller.openCreateModal(createType);
+    if (this.#element) {
+      const modalContainer = (globalThis as any).document?.createElement?.("div");
+      if (modalContainer) {
+        modalContainer.className = "dm-modal-backdrop";
+        modalContainer.innerHTML = modal.html;
+        this.#element.appendChild(modalContainer);
+      }
+    }
+    return modal;
+  }
+
+  static async #onSelectTab(this: PeopleApplication, event: Event, target: HTMLElement): Promise<void> {
+    const tab = target.getAttribute("data-tab") as PeopleTab;
+    if (tab) {
+      this.#controller.selectTab(tab);
+      await (this as any).render?.();
+    }
+  }
+
+  static async #onSelectEntity(this: PeopleApplication, event: Event, target: HTMLElement): Promise<void> {
+    const type = target.getAttribute("data-entity-type") as SelectedEntity["type"];
+    const id = target.getAttribute("data-entity-id");
+    if (type && id) {
+      this.#controller.selectEntity(type, id);
+      await (this as any).render?.();
+    }
+  }
+
+  static async #onOpenCreateModal(this: PeopleApplication, event: Event, target: HTMLElement): Promise<void> {
+    const createType = target.getAttribute("data-create-type") ?? this.#controller.activeTab;
+    this.openCreateModal(createType);
+  }
+
+  static async #onSubmitCreate(this: PeopleApplication, event: Event, target: HTMLElement): Promise<void> {
+    await this.#controller.loadViewModel();
+    await (this as any).render?.();
+  }
+}
+

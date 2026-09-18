@@ -29,6 +29,7 @@ import {
 } from "../notables/notable-types.js";
 import { createOpaqueId, isOpaqueId } from "../../core/identity/ids.js";
 import { isActorUuid } from "../../core/identity/refs.js";
+import { validatePeopleCommandPermission } from "./people-permissions.js";
 
 export interface CreateNotablePayload {
   readonly domainUuid: string;
@@ -66,19 +67,6 @@ export interface DeleteNotablePayload {
 
 function resolveDomainId(domainUuid: string): string {
   return domainUuid.startsWith("JournalEntry.") ? domainUuid.slice("JournalEntry.".length) : domainUuid;
-}
-
-function requireGmPermission(ctx: AuthenticatedCommandContext): Result<boolean, PublicError> {
-  if (ctx.senderUserId !== null && ctx.senderUserId !== ctx.authorityUserId) {
-    return err(
-      createPublicError({
-        code: "DM_SECURITY_PERMISSION_DENIED",
-        category: "permission",
-        message: "Only GM can execute notable commands"
-      })
-    );
-  }
-  return ok(true);
 }
 
 export function registerNotableCommandHandlers(
@@ -218,7 +206,7 @@ export function registerNotableCommandHandlers(
       }
       return ok(payload as CreateNotablePayload);
     },
-    permissionValidator: requireGmPermission
+    permissionValidator: (ctx) => validatePeopleCommandPermission(ctx, domains)
   });
 
   // 2. people:update-notable
@@ -413,7 +401,7 @@ export function registerNotableCommandHandlers(
       }
       return ok(payload as UpdateNotablePayload);
     },
-    permissionValidator: requireGmPermission
+    permissionValidator: (ctx) => validatePeopleCommandPermission(ctx, domains)
   });
 
   // 3. people:delete-notable
@@ -540,7 +528,7 @@ export function registerNotableCommandHandlers(
       }
       return ok(payload as DeleteNotablePayload);
     },
-    permissionValidator: requireGmPermission
+    permissionValidator: (ctx) => validatePeopleCommandPermission(ctx, domains)
   });
 }
 

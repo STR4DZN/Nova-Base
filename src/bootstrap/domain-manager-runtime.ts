@@ -26,7 +26,10 @@ import { registerNotableCommandHandlers } from "../people/commands/notable-comma
 import { registerRoleCommandHandlers } from "../people/commands/role-commands.js";
 import { registerOperationalGroupCommandHandlers } from "../people/commands/operational-group-commands.js";
 import { registerAssignmentCommandHandlers } from "../people/commands/assignment-commands.js";
-import { PeopleService, type AdminPeopleApi, type PublicPeopleApi } from "../people/services/people-service.js";
+import { registerRepairCommandHandlers } from "../people/commands/repair-commands.js";
+import { PeopleService, type PublicPeopleApi } from "../people/services/people-service.js";
+import { PeopleRepairTool } from "../people/services/people-repair-tool.js";
+import { PeopleApplication, PeopleApplicationController } from "../ui/domain-patterns/people/people-app.js";
 import {
   G2DiagnosticsProvider,
   type G2DiagnosticsSnapshot
@@ -52,9 +55,7 @@ export interface DomainManagerRuntime {
   readonly transactionStore: TransactionStore;
   readonly diagnostics: G2DiagnosticsProvider;
   readonly people: PublicPeopleApi;
-  readonly admin: {
-    readonly people: AdminPeopleApi;
-  };
+  readonly repairTool: PeopleRepairTool;
   destroy(): void;
 }
 
@@ -91,6 +92,7 @@ export function composeDomainManagerRuntime(
   registerRoleCommandHandlers(registry, coordinator, mutableDomainRepo);
   registerOperationalGroupCommandHandlers(registry, coordinator, mutableDomainRepo);
   registerAssignmentCommandHandlers(registry, coordinator, mutableDomainRepo);
+  registerRepairCommandHandlers(registry, coordinator, mutableDomainRepo);
   registry.freeze();
 
   const commandQueue = options.commandQueue ?? new CommandQueue({ maxConcurrency: 10 });
@@ -139,7 +141,8 @@ export function composeDomainManagerRuntime(
     }
   });
 
-  const people = new PeopleService(readOnlyDomains);
+  const people = new PeopleService(readOnlyDomains, { commandBus });
+  const repairTool = new PeopleRepairTool(commandBus);
 
   return Object.freeze({
     // G2-AUD-008: Read-only facade exposed publicly
@@ -154,9 +157,7 @@ export function composeDomainManagerRuntime(
     transactionStore,
     diagnostics,
     people,
-    admin: Object.freeze({
-      people: people.asAdmin()
-    }),
+    repairTool,
     destroy: () => {
       commandBus.destroy();
       if ("destroy" in transport && typeof (transport as any).destroy === "function") {
@@ -166,3 +167,8 @@ export function composeDomainManagerRuntime(
     }
   });
 }
+
+export { PeopleRepairTool } from "../people/services/people-repair-tool.js";
+export { PeopleApplication, PeopleApplicationController } from "../ui/domain-patterns/people/people-app.js";
+export { PeopleService, type PublicPeopleApi } from "../people/services/people-service.js";
+

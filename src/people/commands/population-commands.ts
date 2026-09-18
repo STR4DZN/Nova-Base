@@ -29,6 +29,7 @@ import {
   type PopulationState
 } from "../population/population-types.js";
 import { createOpaqueId, isOpaqueId } from "../../core/identity/ids.js";
+import { validatePeopleCommandPermission } from "./people-permissions.js";
 
 export interface SetPopulationPayload {
   readonly domainUuid: string;
@@ -79,19 +80,6 @@ export interface DeletePopulationGroupPayload {
 
 function resolveDomainId(domainUuid: string): string {
   return domainUuid.startsWith("JournalEntry.") ? domainUuid.slice("JournalEntry.".length) : domainUuid;
-}
-
-function requireGmPermission(ctx: AuthenticatedCommandContext): Result<boolean, PublicError> {
-  if (ctx.senderUserId !== null && ctx.senderUserId !== ctx.authorityUserId) {
-    return err(
-      createPublicError({
-        code: "DM_SECURITY_PERMISSION_DENIED",
-        category: "permission",
-        message: "Only GM can execute population commands"
-      })
-    );
-  }
-  return ok(true);
 }
 
 export function registerPopulationCommandHandlers(
@@ -194,7 +182,7 @@ export function registerPopulationCommandHandlers(
       if (!val.ok) return val;
       return ok(payload as SetPopulationPayload);
     },
-    permissionValidator: requireGmPermission
+    permissionValidator: (ctx) => validatePeopleCommandPermission(ctx, domains)
   });
 
   // 2. people:create-population-group
@@ -329,7 +317,7 @@ export function registerPopulationCommandHandlers(
       }
       return ok(payload as CreatePopulationGroupPayload);
     },
-    permissionValidator: requireGmPermission
+    permissionValidator: (ctx) => validatePeopleCommandPermission(ctx, domains)
   });
 
   // 3. people:update-population-group
@@ -469,7 +457,7 @@ export function registerPopulationCommandHandlers(
       }
       return ok(payload as UpdatePopulationGroupPayload);
     },
-    permissionValidator: requireGmPermission
+    permissionValidator: (ctx) => validatePeopleCommandPermission(ctx, domains)
   });
 
   // 4. people:delete-population-group
@@ -584,6 +572,6 @@ export function registerPopulationCommandHandlers(
       }
       return ok(payload as DeletePopulationGroupPayload);
     },
-    permissionValidator: requireGmPermission
+    permissionValidator: (ctx) => validatePeopleCommandPermission(ctx, domains)
   });
 }

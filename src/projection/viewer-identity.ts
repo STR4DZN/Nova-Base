@@ -29,25 +29,31 @@ export function resolveCurrentViewer(
   if (current) {
     const realIsGm = Boolean((current as any).isGM ?? (current as any).isGm);
     const realUserId = String((current as any).id ?? (current as any).userId ?? "anonymous");
+    const trustedRestrictedRefs = (current as any).allowedRestrictedRefs as readonly string[] | undefined;
 
-    // Security: Caller CANNOT escalate isGm if real authenticated user is NOT a GM!
-    const effectiveIsGm = realIsGm ? (callerSuppliedViewer?.isGm ?? true) : false;
-    const effectiveUserId = callerSuppliedViewer?.userId ?? realUserId;
-    const effectiveAllowedRestrictedRefs =
-      callerSuppliedViewer?.allowedRestrictedRefs ?? (current as any).allowedRestrictedRefs;
+    if (!realIsGm) {
+      // Security: Non-GM caller CANNOT escalate clearance, spoof another user, or supply arbitrary allowedRestrictedRefs
+      return Object.freeze({
+        userId: realUserId,
+        isGm: false,
+        allowedRestrictedRefs: trustedRestrictedRefs ? Object.freeze([...trustedRestrictedRefs]) : Object.freeze([])
+      });
+    }
 
+    // GM caller: GM has full clearance, but can optionally narrow their own view for testing/simulation
     return Object.freeze({
-      userId: effectiveUserId,
-      isGm: effectiveIsGm,
-      allowedRestrictedRefs: effectiveAllowedRestrictedRefs
+      userId: callerSuppliedViewer?.userId ?? realUserId,
+      isGm: callerSuppliedViewer?.isGm ?? true,
+      allowedRestrictedRefs: callerSuppliedViewer?.allowedRestrictedRefs ?? trustedRestrictedRefs
     });
   }
 
-  // Headless / Test environment without authenticated user context:
-  // Default is FAIL-CLOSED: isGm is false unless explicitly specified
+  // Headless / fallback without configured provider: fail-closed by default
   return Object.freeze({
     userId: callerSuppliedViewer?.userId ?? "anonymous",
     isGm: callerSuppliedViewer?.isGm === true,
     allowedRestrictedRefs: callerSuppliedViewer?.allowedRestrictedRefs
+      ? Object.freeze([...callerSuppliedViewer.allowedRestrictedRefs])
+      : Object.freeze([])
   });
 }

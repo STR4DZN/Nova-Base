@@ -30,6 +30,7 @@ import {
   type RoleVisibility
 } from "../roles/role-types.js";
 import { createOpaqueId, isOpaqueId } from "../../core/identity/ids.js";
+import { validatePeopleCommandPermission } from "./people-permissions.js";
 
 export interface CreateRolePayload {
   readonly domainUuid: string;
@@ -68,19 +69,6 @@ export interface DeleteRolePayload {
 
 function resolveDomainId(domainUuid: string): string {
   return domainUuid.startsWith("JournalEntry.") ? domainUuid.slice("JournalEntry.".length) : domainUuid;
-}
-
-function requireGmPermission(ctx: AuthenticatedCommandContext): Result<boolean, PublicError> {
-  if (ctx.senderUserId !== null && ctx.senderUserId !== ctx.authorityUserId) {
-    return err(
-      createPublicError({
-        code: "DM_SECURITY_PERMISSION_DENIED",
-        category: "permission",
-        message: "Only GM can execute role commands"
-      })
-    );
-  }
-  return ok(true);
 }
 
 export function registerRoleCommandHandlers(
@@ -261,7 +249,7 @@ export function registerRoleCommandHandlers(
       }
       return ok(payload as CreateRolePayload);
     },
-    permissionValidator: requireGmPermission
+    permissionValidator: (ctx) => validatePeopleCommandPermission(ctx, domains)
   });
 
   // 2. people:assign-role
@@ -459,7 +447,7 @@ export function registerRoleCommandHandlers(
       }
       return ok(payload as AssignRolePayload);
     },
-    permissionValidator: requireGmPermission
+    permissionValidator: (ctx) => validatePeopleCommandPermission(ctx, domains)
   });
 
   // 3. people:unassign-role
@@ -608,7 +596,7 @@ export function registerRoleCommandHandlers(
       }
       return ok(payload as UnassignRolePayload);
     },
-    permissionValidator: requireGmPermission
+    permissionValidator: (ctx) => validatePeopleCommandPermission(ctx, domains)
   });
 
   // 4. people:delete-role
@@ -723,7 +711,7 @@ export function registerRoleCommandHandlers(
       }
       return ok(payload as DeleteRolePayload);
     },
-    permissionValidator: requireGmPermission
+    permissionValidator: (ctx) => validatePeopleCommandPermission(ctx, domains)
   });
 }
 

@@ -17,7 +17,8 @@ import {
   sanitizeTransportReceiptForPublic,
   type TransportInboundContext,
   type TransportInboundMessage,
-  type TransportReceipt
+  type TransportReceipt,
+  type TransportSendOptions
 } from "./command-transport.js";
 import { RateLimiter } from "./rate-limiter.js";
 import {
@@ -364,7 +365,7 @@ export class CommandBus {
 
     // 9. Permission Validation (Master §11.2, DEC-573–582)
     if (registration.permissionValidator) {
-      const permResult = registration.permissionValidator(context);
+      const permResult = await registration.permissionValidator(context);
       if (!permResult.ok) {
         this.#rateLimiter.recordAbuse(
           context.senderUserId,
@@ -498,7 +499,7 @@ export class CommandBus {
             const receipt = coordRes.value;
             finalReceipt = {
               commandId: command.commandId,
-              status: receipt.status === "executed" ? "executed" : "rejected",
+              status: receipt.status === "rejected" ? "rejected" : "executed",
               result: receipt.result as TResponse,
               error: receipt.error,
               transportTimestamp: now
@@ -566,6 +567,33 @@ export class CommandBus {
   }
 
   /**
+   * Universal command execution entrypoint for all clients and UI.
+   *
+   * If running on the Primary Authority host, executes directly via executeLocal.
+   * If running on a remote client (e.g. Player), transmits to the Primary Authority via transport.send().
+   */
+  async execute<TPayload, TResult = unknown>(
+    command: DomainCommand<TPayload>,
+    options?: TransportSendOptions
+  ): Promise<Result<TransportReceipt<TResult>, PublicError>> {
+    if (this.#authorityService.isCurrentUser()) {
+      return this.executeLocal<TPayload, TResult>(command, { type: "user" });
+    }
+
+    if (!this.#transport) {
+      return err(
+        createPublicError({
+          code: "DM_TRANSPORT_NOT_CONFIGURED",
+          category: "internal",
+          message: "No transport configured to transmit command to Primary Authority"
+        })
+      );
+    }
+
+    return this.#transport.send<TPayload, TResult>(command, options);
+  }
+
+  /**
    * Executes a command within the local authority host context (e.g. ticks, internal orchestration).
    *
    * Enforces G2-AUD-005 (authority host guard) and G2-AUD-006 (trusted provenance preservation).
@@ -592,8 +620,9 @@ export class CommandBus {
       } as TransportReceipt<TResult>);
     }
 
+    const authorityUserId = this.#authorityService.getStatus().authorityUserId ?? null;
     const inboundContext: TransportInboundContext = {
-      senderUserId: null,
+      senderUserId: source.type === "user" ? authorityUserId : null,
       transportName: "local",
       receivedAtReal: Date.now(),
       operationSource: source

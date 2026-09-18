@@ -16,7 +16,7 @@ export type CommandSchemaValidator<TPayload = unknown> = (
 
 export type CommandPermissionValidator<TPayload = unknown> = (
   context: AuthenticatedCommandContext<TPayload>
-) => Result<boolean, PublicError>;
+) => Result<boolean, PublicError> | Promise<Result<boolean, PublicError>>;
 
 export interface CommandRegistration<TPayload = unknown, TResult = unknown> {
   readonly type: string;

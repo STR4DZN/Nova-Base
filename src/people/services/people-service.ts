@@ -14,16 +14,14 @@ import type { DomainRecord } from "../../domains/domain-schema.js";
 import { resolvePeopleEffectiveCapabilities, type DomainEffectiveCapabilitiesReport } from "../../aggregation/people-grants.js";
 import { buildPeopleViewModel, type PeoplePresenterOptions, type PeopleSubsystemViewModel } from "../../ui/domain-patterns/people/people-presenter.js";
 import { renderPeopleSubsystemHtml } from "../../ui/domain-patterns/people/people-view.js";
+import { PeopleApplication } from "../../ui/domain-patterns/people/people-app.js";
+import type { CommandBus } from "../../commands/command-bus.js";
 import { ok, type Result } from "../../core/contracts/result.js";
 
 export interface PeopleServiceOptions {
   readonly roleDefinitions?: readonly RoleDefinition[];
   readonly groupDefinitions?: readonly OperationalGroupDefinition[];
-}
-
-export interface AdminPeopleApi {
-  getPeopleData(domainUuid: string): Promise<Result<DomainPeopleData>>;
-  readonly rawRepository: PeopleRepository;
+  readonly commandBus?: CommandBus;
 }
 
 export interface PublicPeopleApi {
@@ -112,10 +110,10 @@ export interface PublicPeopleApi {
     options?: PeopleAggregationQueryOptions
   ): Result<PeopleAggregateResult>;
 
-  getPeopleData(
-    domainUuid: string,
-    viewer?: Partial<ViewerIdentity>
-  ): Promise<Result<DomainPeopleData>>;
+  getAggregate(
+    rootDomainUuid: string,
+    options?: PeopleAggregationQueryOptions
+  ): Result<PeopleAggregateResult>;
 
   getEffectiveCapabilities(
     domainInput: { record: DomainRecord } | DomainRecord,
@@ -125,21 +123,27 @@ export interface PublicPeopleApi {
 
   buildViewModel(
     domainInput: { record: DomainRecord } | DomainRecord,
-    options: PeoplePresenterOptions
+    options?: Partial<PeoplePresenterOptions>
   ): PeopleSubsystemViewModel;
 
   renderSubsystemHtml(vm: PeopleSubsystemViewModel): string;
 
-  asAdmin(): AdminPeopleApi;
-  asAuthority(): AdminPeopleApi;
+  openApp?(
+    domainUuid: string,
+    options?: { viewer?: Partial<ViewerIdentity>; commandBus?: CommandBus }
+  ): PeopleApplication;
 }
 
 export class PeopleService implements PublicPeopleApi {
+  readonly #domains: DomainReadRepository;
+  readonly #commandBus?: CommandBus;
   readonly #repository: PeopleRepository;
   readonly #projection: PeopleProjectionService;
   readonly #aggregation: PeopleAggregationService;
 
   constructor(domains: DomainReadRepository, options: PeopleServiceOptions = {}) {
+    this.#domains = domains;
+    this.#commandBus = options.commandBus;
     this.#repository = new PeopleRepository(domains as any);
     this.#projection = new PeopleProjectionService({
       roleDefinitions: options.roleDefinitions,
@@ -148,17 +152,9 @@ export class PeopleService implements PublicPeopleApi {
     this.#aggregation = new PeopleAggregationService(domains);
   }
 
-  asAdmin(): AdminPeopleApi {
-    return {
-      getPeopleData: (domainUuid: string) => this.#repository.getPeopleData(domainUuid),
-      rawRepository: this.#repository
-    };
-  }
-
-  asAuthority(): AdminPeopleApi {
-    return this.asAdmin();
-  }
-
+  /**
+   * Internal/Authority-only raw people data access. Not part of PublicPeopleApi.
+   */
   async getPeopleData(
     domainUuid: string,
     callerViewer?: Partial<ViewerIdentity>
@@ -346,12 +342,36 @@ export class PeopleService implements PublicPeopleApi {
 
   buildViewModel(
     domainInput: { record: DomainRecord } | DomainRecord,
-    options: PeoplePresenterOptions
+    options: Partial<PeoplePresenterOptions> = {}
   ): PeopleSubsystemViewModel {
-    return buildPeopleViewModel(domainInput as any, options);
+    const viewer = resolveCurrentViewer();
+    // Security: Non-GM caller CANNOT elevate viewerIsGm to true!
+    const effectiveIsGm = viewer.isGm ? (options.viewerIsGm ?? true) : false;
+    return buildPeopleViewModel(domainInput as any, {
+      ...options,
+      viewerIsGm: effectiveIsGm,
+      allowedRestrictedRefs: viewer.allowedRestrictedRefs
+    });
   }
 
   renderSubsystemHtml(vm: PeopleSubsystemViewModel): string {
     return renderPeopleSubsystemHtml(vm);
+  }
+
+  openApp(
+    domainUuid: string,
+    options?: { viewer?: Partial<ViewerIdentity>; commandBus?: CommandBus }
+  ): PeopleApplication {
+    const bus = options?.commandBus ?? this.#commandBus;
+    if (!bus) {
+      throw new Error("CommandBus is required to open PeopleApplication");
+    }
+    return new PeopleApplication({
+      domainUuid,
+      commandBus: bus,
+      peopleApi: this,
+      domains: this.#domains,
+      viewer: options?.viewer
+    });
   }
 }

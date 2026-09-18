@@ -85,3 +85,9 @@ Hooks.once("ready", () => {
     g2Diagnostics: runtime.diagnostics.getSnapshot()
   });
 });
+
+export { composeDomainManagerRuntime, type DomainManagerRuntime } from "./bootstrap/domain-manager-runtime.js";
+export { PeopleApplication, PeopleApplicationController } from "./ui/domain-patterns/people/people-app.js";
+export { PeopleRepairTool } from "./people/services/people-repair-tool.js";
+export { PeopleService, type PublicPeopleApi } from "./people/services/people-service.js";
+

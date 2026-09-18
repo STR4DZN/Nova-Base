@@ -3431,6 +3431,9 @@ var DomainRepository = class {
 
 // src/commands/command-envelope.ts
 var COMMAND_CONTRACT_VERSION_V1 = 1;
+function createCommandId() {
+  return createOpaqueId("cmd");
+}
 function isCommandId(value) {
   return isOpaqueId(value, "cmd");
 }
@@ -4646,7 +4649,7 @@ var CommandBus = class {
       }
     }
     if (registration.permissionValidator) {
-      const permResult = registration.permissionValidator(context);
+      const permResult = await registration.permissionValidator(context);
       if (!permResult.ok) {
         this.#rateLimiter.recordAbuse(
           context.senderUserId,
@@ -4760,7 +4763,7 @@ var CommandBus = class {
             const receipt = coordRes.value;
             finalReceipt = {
               commandId: command.commandId,
-              status: receipt.status === "executed" ? "executed" : "rejected",
+              status: receipt.status === "rejected" ? "rejected" : "executed",
               result: receipt.result,
               error: receipt.error,
               transportTimestamp: now
@@ -4818,6 +4821,27 @@ var CommandBus = class {
     return ok(receiptToReturn);
   }
   /**
+   * Universal command execution entrypoint for all clients and UI.
+   *
+   * If running on the Primary Authority host, executes directly via executeLocal.
+   * If running on a remote client (e.g. Player), transmits to the Primary Authority via transport.send().
+   */
+  async execute(command, options) {
+    if (this.#authorityService.isCurrentUser()) {
+      return this.executeLocal(command, { type: "user" });
+    }
+    if (!this.#transport) {
+      return err(
+        createPublicError({
+          code: "DM_TRANSPORT_NOT_CONFIGURED",
+          category: "internal",
+          message: "No transport configured to transmit command to Primary Authority"
+        })
+      );
+    }
+    return this.#transport.send(command, options);
+  }
+  /**
    * Executes a command within the local authority host context (e.g. ticks, internal orchestration).
    *
    * Enforces G2-AUD-005 (authority host guard) and G2-AUD-006 (trusted provenance preservation).
@@ -4836,8 +4860,9 @@ var CommandBus = class {
         transportTimestamp: Date.now()
       });
     }
+    const authorityUserId = this.#authorityService.getStatus().authorityUserId ?? null;
     const inboundContext = {
-      senderUserId: null,
+      senderUserId: source.type === "user" ? authorityUserId : null,
       transportName: "local",
       receivedAtReal: Date.now(),
       operationSource: source
@@ -6371,21 +6396,66 @@ function registerDomainCommandHandlers(registry, coordinator, domains) {
   });
 }
 
-// src/people/commands/population-commands.ts
-function resolveDomainId(domainUuid) {
-  return domainUuid.startsWith("JournalEntry.") ? domainUuid.slice("JournalEntry.".length) : domainUuid;
-}
-function requireGmPermission(ctx) {
-  if (ctx.senderUserId !== null && ctx.senderUserId !== ctx.authorityUserId) {
+// src/people/commands/people-permissions.ts
+async function validatePeopleCommandPermission(ctx, domains, domainUuidExtractor) {
+  if (ctx.senderUserId === null || ctx.senderUserId === ctx.authorityUserId) {
+    return ok(true);
+  }
+  const gameUser = globalThis.game?.users?.get?.(ctx.senderUserId);
+  if (gameUser?.isGM) {
+    return ok(true);
+  }
+  const rawDomainUuid = (domainUuidExtractor ? domainUuidExtractor(ctx.command.payload) : void 0) ?? ctx.command.payload?.domainUuid ?? ctx.command.payload?.id;
+  if (typeof rawDomainUuid !== "string" || rawDomainUuid.trim().length === 0) {
     return err(
       createPublicError({
         code: "DM_SECURITY_PERMISSION_DENIED",
         category: "permission",
-        message: "Only GM can execute population commands"
+        message: "Permission denied: domain context required to verify authorization"
       })
     );
   }
-  return ok(true);
+  const cleanId = rawDomainUuid.startsWith("JournalEntry.") ? rawDomainUuid.slice("JournalEntry.".length) : rawDomainUuid;
+  const docRes = await domains.read(cleanId);
+  if (!docRes.ok) {
+    return err(
+      createPublicError({
+        code: "DM_SECURITY_PERMISSION_DENIED",
+        category: "permission",
+        message: "Permission denied: unable to resolve target domain authorization"
+      })
+    );
+  }
+  const doc = docRes.value;
+  const record = doc.record;
+  if (record.metadata?.createdByUserId === ctx.senderUserId) {
+    return ok(true);
+  }
+  const generalControllers = record.definition?.capabilities?.config?.controllers;
+  if (Array.isArray(generalControllers) && generalControllers.includes(ctx.senderUserId)) {
+    return ok(true);
+  }
+  const peopleConfig = record.definition?.capabilities?.config?.[PEOPLE_CAPABILITY_ID];
+  const peopleControllers = peopleConfig?.controllers;
+  if (Array.isArray(peopleControllers) && peopleControllers.includes(ctx.senderUserId)) {
+    return ok(true);
+  }
+  const docOwnership = doc.doc?.ownership ?? doc.flags?.ownership;
+  if (docOwnership && (docOwnership[ctx.senderUserId] >= 3 || docOwnership[ctx.senderUserId] === "owner")) {
+    return ok(true);
+  }
+  return err(
+    createPublicError({
+      code: "DM_SECURITY_PERMISSION_DENIED",
+      category: "permission",
+      message: `User '${ctx.senderUserId}' is not authorized to manage people in domain '${cleanId}'`
+    })
+  );
+}
+
+// src/people/commands/population-commands.ts
+function resolveDomainId(domainUuid) {
+  return domainUuid.startsWith("JournalEntry.") ? domainUuid.slice("JournalEntry.".length) : domainUuid;
 }
 function registerPopulationCommandHandlers(registry, coordinator, domains) {
   const setPopulationMutation = {
@@ -6479,7 +6549,7 @@ function registerPopulationCommandHandlers(registry, coordinator, domains) {
       if (!val.ok) return val;
       return ok(payload);
     },
-    permissionValidator: requireGmPermission
+    permissionValidator: (ctx) => validatePeopleCommandPermission(ctx, domains)
   });
   const createGroupMutation = {
     getLockKeys: (ctx) => [`domain:${resolveDomainId(ctx.command.payload?.domainUuid)}`],
@@ -6605,7 +6675,7 @@ function registerPopulationCommandHandlers(registry, coordinator, domains) {
       }
       return ok(payload);
     },
-    permissionValidator: requireGmPermission
+    permissionValidator: (ctx) => validatePeopleCommandPermission(ctx, domains)
   });
   const updateGroupMutation = {
     getLockKeys: (ctx) => [`domain:${resolveDomainId(ctx.command.payload?.domainUuid)}`],
@@ -6734,7 +6804,7 @@ function registerPopulationCommandHandlers(registry, coordinator, domains) {
       }
       return ok(payload);
     },
-    permissionValidator: requireGmPermission
+    permissionValidator: (ctx) => validatePeopleCommandPermission(ctx, domains)
   });
   const deleteGroupMutation = {
     getLockKeys: (ctx) => [`domain:${resolveDomainId(ctx.command.payload?.domainUuid)}`],
@@ -6842,25 +6912,13 @@ function registerPopulationCommandHandlers(registry, coordinator, domains) {
       }
       return ok(payload);
     },
-    permissionValidator: requireGmPermission
+    permissionValidator: (ctx) => validatePeopleCommandPermission(ctx, domains)
   });
 }
 
 // src/people/commands/notable-commands.ts
 function resolveDomainId2(domainUuid) {
   return domainUuid.startsWith("JournalEntry.") ? domainUuid.slice("JournalEntry.".length) : domainUuid;
-}
-function requireGmPermission2(ctx) {
-  if (ctx.senderUserId !== null && ctx.senderUserId !== ctx.authorityUserId) {
-    return err(
-      createPublicError({
-        code: "DM_SECURITY_PERMISSION_DENIED",
-        category: "permission",
-        message: "Only GM can execute notable commands"
-      })
-    );
-  }
-  return ok(true);
 }
 function registerNotableCommandHandlers(registry, coordinator, domains) {
   const createNotableMutation = {
@@ -6985,7 +7043,7 @@ function registerNotableCommandHandlers(registry, coordinator, domains) {
       }
       return ok(payload);
     },
-    permissionValidator: requireGmPermission2
+    permissionValidator: (ctx) => validatePeopleCommandPermission(ctx, domains)
   });
   const updateNotableMutation = {
     getLockKeys: (ctx) => [`domain:${resolveDomainId2(ctx.command.payload?.domainUuid)}`],
@@ -7165,7 +7223,7 @@ function registerNotableCommandHandlers(registry, coordinator, domains) {
       }
       return ok(payload);
     },
-    permissionValidator: requireGmPermission2
+    permissionValidator: (ctx) => validatePeopleCommandPermission(ctx, domains)
   });
   const deleteNotableMutation = {
     getLockKeys: (ctx) => [`domain:${resolveDomainId2(ctx.command.payload?.domainUuid)}`],
@@ -7283,25 +7341,13 @@ function registerNotableCommandHandlers(registry, coordinator, domains) {
       }
       return ok(payload);
     },
-    permissionValidator: requireGmPermission2
+    permissionValidator: (ctx) => validatePeopleCommandPermission(ctx, domains)
   });
 }
 
 // src/people/commands/role-commands.ts
 function resolveDomainId3(domainUuid) {
   return domainUuid.startsWith("JournalEntry.") ? domainUuid.slice("JournalEntry.".length) : domainUuid;
-}
-function requireGmPermission3(ctx) {
-  if (ctx.senderUserId !== null && ctx.senderUserId !== ctx.authorityUserId) {
-    return err(
-      createPublicError({
-        code: "DM_SECURITY_PERMISSION_DENIED",
-        category: "permission",
-        message: "Only GM can execute role commands"
-      })
-    );
-  }
-  return ok(true);
 }
 function registerRoleCommandHandlers(registry, coordinator, domains) {
   const createRoleMutation = {
@@ -7465,7 +7511,7 @@ function registerRoleCommandHandlers(registry, coordinator, domains) {
       }
       return ok(payload);
     },
-    permissionValidator: requireGmPermission3
+    permissionValidator: (ctx) => validatePeopleCommandPermission(ctx, domains)
   });
   const assignRoleMutation = {
     getLockKeys: (ctx) => [`domain:${resolveDomainId3(ctx.command.payload?.domainUuid)}`],
@@ -7645,7 +7691,7 @@ function registerRoleCommandHandlers(registry, coordinator, domains) {
       }
       return ok(payload);
     },
-    permissionValidator: requireGmPermission3
+    permissionValidator: (ctx) => validatePeopleCommandPermission(ctx, domains)
   });
   const unassignRoleMutation = {
     getLockKeys: (ctx) => [`domain:${resolveDomainId3(ctx.command.payload?.domainUuid)}`],
@@ -7782,7 +7828,7 @@ function registerRoleCommandHandlers(registry, coordinator, domains) {
       }
       return ok(payload);
     },
-    permissionValidator: requireGmPermission3
+    permissionValidator: (ctx) => validatePeopleCommandPermission(ctx, domains)
   });
   const deleteRoleMutation = {
     getLockKeys: (ctx) => [`domain:${resolveDomainId3(ctx.command.payload?.domainUuid)}`],
@@ -7890,25 +7936,13 @@ function registerRoleCommandHandlers(registry, coordinator, domains) {
       }
       return ok(payload);
     },
-    permissionValidator: requireGmPermission3
+    permissionValidator: (ctx) => validatePeopleCommandPermission(ctx, domains)
   });
 }
 
 // src/people/commands/operational-group-commands.ts
 function resolveDomainId4(domainUuid) {
   return domainUuid.startsWith("JournalEntry.") ? domainUuid.slice("JournalEntry.".length) : domainUuid;
-}
-function requireGmPermission4(ctx) {
-  if (ctx.senderUserId !== null && ctx.senderUserId !== ctx.authorityUserId) {
-    return err(
-      createPublicError({
-        code: "DM_SECURITY_PERMISSION_DENIED",
-        category: "permission",
-        message: "Only GM can execute operational group commands"
-      })
-    );
-  }
-  return ok(true);
 }
 function registerOperationalGroupCommandHandlers(registry, coordinator, domains) {
   const createOperationalGroupMutation = {
@@ -8054,7 +8088,7 @@ function registerOperationalGroupCommandHandlers(registry, coordinator, domains)
       }
       return ok(payload);
     },
-    permissionValidator: requireGmPermission4
+    permissionValidator: (ctx) => validatePeopleCommandPermission(ctx, domains)
   });
   const updateOperationalGroupMutation = {
     getLockKeys: (ctx) => [`domain:${resolveDomainId4(ctx.command.payload?.domainUuid)}`],
@@ -8224,7 +8258,7 @@ function registerOperationalGroupCommandHandlers(registry, coordinator, domains)
       }
       return ok(payload);
     },
-    permissionValidator: requireGmPermission4
+    permissionValidator: (ctx) => validatePeopleCommandPermission(ctx, domains)
   });
   const deleteOperationalGroupMutation = {
     getLockKeys: (ctx) => [`domain:${resolveDomainId4(ctx.command.payload?.domainUuid)}`],
@@ -8332,7 +8366,7 @@ function registerOperationalGroupCommandHandlers(registry, coordinator, domains)
       }
       return ok(payload);
     },
-    permissionValidator: requireGmPermission4
+    permissionValidator: (ctx) => validatePeopleCommandPermission(ctx, domains)
   });
 }
 
@@ -8383,18 +8417,6 @@ function getSourceCapacity(people, sourceRef, workforceTypeId, nowReal = Date.no
 }
 function resolveDomainId5(domainUuid) {
   return domainUuid.startsWith("JournalEntry.") ? domainUuid.slice("JournalEntry.".length) : domainUuid;
-}
-function requireGmPermission5(ctx) {
-  if (ctx.senderUserId !== null && ctx.senderUserId !== ctx.authorityUserId) {
-    return err(
-      createPublicError({
-        code: "DM_SECURITY_PERMISSION_DENIED",
-        category: "permission",
-        message: "Only GM can execute workforce assignment commands"
-      })
-    );
-  }
-  return ok(true);
 }
 function registerAssignmentCommandHandlers(registry, coordinator, domains) {
   const createAssignmentMutation = {
@@ -8555,7 +8577,7 @@ function registerAssignmentCommandHandlers(registry, coordinator, domains) {
       }
       return ok(payload);
     },
-    permissionValidator: requireGmPermission5
+    permissionValidator: (ctx) => validatePeopleCommandPermission(ctx, domains)
   });
   const cancelAssignmentMutation = {
     getLockKeys: (ctx) => [`domain:${resolveDomainId5(ctx.command.payload?.domainUuid)}`],
@@ -8663,7 +8685,7 @@ function registerAssignmentCommandHandlers(registry, coordinator, domains) {
       }
       return ok(payload);
     },
-    permissionValidator: requireGmPermission5
+    permissionValidator: (ctx) => validatePeopleCommandPermission(ctx, domains)
   });
   const createReservationMutation = {
     getLockKeys: (ctx) => [`domain:${resolveDomainId5(ctx.command.payload?.domainUuid)}`],
@@ -8820,7 +8842,7 @@ function registerAssignmentCommandHandlers(registry, coordinator, domains) {
       }
       return ok(payload);
     },
-    permissionValidator: requireGmPermission5
+    permissionValidator: (ctx) => validatePeopleCommandPermission(ctx, domains)
   });
   const releaseReservationMutation = {
     getLockKeys: (ctx) => [`domain:${resolveDomainId5(ctx.command.payload?.domainUuid)}`],
@@ -8928,7 +8950,279 @@ function registerAssignmentCommandHandlers(registry, coordinator, domains) {
       }
       return ok(payload);
     },
-    permissionValidator: requireGmPermission5
+    permissionValidator: (ctx) => validatePeopleCommandPermission(ctx, domains)
+  });
+}
+
+// src/people/commands/repair-commands.ts
+function resolveDomainId6(domainUuid) {
+  return domainUuid.startsWith("JournalEntry.") ? domainUuid.slice("JournalEntry.".length) : domainUuid;
+}
+function requireGmOnlyPermission(ctx) {
+  if (ctx.senderUserId === null || ctx.senderUserId === ctx.authorityUserId) {
+    return ok(true);
+  }
+  const gameUser = globalThis.game?.users?.get?.(ctx.senderUserId);
+  if (gameUser?.isGM) {
+    return ok(true);
+  }
+  return err(
+    createPublicError({
+      code: "DM_SECURITY_PERMISSION_DENIED",
+      category: "permission",
+      message: "Only Game Master or Primary Authority can execute domain repair operations"
+    })
+  );
+}
+function registerRepairCommandHandlers(registry, coordinator, domains) {
+  const repairMutation = {
+    getLockKeys: (ctx) => [`domain:${resolveDomainId6(ctx.command.payload?.domainUuid)}`],
+    freshRead: async (ctx) => {
+      const readRes = await domains.read(resolveDomainId6(ctx.command.payload.domainUuid));
+      if (!readRes.ok) return readRes;
+      return ok({
+        revision: readRes.value.record.revision,
+        state: readRes.value
+      });
+    },
+    buildPlan: async (ctx, freshState) => {
+      const domainDoc = freshState.state;
+      const currentPeople = getDomainPeopleData(domainDoc.record);
+      const { operation } = ctx.command.payload;
+      const changes = [];
+      let repairedPeople = null;
+      let summary = "";
+      switch (operation.type) {
+        case "relink-notable": {
+          const { oldNotableId, newNotableId } = operation;
+          let changed = false;
+          const updatedRoles = currentPeople.roles.map((r) => {
+            if (r.occupants.includes(oldNotableId)) {
+              changed = true;
+              const newOccupants = r.occupants.map((occ) => occ === oldNotableId ? newNotableId : occ);
+              const uniqueOccupants = Object.freeze([...new Set(newOccupants)]);
+              changes.push(`Role '${r.id}': relinked occupant '${oldNotableId}' -> '${newNotableId}'`);
+              return { ...r, occupants: uniqueOccupants };
+            }
+            return r;
+          });
+          const updatedGroups = currentPeople.operationalGroups.map((g) => {
+            if (g.members.includes(oldNotableId)) {
+              changed = true;
+              const newMembers = g.members.map((m) => m === oldNotableId ? newNotableId : m);
+              const uniqueMembers = Object.freeze([...new Set(newMembers)]);
+              changes.push(`Operational Group '${g.id}': relinked member '${oldNotableId}' -> '${newNotableId}'`);
+              return { ...g, members: uniqueMembers };
+            }
+            return g;
+          });
+          summary = `Relink notable '${oldNotableId}' -> '${newNotableId}'`;
+          if (changed) {
+            repairedPeople = {
+              ...currentPeople,
+              roles: Object.freeze(updatedRoles),
+              operationalGroups: Object.freeze(updatedGroups)
+            };
+          }
+          break;
+        }
+        case "purge-dangling-occupants": {
+          const validNotableIds = new Set(currentPeople.notables.map((n) => n.id));
+          let changed = false;
+          const updatedRoles = currentPeople.roles.map((r) => {
+            const validOccupants = r.occupants.filter((occId) => validNotableIds.has(occId));
+            if (validOccupants.length !== r.occupants.length) {
+              changed = true;
+              const purgedCount = r.occupants.length - validOccupants.length;
+              changes.push(`Role '${r.id}': purged ${purgedCount} dangling occupant(s)`);
+              return { ...r, occupants: Object.freeze(validOccupants) };
+            }
+            return r;
+          });
+          const updatedGroups = currentPeople.operationalGroups.map((g) => {
+            const validMembers = g.members.filter((mId) => validNotableIds.has(mId));
+            if (validMembers.length !== g.members.length) {
+              changed = true;
+              const purgedCount = g.members.length - validMembers.length;
+              changes.push(`Operational Group '${g.id}': purged ${purgedCount} dangling member(s)`);
+              const newSize = g.membershipMode === "explicit" ? validMembers.length : g.size;
+              return { ...g, members: Object.freeze(validMembers), size: newSize };
+            }
+            return g;
+          });
+          summary = "Purge dangling role occupants and group members";
+          if (changed) {
+            repairedPeople = {
+              ...currentPeople,
+              roles: Object.freeze(updatedRoles),
+              operationalGroups: Object.freeze(updatedGroups)
+            };
+          }
+          break;
+        }
+        case "repair-explicit-group-sizes": {
+          let changed = false;
+          const updatedGroups = currentPeople.operationalGroups.map((g) => {
+            if (g.membershipMode === "explicit" && g.size !== g.members.length) {
+              changed = true;
+              changes.push(`Operational Group '${g.id}' (${g.name}): aligned size from ${g.size} to ${g.members.length}`);
+              return { ...g, size: g.members.length };
+            }
+            return g;
+          });
+          summary = "Repair explicit operational group sizes to match member counts";
+          if (changed) {
+            repairedPeople = {
+              ...currentPeople,
+              operationalGroups: Object.freeze(updatedGroups)
+            };
+          }
+          break;
+        }
+        case "prune-expired-reservations": {
+          const nowReal = operation.nowReal ?? Date.now();
+          const nowWorld = operation.nowWorld;
+          let changed = false;
+          const activeReservations = (currentPeople.reservations ?? []).filter((r) => {
+            if (r.status !== "active") return true;
+            const realExpired = r.expiresAtReal !== void 0 && r.expiresAtReal < nowReal;
+            const worldExpired = nowWorld !== void 0 && r.expiresAtWorld !== void 0 && r.expiresAtWorld <= nowWorld;
+            if (realExpired || worldExpired) {
+              changed = true;
+              changes.push(`Pruned expired reservation '${r.id}' (${r.workforceTypeId}: ${r.amount})`);
+              return false;
+            }
+            return true;
+          });
+          summary = "Prune expired reservations";
+          if (changed) {
+            repairedPeople = {
+              ...currentPeople,
+              reservations: Object.freeze(activeReservations)
+            };
+          }
+          break;
+        }
+        case "prune-ended-assignments": {
+          const { nowWorld } = operation;
+          let changed = false;
+          const updatedAssignments = (currentPeople.assignments ?? []).map((a) => {
+            if (a.status === "active" && a.endsAtWorld !== void 0 && a.endsAtWorld <= nowWorld) {
+              changed = true;
+              changes.push(`Marked assignment '${a.id}' as ended (expired at world time ${a.endsAtWorld})`);
+              return { ...a, status: "ended", endedReason: "expired" };
+            }
+            return a;
+          });
+          summary = "Prune ended assignments past world time";
+          if (changed) {
+            repairedPeople = {
+              ...currentPeople,
+              assignments: Object.freeze(updatedAssignments)
+            };
+          }
+          break;
+        }
+      }
+      if (!repairedPeople) {
+        const plan2 = createMutationPlan({
+          commandId: ctx.command.commandId,
+          lockKeys: [`domain:${domainDoc.uuid}`],
+          writeSet: [],
+          summary: `No inconsistencies found for operation: ${summary}`
+        });
+        return ok(plan2);
+      }
+      const updatedRecord = withDomainPeopleData(domainDoc.record, repairedPeople);
+      const plan = createMutationPlan({
+        commandId: ctx.command.commandId,
+        lockKeys: [`domain:${domainDoc.uuid}`],
+        writeSet: [
+          {
+            targetRef: `domain:${domainDoc.uuid}`,
+            operationType: "update",
+            payload: {
+              ...domainDoc,
+              record: updatedRecord
+            }
+          }
+        ],
+        summary: `Execute repair: ${summary} in domain '${domainDoc.name}'`
+      });
+      return ok(plan);
+    },
+    commit: async (plan) => {
+      const summary = plan.summary ?? "Repair operation";
+      const targetDoc = plan.writeSet[0]?.payload;
+      if (!targetDoc) {
+        return ok({
+          result: {
+            domainUuid: plan.lockKeys[0]?.replace("domain:", "") ?? "",
+            repaired: false,
+            summary,
+            changes: Object.freeze([])
+          },
+          resultingRevisions: {},
+          changed: false,
+          summary
+        });
+      }
+      const updateRes = await domains.update(targetDoc);
+      if (!updateRes.ok) return err(updateRes.error);
+      return ok({
+        result: {
+          domainUuid: targetDoc.uuid,
+          repaired: true,
+          summary,
+          changes: Object.freeze(
+            summary.includes("Relink") || summary.includes("Purge") || summary.includes("Repair") || summary.includes("Prune") ? [summary] : []
+          )
+        },
+        resultingRevisions: { [targetDoc.uuid]: updateRes.value.revision },
+        changed: true,
+        summary
+      });
+    }
+  };
+  registry.register({
+    type: "people:repair",
+    visibility: "public",
+    transactional: true,
+    description: "Authoritatively executes domain repair operations via transactional mutation pipeline",
+    mutationDefinition: repairMutation,
+    handler: createTransactionalHandler(coordinator, repairMutation),
+    schemaValidator: (payload) => {
+      if (!payload || typeof payload !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Payload must be an object"
+          })
+        );
+      }
+      const p = payload;
+      if (typeof p.domainUuid !== "string" || !p.domainUuid) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "domainUuid is required"
+          })
+        );
+      }
+      if (!p.operation || typeof p.operation !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "operation is required"
+          })
+        );
+      }
+      return ok(payload);
+    },
+    permissionValidator: requireGmOnlyPermission
   });
 }
 
@@ -9617,19 +9911,24 @@ function resolveCurrentViewer(callerSuppliedViewer, customProvider) {
   if (current) {
     const realIsGm = Boolean(current.isGM ?? current.isGm);
     const realUserId = String(current.id ?? current.userId ?? "anonymous");
-    const effectiveIsGm = realIsGm ? callerSuppliedViewer?.isGm ?? true : false;
-    const effectiveUserId = callerSuppliedViewer?.userId ?? realUserId;
-    const effectiveAllowedRestrictedRefs = callerSuppliedViewer?.allowedRestrictedRefs ?? current.allowedRestrictedRefs;
+    const trustedRestrictedRefs = current.allowedRestrictedRefs;
+    if (!realIsGm) {
+      return Object.freeze({
+        userId: realUserId,
+        isGm: false,
+        allowedRestrictedRefs: trustedRestrictedRefs ? Object.freeze([...trustedRestrictedRefs]) : Object.freeze([])
+      });
+    }
     return Object.freeze({
-      userId: effectiveUserId,
-      isGm: effectiveIsGm,
-      allowedRestrictedRefs: effectiveAllowedRestrictedRefs
+      userId: callerSuppliedViewer?.userId ?? realUserId,
+      isGm: callerSuppliedViewer?.isGm ?? true,
+      allowedRestrictedRefs: callerSuppliedViewer?.allowedRestrictedRefs ?? trustedRestrictedRefs
     });
   }
   return Object.freeze({
     userId: callerSuppliedViewer?.userId ?? "anonymous",
     isGm: callerSuppliedViewer?.isGm === true,
-    allowedRestrictedRefs: callerSuppliedViewer?.allowedRestrictedRefs
+    allowedRestrictedRefs: callerSuppliedViewer?.allowedRestrictedRefs ? Object.freeze([...callerSuppliedViewer.allowedRestrictedRefs]) : Object.freeze([])
   });
 }
 
@@ -9945,12 +10244,637 @@ function renderPeopleSubsystemHtml(vm) {
   `;
 }
 
+// src/ui/domain-patterns/people/people-app.ts
+function makeCommand(type, payload) {
+  return {
+    contractVersion: COMMAND_CONTRACT_VERSION_V1,
+    commandId: createCommandId(),
+    type,
+    payload,
+    issuedAtReal: Date.now()
+  };
+}
+var PeopleApplicationController = class {
+  #domainUuid;
+  #commandBus;
+  #peopleApi;
+  #domains;
+  #viewer;
+  #activeTab = "notables";
+  #selectedEntity = null;
+  #lastViewModel = null;
+  constructor(options) {
+    this.#domainUuid = options.domainUuid;
+    this.#commandBus = options.commandBus;
+    this.#peopleApi = options.peopleApi;
+    this.#domains = options.domains;
+    this.#viewer = options.viewer;
+  }
+  get domainUuid() {
+    return this.#domainUuid;
+  }
+  get activeTab() {
+    return this.#activeTab;
+  }
+  get selectedEntity() {
+    return this.#selectedEntity;
+  }
+  selectTab(tab) {
+    this.#activeTab = tab;
+  }
+  selectEntity(type, id) {
+    this.#selectedEntity = { type, id };
+  }
+  clearSelection() {
+    this.#selectedEntity = null;
+  }
+  async loadViewModel() {
+    const id = this.#domainUuid.startsWith("JournalEntry.") ? this.#domainUuid.slice("JournalEntry.".length) : this.#domainUuid;
+    const docRes = await this.#domains.read(id);
+    if (!docRes.ok) return docRes;
+    const isGm = this.#viewer?.isGm ?? true;
+    const vm = this.#peopleApi.buildViewModel(docRes.value, {
+      viewerIsGm: isGm
+    });
+    this.#lastViewModel = vm;
+    return ok(vm);
+  }
+  async #executeCommand(cmd) {
+    const res = await this.#commandBus.execute(cmd);
+    if (!res.ok) return res;
+    if (res.value.status === "rejected") {
+      return err(
+        res.value.error ?? createPublicError({
+          code: "DM_COMMAND_REJECTED",
+          category: "internal",
+          message: "Command was rejected by authority"
+        })
+      );
+    }
+    return ok(res.value.result);
+  }
+  // Action Dispatchers via CommandBus
+  async dispatchCreateNotable(payload) {
+    const cmd = makeCommand("people:create-notable", {
+      domainUuid: this.#domainUuid,
+      notable: {
+        type: payload.type ?? "inline",
+        ...payload.name !== void 0 ? { name: payload.name } : {},
+        ...payload.actorUuid !== void 0 ? { actorUuid: payload.actorUuid } : {},
+        ...payload.description !== void 0 ? { description: payload.description } : {},
+        tags: payload.tags ?? [],
+        visibility: payload.visibility ?? "public"
+      }
+    });
+    return this.#executeCommand(cmd);
+  }
+  async dispatchCreateRole(payload) {
+    const cmd = makeCommand("people:create-role", {
+      domainUuid: this.#domainUuid,
+      role: {
+        definitionId: payload.definitionId,
+        ...payload.customLabel !== void 0 ? { customLabel: payload.customLabel } : {},
+        occupants: payload.occupants ?? [],
+        visibility: payload.visibility ?? "public",
+        scope: payload.scope ?? "domain",
+        ...payload.operationalGroupId !== void 0 ? { operationalGroupId: payload.operationalGroupId } : {},
+        ...payload.notes !== void 0 ? { notes: payload.notes } : {},
+        tags: payload.tags ?? []
+      }
+    });
+    return this.#executeCommand(cmd);
+  }
+  async dispatchCreateOperationalGroup(payload) {
+    const cmd = makeCommand("people:create-operational-group", {
+      domainUuid: this.#domainUuid,
+      group: {
+        name: payload.name,
+        definitionId: payload.definitionId,
+        membershipMode: payload.membershipMode ?? "abstract",
+        size: payload.size ?? payload.members?.length ?? 1,
+        members: payload.members ?? [],
+        ...payload.populationGroupId !== void 0 ? { populationGroupId: payload.populationGroupId } : {},
+        visibility: payload.visibility ?? "public",
+        ...payload.notes !== void 0 ? { notes: payload.notes } : {},
+        tags: payload.tags ?? []
+      }
+    });
+    return this.#executeCommand(cmd);
+  }
+  async dispatchCreateAssignment(payload) {
+    const cmd = makeCommand("people:create-assignment", {
+      domainUuid: this.#domainUuid,
+      assignment: {
+        sourceRef: payload.sourceRef,
+        targetRef: payload.targetRef,
+        workforceTypeId: payload.workforceTypeId,
+        amount: payload.amount,
+        visibility: payload.visibility ?? "public",
+        ...payload.startedAtWorld !== void 0 ? { startedAtWorld: payload.startedAtWorld } : {},
+        ...payload.endsAtWorld !== void 0 ? { endsAtWorld: payload.endsAtWorld } : {},
+        ...payload.notes !== void 0 ? { notes: payload.notes } : {}
+      },
+      ...payload.allowOvercommit !== void 0 ? { allowOvercommit: payload.allowOvercommit } : {}
+    });
+    return this.#executeCommand(cmd);
+  }
+  async dispatchCancelAssignment(assignmentId) {
+    const cmd = makeCommand("people:cancel-assignment", {
+      domainUuid: this.#domainUuid,
+      assignmentId
+    });
+    return this.#executeCommand(cmd);
+  }
+  async dispatchCreateReservation(payload) {
+    const cmd = makeCommand("people:create-reservation", {
+      domainUuid: this.#domainUuid,
+      reservation: {
+        sourceRef: payload.sourceRef,
+        targetRef: payload.targetRef,
+        workforceTypeId: payload.workforceTypeId,
+        amount: payload.amount,
+        ...payload.correlationId !== void 0 ? { correlationId: payload.correlationId } : {},
+        visibility: payload.visibility ?? "public",
+        ...payload.expiresAtReal !== void 0 ? { expiresAtReal: payload.expiresAtReal } : {},
+        ...payload.expiresAtWorld !== void 0 ? { expiresAtWorld: payload.expiresAtWorld } : {},
+        ...payload.notes !== void 0 ? { notes: payload.notes } : {}
+      },
+      ...payload.allowOvercommit !== void 0 ? { allowOvercommit: payload.allowOvercommit } : {}
+    });
+    return this.#executeCommand(cmd);
+  }
+  async dispatchReleaseReservation(reservationId) {
+    const cmd = makeCommand("people:release-reservation", {
+      domainUuid: this.#domainUuid,
+      reservationId
+    });
+    return this.#executeCommand(cmd);
+  }
+  // HTML Rendering (Collection + Inspector + Create Modals/Buttons)
+  render(vm) {
+    this.#lastViewModel = vm;
+    const tabsHtml = `
+      <nav class="dm-people-tabs" role="tablist">
+        <button type="button" class="dm-tab ${this.#activeTab === "notables" ? "active" : ""}" data-action="selectTab" data-tab="notables">
+          <i class="fas fa-user-shield"></i> Notables (${vm.notables.length})
+        </button>
+        <button type="button" class="dm-tab ${this.#activeTab === "roles" ? "active" : ""}" data-action="selectTab" data-tab="roles">
+          <i class="fas fa-sitemap"></i> Roles (${vm.roles.length})
+        </button>
+        <button type="button" class="dm-tab ${this.#activeTab === "operationalGroups" ? "active" : ""}" data-action="selectTab" data-tab="operationalGroups">
+          <i class="fas fa-users-cog"></i> Operational Groups (${vm.operationalGroups.length})
+        </button>
+        <button type="button" class="dm-tab ${this.#activeTab === "population" ? "active" : ""}" data-action="selectTab" data-tab="population">
+          <i class="fas fa-users"></i> Population (${escapeHtml(vm.population.formattedTotal)})
+        </button>
+        <button type="button" class="dm-tab ${this.#activeTab === "assignments" ? "active" : ""}" data-action="selectTab" data-tab="assignments">
+          <i class="fas fa-tasks"></i> Workforce & Assignments
+        </button>
+      </nav>
+    `;
+    const collectionHtml = this.#renderCollectionView(vm);
+    const inspectorHtml = this.#renderInspectorView(vm);
+    return `
+      <div class="dm-people-app-v2" data-domain-uuid="${escapeAttribute(this.#domainUuid)}">
+        <header class="dm-app-header">
+          <h2><i class="fas fa-users-crown"></i> People & Governance Subsystem</h2>
+          <div class="dm-app-actions">
+            <button type="button" class="dm-btn dm-btn-primary" data-action="openCreateModal" data-create-type="${escapeAttribute(this.#activeTab)}">
+              <i class="fas fa-plus"></i> Create New
+            </button>
+          </div>
+        </header>
+
+        ${tabsHtml}
+
+        <div class="dm-people-layout">
+          <main class="dm-collection-container">
+            ${collectionHtml}
+          </main>
+
+          <aside class="dm-inspector-container">
+            ${inspectorHtml}
+          </aside>
+        </div>
+      </div>
+    `;
+  }
+  #renderCollectionView(vm) {
+    switch (this.#activeTab) {
+      case "notables":
+        return this.#renderNotablesCollection(vm);
+      case "roles":
+        return this.#renderRolesCollection(vm);
+      case "operationalGroups":
+        return this.#renderOperationalGroupsCollection(vm);
+      case "population":
+        return this.#renderPopulationCollection(vm);
+      case "assignments":
+        return this.#renderAssignmentsCollection(vm);
+    }
+  }
+  #renderNotablesCollection(vm) {
+    if (vm.notables.length === 0) {
+      return `<div class="dm-empty-state">No notables found in domain. Click 'Create New' to register a notable leader or agent.</div>`;
+    }
+    return `
+      <div class="dm-collection-grid">
+        ${vm.notables.map((n) => {
+      const isSelected = this.#selectedEntity?.type === "notable" && this.#selectedEntity.id === n.notable.id;
+      return `
+            <div class="dm-card dm-notable-card ${isSelected ? "selected" : ""} ${n.isSecret ? "secret" : ""}"
+                 data-action="selectEntity" data-entity-type="notable" data-entity-id="${escapeAttribute(n.notable.id)}">
+              <div class="dm-card-badge ${escapeAttribute(n.badgeClass)}">${escapeHtml(n.notable.type)}</div>
+              <h4 class="dm-card-title">${escapeHtml(n.status.resolvedName)}</h4>
+              ${n.notable.description ? `<div class="dm-card-subtitle">${escapeHtml(n.notable.description)}</div>` : ""}
+              ${n.isSecret ? `<span class="dm-badge-secret"><i class="fas fa-eye-slash"></i> Secret</span>` : ""}
+            </div>
+          `;
+    }).join("")}
+      </div>
+    `;
+  }
+  #renderRolesCollection(vm) {
+    if (vm.roles.length === 0) {
+      return `<div class="dm-empty-state">No roles configured. Click 'Create New' to establish a leadership office or operational group role.</div>`;
+    }
+    return `
+      <div class="dm-collection-list">
+        ${vm.roles.map((r) => {
+      const isSelected = this.#selectedEntity?.type === "role" && this.#selectedEntity.id === r.evaluation.role.id;
+      return `
+            <div class="dm-list-row dm-role-row ${isSelected ? "selected" : ""} ${r.isSecret ? "secret" : ""}"
+                 data-action="selectEntity" data-entity-type="role" data-entity-id="${escapeAttribute(r.evaluation.role.id)}">
+              <div class="dm-row-main">
+                <span class="dm-role-name">${escapeHtml(r.evaluation.effectiveLabel)}</span>
+                <span class="dm-badge dm-badge-${escapeAttribute(r.statusClass)}">${escapeHtml(r.statusClass)}</span>
+                ${r.isSecret ? `<span class="dm-badge-secret"><i class="fas fa-eye-slash"></i> Secret</span>` : ""}
+              </div>
+              <div class="dm-row-meta">
+                <span>Occupants: ${r.evaluation.role.occupants.length}</span>
+              </div>
+            </div>
+          `;
+    }).join("")}
+      </div>
+    `;
+  }
+  #renderOperationalGroupsCollection(vm) {
+    if (vm.operationalGroups.length === 0) {
+      return `<div class="dm-empty-state">No operational groups registered. Click 'Create New' to muster squads, patrols, or guilds.</div>`;
+    }
+    return `
+      <div class="dm-collection-list">
+        ${vm.operationalGroups.map((g) => {
+      const isSelected = this.#selectedEntity?.type === "group" && this.#selectedEntity.id === g.group.id;
+      return `
+            <div class="dm-list-row dm-group-row ${isSelected ? "selected" : ""} ${g.isSecret ? "secret" : ""}"
+                 data-action="selectEntity" data-entity-type="group" data-entity-id="${escapeAttribute(g.group.id)}">
+              <div class="dm-row-main">
+                <span class="dm-group-name">${escapeHtml(g.group.name)}</span>
+                <span class="dm-badge dm-badge-${escapeAttribute(g.statusClass)}">${escapeHtml(g.statusClass)}</span>
+                ${g.isSecret ? `<span class="dm-badge-secret"><i class="fas fa-eye-slash"></i> Secret</span>` : ""}
+              </div>
+              <div class="dm-row-meta">
+                <span>Size: ${g.group.size} (${escapeHtml(g.group.membershipMode)})</span>
+              </div>
+            </div>
+          `;
+    }).join("")}
+      </div>
+    `;
+  }
+  #renderPopulationCollection(vm) {
+    return `
+      <div class="dm-population-view">
+        <div class="dm-summary-card">
+          <h3>Total Population: ${escapeHtml(vm.population.formattedTotal)}</h3>
+          <p>Mode: <strong>${escapeHtml(vm.population.state.mode)}</strong> | Precision: <strong>${escapeHtml(vm.population.resolution.precision)}</strong></p>
+        </div>
+      </div>
+    `;
+  }
+  #renderAssignmentsCollection(vm) {
+    const workforceTypes = Object.values(vm.workforce.types);
+    return `
+      <div class="dm-assignments-view">
+        <h3>Workforce Capacities</h3>
+        <div class="dm-workforce-grid">
+          ${workforceTypes.map((w) => `
+            <div class="dm-wf-card ${w.isOvercommitted ? "overcommitted" : ""}">
+              <h4>${escapeHtml(w.workforceTypeId)}</h4>
+              <div class="dm-wf-numbers">
+                <span>Available: <strong>${w.available}</strong></span>
+                <span>Committed: ${w.committed}</span>
+                <span>Reserved: ${w.reserved}</span>
+                <span>Capacity: ${w.capacity}</span>
+              </div>
+              ${w.isOvercommitted ? `<div class="dm-badge-alert">OVERCOMMIT</div>` : ""}
+            </div>
+          `).join("")}
+        </div>
+      </div>
+    `;
+  }
+  #renderInspectorView(vm) {
+    if (!this.#selectedEntity) {
+      return `
+        <div class="dm-inspector-empty">
+          <i class="fas fa-info-circle"></i>
+          <p>Select an item from the collection to inspect attributes, assignments, and resolution status.</p>
+        </div>
+      `;
+    }
+    const { type, id } = this.#selectedEntity;
+    if (type === "notable") {
+      const n = vm.notables.find((item) => item.notable.id === id);
+      if (!n) return `<div class="dm-inspector-empty">Notable not found or hidden.</div>`;
+      return `
+        <div class="dm-inspector-content">
+          <h3>Notable Inspector</h3>
+          <div class="dm-inspector-field">
+            <label>Name:</label> <span>${escapeHtml(n.status.resolvedName)}</span>
+          </div>
+          <div class="dm-inspector-field">
+            <label>ID:</label> <code>${escapeHtml(n.notable.id)}</code>
+          </div>
+          <div class="dm-inspector-field">
+            <label>Type:</label> <span>${escapeHtml(n.notable.type)}</span>
+          </div>
+          <div class="dm-inspector-field">
+            <label>Visibility:</label> <span>${escapeHtml(n.notable.visibility)}</span>
+          </div>
+          ${n.notable.description ? `<div class="dm-inspector-field"><label>Description:</label> <p>${escapeHtml(n.notable.description)}</p></div>` : ""}
+          ${n.notable.tags.length > 0 ? `<div class="dm-inspector-field"><label>Tags:</label> <span>${escapeHtml(n.notable.tags.join(", "))}</span></div>` : ""}
+        </div>
+      `;
+    }
+    if (type === "role") {
+      const r = vm.roles.find((item) => item.evaluation.role.id === id);
+      if (!r) return `<div class="dm-inspector-empty">Role not found or hidden.</div>`;
+      return `
+        <div class="dm-inspector-content">
+          <h3>Role Inspector</h3>
+          <div class="dm-inspector-field">
+            <label>Title:</label> <span>${escapeHtml(r.evaluation.effectiveLabel)}</span>
+          </div>
+          <div class="dm-inspector-field">
+            <label>Definition ID:</label> <code>${escapeHtml(r.evaluation.role.definitionId)}</code>
+          </div>
+          <div class="dm-inspector-field">
+            <label>Status:</label> <span class="dm-badge dm-badge-${escapeAttribute(r.statusClass)}">${escapeHtml(r.statusClass)}</span>
+          </div>
+          <div class="dm-inspector-field">
+            <label>Requirements Satisfied:</label> <span>${r.evaluation.isRequirementSatisfied ? "Yes" : "No"}</span>
+          </div>
+          <div class="dm-inspector-field">
+            <label>Occupants (${r.evaluation.role.occupants.length}):</label>
+            <ul>
+              ${r.evaluation.role.occupants.map((occId) => `<li><code>${escapeHtml(occId)}</code></li>`).join("")}
+            </ul>
+          </div>
+        </div>
+      `;
+    }
+    if (type === "group") {
+      const g = vm.operationalGroups.find((item) => item.group.id === id);
+      if (!g) return `<div class="dm-inspector-empty">Group not found or hidden.</div>`;
+      return `
+        <div class="dm-inspector-content">
+          <h3>Operational Group Inspector</h3>
+          <div class="dm-inspector-field">
+            <label>Name:</label> <span>${escapeHtml(g.group.name)}</span>
+          </div>
+          <div class="dm-inspector-field">
+            <label>Definition:</label> <code>${escapeHtml(g.group.definitionId)}</code>
+          </div>
+          <div class="dm-inspector-field">
+            <label>Size:</label> <span>${g.group.size} (${escapeHtml(g.group.membershipMode)})</span>
+          </div>
+          <div class="dm-inspector-field">
+            <label>Lifecycle:</label> <span>${escapeHtml(g.group.lifecycle)}</span>
+          </div>
+          <div class="dm-inspector-field">
+            <label>Members (${g.group.members.length}):</label>
+            <ul>
+              ${g.group.members.map((mId) => `<li><code>${escapeHtml(mId)}</code></li>`).join("")}
+            </ul>
+          </div>
+        </div>
+      `;
+    }
+    return `<div class="dm-inspector-empty">Unknown entity type.</div>`;
+  }
+  openCreateModal(createType) {
+    const html = this.renderCreateModal(createType);
+    return { type: createType, html };
+  }
+  renderCreateModal(createType) {
+    switch (createType) {
+      case "notables":
+        return `
+          <div class="dm-modal dm-create-notable-modal" data-modal-type="notable">
+            <h3>Create Notable</h3>
+            <form data-action="submitCreate" data-create-type="notable">
+              <label>Name: <input type="text" name="name" required /></label>
+              <label>Type: 
+                <select name="type">
+                  <option value="inline">Inline</option>
+                  <option value="actor">Actor</option>
+                </select>
+              </label>
+              <label>Actor UUID (optional): <input type="text" name="actorUuid" /></label>
+              <label>Description: <textarea name="description"></textarea></label>
+              <label>Visibility:
+                <select name="visibility">
+                  <option value="public">Public</option>
+                  <option value="secret">Secret</option>
+                </select>
+              </label>
+              <button type="submit" class="dm-btn dm-btn-primary">Create</button>
+            </form>
+          </div>
+        `;
+      case "roles":
+        return `
+          <div class="dm-modal dm-create-role-modal" data-modal-type="role">
+            <h3>Create Role</h3>
+            <form data-action="submitCreate" data-create-type="role">
+              <label>Title/Label: <input type="text" name="name" required /></label>
+              <label>Definition ID: <input type="text" name="definitionId" required /></label>
+              <label>Scope:
+                <select name="scope">
+                  <option value="domain">Domain</option>
+                  <option value="operational-group">Operational Group</option>
+                </select>
+              </label>
+              <button type="submit" class="dm-btn dm-btn-primary">Create</button>
+            </form>
+          </div>
+        `;
+      case "operationalGroups":
+        return `
+          <div class="dm-modal dm-create-group-modal" data-modal-type="group">
+            <h3>Create Operational Group</h3>
+            <form data-action="submitCreate" data-create-type="group">
+              <label>Name: <input type="text" name="name" required /></label>
+              <label>Type: <input type="text" name="type" required /></label>
+              <label>Membership Mode:
+                <select name="membershipMode">
+                  <option value="abstract">Abstract</option>
+                  <option value="explicit">Explicit</option>
+                </select>
+              </label>
+              <button type="submit" class="dm-btn dm-btn-primary">Create</button>
+            </form>
+          </div>
+        `;
+      default:
+        return `
+          <div class="dm-modal dm-create-default-modal">
+            <h3>Create ${escapeHtml(createType)}</h3>
+            <form data-action="submitCreate" data-create-type="${escapeAttribute(createType)}">
+              <label>Name: <input type="text" name="name" required /></label>
+              <button type="submit" class="dm-btn dm-btn-primary">Create</button>
+            </form>
+          </div>
+        `;
+    }
+  }
+};
+var BaseApp = globalThis.foundry?.applications?.api?.ApplicationV2 ?? class MockApplicationV2 {
+  options;
+  constructor(options = {}) {
+    this.options = options;
+  }
+  async render(force) {
+    return this;
+  }
+  async close() {
+  }
+};
+var PeopleApplication = class _PeopleApplication extends BaseApp {
+  static DEFAULT_OPTIONS = {
+    id: "domain-manager-people-{id}",
+    classes: ["domain-manager", "dm-people-app-v2"],
+    tag: "div",
+    window: {
+      title: "People & Governance",
+      icon: "fas fa-users-crown",
+      resizable: true,
+      minimizable: true
+    },
+    position: {
+      width: 820,
+      height: 640
+    },
+    actions: {
+      selectTab: _PeopleApplication.#onSelectTab,
+      selectEntity: _PeopleApplication.#onSelectEntity,
+      openCreateModal: _PeopleApplication.#onOpenCreateModal,
+      submitCreate: _PeopleApplication.#onSubmitCreate
+    }
+  };
+  #controller;
+  #element = null;
+  constructor(options) {
+    super(options);
+    this.#controller = new PeopleApplicationController(options);
+  }
+  get controller() {
+    return this.#controller;
+  }
+  async _prepareContext(options) {
+    const vmRes = await this.#controller.loadViewModel();
+    return {
+      viewModel: vmRes.ok ? vmRes.value : null,
+      error: !vmRes.ok ? vmRes.error : null
+    };
+  }
+  _renderHTML(context, options) {
+    if (context.error) {
+      return `<div class="dm-error-state">${escapeHtml(context.error.message)}</div>`;
+    }
+    return this.#controller.render(context.viewModel);
+  }
+  attachEventListeners(element) {
+    this.#element = element;
+    element.addEventListener("click", async (event) => {
+      const target = event.target.closest?.("[data-action]");
+      if (!target) return;
+      const action = target.getAttribute("data-action");
+      if (action === "selectTab") {
+        const tab = target.getAttribute("data-tab");
+        if (tab) {
+          this.#controller.selectTab(tab);
+          const vmRes = await this.#controller.loadViewModel();
+          if (vmRes.ok) {
+            element.innerHTML = this.#controller.render(vmRes.value);
+          }
+        }
+      } else if (action === "selectEntity") {
+        const type = target.getAttribute("data-entity-type");
+        const id = target.getAttribute("data-entity-id");
+        if (type && id) {
+          this.#controller.selectEntity(type, id);
+          const vmRes = await this.#controller.loadViewModel();
+          if (vmRes.ok) {
+            element.innerHTML = this.#controller.render(vmRes.value);
+          }
+        }
+      } else if (action === "openCreateModal") {
+        const createType = target.getAttribute("data-create-type") ?? this.#controller.activeTab;
+        this.openCreateModal(createType);
+      }
+    });
+  }
+  openCreateModal(createType) {
+    const modal = this.#controller.openCreateModal(createType);
+    if (this.#element) {
+      const modalContainer = globalThis.document?.createElement?.("div");
+      if (modalContainer) {
+        modalContainer.className = "dm-modal-backdrop";
+        modalContainer.innerHTML = modal.html;
+        this.#element.appendChild(modalContainer);
+      }
+    }
+    return modal;
+  }
+  static async #onSelectTab(event, target) {
+    const tab = target.getAttribute("data-tab");
+    if (tab) {
+      this.#controller.selectTab(tab);
+      await this.render?.();
+    }
+  }
+  static async #onSelectEntity(event, target) {
+    const type = target.getAttribute("data-entity-type");
+    const id = target.getAttribute("data-entity-id");
+    if (type && id) {
+      this.#controller.selectEntity(type, id);
+      await this.render?.();
+    }
+  }
+  static async #onOpenCreateModal(event, target) {
+    const createType = target.getAttribute("data-create-type") ?? this.#controller.activeTab;
+    this.openCreateModal(createType);
+  }
+  static async #onSubmitCreate(event, target) {
+    await this.#controller.loadViewModel();
+    await this.render?.();
+  }
+};
+
 // src/people/services/people-service.ts
 var PeopleService = class {
+  #domains;
+  #commandBus;
   #repository;
   #projection;
   #aggregation;
   constructor(domains, options = {}) {
+    this.#domains = domains;
+    this.#commandBus = options.commandBus;
     this.#repository = new PeopleRepository(domains);
     this.#projection = new PeopleProjectionService({
       roleDefinitions: options.roleDefinitions,
@@ -9958,15 +10882,9 @@ var PeopleService = class {
     });
     this.#aggregation = new PeopleAggregationService(domains);
   }
-  asAdmin() {
-    return {
-      getPeopleData: (domainUuid) => this.#repository.getPeopleData(domainUuid),
-      rawRepository: this.#repository
-    };
-  }
-  asAuthority() {
-    return this.asAdmin();
-  }
+  /**
+   * Internal/Authority-only raw people data access. Not part of PublicPeopleApi.
+   */
   async getPeopleData(domainUuid, callerViewer) {
     const viewer = resolveCurrentViewer(callerViewer);
     const rawRes = await this.#repository.getPeopleData(domainUuid);
@@ -10070,11 +10988,126 @@ var PeopleService = class {
   getEffectiveCapabilities(domainInput, roleDefinitions, operationalGroupDefinitions) {
     return resolvePeopleEffectiveCapabilities(domainInput, roleDefinitions, operationalGroupDefinitions);
   }
-  buildViewModel(domainInput, options) {
-    return buildPeopleViewModel(domainInput, options);
+  buildViewModel(domainInput, options = {}) {
+    const viewer = resolveCurrentViewer();
+    const effectiveIsGm = viewer.isGm ? options.viewerIsGm ?? true : false;
+    return buildPeopleViewModel(domainInput, {
+      ...options,
+      viewerIsGm: effectiveIsGm,
+      allowedRestrictedRefs: viewer.allowedRestrictedRefs
+    });
   }
   renderSubsystemHtml(vm) {
     return renderPeopleSubsystemHtml(vm);
+  }
+  openApp(domainUuid, options) {
+    const bus = options?.commandBus ?? this.#commandBus;
+    if (!bus) {
+      throw new Error("CommandBus is required to open PeopleApplication");
+    }
+    return new PeopleApplication({
+      domainUuid,
+      commandBus: bus,
+      peopleApi: this,
+      domains: this.#domains,
+      viewer: options?.viewer
+    });
+  }
+};
+
+// src/people/services/people-repair-tool.ts
+var PeopleRepairTool = class {
+  #commandBus;
+  #domains;
+  #coordinator;
+  constructor(commandBusOrDomains, coordinator, commandBus) {
+    if ("execute" in commandBusOrDomains || "executeLocal" in commandBusOrDomains) {
+      this.#commandBus = commandBusOrDomains;
+    } else if (commandBus) {
+      this.#commandBus = commandBus;
+      this.#domains = commandBusOrDomains;
+      this.#coordinator = coordinator;
+    } else {
+      this.#domains = commandBusOrDomains;
+      this.#coordinator = coordinator;
+      const registry = new CommandRegistry();
+      if (coordinator) {
+        registerRepairCommandHandlers(registry, coordinator, this.#domains);
+      }
+      const authority = {
+        isCurrentUser: () => true,
+        getCurrent: () => "local-authority",
+        getStatus: () => ({ authorityUserId: "local-authority", authorityEpoch: 1, available: true })
+      };
+      this.#commandBus = new CommandBus({
+        registry,
+        coordinator,
+        authorityService: authority
+      });
+    }
+  }
+  get commandBus() {
+    return this.#commandBus;
+  }
+  async relinkNotable(domainUuid, oldNotableId, newNotableId) {
+    return this.#dispatchRepair(domainUuid, {
+      type: "relink-notable",
+      oldNotableId,
+      newNotableId
+    });
+  }
+  async purgeDanglingOccupants(domainUuid) {
+    return this.#dispatchRepair(domainUuid, {
+      type: "purge-dangling-occupants"
+    });
+  }
+  async repairExplicitGroupSizes(domainUuid) {
+    return this.#dispatchRepair(domainUuid, {
+      type: "repair-explicit-group-sizes"
+    });
+  }
+  async pruneExpiredReservations(domainUuid, nowReal = Date.now(), nowWorld) {
+    return this.#dispatchRepair(domainUuid, {
+      type: "prune-expired-reservations",
+      nowReal,
+      nowWorld
+    });
+  }
+  async pruneEndedAssignments(domainUuid, nowWorld) {
+    return this.#dispatchRepair(domainUuid, {
+      type: "prune-ended-assignments",
+      nowWorld
+    });
+  }
+  async #dispatchRepair(domainUuid, operation) {
+    const cmd = {
+      contractVersion: COMMAND_CONTRACT_VERSION_V1,
+      commandId: createCommandId(),
+      type: "people:repair",
+      payload: {
+        domainUuid,
+        operation
+      },
+      issuedAtReal: Date.now()
+    };
+    const res = await this.#commandBus.execute(cmd);
+    if (!res.ok) return res;
+    if (res.value.status === "rejected") {
+      return err(
+        res.value.error ?? createPublicError({
+          code: "DM_COMMAND_REJECTED",
+          category: "internal",
+          message: "Repair command was rejected by authority"
+        })
+      );
+    }
+    const receiptResult = res.value.result;
+    return ok({
+      domainUuid: receiptResult.domainUuid,
+      repaired: receiptResult.repaired,
+      summary: receiptResult.summary,
+      changes: receiptResult.changes
+    });
   }
 };
 
@@ -10166,6 +11199,7 @@ function composeDomainManagerRuntime(options = {}) {
   registerRoleCommandHandlers(registry, coordinator, mutableDomainRepo);
   registerOperationalGroupCommandHandlers(registry, coordinator, mutableDomainRepo);
   registerAssignmentCommandHandlers(registry, coordinator, mutableDomainRepo);
+  registerRepairCommandHandlers(registry, coordinator, mutableDomainRepo);
   registry.freeze();
   const commandQueue = options.commandQueue ?? new CommandQueue({ maxConcurrency: 10 });
   const dedupeStore = options.dedupeStore ?? new CommandDedupeStore();
@@ -10205,7 +11239,8 @@ function composeDomainManagerRuntime(options = {}) {
       });
     }
   });
-  const people = new PeopleService(readOnlyDomains);
+  const people = new PeopleService(readOnlyDomains, { commandBus });
+  const repairTool = new PeopleRepairTool(commandBus);
   return Object.freeze({
     // G2-AUD-008: Read-only facade exposed publicly
     domains: readOnlyDomains,
@@ -10219,9 +11254,7 @@ function composeDomainManagerRuntime(options = {}) {
     transactionStore,
     diagnostics,
     people,
-    admin: Object.freeze({
-      people: people.asAdmin()
-    }),
+    repairTool,
     destroy: () => {
       commandBus.destroy();
       if ("destroy" in transport && typeof transport.destroy === "function") {
@@ -10334,4 +11367,11 @@ Hooks.once("ready", () => {
     g2Diagnostics: runtime.diagnostics.getSnapshot()
   });
 });
+export {
+  PeopleApplication,
+  PeopleApplicationController,
+  PeopleRepairTool,
+  PeopleService,
+  composeDomainManagerRuntime
+};
 //# sourceMappingURL=main.js.map

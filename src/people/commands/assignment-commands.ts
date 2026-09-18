@@ -33,6 +33,7 @@ import {
   resolveOperationalGroupWorkforceType
 } from "../workforce/workforce-calculator.js";
 import { createOpaqueId, isOpaqueId } from "../../core/identity/ids.js";
+import { validatePeopleCommandPermission } from "./people-permissions.js";
 
 export interface SourceCapacityReport {
   readonly capacity: number;
@@ -173,19 +174,6 @@ export interface ReleaseReservationPayload {
 
 function resolveDomainId(domainUuid: string): string {
   return domainUuid.startsWith("JournalEntry.") ? domainUuid.slice("JournalEntry.".length) : domainUuid;
-}
-
-function requireGmPermission(ctx: AuthenticatedCommandContext): Result<boolean, PublicError> {
-  if (ctx.senderUserId !== null && ctx.senderUserId !== ctx.authorityUserId) {
-    return err(
-      createPublicError({
-        code: "DM_SECURITY_PERMISSION_DENIED",
-        category: "permission",
-        message: "Only GM can execute workforce assignment commands"
-      })
-    );
-  }
-  return ok(true);
 }
 
 export function registerAssignmentCommandHandlers(
@@ -367,7 +355,7 @@ export function registerAssignmentCommandHandlers(
       }
       return ok(payload as CreateAssignmentPayload);
     },
-    permissionValidator: requireGmPermission
+    permissionValidator: (ctx) => validatePeopleCommandPermission(ctx, domains)
   });
 
   // 2. people:cancel-assignment
@@ -487,7 +475,7 @@ export function registerAssignmentCommandHandlers(
       }
       return ok(payload as CancelAssignmentPayload);
     },
-    permissionValidator: requireGmPermission
+    permissionValidator: (ctx) => validatePeopleCommandPermission(ctx, domains)
   });
 
   // 3. people:create-reservation
@@ -662,7 +650,7 @@ export function registerAssignmentCommandHandlers(
       }
       return ok(payload as CreateReservationPayload);
     },
-    permissionValidator: requireGmPermission
+    permissionValidator: (ctx) => validatePeopleCommandPermission(ctx, domains)
   });
 
   // 4. people:release-reservation
@@ -782,6 +770,6 @@ export function registerAssignmentCommandHandlers(
       }
       return ok(payload as ReleaseReservationPayload);
     },
-    permissionValidator: requireGmPermission
+    permissionValidator: (ctx) => validatePeopleCommandPermission(ctx, domains)
   });
 }

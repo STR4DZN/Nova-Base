@@ -5,7 +5,7 @@
 **Normative Authorities:** `Documentos/99_DOMAIN_MANAGER_MASTER_SPECIFICATION_V1.md` (§13, DEC-0891 to DEC-1415), `Documentos/GATES/13_G3_PEOPLE.md`  
 **Status:** **SUBMITTED_FOR_USER_ACCEPTANCE (Aguardando Aceitação Soberana do Usuário)**  
 **Date:** 2026-09-18  
-**Test Suite:** 307/307 passing (0 failures, 0 regressions against G2 baseline of 233)  
+**Test Suite:** 314/314 passing (0 failures, 0 regressions against G2 baseline of 233)  
 **TypeScript Conformance:** Strict, 0 errors via `tsc --noEmit`  
 
 ---
@@ -68,22 +68,33 @@ Gate G3 implements the complete, vertical **People Subsystem** for the Domain Ma
 
 ---
 
-## 5. Verification & Quality Metrics
+## 5. Revalidação Externa Final: Resolução dos 4 Bloqueios Estruturais
 
-- **TypeScript Compilation (`tsc --noEmit`)**: 0 errors. Strict typing across all data types, schemas, presenters, repositories, calculators, and mutation coordinators.
+| Bloqueio | Descrição do Bloqueio | Causa Raiz Auditada | Remediação Canônica Implementada | Evidência de Verificação | Status |
+|:---:|---|---|---|---|:---:|
+| **B1** | **PublicPeopleApi / AdminPeopleApi Security & Clearance Bypasses** | `asAdmin()` e `asAuthority()` permitiam escalada não autenticada; `resolveCurrentViewer` aceitava `userId`, `isGm` e `allowedRestrictedRefs` arbitrários do chamador; `buildViewModel` aceitava `viewerIsGm: true` de jogadores. | Removidos `asAdmin()` e `asAuthority()` de `PublicPeopleApi` e do runtime. `resolveCurrentViewer()` impõe clamping estrito contra o contexto da sessão (não-GM tem `isGm` forçado para `false` e `allowedRestrictedRefs` restrito aos permitidos pela sessão). `buildViewModel` deriva `effectiveIsGm` exclusivamente do viewer clampado. | `tests/people/g3-revalidation-audit.test.ts` | **PASS** |
+| **B2** | **Multiplayer — UI Mutating as Player & Authority Permissions** | UI usava `executeLocal`, executando apenas na máquina local como autoridade; remetentes remotos sofriam erro ou bypassavam permissão na autoridade. | `CommandBus.execute()` roteia automaticamente via `executeLocal` na autoridade e via `transport.send` em clientes jogadores. `CommandBus` aguarda `permissionValidator` assíncrono. Implementado `validatePeopleCommandPermission` validando criadores do domínio (`createdByUserId`), controladores de capacidade/people e ownership de documentos no Foundry. | `tests/people/g3-revalidation-audit.test.ts` | **PASS** |
+| **B3** | **G3.9 UI Production Composition & Action Wiring** | `PeopleApplication` e modais não estavam expostos no bundle de produção `dist/main.js` ou conectados a ações DOM reais. | Implementada classe `PeopleApplication` (Foundry ApplicationV2 / DOM adapter) conectando listeners DOM reais para troca de abas (`selectTab`), seleção (`selectEntity`), abertura de modais (`openCreateModal`) e submissão (`submitCreate`). Exportados em `src/index.ts`, `src/main.ts` e compilados em `dist/main.js`. | `tests/people/g3-revalidation-audit.test.ts` | **PASS** |
+| **B4** | **PeopleRepairTool via Pipeline Transacional** | `PeopleRepairTool` mutava repositório diretamente fora do pipeline transacional sem locks ordenados ou reconciliação de concorrência. | Criado comando transacional `people:repair` no `CommandRegistry` com lock ordenado (`domain:<cleanId>`), fresh read com revision, commit com update e autorização estrita GM-only (`requireGmOnlyPermission`). `PeopleRepairTool` refatorado para despachar estritamente via `CommandBus.execute()`. | `tests/people/g3-revalidation-audit.test.ts` | **PASS** |
+
+---
+
+## 6. Verification & Quality Metrics
+
+- **TypeScript Compilation (`tsc --noEmit`)**: 0 erros. Strict typing across all data types, schemas, presenters, repositories, calculators, and mutation coordinators.
 - **Node.js Test Suite (`node tests/run-tests.mjs`)**:
-  - Total Tests: **307**
-  - Passed: **307**
+  - Total Tests: **314**
+  - Passed: **314**
   - Failed: **0**
-  - Regressions: **0** (All 233 Gate G2 tests + 74 Gate G3 & Audit Hardening tests pass 100%)
+  - Regressions: **0** (All 233 Gate G2 tests + 74 Gate G3 tests + 7 Revalidation Audit tests pass 100%)
 - **Capability Registry Verification**:
   - Connected `validateDomainPeopleData` directly to `CapabilityRegistry` under `domain-manager:people`.
   - Inactive domains completely skip people validation and overhead.
 
 ---
 
-## 6. Formal Submission for User Acceptance
+## 7. Formal Submission for User Acceptance
 
-Gate G3 (People) has satisfied all criteria specified in `Documentos/GATES/13_G3_PEOPLE.md` and `Documentos/99_DOMAIN_MANAGER_MASTER_SPECIFICATION_V1.md` (§13), along with all 8 hardening requirements from the post-implementation security and architectural audit.
+Gate G3 (People) has satisfied all criteria specified in `Documentos/GATES/13_G3_PEOPLE.md` and `Documentos/99_DOMAIN_MANAGER_MASTER_SPECIFICATION_V1.md` (§13), along with all 4 structural blocker resolutions from the final revalidation audit.
 
 O Gate G3 é submetido formalmente como **SUBMETIDO PARA ACEITAÇÃO** e **NUNCA SERÁ CONSIDERADO ACEITO ATÉ QUE O USUÁRIO FORNEÇA SUA APROVAÇÃO EXPLÍCITA**.

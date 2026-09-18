@@ -15,6 +15,7 @@ export interface PeoplePresenterOptions {
   readonly nowReal?: number;
   readonly actorResolver?: (uuid: string) => { name: string; img?: string } | null | undefined;
   readonly customRoleDefinitions?: readonly RoleDefinition[];
+  readonly allowedRestrictedRefs?: readonly string[];
 }
 
 export interface NotableViewModel {

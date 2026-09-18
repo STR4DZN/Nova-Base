@@ -30,6 +30,7 @@ import {
   type OperationalGroupVisibility
 } from "../operational-groups/operational-group-types.js";
 import { createOpaqueId, isOpaqueId } from "../../core/identity/ids.js";
+import { validatePeopleCommandPermission } from "./people-permissions.js";
 
 export interface CreateOperationalGroupPayload {
   readonly domainUuid: string;
@@ -73,19 +74,6 @@ export interface DeleteOperationalGroupPayload {
 
 function resolveDomainId(domainUuid: string): string {
   return domainUuid.startsWith("JournalEntry.") ? domainUuid.slice("JournalEntry.".length) : domainUuid;
-}
-
-function requireGmPermission(ctx: AuthenticatedCommandContext): Result<boolean, PublicError> {
-  if (ctx.senderUserId !== null && ctx.senderUserId !== ctx.authorityUserId) {
-    return err(
-      createPublicError({
-        code: "DM_SECURITY_PERMISSION_DENIED",
-        category: "permission",
-        message: "Only GM can execute operational group commands"
-      })
-    );
-  }
-  return ok(true);
 }
 
 export function registerOperationalGroupCommandHandlers(
@@ -252,7 +240,7 @@ export function registerOperationalGroupCommandHandlers(
       }
       return ok(payload as CreateOperationalGroupPayload);
     },
-    permissionValidator: requireGmPermission
+    permissionValidator: (ctx) => validatePeopleCommandPermission(ctx, domains)
   });
 
   // 2. people:update-operational-group
@@ -455,7 +443,7 @@ export function registerOperationalGroupCommandHandlers(
       }
       return ok(payload as UpdateOperationalGroupPayload);
     },
-    permissionValidator: requireGmPermission
+    permissionValidator: (ctx) => validatePeopleCommandPermission(ctx, domains)
   });
 
   // 3. people:delete-operational-group
@@ -574,6 +562,6 @@ export function registerOperationalGroupCommandHandlers(
       }
       return ok(payload as DeleteOperationalGroupPayload);
     },
-    permissionValidator: requireGmPermission
+    permissionValidator: (ctx) => validatePeopleCommandPermission(ctx, domains)
   });
 }

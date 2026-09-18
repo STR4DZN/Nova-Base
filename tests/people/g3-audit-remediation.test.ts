@@ -17,8 +17,7 @@ import {
 import { PeopleRepository } from "../../src/people/repositories/people-repository.js";
 import {
   PeopleService,
-  type PublicPeopleApi,
-  type AdminPeopleApi
+  type PublicPeopleApi
 } from "../../src/people/services/people-service.js";
 import { PeopleProjectionService } from "../../src/projection/people/people-projection-service.js";
 import {
@@ -153,8 +152,7 @@ function setupTestEnvironment() {
   const peopleAggregationService = new PeopleAggregationService(domains);
   const peopleService = new PeopleService(domains);
   const publicApi: PublicPeopleApi = peopleService;
-  const adminApi: AdminPeopleApi = peopleService.asAdmin();
-  const peopleRepo = adminApi.rawRepository;
+  const peopleRepo = new PeopleRepository(domains);
 
   return {
     registry,
@@ -165,13 +163,12 @@ function setupTestEnvironment() {
     peopleRepo,
     peopleService,
     peopleAggregationService,
-    publicApi,
-    adminApi
+    publicApi
   };
 }
 
 test("G3 Remediation Item 1 & 5: Public People API enforces viewer identity, clamps caller spoofing, and strips secrets", async () => {
-  const { domains, bus, publicApi, adminApi } = setupTestEnvironment();
+  const { domains, bus, publicApi, peopleRepo } = setupTestEnvironment();
 
   const domainRes = await domains.create({ name: "Royal City", record: defaultRecord });
   assert.equal(domainRes.ok, true);
@@ -226,15 +223,19 @@ test("G3 Remediation Item 1 & 5: Public People API enforces viewer identity, cla
   assert.equal(notablesRes.value[0].name, "Lord Mayor");
   assert.equal(notablesRes.value.some((n) => n.id === secretNotable.id), false);
 
-  // getPeopleData via Public API also strips secrets for non-GM
-  const peopleDataRes = await publicApi.getPeopleData(domainUuid);
-  assert.equal(peopleDataRes.ok, true);
-  assert.equal(peopleDataRes.value.notables.some((n) => n.id === secretNotable.id), false);
+  // asAdmin() and asAuthority() must not exist on Public API (Blocker 1)
+  assert.equal((publicApi as any).asAdmin, undefined);
+  assert.equal((publicApi as any).asAuthority, undefined);
 
-  // Admin API returns raw unprojected data including the secret notable
-  const adminPeopleDataRes = await adminApi.getPeopleData(domainUuid);
-  assert.equal(adminPeopleDataRes.ok, true);
-  assert.equal(adminPeopleDataRes.value.notables.some((n) => n.id === secretNotable.id), true);
+  // getPeopleData via Public API strips secrets for non-GM (Blocker 1)
+  const peopleDataRes = await (publicApi as any).getPeopleData(domainUuid);
+  assert.equal(peopleDataRes.ok, true);
+  assert.equal(peopleDataRes.value.notables.some((n: any) => n.id === secretNotable.id), false);
+
+  // Raw internal repository returns raw unprojected data including the secret notable
+  const rawPeopleDataRes = await peopleRepo.getPeopleData(domainUuid);
+  assert.equal(rawPeopleDataRes.ok, true);
+  assert.equal(rawPeopleDataRes.value.notables.some((n) => n.id === secretNotable.id), true);
 
   // Reset current user provider to GM for subsequent tests
   setCurrentUserProvider(() => ({
