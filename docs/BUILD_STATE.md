@@ -3,11 +3,11 @@
 ## Identidade
 
 - Module version: `0.0.3`
-- Gate de código atual: `G3 — People Subsystem & Lifecycle (REVALIDAÇÃO CONCLUÍDA, 4 BLOQUEIOS RESOLVIDOS, PENDENTE DE ACEITAÇÃO DO USUÁRIO)`
-- Estado local: `GATE_G3_PENDING_USER_ACCEPTANCE`
-- Estado externo: `GATE_G2_HOMOLOGATED_AND_ACCEPTED (Foundry VTT v13.351 + Socketlib In-World Smoke Test PASS)`
+- Gate de código atual: `G3 — People Subsystem & Lifecycle (HOMOLOGADO E ACEITO PELO USUÁRIO)`
+- Estado local: `GATE_G3_HOMOLOGATED_AND_ACCEPTED`
+- Estado externo: `GATE_G3_HOMOLOGATED_AND_ACCEPTED (Foundry VTT v13.351 + Socketlib In-World Smoke Test PASS)`
 - Schema Domain: `1`
-- Data de submissão do Gate G3: `2026-09-18`
+- Data de homologação do Gate G3: `2026-09-18`
 
 ## Estado canônico
 
@@ -20,7 +20,9 @@
   - Concorrência de até 10 conexões concorrentes demonstrada em testes de carga, sem vazamento de permits ou locks.
   - Anti-spoofing estrito, rate limiting pré-validação, dedupe store em memória com compartilhamento in-flight, LockManager ordenado e Transaction/Recovery shell.
   - Smoke test in-world (`scripts/foundry-v13-socketlib-smoke-test.js`) 100% aprovado no Foundry VTT v13.351.
-- **Gate G3**: Concluído, auditado, remediado contra todos os 4 bloqueios estruturais da revalidação externa e submetido para aceitação soberana do usuário (`docs/GATE_G3_ACCEPTANCE_REPORT.md`).
+- **Gate G3**: Concluído, auditado, remediado contra todos os bloqueios da revalidação externa, homologado e aceito soberanamente pelo usuário.
+  - Smoke test in-world 100% aprovado no Foundry VTT v13.351 em ambas as fases (GM e Player remoto via Socketlib).
+  - O Gate G3 está formalmente homologado e fechado, não devendo ser reaberto sem evidência concreta de regressão.
   - **G3.1 (Population Modes)**: modos `manual`, `sumGroups`, `hybrid`, precisão `exact`/`estimated`/`unknown`, cálculo e propagação estrita.
   - **G3.2 (PopulationGroup Entity & Commands)**: `DomainPeopleData`, repositório e comandos transacionais (`people:set-population`, `people:create-population-group`, `people:update-population-group`, `people:delete-population-group`).
   - **G3.3 (Notables)**: union discriminada `inline`/`actor`, IDs opacos `not_*`, resolução resiliente de `broken-ref`, anti-duplicação de ator no mesmo domínio, upgrade de inline para ator, guard de deleção para ocupantes de papéis.
@@ -30,11 +32,8 @@
   - **G3.7 (Assignments & Reservations Shell)**: modelos e comandos para atribuição e reserva de força de trabalho com bloqueio contra overcommit (`DM_WORKFORCE_OVERCOMMIT`) e override do GM.
   - **G3.8 (Capability Grants & People Aggregation)**: resolução dinâmica de concessões de capacidades (`resolvePeopleEffectiveCapabilities`) por papéis preenchidos e grupos operacionais ativos com rastreamento de proveniência e zero efeitos colaterais de persistência.
   - **G3.9 (People UI Presentation & Views)**: presenter com sanitização de visão GM vs Jogador (ocultação de notáveis/papéis/grupos secretos) e templates HTML semânticos.
-  - **G3 Revalidação Externa & Resolução dos 4 Bloqueios Estruturais**:
-    - **Bloqueio 1 (Public People API & Viewer Clamping)**: Removidos `asAdmin()` e `asAuthority()` da API pública e do runtime. Clamping estrito em `resolveCurrentViewer()` impedindo qualquer spoofing de `userId`, `isGm` ou `allowedRestrictedRefs` por callers não-GM. Acesso raw restrito a GM.
-    - **Bloqueio 2 (Multiplayer — UI Mutating as Player & Authority Permissions)**: `PeopleApplicationController` despacha comandos via `CommandBus.execute()`, que roteia para transporte de rede para clientes remotos (jogadores). Implementado `validatePeopleCommandPermission()` na autoridade (G3: GM, Primary Authority, Journal OWNER ownership >= 3, or canonical `DomainControllerProvider` authority; provenance `createdByUserId` does NOT grant mutation rights per DEC-018).
-    - **Bloqueio 3 (UI Production Composition & Action Wiring)**: Adaptador DOM e ApplicationV2 `PeopleApplication` e `PeopleApplicationController` implementados com suporte a seleção de abas, seleção de entidades, abertura de modais (`openCreateModal`) e submissão via formulário, expostos no bundle de produção `dist/main.js`.
-    - **Bloqueio 4 (PeopleRepairTool via Pipeline Transacional)**: Criado comando transacional `people:repair` com locks ordenados (`domain:<cleanId>`), fresh read com revision, operações de reparo puras e idempotentes, validação de permissão GM-only e commit via update. `PeopleRepairTool` refatorada para despachar estritamente via `CommandBus.execute()`.
+  - **ApplicationV2 UI & Multi-user Socketlib Pipeline**: `PeopleApplication` e `PeopleApplicationController` 100% operacionais no Foundry VTT v13 com herança de element accessor nativo, despacho de comandos remotos pelo `CommandBus` e resolução canônica de `DomainControllerProvider` (DEC-018).
+  - **Authoritative PeopleRepairTool**: Execução GM-only via pipeline transacional (`people:repair`) com locks ordenados e integridade de revisão.
 
 ## Evidência local Gate G3
 
@@ -42,9 +41,10 @@
 |---|---|
 | TypeScript strict (`node ./node_modules/typescript/bin/tsc --noEmit`) | PASS (0 erros) |
 | Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 335/335 (0 falhas) |
-| Relatório de Aceitação | Submetido para revisão e aceitação do usuário (`docs/GATE_G3_ACCEPTANCE_REPORT.md`) |
+| Relatório de Aceitação | Homologado e aceito pelo usuário (`docs/GATE_G3_ACCEPTANCE_REPORT.md`) |
 | Regressões G2 | 0 (todos os 233 testes de base preservados e passando) |
+| In-World Smoke Test (Foundry VTT v13.351) | PASS (Fases GM e Player 100% aprovadas) |
 
 ## Próxima ação canônica
- 
-- **Gate G4 (Economy & Resources)**: Com a implementação e remediação completa de todos os bloqueios da revalidação do Gate G3 (People) e 335/335 testes aprovados, a transição para o Gate G4 aguarda formalmente a homologação e aceitação soberana do Gate G3 por parte do usuário.
+
+- **Gate G4 (Economy & Resources)**: Com a homologação e aceitação formal do Gate G3 pelo usuário, o Gate G4 está LIBERADO para início de especificação e desenvolvimento de acordo com o plano diretor.

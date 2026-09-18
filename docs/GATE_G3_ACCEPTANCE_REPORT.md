@@ -93,8 +93,11 @@ Gate G3 implements the complete, vertical **People Subsystem** for the Domain Ma
 
 ---
 
-## 7. Formal Submission for User Acceptance
+## 7. Homologation & Formal User Acceptance
 
-Gate G3 (People) has satisfied all criteria specified in `Documentos/GATES/13_G3_PEOPLE.md` and `Documentos/99_DOMAIN_MANAGER_MASTER_SPECIFICATION_V1.md` (§13), along with all structural blocker resolutions and hardening from the final external revalidation audit.
+Gate G3 (People & Governance Subsystem) has satisfied all criteria specified in `Documentos/GATES/13_G3_PEOPLE.md` and `Documentos/99_DOMAIN_MANAGER_MASTER_SPECIFICATION_V1.md` (§13), along with all structural blocker resolutions and hardening verified both in automated regression suites (335/335 PASS) and live in Foundry VTT v13.351 (GM phase PASS, Player phase PASS via Socketlib).
 
-O Gate G3 é submetido formalmente como **SUBMETIDO PARA ACEITAÇÃO** e **NUNCA SERÁ CONSIDERADO ACEITO ATÉ QUE O USUÁRIO FORNEÇA SUA APROVAÇÃO EXPLÍCITA**.
+- **Status de Homologação**: **GATE_G3_HOMOLOGATED_AND_ACCEPTED**
+- **Data de Aceitação**: 2026-09-18
+- **Regressões**: 0
+- **Diretriz Canônica**: O Gate G3 está formalmente homologado e fechado, não devendo ser reaberto sem evidência concreta de regressão. O Gate G4 (Economy & Resources) está LIBERADO.
