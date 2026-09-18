@@ -794,7 +794,18 @@ export function registerEconomyCommands(options: RegisterEconomyCommandsOptions)
       }
       const regRes = targetThresholdService.registerThreshold(p);
       if (regRes.ok) {
-        await targetThresholdService.flush();
+        try {
+          await targetThresholdService.flush();
+        } catch (e: unknown) {
+          return err(
+            createPublicError({
+              code: "DM_DOMAIN_STORAGE_ERROR",
+              category: "provider",
+              message: `Failed to persist threshold: ${e instanceof Error ? e.message : String(e)}`,
+              retryable: true
+            })
+          );
+        }
       }
       return regRes;
     }
@@ -827,13 +838,25 @@ export function registerEconomyCommands(options: RegisterEconomyCommandsOptions)
       validateEconomyCommandPermission(ctx, domains, [], { gmOnly: true }),
     handler: async (ctx: AuthenticatedCommandContext<any>) => {
       const def = ctx.command.payload.definition as ResourceDefinition;
+      const targetRegistry = resourceRegistry ?? economyService.registry;
+      if (targetRegistry) {
+        if (targetRegistry.has(def.id)) {
+          return err(
+            createPublicError({
+              code: "DM_ECON_RESOURCE_ALREADY_EXISTS",
+              category: "conflict",
+              message: `Resource definition with ID '${def.id}' already exists`
+            })
+          );
+        }
+        const regRes = targetRegistry.register(def);
+        if (!regRes.ok) {
+          return regRes;
+        }
+      }
       const targetStore = customResourceStore;
       if (targetStore) {
         await targetStore.save(def);
-      }
-      const targetRegistry = resourceRegistry ?? economyService.registry;
-      if (targetRegistry) {
-        targetRegistry.register(def);
       }
       return ok(def);
     }

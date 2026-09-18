@@ -33,6 +33,7 @@ export interface LedgerFilter {
   readonly limit?: number;
   readonly direction?: "asc" | "desc";
   readonly recent?: boolean;
+  readonly allowedResourceIds?: readonly string[];
 }
 
 export interface PagedLedgerResult {
@@ -154,6 +155,9 @@ export class LedgerStore {
     }
     if (filter.resourceId !== undefined) {
       filtered = filtered.filter((e) => e.resourceId === filter.resourceId);
+    }
+    if (filter.allowedResourceIds !== undefined) {
+      filtered = filtered.filter((e) => filter.allowedResourceIds!.includes(e.resourceId));
     }
     if (filter.transactionId !== undefined) {
       filtered = filtered.filter((e) => e.transactionId === filter.transactionId);

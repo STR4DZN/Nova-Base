@@ -8,6 +8,7 @@ import {
   type ResourceAccountDto
 } from "../projection/economy-projection-service.js";
 import type { ViewerIdentity } from "../../projection/viewer-identity.js";
+import type { DerivedAccountResolver } from "../services/economy-service.js";
 
 export interface AggregateResourceTotalDto {
   readonly resourceId: string;
@@ -35,6 +36,7 @@ export interface EconomyAggregationOptions {
   readonly reservationStore: ReservationStore;
   readonly providerRegistry?: ProviderRegistry;
   readonly projectionService?: EconomyProjectionService;
+  readonly derivedResolvers?: Map<string, DerivedAccountResolver>;
 }
 
 export class EconomyAggregationProvider {
@@ -43,12 +45,14 @@ export class EconomyAggregationProvider {
   readonly #reservationStore: ReservationStore;
   readonly #providerRegistry?: ProviderRegistry;
   readonly #projection: EconomyProjectionService;
+  readonly #derivedResolvers?: Map<string, DerivedAccountResolver>;
 
   constructor(options: EconomyAggregationOptions) {
     this.#domains = options.domains;
     this.#resourceRegistry = options.resourceRegistry;
     this.#reservationStore = options.reservationStore;
     this.#providerRegistry = options.providerRegistry;
+    this.#derivedResolvers = options.derivedResolvers;
     this.#projection = options.projectionService ?? new EconomyProjectionService();
   }
 
@@ -137,6 +141,29 @@ export class EconomyAggregationProvider {
             if (provider && "readBalance" in provider) {
               try {
                 const balRes = await (provider as any).readBalance(uuid, account.resourceId, account.providerRef);
+                if (balRes?.ok) {
+                  balance = balRes.value.balanceMinor;
+                  readSuccess = true;
+                }
+              } catch {}
+            }
+          }
+          if (!readSuccess) {
+            resourceStats.isComplete = false;
+            resourceStats.unknownContributorCount++;
+            if (!unknownContributors.includes(uuid)) {
+              unknownContributors.push(uuid);
+            }
+          }
+        }
+
+        if (account.mode === "derived") {
+          let readSuccess = false;
+          if (this.#derivedResolvers) {
+            const resolver = this.#derivedResolvers.get(account.resolverId);
+            if (resolver) {
+              try {
+                const balRes = await resolver(uuid, account);
                 if (balRes?.ok) {
                   balance = balRes.value.balanceMinor;
                   readSuccess = true;

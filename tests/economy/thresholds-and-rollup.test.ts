@@ -637,3 +637,204 @@ test("G4-REVAL3-007: Canonical economy commands economy:set-threshold, economy:r
   assert.equal(releaseEvent !== undefined, true);
   assert.equal(releaseEvent?.reason, "Mission cancelled by Domain Council");
 });
+
+test("G4-REVAL4-002: ThresholdService.flush() propagates storage failure and economy:set-threshold returns DM_DOMAIN_STORAGE_ERROR", async () => {
+  const failingAdapter = {
+    loadSnapshot: async () => null,
+    saveSnapshot: async () => {
+      throw new Error("I/O Storage Error: Disk full");
+    }
+  };
+
+  const thresholdService = new ThresholdService({ storageAdapter: failingAdapter as any });
+
+  // Registering threshold schedules flush
+  thresholdService.registerThreshold({
+    id: "thresh-fail-1",
+    domainUuid: "dom-fail",
+    resourceId: "domain-manager:treasury",
+    direction: "below",
+    levelMinor: 100,
+    severity: "warning",
+    channel: "chat"
+  });
+
+  // Direct flush() should rethrow the persistent error
+  await assert.rejects(
+    async () => {
+      await thresholdService.flush();
+    },
+    { message: /I\/O Storage Error: Disk full/ }
+  );
+
+  // Now test command execution pipeline
+  const registry = new CommandRegistry();
+  const authorityService = new PrimaryAuthorityService(
+    {
+      getUsers: () => [{ id: "gm-1", isGM: true, active: true }],
+      getPreferredUserId: () => null,
+      getCurrentUserId: () => "gm-1"
+    },
+    { authorityUserId: "gm-1", authorityEpoch: 1, initialized: true }
+  );
+  const commandBus = new CommandBus({ registry, authorityService });
+
+  const doc = createDoc("dom-fail", "Fail Domain");
+  const docMap = new Map([[doc.id, doc], [doc.uuid, doc]]);
+  const domains = new StorageDomainRepository({
+    get: (id: string) => docMap.get(id),
+    list: () => [...new Set(docMap.values())],
+    create: async () => { throw new Error("not used"); }
+  });
+
+  registerEconomyCommands({
+    registry,
+    domains,
+    resourceRegistry: createDefaultResourceRegistry(),
+    thresholdService
+  });
+
+  const cmd = {
+    contractVersion: COMMAND_CONTRACT_VERSION_V1,
+    commandId: createOpaqueId("cmd"),
+    type: "economy:set-threshold",
+    payload: {
+      id: "thresh-fail-cmd",
+      domainUuid: doc.uuid,
+      resourceId: "domain-manager:treasury",
+      metric: "balance" as const,
+      valueMinor: 50,
+      direction: "below" as const,
+      severity: "critical" as const,
+      channel: "chat" as const
+    },
+    issuedAtReal: Date.now()
+  };
+
+  const receipt = await commandBus.execute(cmd);
+  assert.equal(receipt.ok, true);
+  assert.equal(receipt.value.status, "rejected");
+  assert.equal(receipt.value.error?.code, "DM_DOMAIN_STORAGE_ERROR");
+});
+
+test("G4-REVAL4-004: economy:register-custom-resource rejects duplicate resource definition with DM_ECON_RESOURCE_ALREADY_EXISTS", async () => {
+  const customResourceStore = new CustomResourceDefinitionStore();
+  const resourceRegistry = createDefaultResourceRegistry();
+  const registry = new CommandRegistry();
+  const authorityService = new PrimaryAuthorityService(
+    {
+      getUsers: () => [{ id: "gm-1", isGM: true, active: true }],
+      getPreferredUserId: () => null,
+      getCurrentUserId: () => "gm-1"
+    },
+    { authorityUserId: "gm-1", authorityEpoch: 1, initialized: true }
+  );
+  const commandBus = new CommandBus({ registry, authorityService });
+
+  const doc = createDoc("dom-custom-test", "Custom Domain");
+  const docMap = new Map([[doc.id, doc], [doc.uuid, doc]]);
+  const domains = new StorageDomainRepository({
+    get: (id: string) => docMap.get(id),
+    list: () => [...new Set(docMap.values())],
+    create: async () => { throw new Error("not used"); }
+  });
+
+  registerEconomyCommands({
+    registry,
+    domains,
+    resourceRegistry,
+    customResourceStore
+  });
+
+  const customDef = {
+    id: "world:stellar-dust",
+    version: 1,
+    label: "Stellar Dust",
+    description: "Cosmic matter",
+    categoryId: "cosmic",
+    tags: ["space"],
+    precision: 2,
+    displayUnit: { singular: "grain", plural: "grains" },
+    minimumMinor: 0,
+    maximumMinor: 100000,
+    allowNegative: false,
+    defaultCapacityPolicy: "block" as const,
+    lifecycle: "active" as const
+  };
+
+  // First registration succeeds
+  const cmd1 = {
+    contractVersion: COMMAND_CONTRACT_VERSION_V1,
+    commandId: createOpaqueId("cmd"),
+    type: "economy:register-custom-resource",
+    payload: { definition: customDef },
+    issuedAtReal: Date.now()
+  };
+  const receipt1 = await commandBus.execute(cmd1);
+  assert.equal(receipt1.ok, true);
+  assert.equal(receipt1.value.status, "executed");
+
+  // Second registration of exact same resource ID must fail with DM_ECON_RESOURCE_ALREADY_EXISTS
+  const cmd2 = {
+    contractVersion: COMMAND_CONTRACT_VERSION_V1,
+    commandId: createOpaqueId("cmd"),
+    type: "economy:register-custom-resource",
+    payload: { definition: { ...customDef, label: "Spoofed Duplicate" } },
+    issuedAtReal: Date.now()
+  };
+  const receipt2 = await commandBus.execute(cmd2);
+  assert.equal(receipt2.ok, true);
+  assert.equal(receipt2.value.status, "rejected");
+  assert.equal(receipt2.value.error?.code, "DM_ECON_RESOURCE_ALREADY_EXISTS");
+
+  // Original definition preserved without overwrite
+  assert.equal(resourceRegistry.get("world:stellar-dust")?.label, "Stellar Dust");
+  assert.equal(customResourceStore.get("world:stellar-dust")?.label, "Stellar Dust");
+});
+
+test("G4-REVAL4-004: EconomyAggregationProvider marks unresolvable derived accounts as incomplete and lists domain in unknownContributors", async () => {
+  const docDerived = createDoc("dom-derived-test", "Derived Domain", [
+    {
+      mode: "derived",
+      domainUuid: "JournalEntry.dom-derived-test",
+      resourceId: "domain-manager:treasury",
+      resolverId: "unregistered-resolver-service",
+      derivedBalanceMinor: 0,
+      baseCapacityMinor: 10000,
+      visibility: "public"
+    }
+  ]);
+
+  const docMap = new Map<string, IdentifiedJournalEntryDocumentLike>([
+    [docDerived.id, docDerived],
+    [docDerived.uuid, docDerived]
+  ]);
+
+  const repo = new StorageDomainRepository({
+    get: (id: string) => docMap.get(id),
+    list: () => [...new Set(docMap.values())],
+    create: async () => { throw new Error("not used"); }
+  });
+
+  const registry = createDefaultResourceRegistry();
+  const reservationStore = new ReservationStore();
+
+  const aggregator = new EconomyAggregationProvider({
+    domains: repo,
+    resourceRegistry: registry,
+    reservationStore
+  });
+
+  const result = await aggregator.getAggregateContext(
+    [docDerived.uuid],
+    { isGm: true }
+  );
+
+  const treasuryStats = result.totals.find((t) => t.resourceId === "domain-manager:treasury")!;
+  assert.ok(treasuryStats);
+  assert.equal(treasuryStats.isComplete, false, "Resource stats must be incomplete when derived account is unresolvable");
+  assert.equal(treasuryStats.unknownContributorCount, 1, "Should count 1 unknown contributor");
+
+  assert.ok(result.unknownContributors.includes(docDerived.uuid), "Domain UUID must be included in unknownContributors for GM");
+});
+

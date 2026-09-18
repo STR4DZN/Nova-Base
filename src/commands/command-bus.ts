@@ -536,7 +536,18 @@ export class CommandBus {
         transportTimestamp: now
       };
     } finally {
-      if ((queueEntry.status as QueuedCommandStatus) !== "cancelled") {
+      if (queueEntry.abortController.signal.aborted || (queueEntry.status as QueuedCommandStatus) === "cancelled") {
+        finalReceipt = {
+          commandId: command.commandId,
+          status: "rejected",
+          error: createPublicError({
+            code: "DM_COMMAND_CANCELLED",
+            category: "busy",
+            message: `Command was cancelled: ${queueEntry.cancelReason ?? "Unknown reason"}`
+          }),
+          transportTimestamp: now
+        };
+      } else {
         const isSuccess = finalReceipt !== undefined && finalReceipt.status === "executed";
         this.#commandQueue.markFinished(command.commandId, isSuccess);
       }

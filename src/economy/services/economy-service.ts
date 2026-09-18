@@ -14,6 +14,10 @@ import type { TransactionStore } from "../../mutations/transaction-store.js";
 import type { RecoveryService } from "../../mutations/recovery-service.js";
 import { createTransactionRecord } from "../../mutations/transaction-record.js";
 import type { ProviderRegistry } from "../providers/provider-registry.js";
+import {
+  assertProviderHealthy,
+  assertDebitAllowedOnProviderBalance
+} from "../providers/provider-types.js";
 import type { ThresholdService } from "../thresholds/threshold-service.js";
 import {
   type DerivedResourceAccount,
@@ -710,6 +714,12 @@ export class EconomyService {
             })
           );
         }
+
+        const healthRes = await assertProviderHealthy(provider);
+        if (!healthRes.ok) {
+          return healthRes;
+        }
+
         const delta = params.deltaMinor ?? 0;
         if (delta === 0) {
           return ok({
@@ -717,6 +727,29 @@ export class EconomyService {
             entry: undefined,
             isNoop: true
           });
+        }
+
+        if (delta < 0 && "readBalance" in provider && typeof (provider as any).readBalance === "function") {
+          const balRes = await (provider as any).readBalance(
+            params.domainUuid,
+            params.resourceId,
+            providerAccount.providerRef
+          );
+          if (balRes.ok) {
+            const debitCheck = assertDebitAllowedOnProviderBalance(balRes.value, providerAccount.providerId);
+            if (!debitCheck.ok) {
+              return debitCheck;
+            }
+            if (balRes.value.balanceMinor + delta < 0) {
+              return err(
+                createPublicError({
+                  code: "DM_ECON_INSUFFICIENT_FUNDS",
+                  category: "validation",
+                  message: `Insufficient funds in provider account '${params.resourceId}'. Current: ${balRes.value.balanceMinor}, required: ${Math.abs(delta)}`
+                })
+              );
+            }
+          }
         }
 
         const transactionId = createOpaqueId("tx");
@@ -737,7 +770,8 @@ export class EconomyService {
             providerRef: providerAccount.providerRef,
             deltaMinor: delta,
             reason: params.reason,
-            userId: params.userId
+            userId: params.userId,
+            providerWriteConfirmed: false
           }
         });
 
@@ -747,17 +781,55 @@ export class EconomyService {
         this.#transactionStore?.transition(transactionId, "committing", epoch);
         await this.#transactionStore?.flush();
 
-        const mutRes = await (provider as any).mutateBalance(
-          params.domainUuid,
-          params.resourceId,
-          providerAccount.providerRef,
-          delta,
-          params.reason
-        );
+        let mutRes: any;
+        let unknownOutcome = false;
+        try {
+          mutRes = await (provider as any).mutateBalance(
+            params.domainUuid,
+            params.resourceId,
+            providerAccount.providerRef,
+            delta,
+            params.reason,
+            { operationRef: transactionId }
+          );
+        } catch (caughtErr: unknown) {
+          unknownOutcome = true;
+          mutRes = err(
+            createPublicError({
+              code: "DM_ECON_PROVIDER_TIMEOUT",
+              category: "provider",
+              message: `Provider mutation timed out or threw unknown error: ${caughtErr instanceof Error ? caughtErr.message : String(caughtErr)}`,
+              details: { outcome: "unknown" }
+            })
+          );
+        }
+
         if (!mutRes.ok) {
+          const isUnknown =
+            unknownOutcome ||
+            mutRes.error.code === "DM_ECON_PROVIDER_TIMEOUT" ||
+            mutRes.error.details?.outcome === "unknown" ||
+            mutRes.error.retryable === true;
+
+          if (isUnknown) {
+            this.#transactionStore?.transition(
+              transactionId,
+              "needs-recovery",
+              epoch,
+              `Provider mutation outcome unknown: ${mutRes.error.message}`
+            );
+            await this.#transactionStore?.flush();
+            return mutRes;
+          }
+
           this.#transactionStore?.transition(transactionId, "failed", epoch, mutRes.error.message);
           await this.#transactionStore?.flush();
           return mutRes;
+        }
+
+        (txRecord.recoveryData as any).providerWriteConfirmed = true;
+        if (mutRes.value?.providerTransactionRef) {
+          (txRecord.recoveryData as any).providerTransactionRef = mutRes.value.providerTransactionRef;
         }
 
         const entryRes = this.#ledgerStore.append({
@@ -787,6 +859,27 @@ export class EconomyService {
 
         await this.#ledgerStore.flush();
 
+        if (typeof (provider as any).flush === "function") {
+          try {
+            await (provider as any).flush();
+          } catch (flushErr: unknown) {
+            this.#transactionStore?.transition(
+              transactionId,
+              "needs-recovery",
+              epoch,
+              `Provider persistence flush failed: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`
+            );
+            await this.#transactionStore?.flush();
+            return err(
+              createPublicError({
+                code: "DM_ECON_PROVIDER_STORAGE_ERROR",
+                category: "provider",
+                message: `Provider persistence flush failed: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`
+              })
+            );
+          }
+        }
+
         this.#transactionStore?.transition(
           transactionId,
           "committed",
@@ -798,7 +891,7 @@ export class EconomyService {
         this.#evaluateThresholds(
           params.domainUuid,
           params.resourceId,
-          mutRes.value.balanceMinor,
+          mutRes.value.newBalanceMinor ?? mutRes.value.balanceMinor,
           null
         );
 
@@ -2264,17 +2357,66 @@ export class EconomyService {
         return ok(undefined);
       }
 
-      // Revert provider balance mutation
+      // Revert provider balance mutation with prior reconciliation
       if (this.#providerRegistry && data.providerId) {
         const provider = this.#providerRegistry.get(data.providerId);
-        if (provider && "mutateBalance" in provider && typeof (provider as any).mutateBalance === "function") {
-          await (provider as any).mutateBalance(
-            data.domainUuid,
-            data.resourceId,
-            data.providerRef ?? "",
-            -data.deltaMinor,
-            `Recovery compensation for aborted adjustment ${record.transactionId}`
-          );
+        if (provider) {
+          if (typeof (provider as any).reconcile === "function") {
+            const recRes = await (provider as any).reconcile(
+              data.domainUuid,
+              data.resourceId,
+              data.providerRef ?? "",
+              record.transactionId
+            );
+            if (!recRes.ok) {
+              return recRes;
+            }
+            if (recRes.value.outcome === "not-written") {
+              if (this.#transactionStore) {
+                this.#transactionStore.transition(
+                  record.transactionId,
+                  "failed",
+                  record.authorityEpoch,
+                  "Reconciliation confirmed mutation was not applied on provider"
+                );
+                await this.#transactionStore.flush();
+              }
+              return ok(undefined);
+            }
+            if (recRes.value.outcome === "unknown") {
+              return err(
+                createPublicError({
+                  code: "DM_ECON_RECOVERY_INDETERMINATE",
+                  category: "recovery",
+                  message: `Provider reconciliation outcome is unknown for transaction '${record.transactionId}'`
+                })
+              );
+            }
+          } else if (!data.providerWriteConfirmed) {
+            return err(
+              createPublicError({
+                code: "DM_ECON_RECOVERY_INDETERMINATE",
+                category: "recovery",
+                message: `Provider write confirmation is missing and provider does not support reconciliation for '${record.transactionId}'`
+              })
+            );
+          }
+
+          if (typeof (provider as any).mutateBalance === "function") {
+            const compRes = await (provider as any).mutateBalance(
+              data.domainUuid,
+              data.resourceId,
+              data.providerRef ?? "",
+              -data.deltaMinor,
+              `Recovery compensation for aborted adjustment ${record.transactionId}`
+            );
+            if (!compRes.ok) {
+              return compRes;
+            }
+            if (typeof (provider as any).flush === "function") {
+              await (provider as any).flush();
+            }
+          }
         }
       }
 

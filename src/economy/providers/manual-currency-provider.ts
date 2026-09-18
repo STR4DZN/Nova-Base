@@ -106,11 +106,14 @@ export class ManualCurrencyProvider implements CurrencyProvider {
     return ok(this.#balances.get(targetRef) ?? 0);
   }
 
+  readonly #operations = new Map<string, { deltaMinor: number; timestamp: number }>();
+
   async mutateCurrency(
     targetRef: string,
     deltaMinor: number,
-    _reason: string
-  ): Promise<Result<{ newBalanceMinor: number }, PublicError>> {
+    _reason: string,
+    options?: { readonly operationRef?: string }
+  ): Promise<Result<{ newBalanceMinor: number; outcome?: "success"; providerTransactionRef?: string }, PublicError>> {
     if (!this.#isHealthy) {
       return err(
         createPublicError({
@@ -123,8 +126,15 @@ export class ManualCurrencyProvider implements CurrencyProvider {
     const current = this.#balances.get(targetRef) ?? 0;
     const next = current + deltaMinor;
     this.#balances.set(targetRef, next);
+    if (options?.operationRef) {
+      this.#operations.set(options.operationRef, { deltaMinor, timestamp: Date.now() });
+    }
     this.#schedulePersist();
-    return ok({ newBalanceMinor: next });
+    return ok({
+      newBalanceMinor: next,
+      outcome: "success",
+      ...(options?.operationRef ? { providerTransactionRef: options.operationRef } : {})
+    });
   }
 
   async readBalance(
@@ -143,10 +153,45 @@ export class ManualCurrencyProvider implements CurrencyProvider {
     resourceId: string,
     providerRef: string,
     deltaMinor: number,
-    reason: string
-  ): Promise<Result<{ newBalanceMinor: number }, PublicError>> {
+    reason: string,
+    options?: { readonly operationRef?: string }
+  ): Promise<Result<{ newBalanceMinor: number; outcome?: "success"; providerTransactionRef?: string }, PublicError>> {
     const key = providerRef || `${domainUuid}:${resourceId}`;
-    return this.mutateCurrency(key, deltaMinor, reason);
+    return this.mutateCurrency(key, deltaMinor, reason, options);
+  }
+
+  async reconcile(
+    _domainUuidOrTargetRef: string,
+    _resourceIdOrOpRef: string,
+    providerRef?: string,
+    operationRef?: string
+  ): Promise<Result<{ written: boolean; outcome: "written" | "not-written" | "unknown"; currentBalanceMinor?: number }, PublicError>> {
+    const opKey = operationRef ?? _resourceIdOrOpRef;
+    const balKey = providerRef ?? _domainUuidOrTargetRef;
+    const currentBalance = this.#balances.get(balKey) ?? 0;
+
+    if (!this.#isHealthy) {
+      return ok({
+        written: false,
+        outcome: "unknown",
+        currentBalanceMinor: currentBalance
+      });
+    }
+
+    const op = this.#operations.get(opKey);
+    if (op) {
+      return ok({
+        written: true,
+        outcome: "written",
+        currentBalanceMinor: currentBalance
+      });
+    }
+
+    return ok({
+      written: false,
+      outcome: "not-written",
+      currentBalanceMinor: currentBalance
+    });
   }
 
   async applyDelta(params: {
@@ -155,13 +200,15 @@ export class ManualCurrencyProvider implements CurrencyProvider {
     readonly providerRef: string;
     readonly deltaMinor: number;
     readonly reason: string;
-  }): Promise<Result<{ newBalanceMinor: number }, PublicError>> {
+    readonly options?: { readonly operationRef?: string };
+  }): Promise<Result<{ newBalanceMinor: number; outcome?: "success"; providerTransactionRef?: string }, PublicError>> {
     return this.mutateBalance(
       params.domainUuid,
       params.resourceId,
       params.providerRef,
       params.deltaMinor,
-      params.reason
+      params.reason,
+      params.options
     );
   }
 

@@ -13,6 +13,8 @@ import type { ResourceDefinitionRegistry } from "../../../economy/definitions/re
 import type { LedgerStore } from "../../../economy/ledger/ledger-store.js";
 import type { ReservationStore } from "../../../economy/reservations/reservation-store.js";
 import type { ProviderRegistry } from "../../../economy/providers/provider-registry.js";
+import type { ProviderHealth } from "../../../economy/providers/provider-types.js";
+import type { TransactionStore } from "../../../mutations/transaction-store.js";
 import { parseResourceAmount } from "../../../economy/math/minor-units.js";
 import { resolveCurrentViewer, type ViewerIdentity } from "../../../projection/viewer-identity.js";
 import {
@@ -27,15 +29,32 @@ import {
   renderCreateAccountModalHtml,
   renderEconomySubsystemHtml,
   renderResourceDetailModalHtml,
+  renderTransactionHistoryModalHtml,
   renderTransferModalHtml
 } from "./economy-view.js";
+
+function cleanPayload<T>(payload: T): T {
+  if (payload === null || typeof payload !== "object") {
+    return payload;
+  }
+  if (Array.isArray(payload)) {
+    return payload.map(cleanPayload) as unknown as T;
+  }
+  const cleaned: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(payload as Record<string, unknown>)) {
+    if (value !== undefined) {
+      cleaned[key] = typeof value === "object" && value !== null ? cleanPayload(value) : value;
+    }
+  }
+  return cleaned as T;
+}
 
 function makeCommand<T>(type: string, payload: T): DomainCommand<T> {
   return {
     contractVersion: COMMAND_CONTRACT_VERSION_V1,
     commandId: createCommandId(),
     type,
-    payload,
+    payload: cleanPayload(payload),
     issuedAtReal: Date.now()
   };
 }
@@ -48,11 +67,18 @@ export interface EconomyAppOptions {
   readonly ledgerStore?: LedgerStore;
   readonly reservationStore?: ReservationStore;
   readonly providerRegistry?: ProviderRegistry;
+  readonly transactionStore?: TransactionStore;
   readonly domains: DomainReadRepository;
   readonly viewer?: Partial<ViewerIdentity>;
 }
 
-export type EconomyModalType = "transfer" | "adjust" | "createAccount" | "resourceDetail" | null;
+export type EconomyModalType =
+  | "transfer"
+  | "adjust"
+  | "createAccount"
+  | "resourceDetail"
+  | "transactionHistory"
+  | null;
 
 export class EconomyApplicationController {
   readonly #domainUuid: string;
@@ -61,6 +87,7 @@ export class EconomyApplicationController {
   readonly #ledgerStore?: LedgerStore;
   readonly #reservationStore?: ReservationStore;
   readonly #providerRegistry?: ProviderRegistry;
+  readonly #transactionStore?: TransactionStore;
   readonly #domains: DomainReadRepository;
   readonly #viewer?: Partial<ViewerIdentity>;
 
@@ -80,6 +107,8 @@ export class EconomyApplicationController {
       options.reservationStore ?? (options.economyService as any)?.reservationStore;
     this.#providerRegistry =
       options.providerRegistry ?? (options.economyService as any)?.providerRegistry;
+    this.#transactionStore =
+      options.transactionStore ?? (options.economyService as any)?.transactionStore;
     this.#domains = options.domains;
     this.#viewer = options.viewer;
   }
@@ -117,6 +146,22 @@ export class EconomyApplicationController {
     const viewer = resolveCurrentViewer(this.#viewer);
     const isGm = viewer.isGm;
 
+    const providerHealthMap = new Map<string, ProviderHealth>();
+    if (this.#providerRegistry) {
+      for (const p of this.#providerRegistry.list()) {
+        try {
+          const health = await p.getHealth();
+          providerHealthMap.set(p.providerId, health);
+        } catch {
+          providerHealthMap.set(p.providerId, {
+            status: "unavailable",
+            lastCheckedAt: Date.now(),
+            message: "Provider health check failed"
+          });
+        }
+      }
+    }
+
     const presenterOptions: EconomyPresenterOptions = {
       viewerIsGm: isGm,
       viewer,
@@ -124,6 +169,8 @@ export class EconomyApplicationController {
       ledgerStore: this.#ledgerStore,
       reservationStore: this.#reservationStore,
       providerRegistry: this.#providerRegistry,
+      providerHealthMap,
+      transactionStore: this.#transactionStore,
       ledgerPage: this.#ledgerPage,
       ledgerPageSize: 20
     };
@@ -208,6 +255,7 @@ export class EconomyApplicationController {
 
   async dispatchCreateAccount(payload: {
     readonly resourceId: string;
+    readonly mode?: "native" | "provider" | "derived";
     readonly initialBalanceMinor?: number;
     readonly baseCapacityMinor?: number | null;
     readonly visibility?: "public" | "restricted" | "secret";
@@ -216,12 +264,66 @@ export class EconomyApplicationController {
     const cmd = makeCommand("economy:create-account", {
       domainUuid: this.#domainUuid,
       resourceId: payload.resourceId,
+      mode: payload.mode ?? "native",
       initialBalanceMinor: payload.initialBalanceMinor,
       baseCapacityMinor: payload.baseCapacityMinor,
       visibility: payload.visibility,
       reason: payload.reason
     });
     return this.#executeCommand(cmd);
+  }
+
+  async dispatchQuickResourceCreateAndAccount(payload: {
+    readonly definition: {
+      readonly id: string;
+      readonly label: string;
+      readonly precision?: number;
+      readonly unit?: string;
+      readonly description?: string;
+    };
+    readonly account: {
+      readonly mode?: "native" | "provider" | "derived";
+      readonly initialBalanceMinor?: number;
+      readonly baseCapacityMinor?: number | null;
+      readonly visibility?: "public" | "restricted" | "secret";
+      readonly reason?: string;
+    };
+  }): Promise<Result<unknown>> {
+    const regCmd = makeCommand("economy:register-custom-resource", {
+      definition: {
+        id: payload.definition.id,
+        version: 1,
+        label: payload.definition.label,
+        precision: payload.definition.precision ?? 0,
+        displayUnit: {
+          singular: payload.definition.unit ?? "",
+          plural: payload.definition.unit ?? ""
+        },
+        description: payload.definition.description ?? "",
+        icon: "fas fa-box",
+        categoryId: "custom",
+        tags: ["custom"],
+        minimumMinor: 0,
+        maximumMinor: null,
+        allowNegative: false,
+        defaultCapacityPolicy: "block",
+        lifecycle: "active"
+      }
+    });
+
+    const regRes = await this.#executeCommand(regCmd);
+    if (!regRes.ok) {
+      return regRes;
+    }
+
+    return this.dispatchCreateAccount({
+      resourceId: payload.definition.id,
+      mode: payload.account.mode ?? "native",
+      initialBalanceMinor: payload.account.initialBalanceMinor,
+      baseCapacityMinor: payload.account.baseCapacityMinor,
+      visibility: payload.account.visibility,
+      reason: payload.account.reason ?? `Initial allocation for ${payload.definition.label}`
+    });
   }
 
   async #executeCommand(cmd: DomainCommand<any>): Promise<Result<unknown>> {
@@ -258,6 +360,8 @@ export class EconomyApplicationController {
     } else if (this.#activeModal === "createAccount") {
       const defs = this.#resourceRegistry ? this.#resourceRegistry.list() : [];
       modalHtml = renderCreateAccountModalHtml(this.#domainUuid, defs);
+    } else if (this.#activeModal === "transactionHistory") {
+      modalHtml = renderTransactionHistoryModalHtml(this.#domainUuid, vm.transactions);
     } else if (this.#activeModal === "resourceDetail" && this.#selectedResourceId) {
       const acc = vm.accounts.find((a) => a.resourceId === this.#selectedResourceId);
       if (acc) {
@@ -375,6 +479,7 @@ export class EconomyApplication extends BaseApp {
       openTransferModal: EconomyApplication.#onOpenTransferModal,
       openAdjustModal: EconomyApplication.#onOpenAdjustModal,
       openCreateAccountModal: EconomyApplication.#onOpenCreateAccountModal,
+      openTransactionHistoryModal: EconomyApplication.#onOpenTransactionHistoryModal,
       openResourceDetail: EconomyApplication.#onOpenResourceDetail,
       releaseReservation: EconomyApplication.#onReleaseReservation,
       nextLedgerPage: EconomyApplication.#onNextLedgerPage,
@@ -508,6 +613,17 @@ export class EconomyApplication extends BaseApp {
       if (form._dmSubmitBound) return;
       form._dmSubmitBound = true;
 
+      const modeRadios = form.querySelectorAll?.('input[name="creationMode"]') ?? [];
+      modeRadios.forEach((radio: any) => {
+        radio.addEventListener?.("change", () => {
+          const isQuick = radio.value === "quickCreate";
+          const existingGroup = form.querySelector?.("#dm-existing-group");
+          const quickGroup = form.querySelector?.("#dm-quick-group");
+          if (existingGroup) existingGroup.style.display = isQuick ? "none" : "";
+          if (quickGroup) quickGroup.style.display = isQuick ? "" : "none";
+        });
+      });
+
       form.addEventListener("submit", async (e: any) => {
         e.preventDefault();
         const formType = form.getAttribute?.("data-form-type");
@@ -553,25 +669,58 @@ export class EconomyApplication extends BaseApp {
             this.render();
           }
         } else if (formType === "createAccount") {
+          const isQuick = data.creationMode === "quickCreate";
+          let accountPrecision = 0;
+          let resourceId = data.resourceId;
+
+          if (isQuick) {
+            resourceId = data.quickResourceId;
+            accountPrecision = data.quickResourcePrecision ? parseInt(data.quickResourcePrecision, 10) : 0;
+          } else {
+            accountPrecision = precision;
+          }
+
           let initialBalanceMinor: number | undefined = undefined;
           if (data.initialBalance) {
-            const parsedInit = parseResourceAmount(data.initialBalance, precision);
+            const parsedInit = parseResourceAmount(data.initialBalance, accountPrecision);
             if (parsedInit.ok) initialBalanceMinor = parsedInit.value;
           }
 
           let baseCapacityMinor: number | null | undefined = undefined;
           if (data.baseCapacity) {
-            const parsedCap = parseResourceAmount(data.baseCapacity, precision);
+            const parsedCap = parseResourceAmount(data.baseCapacity, accountPrecision);
             if (parsedCap.ok) baseCapacityMinor = parsedCap.value;
           }
 
-          await this.#controller.dispatchCreateAccount({
-            resourceId: data.resourceId,
-            initialBalanceMinor,
-            baseCapacityMinor,
-            visibility: (data.visibility as any) || "public",
-            reason: data.reason || undefined
-          });
+          if (isQuick) {
+            const quickRes = await this.#controller.dispatchQuickResourceCreateAndAccount({
+              definition: {
+                id: resourceId,
+                label: data.quickResourceLabel || resourceId,
+                precision: accountPrecision,
+                unit: data.quickResourceUnit || undefined,
+                description: data.quickResourceDescription || undefined
+              },
+              account: {
+                initialBalanceMinor,
+                baseCapacityMinor,
+                visibility: (data.visibility as any) || "public",
+                reason: data.reason || undefined
+              }
+            });
+            if (!quickRes.ok) {
+              console.error("Quick resource create failed:", quickRes.error.message);
+              return;
+            }
+          } else {
+            await this.#controller.dispatchCreateAccount({
+              resourceId,
+              initialBalanceMinor,
+              baseCapacityMinor,
+              visibility: (data.visibility as any) || "public",
+              reason: data.reason || undefined
+            });
+          }
           this.#controller.closeModal();
           this.render();
         }
@@ -591,6 +740,11 @@ export class EconomyApplication extends BaseApp {
 
   static #onOpenCreateAccountModal(this: EconomyApplication): void {
     this.#controller.openModal("createAccount");
+    this.render();
+  }
+
+  static #onOpenTransactionHistoryModal(this: EconomyApplication): void {
+    this.#controller.openModal("transactionHistory");
     this.render();
   }
 

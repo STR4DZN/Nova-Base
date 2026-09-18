@@ -140,3 +140,64 @@ test("G4-AUD-009: LedgerStore handles 10,000+ entries scale test with performant
   assert.equal(page2.entries[49].sequence, 9_901);
 });
 
+test("G4-REVAL4-003: LedgerStore.queryPaged filters strictly by allowedResourceIds without leaking totalCount or hasMore", async () => {
+  const store = new LedgerStore();
+
+  // Populate 15 treasury entries (public)
+  for (let i = 1; i <= 15; i++) {
+    store.append({
+      domainUuid: "dom-leak-test",
+      resourceId: "domain-manager:treasury",
+      deltaMinor: 100 * i,
+      kind: "adjustment",
+      source: { type: "manual", reason: `Treasury #${i}` }
+    });
+  }
+
+  // Populate 20 materials entries (secret)
+  for (let i = 1; i <= 20; i++) {
+    store.append({
+      domainUuid: "dom-leak-test",
+      resourceId: "domain-manager:materials",
+      deltaMinor: 50 * i,
+      kind: "adjustment",
+      source: { type: "manual", reason: `Materials #${i}` }
+    });
+  }
+
+  assert.equal(store.count, 35);
+
+  // Query with allowedResourceIds restricted only to treasury
+  const page1 = store.queryPaged({
+    domainUuid: "dom-leak-test",
+    allowedResourceIds: ["domain-manager:treasury"],
+    direction: "desc",
+    limit: 10
+  });
+
+  // totalCount MUST be 15, NOT 35!
+  assert.equal(page1.totalCount, 15, "totalCount must reflect only allowed resources");
+  assert.equal(page1.entries.length, 10);
+  assert.equal(page1.hasMore, true);
+  for (const entry of page1.entries) {
+    assert.equal(entry.resourceId, "domain-manager:treasury");
+  }
+
+  // Page 2
+  const page2 = store.queryPaged({
+    domainUuid: "dom-leak-test",
+    allowedResourceIds: ["domain-manager:treasury"],
+    direction: "desc",
+    cursor: page1.nextCursor,
+    limit: 10
+  });
+
+  assert.equal(page2.totalCount, 5, "totalCount reflects matching entries in cursor window");
+  assert.equal(page2.entries.length, 5);
+  assert.equal(page2.hasMore, false, "hasMore must be false after the 15th treasury entry");
+  for (const entry of page2.entries) {
+    assert.equal(entry.resourceId, "domain-manager:treasury");
+  }
+});
+
+

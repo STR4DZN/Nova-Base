@@ -5217,7 +5217,18 @@ var CommandBus = class {
         transportTimestamp: now
       };
     } finally {
-      if (queueEntry.status !== "cancelled") {
+      if (queueEntry.abortController.signal.aborted || queueEntry.status === "cancelled") {
+        finalReceipt = {
+          commandId: command.commandId,
+          status: "rejected",
+          error: createPublicError({
+            code: "DM_COMMAND_CANCELLED",
+            category: "busy",
+            message: `Command was cancelled: ${queueEntry.cancelReason ?? "Unknown reason"}`
+          }),
+          transportTimestamp: now
+        };
+      } else {
         const isSuccess = finalReceipt !== void 0 && finalReceipt.status === "executed";
         this.#commandQueue.markFinished(command.commandId, isSuccess);
       }
@@ -12743,6 +12754,9 @@ var LedgerStore = class {
     if (filter.resourceId !== void 0) {
       filtered = filtered.filter((e) => e.resourceId === filter.resourceId);
     }
+    if (filter.allowedResourceIds !== void 0) {
+      filtered = filtered.filter((e) => filter.allowedResourceIds.includes(e.resourceId));
+    }
     if (filter.transactionId !== void 0) {
       filtered = filtered.filter((e) => e.transactionId === filter.transactionId);
     }
@@ -13581,6 +13595,36 @@ var CustomResourceDefinitionStore = class {
     await this.#adapter.saveSnapshot(snapshot);
   }
 };
+
+// src/economy/providers/provider-types.ts
+function isNamespacedProviderId(value) {
+  return typeof value === "string" && /^[a-z0-9][a-z0-9._-]*:[a-z0-9][a-z0-9._-]*$/.test(value);
+}
+async function assertProviderHealthy(provider) {
+  const health = await provider.getHealth();
+  if (health.status === "unavailable" || health.status === "incompatible") {
+    return err(
+      createPublicError({
+        code: "DM_ECON_PROVIDER_UNAVAILABLE",
+        category: "provider",
+        message: `Provider '${provider.providerId}' is ${health.status}: ${health.message ?? "No details provided"}`
+      })
+    );
+  }
+  return ok(health);
+}
+function assertDebitAllowedOnProviderBalance(balanceResult, providerId) {
+  if (balanceResult.isStale) {
+    return err(
+      createPublicError({
+        code: "DM_ECON_PROVIDER_STALE_CACHE",
+        category: "provider",
+        message: `Provider '${providerId}' balance is stale/cached; debit operations are strictly blocked`
+      })
+    );
+  }
+  return ok(void 0);
+}
 
 // src/economy/accounts/capacity-resolver.ts
 function resolveEffectiveCapacity(baseCapacityMinor, modifiers = [], resourceDef) {
@@ -14489,6 +14533,10 @@ var EconomyService = class {
             })
           );
         }
+        const healthRes = await assertProviderHealthy(provider);
+        if (!healthRes.ok) {
+          return healthRes;
+        }
         const delta = params.deltaMinor ?? 0;
         if (delta === 0) {
           return ok({
@@ -14496,6 +14544,28 @@ var EconomyService = class {
             entry: void 0,
             isNoop: true
           });
+        }
+        if (delta < 0 && "readBalance" in provider && typeof provider.readBalance === "function") {
+          const balRes = await provider.readBalance(
+            params.domainUuid,
+            params.resourceId,
+            providerAccount.providerRef
+          );
+          if (balRes.ok) {
+            const debitCheck = assertDebitAllowedOnProviderBalance(balRes.value, providerAccount.providerId);
+            if (!debitCheck.ok) {
+              return debitCheck;
+            }
+            if (balRes.value.balanceMinor + delta < 0) {
+              return err(
+                createPublicError({
+                  code: "DM_ECON_INSUFFICIENT_FUNDS",
+                  category: "validation",
+                  message: `Insufficient funds in provider account '${params.resourceId}'. Current: ${balRes.value.balanceMinor}, required: ${Math.abs(delta)}`
+                })
+              );
+            }
+          }
         }
         const transactionId = createOpaqueId("tx");
         const cmdId = params.commandId ?? createOpaqueId("cmd");
@@ -14514,7 +14584,8 @@ var EconomyService = class {
             providerRef: providerAccount.providerRef,
             deltaMinor: delta,
             reason: params.reason,
-            userId: params.userId
+            userId: params.userId,
+            providerWriteConfirmed: false
           }
         });
         this.#transactionStore?.save(txRecord);
@@ -14522,17 +14593,47 @@ var EconomyService = class {
         this.#transactionStore?.transition(transactionId, "prepared", epoch);
         this.#transactionStore?.transition(transactionId, "committing", epoch);
         await this.#transactionStore?.flush();
-        const mutRes = await provider.mutateBalance(
-          params.domainUuid,
-          params.resourceId,
-          providerAccount.providerRef,
-          delta,
-          params.reason
-        );
+        let mutRes;
+        let unknownOutcome = false;
+        try {
+          mutRes = await provider.mutateBalance(
+            params.domainUuid,
+            params.resourceId,
+            providerAccount.providerRef,
+            delta,
+            params.reason,
+            { operationRef: transactionId }
+          );
+        } catch (caughtErr) {
+          unknownOutcome = true;
+          mutRes = err(
+            createPublicError({
+              code: "DM_ECON_PROVIDER_TIMEOUT",
+              category: "provider",
+              message: `Provider mutation timed out or threw unknown error: ${caughtErr instanceof Error ? caughtErr.message : String(caughtErr)}`,
+              details: { outcome: "unknown" }
+            })
+          );
+        }
         if (!mutRes.ok) {
+          const isUnknown = unknownOutcome || mutRes.error.code === "DM_ECON_PROVIDER_TIMEOUT" || mutRes.error.details?.outcome === "unknown" || mutRes.error.retryable === true;
+          if (isUnknown) {
+            this.#transactionStore?.transition(
+              transactionId,
+              "needs-recovery",
+              epoch,
+              `Provider mutation outcome unknown: ${mutRes.error.message}`
+            );
+            await this.#transactionStore?.flush();
+            return mutRes;
+          }
           this.#transactionStore?.transition(transactionId, "failed", epoch, mutRes.error.message);
           await this.#transactionStore?.flush();
           return mutRes;
+        }
+        txRecord.recoveryData.providerWriteConfirmed = true;
+        if (mutRes.value?.providerTransactionRef) {
+          txRecord.recoveryData.providerTransactionRef = mutRes.value.providerTransactionRef;
         }
         const entryRes2 = this.#ledgerStore.append({
           domainUuid: params.domainUuid,
@@ -14558,6 +14659,26 @@ var EconomyService = class {
           return entryRes2;
         }
         await this.#ledgerStore.flush();
+        if (typeof provider.flush === "function") {
+          try {
+            await provider.flush();
+          } catch (flushErr) {
+            this.#transactionStore?.transition(
+              transactionId,
+              "needs-recovery",
+              epoch,
+              `Provider persistence flush failed: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`
+            );
+            await this.#transactionStore?.flush();
+            return err(
+              createPublicError({
+                code: "DM_ECON_PROVIDER_STORAGE_ERROR",
+                category: "provider",
+                message: `Provider persistence flush failed: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`
+              })
+            );
+          }
+        }
         this.#transactionStore?.transition(
           transactionId,
           "committed",
@@ -14568,7 +14689,7 @@ var EconomyService = class {
         this.#evaluateThresholds(
           params.domainUuid,
           params.resourceId,
-          mutRes.value.balanceMinor,
+          mutRes.value.newBalanceMinor ?? mutRes.value.balanceMinor,
           null
         );
         return ok({
@@ -15780,14 +15901,62 @@ var EconomyService = class {
       }
       if (this.#providerRegistry && data.providerId) {
         const provider = this.#providerRegistry.get(data.providerId);
-        if (provider && "mutateBalance" in provider && typeof provider.mutateBalance === "function") {
-          await provider.mutateBalance(
-            data.domainUuid,
-            data.resourceId,
-            data.providerRef ?? "",
-            -data.deltaMinor,
-            `Recovery compensation for aborted adjustment ${record.transactionId}`
-          );
+        if (provider) {
+          if (typeof provider.reconcile === "function") {
+            const recRes = await provider.reconcile(
+              data.domainUuid,
+              data.resourceId,
+              data.providerRef ?? "",
+              record.transactionId
+            );
+            if (!recRes.ok) {
+              return recRes;
+            }
+            if (recRes.value.outcome === "not-written") {
+              if (this.#transactionStore) {
+                this.#transactionStore.transition(
+                  record.transactionId,
+                  "failed",
+                  record.authorityEpoch,
+                  "Reconciliation confirmed mutation was not applied on provider"
+                );
+                await this.#transactionStore.flush();
+              }
+              return ok(void 0);
+            }
+            if (recRes.value.outcome === "unknown") {
+              return err(
+                createPublicError({
+                  code: "DM_ECON_RECOVERY_INDETERMINATE",
+                  category: "recovery",
+                  message: `Provider reconciliation outcome is unknown for transaction '${record.transactionId}'`
+                })
+              );
+            }
+          } else if (!data.providerWriteConfirmed) {
+            return err(
+              createPublicError({
+                code: "DM_ECON_RECOVERY_INDETERMINATE",
+                category: "recovery",
+                message: `Provider write confirmation is missing and provider does not support reconciliation for '${record.transactionId}'`
+              })
+            );
+          }
+          if (typeof provider.mutateBalance === "function") {
+            const compRes = await provider.mutateBalance(
+              data.domainUuid,
+              data.resourceId,
+              data.providerRef ?? "",
+              -data.deltaMinor,
+              `Recovery compensation for aborted adjustment ${record.transactionId}`
+            );
+            if (!compRes.ok) {
+              return compRes;
+            }
+            if (typeof provider.flush === "function") {
+              await provider.flush();
+            }
+          }
         }
       }
       return ok(void 0);
@@ -15891,11 +16060,13 @@ var EconomyAggregationProvider = class {
   #reservationStore;
   #providerRegistry;
   #projection;
+  #derivedResolvers;
   constructor(options) {
     this.#domains = options.domains;
     this.#resourceRegistry = options.resourceRegistry;
     this.#reservationStore = options.reservationStore;
     this.#providerRegistry = options.providerRegistry;
+    this.#derivedResolvers = options.derivedResolvers;
     this.#projection = options.projectionService ?? new EconomyProjectionService();
   }
   async getAggregateContext(domainUuids, callerViewer) {
@@ -15978,6 +16149,29 @@ var EconomyAggregationProvider = class {
             }
           }
         }
+        if (account.mode === "derived") {
+          let readSuccess = false;
+          if (this.#derivedResolvers) {
+            const resolver = this.#derivedResolvers.get(account.resolverId);
+            if (resolver) {
+              try {
+                const balRes = await resolver(uuid, account);
+                if (balRes?.ok) {
+                  balance = balRes.value.balanceMinor;
+                  readSuccess = true;
+                }
+              } catch {
+              }
+            }
+          }
+          if (!readSuccess) {
+            resourceStats.isComplete = false;
+            resourceStats.unknownContributorCount++;
+            if (!unknownContributors.includes(uuid)) {
+              unknownContributors.push(uuid);
+            }
+          }
+        }
         const reserved = this.#reservationStore.getReservedTotal(uuid, account.resourceId);
         const available = balance - reserved;
         resourceStats.totalBalance += balance;
@@ -16014,6 +16208,19 @@ var EconomyAggregationProvider = class {
 };
 
 // src/economy/services/public-economy-api.ts
+function toTransactionDto(tx) {
+  const lastTransition = tx.history[tx.history.length - 1];
+  return {
+    transactionId: tx.transactionId,
+    commandId: tx.commandId,
+    authorityEpoch: tx.authorityEpoch,
+    state: tx.state,
+    lockKeys: tx.lockKeys,
+    createdAtReal: tx.createdAt,
+    updatedAtReal: tx.updatedAt,
+    failureReason: lastTransition?.reason
+  };
+}
 var DefaultPublicEconomyApi = class {
   #domains;
   #commandBus;
@@ -16025,6 +16232,7 @@ var DefaultPublicEconomyApi = class {
   #aggregation;
   #thresholdService;
   #derivedResolvers;
+  #transactionStore;
   constructor(options) {
     this.#domains = options.domains;
     this.#commandBus = options.commandBus;
@@ -16034,29 +16242,120 @@ var DefaultPublicEconomyApi = class {
     this.#providerRegistry = options.providerRegistry;
     this.#thresholdService = options.thresholdService;
     this.#derivedResolvers = options.derivedResolvers;
+    this.#transactionStore = options.transactionStore;
     this.#projection = options.projectionService ?? new EconomyProjectionService();
     this.#aggregation = options.aggregationProvider ?? new EconomyAggregationProvider({
       domains: options.domains,
       resourceRegistry: options.resourceRegistry,
       reservationStore: options.reservationStore,
       providerRegistry: options.providerRegistry,
+      derivedResolvers: options.derivedResolvers,
       projectionService: this.#projection
     });
   }
-  get thresholds() {
-    return this.#thresholdService;
+  async setThreshold(payload, options) {
+    return this.#dispatchCommand("economy:set-threshold", payload, options);
   }
-  registerThreshold(input) {
-    if (!this.#thresholdService) {
-      return err(
-        createPublicError({
-          code: "DM_ECON_THRESHOLD_SERVICE_UNAVAILABLE",
-          category: "internal",
-          message: "Threshold service is not configured"
-        })
-      );
+  async getTransaction(transactionId, callerViewer) {
+    if (!this.#transactionStore) {
+      return ok(void 0);
     }
-    return this.#thresholdService.registerThreshold(input);
+    const viewer = this.#projection.resolveViewer(callerViewer);
+    const tx = this.#transactionStore.get(transactionId);
+    if (!tx) {
+      return ok(void 0);
+    }
+    if (!viewer.isGm) {
+      let domainUuid;
+      const domainKey = tx.lockKeys.find((k) => k.startsWith("domain:") || k.startsWith("JournalEntry."));
+      if (domainKey) {
+        domainUuid = domainKey.startsWith("domain:") ? domainKey.slice("domain:".length) : domainKey;
+      } else if (tx.recoveryData && typeof tx.recoveryData === "object") {
+        domainUuid = tx.recoveryData.domainUuid ?? tx.recoveryData.sourceDomainUuid;
+      }
+      if (domainUuid) {
+        const cleanId = domainUuid.startsWith("JournalEntry.") ? domainUuid.slice("JournalEntry.".length) : domainUuid;
+        const docRes = await this.#domains.read(cleanId);
+        if (!docRes.ok) {
+          return err(
+            createPublicError({
+              code: "DM_SECURITY_PERMISSION_DENIED",
+              category: "permission",
+              message: "Permission denied for transaction"
+            })
+          );
+        }
+        const doc = docRes.value;
+        const ownership = doc.ownership;
+        const userLevel = ownership ? viewer.userId ? ownership[viewer.userId] ?? ownership.default ?? 0 : ownership.default ?? 0 : 0;
+        if (userLevel < 1) {
+          return err(
+            createPublicError({
+              code: "DM_SECURITY_PERMISSION_DENIED",
+              category: "permission",
+              message: "Permission denied for transaction"
+            })
+          );
+        }
+      } else {
+        return err(
+          createPublicError({
+            code: "DM_SECURITY_PERMISSION_DENIED",
+            category: "permission",
+            message: "Permission denied for transaction"
+          })
+        );
+      }
+    }
+    return ok(toTransactionDto(tx));
+  }
+  async listTransactions(filter, callerViewer) {
+    if (!this.#transactionStore) {
+      return ok(Object.freeze([]));
+    }
+    const viewer = this.#projection.resolveViewer(callerViewer);
+    let list = this.#transactionStore.listAll();
+    if (filter?.state) {
+      list = list.filter((tx) => tx.state === filter.state);
+    }
+    if (filter?.domainUuid) {
+      list = list.filter((tx) => {
+        if (tx.lockKeys.some((k) => k.includes(filter.domainUuid))) {
+          return true;
+        }
+        if (tx.recoveryData && typeof tx.recoveryData === "object") {
+          const rec = tx.recoveryData;
+          return rec.domainUuid === filter.domainUuid || rec.sourceDomainUuid === filter.domainUuid || rec.targetDomainUuid === filter.domainUuid;
+        }
+        return false;
+      });
+    }
+    if (!viewer.isGm) {
+      const allowed = [];
+      for (const tx of list) {
+        let domainUuid;
+        const domainKey = tx.lockKeys.find((k) => k.startsWith("domain:") || k.startsWith("JournalEntry."));
+        if (domainKey) {
+          domainUuid = domainKey.startsWith("domain:") ? domainKey.slice("domain:".length) : domainKey;
+        } else if (tx.recoveryData && typeof tx.recoveryData === "object") {
+          domainUuid = tx.recoveryData.domainUuid ?? tx.recoveryData.sourceDomainUuid;
+        }
+        if (!domainUuid) {
+          continue;
+        }
+        const cleanId = domainUuid.startsWith("JournalEntry.") ? domainUuid.slice("JournalEntry.".length) : domainUuid;
+        const docRes = await this.#domains.read(cleanId);
+        if (!docRes.ok) continue;
+        const doc = docRes.value;
+        const ownership = doc.ownership;
+        const userLevel = ownership ? viewer.userId ? ownership[viewer.userId] ?? ownership.default ?? 0 : ownership.default ?? 0 : 0;
+        if (userLevel >= 1) {
+          allowed.push(toTransactionDto(tx));
+        }
+      }
+      return ok(Object.freeze(allowed));
+    }
+    return ok(Object.freeze(list.map(toTransactionDto)));
   }
   listThresholds(domainUuid, resourceId) {
     return this.#thresholdService ? this.#thresholdService.listThresholds(domainUuid, resourceId) : [];
@@ -16209,7 +16508,6 @@ var DefaultPublicEconomyApi = class {
   }
   async queryLedger(filter, callerViewer) {
     const viewer = this.#projection.resolveViewer(callerViewer);
-    const paged = this.#ledgerStore.queryPaged(filter);
     const visibleResourceIds = /* @__PURE__ */ new Set();
     if (filter.domainUuid) {
       const docRes = await this.#domains.read(filter.domainUuid);
@@ -16223,7 +16521,26 @@ var DefaultPublicEconomyApi = class {
           }
         }
       }
+    } else {
+      const allDocsRes = this.#domains.query();
+      if (allDocsRes.ok) {
+        for (const doc of allDocsRes.value) {
+          const econRes = tryGetDomainEconomyData(doc.record);
+          if (econRes.ok) {
+            for (const acc of econRes.value.accounts) {
+              if (this.#projection.isAccountVisible(acc, viewer)) {
+                visibleResourceIds.add(acc.resourceId);
+              }
+            }
+          }
+        }
+      }
     }
+    const storeFilter = viewer.isGm ? filter : {
+      ...filter,
+      allowedResourceIds: Array.from(visibleResourceIds)
+    };
+    const paged = this.#ledgerStore.queryPaged(storeFilter);
     const projected = [];
     for (const entry of paged.entries) {
       const proj = this.#projection.projectLedgerEntry(entry, visibleResourceIds, viewer);
@@ -17080,7 +17397,18 @@ function registerEconomyCommands(options) {
       }
       const regRes = targetThresholdService.registerThreshold(p);
       if (regRes.ok) {
-        await targetThresholdService.flush();
+        try {
+          await targetThresholdService.flush();
+        } catch (e) {
+          return err(
+            createPublicError({
+              code: "DM_DOMAIN_STORAGE_ERROR",
+              category: "provider",
+              message: `Failed to persist threshold: ${e instanceof Error ? e.message : String(e)}`,
+              retryable: true
+            })
+          );
+        }
       }
       return regRes;
     }
@@ -17110,22 +17438,29 @@ function registerEconomyCommands(options) {
     permissionValidator: (ctx) => validateEconomyCommandPermission(ctx, domains, [], { gmOnly: true }),
     handler: async (ctx) => {
       const def = ctx.command.payload.definition;
+      const targetRegistry = resourceRegistry ?? economyService.registry;
+      if (targetRegistry) {
+        if (targetRegistry.has(def.id)) {
+          return err(
+            createPublicError({
+              code: "DM_ECON_RESOURCE_ALREADY_EXISTS",
+              category: "conflict",
+              message: `Resource definition with ID '${def.id}' already exists`
+            })
+          );
+        }
+        const regRes = targetRegistry.register(def);
+        if (!regRes.ok) {
+          return regRes;
+        }
+      }
       const targetStore = customResourceStore;
       if (targetStore) {
         await targetStore.save(def);
       }
-      const targetRegistry = resourceRegistry ?? economyService.registry;
-      if (targetRegistry) {
-        targetRegistry.register(def);
-      }
       return ok(def);
     }
   });
-}
-
-// src/economy/providers/provider-types.ts
-function isNamespacedProviderId(value) {
-  return typeof value === "string" && /^[a-z0-9][a-z0-9._-]*:[a-z0-9][a-z0-9._-]*$/.test(value);
 }
 
 // src/economy/providers/native-resource-provider.ts
@@ -17333,7 +17668,8 @@ var ManualCurrencyProvider = class {
     }
     return ok(this.#balances.get(targetRef) ?? 0);
   }
-  async mutateCurrency(targetRef, deltaMinor, _reason) {
+  #operations = /* @__PURE__ */ new Map();
+  async mutateCurrency(targetRef, deltaMinor, _reason, options) {
     if (!this.#isHealthy) {
       return err(
         createPublicError({
@@ -17346,8 +17682,15 @@ var ManualCurrencyProvider = class {
     const current = this.#balances.get(targetRef) ?? 0;
     const next = current + deltaMinor;
     this.#balances.set(targetRef, next);
+    if (options?.operationRef) {
+      this.#operations.set(options.operationRef, { deltaMinor, timestamp: Date.now() });
+    }
     this.#schedulePersist();
-    return ok({ newBalanceMinor: next });
+    return ok({
+      newBalanceMinor: next,
+      outcome: "success",
+      ...options?.operationRef ? { providerTransactionRef: options.operationRef } : {}
+    });
   }
   async readBalance(domainUuid, resourceId, providerRef) {
     const key = providerRef || `${domainUuid}:${resourceId}`;
@@ -17355,9 +17698,34 @@ var ManualCurrencyProvider = class {
     if (!balRes.ok) return balRes;
     return ok({ balanceMinor: balRes.value, isStale: false });
   }
-  async mutateBalance(domainUuid, resourceId, providerRef, deltaMinor, reason) {
+  async mutateBalance(domainUuid, resourceId, providerRef, deltaMinor, reason, options) {
     const key = providerRef || `${domainUuid}:${resourceId}`;
-    return this.mutateCurrency(key, deltaMinor, reason);
+    return this.mutateCurrency(key, deltaMinor, reason, options);
+  }
+  async reconcile(_domainUuidOrTargetRef, _resourceIdOrOpRef, providerRef, operationRef) {
+    const opKey = operationRef ?? _resourceIdOrOpRef;
+    const balKey = providerRef ?? _domainUuidOrTargetRef;
+    const currentBalance = this.#balances.get(balKey) ?? 0;
+    if (!this.#isHealthy) {
+      return ok({
+        written: false,
+        outcome: "unknown",
+        currentBalanceMinor: currentBalance
+      });
+    }
+    const op = this.#operations.get(opKey);
+    if (op) {
+      return ok({
+        written: true,
+        outcome: "written",
+        currentBalanceMinor: currentBalance
+      });
+    }
+    return ok({
+      written: false,
+      outcome: "not-written",
+      currentBalanceMinor: currentBalance
+    });
   }
   async applyDelta(params) {
     return this.mutateBalance(
@@ -17365,7 +17733,8 @@ var ManualCurrencyProvider = class {
       params.resourceId,
       params.providerRef,
       params.deltaMinor,
-      params.reason
+      params.reason,
+      params.options
     );
   }
   setBalance(targetRef, balanceMinor) {
@@ -17538,6 +17907,7 @@ var ThresholdService = class {
   #crossedStates = /* @__PURE__ */ new Map();
   #storageAdapter;
   #persistQueue = Promise.resolve();
+  #lastPersistError = null;
   constructor(options) {
     if (options && "loadSnapshot" in options) {
       this.#storageAdapter = options;
@@ -17573,11 +17943,17 @@ var ThresholdService = class {
     this.#persistQueue = this.#persistQueue.then(async () => {
       await this.#storageAdapter.saveSnapshot(snapshot);
     }).catch((err3) => {
-      console.error("Failed to persist thresholds:", err3);
+      this.#lastPersistError = err3 instanceof Error ? err3 : new Error(String(err3));
     });
   }
   async flush() {
+    if (!this.#storageAdapter) return;
     await this.#persistQueue;
+    if (this.#lastPersistError) {
+      const err3 = this.#lastPersistError;
+      this.#lastPersistError = null;
+      throw err3;
+    }
   }
   register(input) {
     return this.registerThreshold(input);
@@ -17870,11 +18246,15 @@ function buildEconomyViewModel(domainInput, options) {
     const isClosed = acc.status === "closed";
     let balanceMinor = acc.mode === "native" ? acc.balanceMinor : 0;
     let providerAvailable = true;
+    let providerStatus = void 0;
     if (acc.mode === "provider") {
-      if (options.providerRegistry?.has(acc.providerId)) {
-        providerAvailable = true;
+      const health = options.providerHealthMap?.get(acc.providerId);
+      if (health) {
+        providerStatus = health.status;
+        providerAvailable = health.status === "healthy" || health.status === "degraded";
       } else {
-        providerAvailable = false;
+        providerAvailable = Boolean(options.providerRegistry?.has(acc.providerId));
+        providerStatus = providerAvailable ? "healthy" : "unavailable";
       }
     }
     const reservedMinor = options.reservationStore ? options.reservationStore.getReservedTotal(domainUuid, acc.resourceId) : 0;
@@ -17947,6 +18327,7 @@ function buildEconomyViewModel(domainInput, options) {
       statusBadgeClass,
       providerId: acc.mode === "provider" ? acc.providerId : void 0,
       providerAvailable: acc.mode === "provider" ? providerAvailable : void 0,
+      providerStatus: acc.mode === "provider" ? providerStatus : void 0,
       description: def?.description,
       categoryId: def?.categoryId ?? void 0,
       tags: def?.tags
@@ -18044,12 +18425,63 @@ function buildEconomyViewModel(domainInput, options) {
       });
     }
   }
+  const providerStatuses = [];
+  if (options.providerRegistry) {
+    for (const provider of options.providerRegistry.list()) {
+      const health = options.providerHealthMap?.get(provider.providerId);
+      const status = health?.status ?? "healthy";
+      providerStatuses.push({
+        providerId: provider.providerId,
+        status,
+        statusBadgeClass: `badge--${status}`,
+        lastCheckedAt: health?.lastCheckedAt,
+        lastCheckedFormatted: health?.lastCheckedAt ? new Date(health.lastCheckedAt).toLocaleTimeString() : void 0,
+        message: health?.message
+      });
+    }
+  }
+  const transactionVMs = [];
+  if (options.transactionStore) {
+    let rawTxs = options.transactionStore.listAll();
+    rawTxs = rawTxs.filter((tx) => {
+      if (tx.lockKeys.some((k) => k.includes(domainUuid))) return true;
+      if (tx.recoveryData && typeof tx.recoveryData === "object") {
+        const rec = tx.recoveryData;
+        return rec.domainUuid === domainUuid || rec.sourceDomainUuid === domainUuid || rec.targetDomainUuid === domainUuid;
+      }
+      return false;
+    });
+    for (const tx of rawTxs) {
+      const lastTransition = tx.history[tx.history.length - 1];
+      let stateBadgeClass = "in-flight";
+      if (tx.state === "committed") stateBadgeClass = "committed";
+      else if (tx.state === "compensated") stateBadgeClass = "compensated";
+      else if (tx.state === "failed") stateBadgeClass = "failed";
+      let reason = void 0;
+      if (tx.recoveryData && typeof tx.recoveryData === "object") {
+        reason = tx.recoveryData.reason;
+      }
+      transactionVMs.push({
+        transactionId: tx.transactionId,
+        commandId: tx.commandId,
+        state: tx.state,
+        authorityEpoch: tx.authorityEpoch,
+        lockKeys: tx.lockKeys,
+        createdAtFormatted: new Date(tx.createdAt).toLocaleTimeString(),
+        stateBadgeClass,
+        reason,
+        failureReason: lastTransition?.reason
+      });
+    }
+  }
   return {
     domainUuid,
     viewerIsGm: viewer.isGm,
     accounts: Object.freeze(accountVMs),
     reservations: Object.freeze(reservationVMs),
     recentLedger: Object.freeze(ledgerVMs),
+    providerStatuses: Object.freeze(providerStatuses),
+    transactions: Object.freeze(transactionVMs),
     ledgerPage,
     ledgerTotalCount,
     ledgerHasMore,
@@ -18076,6 +18508,9 @@ function renderEconomySubsystemHtml(vm) {
           <button type="button" class="dm-btn dm-btn-secondary" data-action="openTransferModal">
             <i class="fas fa-exchange-alt"></i> Transfer
           </button>
+          <button type="button" class="dm-btn dm-btn-secondary" data-action="openTransactionHistoryModal">
+            <i class="fas fa-receipt"></i> Transactions
+          </button>
           ${vm.viewerIsGm ? `
             <button type="button" class="dm-btn dm-btn-secondary" data-action="openAdjustModal">
               <i class="fas fa-sliders-h"></i> Adjust
@@ -18086,6 +18521,8 @@ function renderEconomySubsystemHtml(vm) {
           ` : ""}
         </div>
       </header>
+
+      ${renderProviderStatusSection(vm.providerStatuses)}
 
       <section class="dm-resource-cards-section">
         ${renderResourceCards(vm.accounts)}
@@ -18108,6 +18545,26 @@ function renderEconomySubsystemHtml(vm) {
     </div>
   `;
 }
+function renderProviderStatusSection(providers = []) {
+  if (!providers || providers.length === 0) return "";
+  return `
+    <section class="dm-provider-status-section">
+      <div class="dm-provider-status-strip">
+        <span class="dm-strip-label"><i class="fas fa-server"></i> Provider Status:</span>
+        <div class="dm-provider-badges-list">
+          ${providers.map(
+    (p) => `
+            <span class="dm-badge-provider-health dm-health-${escapeAttribute2(p.status)}" title="${escapeAttribute2(p.message ?? p.status)}">
+              <i class="fas fa-circle"></i> ${escapeHtml2(p.providerId)}: <strong>${escapeHtml2(p.status.toUpperCase())}</strong>
+              ${p.lastCheckedFormatted ? `<small>(${escapeHtml2(p.lastCheckedFormatted)})</small>` : ""}
+            </span>
+          `
+  ).join("")}
+        </div>
+      </div>
+    </section>
+  `;
+}
 function renderResourceCards(accounts = []) {
   if (!accounts || accounts.length === 0) {
     return `<div class="dm-empty-state">No resource accounts configured in this domain.</div>`;
@@ -18123,7 +18580,7 @@ function renderResourceCards(accounts = []) {
             <h4 class="dm-card-title">${escapeHtml2(acc.label)}</h4>
             <div class="dm-card-badges">
               ${acc.isSecret ? `<span class="dm-badge-secret"><i class="fas fa-eye-slash"></i> Secret</span>` : ""}
-              ${acc.mode === "provider" ? `<span class="dm-badge-provider ${acc.providerAvailable ? "online" : "offline"}"><i class="fas fa-plug"></i> ${escapeHtml2(acc.providerId ?? "Provider")} (${acc.providerAvailable ? "Active" : "Offline"})</span>` : ""}
+              ${acc.mode === "provider" ? `<span class="dm-badge-provider ${acc.providerStatus ? `status-${escapeAttribute2(acc.providerStatus)}` : acc.providerAvailable ? "online" : "offline"}"><i class="fas fa-plug"></i> ${escapeHtml2(acc.providerId ?? "Provider")} (${escapeHtml2((acc.providerStatus ?? (acc.providerAvailable ? "Active" : "Offline")).toUpperCase())})</span>` : ""}
               <button type="button" class="dm-btn-icon dm-btn-detail" data-action="openResourceDetail" data-resource-id="${escapeAttribute2(acc.resourceId)}" title="View details">
                 <i class="fas fa-info-circle"></i>
               </button>
@@ -18336,22 +18793,100 @@ function renderResourceDetailModalHtml(account) {
     </div>
   `;
 }
+function renderTransactionHistoryModalHtml(domainUuid, transactions = []) {
+  return `
+    <div class="dm-modal dm-tx-history-modal" data-modal-type="transactionHistory">
+      <h3><i class="fas fa-receipt"></i> Domain Transactions</h3>
+      <div class="dm-tx-content">
+        ${transactions.length === 0 ? `<div class="dm-empty-state">No transaction records found for this domain.</div>` : `
+          <table class="dm-transactions-table">
+            <thead>
+              <tr>
+                <th>Transaction ID</th>
+                <th>State</th>
+                <th>Epoch</th>
+                <th>Time</th>
+                <th>Details / Reason</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${transactions.map(
+    (tx) => `
+                <tr class="dm-tx-row ${escapeAttribute2(tx.stateBadgeClass)}">
+                  <td><code>${escapeHtml2(tx.transactionId)}</code></td>
+                  <td><span class="dm-badge-tx dm-state-${escapeAttribute2(tx.stateBadgeClass)}">${escapeHtml2(tx.state)}</span></td>
+                  <td>${escapeHtml2(tx.authorityEpoch)}</td>
+                  <td>${escapeHtml2(tx.createdAtFormatted)}</td>
+                  <td>${escapeHtml2(tx.failureReason ?? "\u2014")}</td>
+                </tr>
+              `
+  ).join("")}
+            </tbody>
+          </table>
+        `}
+      </div>
+      <div class="dm-modal-actions">
+        <button type="button" class="dm-btn dm-btn-primary" data-action="closeModal">Close</button>
+      </div>
+    </div>
+  `;
+}
 function renderCreateAccountModalHtml(domainUuid, availableDefinitions = []) {
   return `
     <div class="dm-modal dm-create-account-modal" data-modal-type="createAccount">
       <h3><i class="fas fa-plus-circle"></i> Create Resource Account</h3>
       <form data-form-type="createAccount">
         <input type="hidden" name="domainUuid" value="${escapeAttribute2(domainUuid)}" />
-        <label>
-          Resource:
-          ${availableDefinitions.length > 0 ? `
-            <select name="resourceId" required>
-              ${availableDefinitions.map((d) => `<option value="${escapeAttribute2(d.id)}" data-precision="${escapeAttribute2(d.precision)}">${escapeHtml2(d.label)} (${escapeHtml2(d.id)})</option>`).join("")}
-            </select>
-          ` : `
-            <input type="text" name="resourceId" required placeholder="e.g. domain-manager:treasury" />
-          `}
-        </label>
+
+        <div class="dm-form-group dm-mode-selector">
+          <label class="dm-radio-inline">
+            <input type="radio" name="creationMode" value="existing" checked data-action="toggleCreationMode" />
+            Existing Resource
+          </label>
+          <label class="dm-radio-inline">
+            <input type="radio" name="creationMode" value="quickCreate" data-action="toggleCreationMode" />
+            Quick Create Custom Resource
+          </label>
+        </div>
+
+        <div class="dm-existing-resource-group" id="dm-existing-group">
+          <label>
+            Resource:
+            ${availableDefinitions.length > 0 ? `
+              <select name="resourceId">
+                ${availableDefinitions.map((d) => `<option value="${escapeAttribute2(d.id)}" data-precision="${escapeAttribute2(d.precision)}">${escapeHtml2(d.label)} (${escapeHtml2(d.id)})</option>`).join("")}
+              </select>
+            ` : `
+              <input type="text" name="resourceId" placeholder="e.g. domain-manager:treasury" />
+            `}
+          </label>
+        </div>
+
+        <div class="dm-quick-resource-group" id="dm-quick-group" style="display: none;">
+          <label>
+            New Resource ID:
+            <input type="text" name="quickResourceId" placeholder="e.g. custom:mana or domain-manager:gems" />
+          </label>
+          <label>
+            Resource Label:
+            <input type="text" name="quickResourceLabel" placeholder="e.g. Mana Crystals" />
+          </label>
+          <div class="dm-form-row">
+            <label>
+              Precision:
+              <input type="number" name="quickResourcePrecision" value="0" min="0" max="4" />
+            </label>
+            <label>
+              Unit:
+              <input type="text" name="quickResourceUnit" placeholder="e.g. crystal, crystals" />
+            </label>
+          </div>
+          <label>
+            Description:
+            <input type="text" name="quickResourceDescription" placeholder="Resource description" />
+          </label>
+        </div>
+
         <label>
           Initial Balance:
           <input type="text" inputmode="decimal" name="initialBalance" placeholder="0" />
@@ -18382,12 +18917,27 @@ function renderCreateAccountModalHtml(domainUuid, availableDefinitions = []) {
 }
 
 // src/ui/domain-patterns/economy/economy-app.ts
+function cleanPayload(payload) {
+  if (payload === null || typeof payload !== "object") {
+    return payload;
+  }
+  if (Array.isArray(payload)) {
+    return payload.map(cleanPayload);
+  }
+  const cleaned = {};
+  for (const [key, value] of Object.entries(payload)) {
+    if (value !== void 0) {
+      cleaned[key] = typeof value === "object" && value !== null ? cleanPayload(value) : value;
+    }
+  }
+  return cleaned;
+}
 function makeCommand2(type, payload) {
   return {
     contractVersion: COMMAND_CONTRACT_VERSION_V1,
     commandId: createCommandId(),
     type,
-    payload,
+    payload: cleanPayload(payload),
     issuedAtReal: Date.now()
   };
 }
@@ -18398,6 +18948,7 @@ var EconomyApplicationController = class {
   #ledgerStore;
   #reservationStore;
   #providerRegistry;
+  #transactionStore;
   #domains;
   #viewer;
   #activeModal = null;
@@ -18411,6 +18962,7 @@ var EconomyApplicationController = class {
     this.#ledgerStore = options.ledgerStore ?? options.economyService?.ledgerStore;
     this.#reservationStore = options.reservationStore ?? options.economyService?.reservationStore;
     this.#providerRegistry = options.providerRegistry ?? options.economyService?.providerRegistry;
+    this.#transactionStore = options.transactionStore ?? options.economyService?.transactionStore;
     this.#domains = options.domains;
     this.#viewer = options.viewer;
   }
@@ -18437,6 +18989,21 @@ var EconomyApplicationController = class {
     }
     const viewer = resolveCurrentViewer(this.#viewer);
     const isGm = viewer.isGm;
+    const providerHealthMap = /* @__PURE__ */ new Map();
+    if (this.#providerRegistry) {
+      for (const p of this.#providerRegistry.list()) {
+        try {
+          const health = await p.getHealth();
+          providerHealthMap.set(p.providerId, health);
+        } catch {
+          providerHealthMap.set(p.providerId, {
+            status: "unavailable",
+            lastCheckedAt: Date.now(),
+            message: "Provider health check failed"
+          });
+        }
+      }
+    }
     const presenterOptions = {
       viewerIsGm: isGm,
       viewer,
@@ -18444,6 +19011,8 @@ var EconomyApplicationController = class {
       ledgerStore: this.#ledgerStore,
       reservationStore: this.#reservationStore,
       providerRegistry: this.#providerRegistry,
+      providerHealthMap,
+      transactionStore: this.#transactionStore,
       ledgerPage: this.#ledgerPage,
       ledgerPageSize: 20
     };
@@ -18506,12 +19075,48 @@ var EconomyApplicationController = class {
     const cmd = makeCommand2("economy:create-account", {
       domainUuid: this.#domainUuid,
       resourceId: payload.resourceId,
+      mode: payload.mode ?? "native",
       initialBalanceMinor: payload.initialBalanceMinor,
       baseCapacityMinor: payload.baseCapacityMinor,
       visibility: payload.visibility,
       reason: payload.reason
     });
     return this.#executeCommand(cmd);
+  }
+  async dispatchQuickResourceCreateAndAccount(payload) {
+    const regCmd = makeCommand2("economy:register-custom-resource", {
+      definition: {
+        id: payload.definition.id,
+        version: 1,
+        label: payload.definition.label,
+        precision: payload.definition.precision ?? 0,
+        displayUnit: {
+          singular: payload.definition.unit ?? "",
+          plural: payload.definition.unit ?? ""
+        },
+        description: payload.definition.description ?? "",
+        icon: "fas fa-box",
+        categoryId: "custom",
+        tags: ["custom"],
+        minimumMinor: 0,
+        maximumMinor: null,
+        allowNegative: false,
+        defaultCapacityPolicy: "block",
+        lifecycle: "active"
+      }
+    });
+    const regRes = await this.#executeCommand(regCmd);
+    if (!regRes.ok) {
+      return regRes;
+    }
+    return this.dispatchCreateAccount({
+      resourceId: payload.definition.id,
+      mode: payload.account.mode ?? "native",
+      initialBalanceMinor: payload.account.initialBalanceMinor,
+      baseCapacityMinor: payload.account.baseCapacityMinor,
+      visibility: payload.account.visibility,
+      reason: payload.account.reason ?? `Initial allocation for ${payload.definition.label}`
+    });
   }
   async #executeCommand(cmd) {
     const receiptRes = await this.#commandBus.execute(cmd);
@@ -18543,6 +19148,8 @@ var EconomyApplicationController = class {
     } else if (this.#activeModal === "createAccount") {
       const defs = this.#resourceRegistry ? this.#resourceRegistry.list() : [];
       modalHtml = renderCreateAccountModalHtml(this.#domainUuid, defs);
+    } else if (this.#activeModal === "transactionHistory") {
+      modalHtml = renderTransactionHistoryModalHtml(this.#domainUuid, vm.transactions);
     } else if (this.#activeModal === "resourceDetail" && this.#selectedResourceId) {
       const acc = vm.accounts.find((a) => a.resourceId === this.#selectedResourceId);
       if (acc) {
@@ -18647,6 +19254,7 @@ var EconomyApplication = class _EconomyApplication extends BaseApp2 {
       openTransferModal: _EconomyApplication.#onOpenTransferModal,
       openAdjustModal: _EconomyApplication.#onOpenAdjustModal,
       openCreateAccountModal: _EconomyApplication.#onOpenCreateAccountModal,
+      openTransactionHistoryModal: _EconomyApplication.#onOpenTransactionHistoryModal,
       openResourceDetail: _EconomyApplication.#onOpenResourceDetail,
       releaseReservation: _EconomyApplication.#onReleaseReservation,
       nextLedgerPage: _EconomyApplication.#onNextLedgerPage,
@@ -18763,6 +19371,16 @@ var EconomyApplication = class _EconomyApplication extends BaseApp2 {
     forms.forEach((form) => {
       if (form._dmSubmitBound) return;
       form._dmSubmitBound = true;
+      const modeRadios = form.querySelectorAll?.('input[name="creationMode"]') ?? [];
+      modeRadios.forEach((radio) => {
+        radio.addEventListener?.("change", () => {
+          const isQuick = radio.value === "quickCreate";
+          const existingGroup = form.querySelector?.("#dm-existing-group");
+          const quickGroup = form.querySelector?.("#dm-quick-group");
+          if (existingGroup) existingGroup.style.display = isQuick ? "none" : "";
+          if (quickGroup) quickGroup.style.display = isQuick ? "" : "none";
+        });
+      });
       form.addEventListener("submit", async (e) => {
         e.preventDefault();
         const formType = form.getAttribute?.("data-form-type");
@@ -18806,23 +19424,54 @@ var EconomyApplication = class _EconomyApplication extends BaseApp2 {
             this.render();
           }
         } else if (formType === "createAccount") {
+          const isQuick = data.creationMode === "quickCreate";
+          let accountPrecision = 0;
+          let resourceId = data.resourceId;
+          if (isQuick) {
+            resourceId = data.quickResourceId;
+            accountPrecision = data.quickResourcePrecision ? parseInt(data.quickResourcePrecision, 10) : 0;
+          } else {
+            accountPrecision = precision;
+          }
           let initialBalanceMinor = void 0;
           if (data.initialBalance) {
-            const parsedInit = parseResourceAmount(data.initialBalance, precision);
+            const parsedInit = parseResourceAmount(data.initialBalance, accountPrecision);
             if (parsedInit.ok) initialBalanceMinor = parsedInit.value;
           }
           let baseCapacityMinor = void 0;
           if (data.baseCapacity) {
-            const parsedCap = parseResourceAmount(data.baseCapacity, precision);
+            const parsedCap = parseResourceAmount(data.baseCapacity, accountPrecision);
             if (parsedCap.ok) baseCapacityMinor = parsedCap.value;
           }
-          await this.#controller.dispatchCreateAccount({
-            resourceId: data.resourceId,
-            initialBalanceMinor,
-            baseCapacityMinor,
-            visibility: data.visibility || "public",
-            reason: data.reason || void 0
-          });
+          if (isQuick) {
+            const quickRes = await this.#controller.dispatchQuickResourceCreateAndAccount({
+              definition: {
+                id: resourceId,
+                label: data.quickResourceLabel || resourceId,
+                precision: accountPrecision,
+                unit: data.quickResourceUnit || void 0,
+                description: data.quickResourceDescription || void 0
+              },
+              account: {
+                initialBalanceMinor,
+                baseCapacityMinor,
+                visibility: data.visibility || "public",
+                reason: data.reason || void 0
+              }
+            });
+            if (!quickRes.ok) {
+              console.error("Quick resource create failed:", quickRes.error.message);
+              return;
+            }
+          } else {
+            await this.#controller.dispatchCreateAccount({
+              resourceId,
+              initialBalanceMinor,
+              baseCapacityMinor,
+              visibility: data.visibility || "public",
+              reason: data.reason || void 0
+            });
+          }
           this.#controller.closeModal();
           this.render();
         }
@@ -18839,6 +19488,10 @@ var EconomyApplication = class _EconomyApplication extends BaseApp2 {
   }
   static #onOpenCreateAccountModal() {
     this.#controller.openModal("createAccount");
+    this.render();
+  }
+  static #onOpenTransactionHistoryModal() {
+    this.#controller.openModal("transactionHistory");
     this.render();
   }
   static #onOpenResourceDetail(event, target) {
@@ -19003,7 +19656,8 @@ function composeDomainManagerRuntime(options = {}) {
     ledgerStore,
     reservationStore,
     providerRegistry,
-    thresholdService
+    thresholdService,
+    transactionStore
   });
   const publicApi = Object.freeze({
     version: BUILD_METADATA.moduleVersion,

@@ -295,7 +295,8 @@ export function composeDomainManagerRuntime(
     ledgerStore,
     reservationStore,
     providerRegistry,
-    thresholdService
+    thresholdService,
+    transactionStore
   });
 
   const publicApi: PublicModuleApi = Object.freeze({

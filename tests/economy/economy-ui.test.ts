@@ -23,7 +23,11 @@ import {
 import { CommandRegistry } from "../../src/commands/command-registry.js";
 import { CommandBus } from "../../src/commands/command-bus.js";
 import { PrimaryAuthorityService } from "../../src/authority/primary-authority-service.js";
-import { withDomainEconomyData, type DomainEconomyData } from "../../src/economy/economy-data.js";
+import {
+  getDomainEconomyData,
+  withDomainEconomyData,
+  type DomainEconomyData
+} from "../../src/economy/economy-data.js";
 
 const testRecord: DomainRecord = {
   schemaVersion: 1,
@@ -498,3 +502,166 @@ test("G4-REVAL3-006: EconomyApplication action dispatch executes exactly once pe
   // Under the single action pipeline, it must have been invoked exactly 1 time
   assert.equal(modalOpenCount, 1);
 });
+
+test("G4-REVAL4-004: buildEconomyViewModel includes provider health statuses and transaction history", async () => {
+  const registry = createDefaultResourceRegistry();
+  const doc = document("dom-ui-t4", "T4 Domain", withDomainEconomyData(testRecord, {
+    schemaVersion: 1,
+    accounts: [
+      { mode: "native", domainUuid: "JournalEntry.dom-ui-t4", resourceId: "domain-manager:treasury", balanceMinor: 5000, baseCapacityMinor: 10000, visibility: "public" }
+    ]
+  }));
+
+  const { TransactionStore } = await import("../../src/mutations/transaction-store.js");
+  const { createTransactionRecord } = await import("../../src/mutations/transaction-record.js");
+  const transactionStore = new TransactionStore();
+
+  const tx1 = createTransactionRecord({
+    transactionId: "tx-ui-1",
+    commandId: "cmd-ui-1" as any,
+    authorityEpoch: 1,
+    lockKeys: [doc.uuid],
+    recoveryData: {
+      type: "economy:adjust",
+      domainUuid: doc.uuid,
+      resourceId: "domain-manager:treasury",
+      deltaMinor: 2500,
+      reason: "Grant bonus"
+    }
+  });
+  transactionStore.save(tx1);
+  transactionStore.transition(tx1.transactionId, "claimed", 1);
+  transactionStore.transition(tx1.transactionId, "prepared", 1);
+  transactionStore.transition(tx1.transactionId, "committing", 1);
+  transactionStore.transition(tx1.transactionId, "committed", 1);
+
+  const providerHealthMap = new Map([
+    ["mock:currency", { status: "healthy" as const, lastCheckedAt: Date.now() - 1000 }],
+    ["mock:inventory", { status: "degraded" as const, message: "Sync latency high", lastCheckedAt: Date.now() }]
+  ]);
+
+  const mockProviderRegistry = {
+    list: () => [
+      { providerId: "mock:currency", label: "Mock Currency" },
+      { providerId: "mock:inventory", label: "Mock Inventory" }
+    ],
+    get: () => undefined
+  };
+
+  const vm = buildEconomyViewModel(doc, {
+    viewerIsGm: true,
+    resourceRegistry: registry,
+    transactionStore,
+    providerRegistry: mockProviderRegistry as any,
+    providerHealthMap
+  });
+
+  // Check provider statuses
+  assert.ok(vm.providerStatuses);
+  assert.equal(vm.providerStatuses.length, 2);
+  const curProv = vm.providerStatuses.find((p) => p.providerId === "mock:currency");
+  assert.ok(curProv);
+  assert.equal(curProv.status, "healthy");
+  assert.equal(curProv.statusBadgeClass, "badge--healthy");
+
+  const invProv = vm.providerStatuses.find((p) => p.providerId === "mock:inventory");
+  assert.ok(invProv);
+  assert.equal(invProv.status, "degraded");
+  assert.equal(invProv.statusBadgeClass, "badge--degraded");
+
+  // Check transactions
+  assert.ok(vm.transactions);
+  assert.equal(vm.transactions.length, 1);
+  assert.equal(vm.transactions[0].transactionId, "tx-ui-1");
+  assert.equal(vm.transactions[0].state, "committed");
+  assert.equal(vm.transactions[0].reason, "Grant bonus");
+
+  // Render HTML check
+  const html = renderEconomySubsystemHtml(vm);
+  assert.ok(html.includes("data-action=\"openTransactionHistoryModal\""));
+  assert.ok(html.includes("Provider Status"));
+  assert.ok(html.includes("HEALTHY"));
+  assert.ok(html.includes("DEGRADED"));
+});
+
+test("G4-REVAL4-004: EconomyApplicationController dispatches Quick Resource Create and Account", async () => {
+  const doc = document("dom-quick-res", "Quick Res Domain", withDomainEconomyData(testRecord, {
+    schemaVersion: 1,
+    accounts: []
+  }));
+  const store = createStore([doc]);
+  const domains = new StorageDomainRepository(store);
+  const resourceRegistry = createDefaultResourceRegistry();
+  const ledgerStore = new LedgerStore();
+  const reservationStore = new ReservationStore();
+  const economyService = new EconomyService({
+    domains,
+    resourceRegistry,
+    ledgerStore,
+    reservationStore
+  });
+  const { CustomResourceDefinitionStore } = await import("../../src/economy/definitions/custom-resource-store.js");
+  const customResourceStore = new CustomResourceDefinitionStore();
+
+  const registry = new CommandRegistry();
+  const authorityService = new PrimaryAuthorityService(
+    {
+      getUsers: () => [{ id: "gm-1", isGM: true, active: true }],
+      getPreferredUserId: () => null,
+      getCurrentUserId: () => "gm-1"
+    },
+    { authorityUserId: "gm-1", authorityEpoch: 1, initialized: true }
+  );
+  const commandBus = new CommandBus({ registry, authorityService });
+
+  const { registerEconomyCommands } = await import("../../src/economy/commands/economy-commands.js");
+  registerEconomyCommands({
+    registry,
+    domains,
+    resourceRegistry,
+    economyService,
+    customResourceStore
+  });
+
+  const app = new EconomyApplication({
+    domainUuid: doc.uuid,
+    commandBus,
+    domains,
+    economyService,
+    viewer: { isGm: true }
+  });
+
+  const res = await app.controller.dispatchQuickResourceCreateAndAccount({
+    definition: {
+      id: "world:mithril",
+      label: "Mithril Ingot",
+      precision: 0,
+      unit: "ingot",
+      description: "Rare silver metal"
+    },
+    account: {
+      initialBalanceMinor: 100,
+      baseCapacityMinor: 5000
+    }
+  });
+
+  if (!res.ok) {
+    console.error("DISPATCH QUICK CREATE ERROR:", res.error);
+  }
+  assert.equal(res.ok, true);
+
+  // Resource is registered
+  assert.equal(resourceRegistry.has("world:mithril"), true);
+  assert.equal(customResourceStore.has("world:mithril"), true);
+
+  // Account is created in domain
+  const updatedDoc = await domains.read(doc.uuid);
+  assert.equal(updatedDoc.ok, true);
+  if (updatedDoc.ok) {
+    const econ = getDomainEconomyData(updatedDoc.value.record);
+    const acct = econ.accounts.find((a) => a.resourceId === "world:mithril");
+    assert.ok(acct);
+    assert.equal(acct.balanceMinor, 100);
+  }
+});
+

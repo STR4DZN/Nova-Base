@@ -26,6 +26,20 @@ export interface BaseResourceProvider {
   hasCapability(cap: string): boolean;
 }
 
+export type ProviderMutationOutcome = "success" | "failed-before-write" | "unknown";
+
+export interface ProviderMutationResult {
+  readonly newBalanceMinor: number;
+  readonly outcome?: ProviderMutationOutcome;
+  readonly providerTransactionRef?: string;
+}
+
+export interface ProviderReconciliationResult {
+  readonly written: boolean;
+  readonly outcome: "written" | "not-written" | "unknown";
+  readonly currentBalanceMinor?: number;
+}
+
 export interface ResourceProviderBalanceResult {
   readonly balanceMinor: number;
   readonly effectiveCapacityMinor?: number | null;
@@ -44,8 +58,16 @@ export interface ResourceProvider extends BaseResourceProvider {
     resourceId: string,
     providerRef: string,
     deltaMinor: number,
-    reason: string
-  ): Promise<Result<{ newBalanceMinor: number }, PublicError>>;
+    reason: string,
+    options?: { readonly operationRef?: string }
+  ): Promise<Result<ProviderMutationResult, PublicError>>;
+  reconcile?(
+    domainUuid: string,
+    resourceId: string,
+    providerRef: string,
+    operationRef: string
+  ): Promise<Result<ProviderReconciliationResult, PublicError>>;
+  flush?(): Promise<void>;
 }
 
 export interface CurrencyProvider extends BaseResourceProvider {
@@ -54,8 +76,14 @@ export interface CurrencyProvider extends BaseResourceProvider {
   mutateCurrency?(
     targetRef: string,
     deltaMinor: number,
-    reason: string
-  ): Promise<Result<{ newBalanceMinor: number }, PublicError>>;
+    reason: string,
+    options?: { readonly operationRef?: string }
+  ): Promise<Result<ProviderMutationResult, PublicError>>;
+  reconcile?(
+    targetRef: string,
+    operationRef: string
+  ): Promise<Result<ProviderReconciliationResult, PublicError>>;
+  flush?(): Promise<void>;
 }
 
 export interface InventoryItemSummary {

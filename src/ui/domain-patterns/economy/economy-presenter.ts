@@ -10,6 +10,8 @@ import { formatResourceAmount } from "../../../economy/math/minor-units.js";
 import type { ResourceDefinition } from "../../../economy/definitions/resource-definition-types.js";
 
 import type { ProviderRegistry } from "../../../economy/providers/provider-registry.js";
+import type { ProviderHealth } from "../../../economy/providers/provider-types.js";
+import type { TransactionStore } from "../../../mutations/transaction-store.js";
 import { EconomyProjectionService } from "../../../economy/projection/economy-projection-service.js";
 import type { ViewerIdentity } from "../../../projection/viewer-identity.js";
 
@@ -20,8 +22,31 @@ export interface EconomyPresenterOptions {
   readonly ledgerStore?: LedgerStore;
   readonly reservationStore?: ReservationStore;
   readonly providerRegistry?: ProviderRegistry;
+  readonly providerHealthMap?: ReadonlyMap<string, ProviderHealth>;
+  readonly transactionStore?: TransactionStore;
   readonly ledgerPage?: number;
   readonly ledgerPageSize?: number;
+}
+
+export interface ProviderStatusViewModel {
+  readonly providerId: string;
+  readonly status: "healthy" | "degraded" | "unavailable" | "incompatible";
+  readonly statusBadgeClass: "badge--healthy" | "badge--degraded" | "badge--unavailable" | "badge--incompatible";
+  readonly lastCheckedAt?: number;
+  readonly lastCheckedFormatted?: string;
+  readonly message?: string;
+}
+
+export interface TransactionItemViewModel {
+  readonly transactionId: string;
+  readonly commandId: string;
+  readonly state: string;
+  readonly authorityEpoch: number;
+  readonly lockKeys: readonly string[];
+  readonly createdAtFormatted: string;
+  readonly stateBadgeClass: "committed" | "compensated" | "failed" | "in-flight";
+  readonly reason?: string;
+  readonly failureReason?: string;
 }
 
 export interface ResourceAccountViewModel {
@@ -45,6 +70,7 @@ export interface ResourceAccountViewModel {
   readonly statusBadgeClass: "normal" | "near-capacity" | "over-capacity" | "low-reserve" | "closed";
   readonly providerId?: string;
   readonly providerAvailable?: boolean;
+  readonly providerStatus?: "healthy" | "degraded" | "unavailable" | "incompatible";
   readonly description?: string;
   readonly categoryId?: string;
   readonly tags?: readonly string[];
@@ -78,6 +104,8 @@ export interface EconomySubsystemViewModel {
   readonly accounts: readonly ResourceAccountViewModel[];
   readonly reservations: readonly ReservationItemViewModel[];
   readonly recentLedger: readonly LedgerEntryViewModel[];
+  readonly providerStatuses: readonly ProviderStatusViewModel[];
+  readonly transactions: readonly TransactionItemViewModel[];
   readonly ledgerPage: number;
   readonly ledgerTotalCount: number;
   readonly ledgerHasMore: boolean;
@@ -118,13 +146,16 @@ export function buildEconomyViewModel(
     const isClosed = acc.status === "closed";
     let balanceMinor = acc.mode === "native" ? acc.balanceMinor : 0;
     let providerAvailable = true;
+    let providerStatus: "healthy" | "degraded" | "unavailable" | "incompatible" | undefined = undefined;
 
     if (acc.mode === "provider") {
-      if (options.providerRegistry?.has(acc.providerId)) {
-        // Provider registered
-        providerAvailable = true;
+      const health = options.providerHealthMap?.get(acc.providerId);
+      if (health) {
+        providerStatus = health.status;
+        providerAvailable = health.status === "healthy" || health.status === "degraded";
       } else {
-        providerAvailable = false;
+        providerAvailable = Boolean(options.providerRegistry?.has(acc.providerId));
+        providerStatus = providerAvailable ? "healthy" : "unavailable";
       }
     }
 
@@ -214,6 +245,7 @@ export function buildEconomyViewModel(
       statusBadgeClass,
       providerId: acc.mode === "provider" ? acc.providerId : undefined,
       providerAvailable: acc.mode === "provider" ? providerAvailable : undefined,
+      providerStatus: acc.mode === "provider" ? providerStatus : undefined,
       description: def?.description,
       categoryId: def?.categoryId ?? undefined,
       tags: def?.tags
@@ -327,12 +359,76 @@ export function buildEconomyViewModel(
     }
   }
 
+  // Provider statuses with real health queries (G4-REVAL4-004)
+  const providerStatuses: ProviderStatusViewModel[] = [];
+  if (options.providerRegistry) {
+    for (const provider of options.providerRegistry.list()) {
+      const health = options.providerHealthMap?.get(provider.providerId);
+      const status = health?.status ?? "healthy";
+      providerStatuses.push({
+        providerId: provider.providerId,
+        status,
+        statusBadgeClass: `badge--${status}` as const,
+        lastCheckedAt: health?.lastCheckedAt,
+        lastCheckedFormatted: health?.lastCheckedAt
+          ? new Date(health.lastCheckedAt).toLocaleTimeString()
+          : undefined,
+        message: health?.message
+      });
+    }
+  }
+
+  // Transaction history for domain (G4-REVAL4-004)
+  const transactionVMs: TransactionItemViewModel[] = [];
+  if (options.transactionStore) {
+    let rawTxs = options.transactionStore.listAll();
+    rawTxs = rawTxs.filter((tx) => {
+      if (tx.lockKeys.some((k) => k.includes(domainUuid))) return true;
+      if (tx.recoveryData && typeof tx.recoveryData === "object") {
+        const rec = tx.recoveryData as any;
+        return (
+          rec.domainUuid === domainUuid ||
+          rec.sourceDomainUuid === domainUuid ||
+          rec.targetDomainUuid === domainUuid
+        );
+      }
+      return false;
+    });
+
+    for (const tx of rawTxs) {
+      const lastTransition = tx.history[tx.history.length - 1];
+      let stateBadgeClass: TransactionItemViewModel["stateBadgeClass"] = "in-flight";
+      if (tx.state === "committed") stateBadgeClass = "committed";
+      else if (tx.state === "compensated") stateBadgeClass = "compensated";
+      else if (tx.state === "failed") stateBadgeClass = "failed";
+
+      let reason: string | undefined = undefined;
+      if (tx.recoveryData && typeof tx.recoveryData === "object") {
+        reason = (tx.recoveryData as any).reason;
+      }
+
+      transactionVMs.push({
+        transactionId: tx.transactionId,
+        commandId: tx.commandId,
+        state: tx.state,
+        authorityEpoch: tx.authorityEpoch,
+        lockKeys: tx.lockKeys,
+        createdAtFormatted: new Date(tx.createdAt).toLocaleTimeString(),
+        stateBadgeClass,
+        reason,
+        failureReason: lastTransition?.reason
+      });
+    }
+  }
+
   return {
     domainUuid,
     viewerIsGm: viewer.isGm,
     accounts: Object.freeze(accountVMs),
     reservations: Object.freeze(reservationVMs),
     recentLedger: Object.freeze(ledgerVMs),
+    providerStatuses: Object.freeze(providerStatuses),
+    transactions: Object.freeze(transactionVMs),
     ledgerPage,
     ledgerTotalCount,
     ledgerHasMore,

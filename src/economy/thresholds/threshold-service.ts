@@ -76,6 +76,7 @@ export class ThresholdService {
   readonly #crossedStates = new Map<string, boolean>();
   readonly #storageAdapter?: ThresholdStorageAdapter;
   #persistQueue: Promise<void> = Promise.resolve();
+  #lastPersistError: Error | null = null;
 
   constructor(options?: ThresholdServiceOptions | ThresholdStorageAdapter) {
     if (options && "loadSnapshot" in options) {
@@ -115,13 +116,19 @@ export class ThresholdService {
       .then(async () => {
         await this.#storageAdapter!.saveSnapshot(snapshot);
       })
-      .catch((err) => {
-        console.error("Failed to persist thresholds:", err);
+      .catch((err: unknown) => {
+        this.#lastPersistError = err instanceof Error ? err : new Error(String(err));
       });
   }
 
   async flush(): Promise<void> {
+    if (!this.#storageAdapter) return;
     await this.#persistQueue;
+    if (this.#lastPersistError) {
+      const err = this.#lastPersistError;
+      this.#lastPersistError = null;
+      throw err;
+    }
   }
 
   register(input: ThresholdInput): Result<ThresholdDefinition, PublicError> {

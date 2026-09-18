@@ -37,15 +37,31 @@ import type {
   ResourceReleaseReservationCommandPayload,
   ResourceReserveCommandPayload,
   ResourceReversalCommandPayload,
+  ResourceSetThresholdCommandPayload,
   ResourceTransferCommandPayload
 } from "../commands/economy-commands.js";
 import type {
   ThresholdService,
   ThresholdDefinition,
-  ThresholdInput,
   ThresholdStatus
 } from "../thresholds/threshold-service.js";
 import type { DerivedAccountResolver } from "./economy-service.js";
+import type { TransactionStore } from "../../mutations/transaction-store.js";
+import type { TransactionRecord, TransactionState } from "../../mutations/transaction-record.js";
+
+function toTransactionDto(tx: TransactionRecord): TransactionRecordDto {
+  const lastTransition = tx.history[tx.history.length - 1];
+  return {
+    transactionId: tx.transactionId,
+    commandId: tx.commandId,
+    authorityEpoch: tx.authorityEpoch,
+    state: tx.state,
+    lockKeys: tx.lockKeys,
+    createdAtReal: tx.createdAt,
+    updatedAtReal: tx.updatedAt,
+    failureReason: lastTransition?.reason
+  };
+}
 
 export interface PagedLedgerResultDto {
   readonly entries: readonly LedgerEntryDto[];
@@ -53,6 +69,17 @@ export interface PagedLedgerResultDto {
   readonly hasMore: boolean;
   readonly nextCursor?: string;
   readonly prevCursor?: string;
+}
+
+export interface TransactionRecordDto {
+  readonly transactionId: string;
+  readonly commandId: string;
+  readonly authorityEpoch: number;
+  readonly state: TransactionState;
+  readonly lockKeys: readonly string[];
+  readonly createdAtReal: number;
+  readonly updatedAtReal: number;
+  readonly failureReason?: string;
 }
 
 export interface PublicEconomyApi {
@@ -66,11 +93,14 @@ export interface PublicEconomyApi {
   getProviderHealth(providerId?: string): Promise<Result<readonly ProviderHealth[], PublicError>>;
   getAggregateContext(domainUuids: readonly string[], viewer?: Partial<ViewerIdentity>): Promise<Result<EconomyAggregateContextDto, PublicError>>;
 
-  // Threshold queries and operations
-  readonly thresholds?: ThresholdService;
-  registerThreshold(input: ThresholdInput): Result<ThresholdDefinition, PublicError>;
+  // Threshold queries and command dispatch
+  setThreshold(payload: ResourceSetThresholdCommandPayload, options?: TransportSendOptions): Promise<Result<TransportReceipt, PublicError>>;
   listThresholds(domainUuid?: string, resourceId?: string): readonly ThresholdDefinition[];
   evaluateThresholds(domainUuid: string, resourceId: string): Promise<Result<ThresholdStatus, PublicError>>;
+
+  // Transaction history queries
+  getTransaction(transactionId: string, viewer?: Partial<ViewerIdentity>): Promise<Result<TransactionRecordDto | undefined, PublicError>>;
+  listTransactions(filter?: { domainUuid?: string; state?: TransactionState }, viewer?: Partial<ViewerIdentity>): Promise<Result<readonly TransactionRecordDto[], PublicError>>;
 
   // Safe semantic mutation helpers (strictly dispatched via CommandBus)
   adjust(payload: ResourceAdjustCommandPayload, options?: TransportSendOptions): Promise<Result<TransportReceipt, PublicError>>;
@@ -95,6 +125,7 @@ export interface DefaultPublicEconomyApiOptions {
   readonly aggregationProvider?: EconomyAggregationProvider;
   readonly thresholdService?: ThresholdService;
   readonly derivedResolvers?: Map<string, DerivedAccountResolver>;
+  readonly transactionStore?: TransactionStore;
 }
 
 export class DefaultPublicEconomyApi implements PublicEconomyApi {
@@ -108,6 +139,7 @@ export class DefaultPublicEconomyApi implements PublicEconomyApi {
   readonly #aggregation: EconomyAggregationProvider;
   readonly #thresholdService?: ThresholdService;
   readonly #derivedResolvers?: Map<string, DerivedAccountResolver>;
+  readonly #transactionStore?: TransactionStore;
 
   constructor(options: DefaultPublicEconomyApiOptions) {
     this.#domains = options.domains;
@@ -118,6 +150,7 @@ export class DefaultPublicEconomyApi implements PublicEconomyApi {
     this.#providerRegistry = options.providerRegistry;
     this.#thresholdService = options.thresholdService;
     this.#derivedResolvers = options.derivedResolvers;
+    this.#transactionStore = options.transactionStore;
     this.#projection = options.projectionService ?? new EconomyProjectionService();
     this.#aggregation =
       options.aggregationProvider ??
@@ -126,25 +159,136 @@ export class DefaultPublicEconomyApi implements PublicEconomyApi {
         resourceRegistry: options.resourceRegistry,
         reservationStore: options.reservationStore,
         providerRegistry: options.providerRegistry,
+        derivedResolvers: options.derivedResolvers,
         projectionService: this.#projection
       });
   }
 
-  get thresholds(): ThresholdService | undefined {
-    return this.#thresholdService;
+  async setThreshold(
+    payload: ResourceSetThresholdCommandPayload,
+    options?: TransportSendOptions
+  ): Promise<Result<TransportReceipt, PublicError>> {
+    return this.#dispatchCommand("economy:set-threshold", payload, options);
   }
 
-  registerThreshold(input: ThresholdInput): Result<ThresholdDefinition, PublicError> {
-    if (!this.#thresholdService) {
-      return err(
-        createPublicError({
-          code: "DM_ECON_THRESHOLD_SERVICE_UNAVAILABLE",
-          category: "internal",
-          message: "Threshold service is not configured"
-        })
-      );
+  async getTransaction(
+    transactionId: string,
+    callerViewer?: Partial<ViewerIdentity>
+  ): Promise<Result<TransactionRecordDto | undefined, PublicError>> {
+    if (!this.#transactionStore) {
+      return ok(undefined);
     }
-    return this.#thresholdService.registerThreshold(input);
+    const viewer = this.#projection.resolveViewer(callerViewer);
+    const tx = this.#transactionStore.get(transactionId);
+    if (!tx) {
+      return ok(undefined);
+    }
+
+    if (!viewer.isGm) {
+      let domainUuid: string | undefined;
+      const domainKey = tx.lockKeys.find((k) => k.startsWith("domain:") || k.startsWith("JournalEntry."));
+      if (domainKey) {
+        domainUuid = domainKey.startsWith("domain:") ? domainKey.slice("domain:".length) : domainKey;
+      } else if (tx.recoveryData && typeof tx.recoveryData === "object") {
+        domainUuid = (tx.recoveryData as any).domainUuid ?? (tx.recoveryData as any).sourceDomainUuid;
+      }
+
+      if (domainUuid) {
+        const cleanId = domainUuid.startsWith("JournalEntry.") ? domainUuid.slice("JournalEntry.".length) : domainUuid;
+        const docRes = await this.#domains.read(cleanId);
+        if (!docRes.ok) {
+          return err(
+            createPublicError({
+              code: "DM_SECURITY_PERMISSION_DENIED",
+              category: "permission",
+              message: "Permission denied for transaction"
+            })
+          );
+        }
+        const doc = docRes.value as any;
+        const ownership = doc.ownership as Record<string, number> | undefined;
+        const userLevel = ownership ? (viewer.userId ? (ownership[viewer.userId] ?? ownership.default ?? 0) : (ownership.default ?? 0)) : 0;
+        if (userLevel < 1) {
+          return err(
+            createPublicError({
+              code: "DM_SECURITY_PERMISSION_DENIED",
+              category: "permission",
+              message: "Permission denied for transaction"
+            })
+          );
+        }
+      } else {
+        return err(
+          createPublicError({
+            code: "DM_SECURITY_PERMISSION_DENIED",
+            category: "permission",
+            message: "Permission denied for transaction"
+          })
+        );
+      }
+    }
+
+    return ok(toTransactionDto(tx));
+  }
+
+  async listTransactions(
+    filter?: { domainUuid?: string; state?: TransactionState },
+    callerViewer?: Partial<ViewerIdentity>
+  ): Promise<Result<readonly TransactionRecordDto[], PublicError>> {
+    if (!this.#transactionStore) {
+      return ok(Object.freeze([]));
+    }
+    const viewer = this.#projection.resolveViewer(callerViewer);
+    let list = this.#transactionStore.listAll();
+
+    if (filter?.state) {
+      list = list.filter((tx) => tx.state === filter.state);
+    }
+
+    if (filter?.domainUuid) {
+      list = list.filter((tx) => {
+        if (tx.lockKeys.some((k) => k.includes(filter.domainUuid!))) {
+          return true;
+        }
+        if (tx.recoveryData && typeof tx.recoveryData === "object") {
+          const rec = tx.recoveryData as any;
+          return (
+            rec.domainUuid === filter.domainUuid ||
+            rec.sourceDomainUuid === filter.domainUuid ||
+            rec.targetDomainUuid === filter.domainUuid
+          );
+        }
+        return false;
+      });
+    }
+
+    if (!viewer.isGm) {
+      const allowed: TransactionRecordDto[] = [];
+      for (const tx of list) {
+        let domainUuid: string | undefined;
+        const domainKey = tx.lockKeys.find((k) => k.startsWith("domain:") || k.startsWith("JournalEntry."));
+        if (domainKey) {
+          domainUuid = domainKey.startsWith("domain:") ? domainKey.slice("domain:".length) : domainKey;
+        } else if (tx.recoveryData && typeof tx.recoveryData === "object") {
+          domainUuid = (tx.recoveryData as any).domainUuid ?? (tx.recoveryData as any).sourceDomainUuid;
+        }
+        if (!domainUuid) {
+          continue;
+        }
+        const cleanId = domainUuid.startsWith("JournalEntry.") ? domainUuid.slice("JournalEntry.".length) : domainUuid;
+        const docRes = await this.#domains.read(cleanId);
+        if (!docRes.ok) continue;
+        const doc = docRes.value as any;
+        const ownership = doc.ownership as Record<string, number> | undefined;
+        const userLevel = ownership ? (viewer.userId ? (ownership[viewer.userId] ?? ownership.default ?? 0) : (ownership.default ?? 0)) : 0;
+        if (userLevel >= 1) {
+          allowed.push(toTransactionDto(tx));
+        }
+      }
+      return ok(Object.freeze(allowed));
+    }
+
+    return ok(Object.freeze(list.map(toTransactionDto)));
   }
 
   listThresholds(domainUuid?: string, resourceId?: string): readonly ThresholdDefinition[] {
@@ -351,7 +495,6 @@ export class DefaultPublicEconomyApi implements PublicEconomyApi {
     callerViewer?: Partial<ViewerIdentity>
   ): Promise<Result<PagedLedgerResultDto, PublicError>> {
     const viewer = this.#projection.resolveViewer(callerViewer);
-    const paged = this.#ledgerStore.queryPaged(filter);
     const visibleResourceIds = new Set<string>();
 
     if (filter.domainUuid) {
@@ -366,7 +509,33 @@ export class DefaultPublicEconomyApi implements PublicEconomyApi {
           }
         }
       }
+    } else {
+      const allDocsRes = this.#domains.query();
+      if (allDocsRes.ok) {
+        for (const doc of allDocsRes.value) {
+          const econRes = tryGetDomainEconomyData(doc.record);
+          if (econRes.ok) {
+            for (const acc of econRes.value.accounts) {
+              if (this.#projection.isAccountVisible(acc, viewer)) {
+                visibleResourceIds.add(acc.resourceId);
+              }
+            }
+          }
+        }
+      }
     }
+
+    // G4-REVAL4-003: If not GM, strictly constrain queryPaged via allowedResourceIds so that
+    // totalCount, hasMore, and cursors are computed ONLY over visible resources, preventing
+    // secret transaction counts or existence from leaking.
+    const storeFilter: LedgerFilter = viewer.isGm
+      ? filter
+      : {
+          ...filter,
+          allowedResourceIds: Array.from(visibleResourceIds)
+        };
+
+    const paged = this.#ledgerStore.queryPaged(storeFilter);
 
     const projected: LedgerEntryDto[] = [];
     for (const entry of paged.entries) {

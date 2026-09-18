@@ -2,7 +2,9 @@ import type {
   EconomySubsystemViewModel,
   ResourceAccountViewModel,
   ReservationItemViewModel,
-  LedgerEntryViewModel
+  LedgerEntryViewModel,
+  ProviderStatusViewModel,
+  TransactionItemViewModel
 } from "./economy-presenter.js";
 
 export function escapeHtml(value: unknown): string {
@@ -30,6 +32,9 @@ export function renderEconomySubsystemHtml(vm: EconomySubsystemViewModel): strin
           <button type="button" class="dm-btn dm-btn-secondary" data-action="openTransferModal">
             <i class="fas fa-exchange-alt"></i> Transfer
           </button>
+          <button type="button" class="dm-btn dm-btn-secondary" data-action="openTransactionHistoryModal">
+            <i class="fas fa-receipt"></i> Transactions
+          </button>
           ${
             vm.viewerIsGm
               ? `
@@ -44,6 +49,8 @@ export function renderEconomySubsystemHtml(vm: EconomySubsystemViewModel): strin
           }
         </div>
       </header>
+
+      ${renderProviderStatusSection(vm.providerStatuses)}
 
       <section class="dm-resource-cards-section">
         ${renderResourceCards(vm.accounts)}
@@ -67,6 +74,29 @@ export function renderEconomySubsystemHtml(vm: EconomySubsystemViewModel): strin
   `;
 }
 
+export function renderProviderStatusSection(providers: readonly ProviderStatusViewModel[] = []): string {
+  if (!providers || providers.length === 0) return "";
+  return `
+    <section class="dm-provider-status-section">
+      <div class="dm-provider-status-strip">
+        <span class="dm-strip-label"><i class="fas fa-server"></i> Provider Status:</span>
+        <div class="dm-provider-badges-list">
+          ${providers
+            .map(
+              (p) => `
+            <span class="dm-badge-provider-health dm-health-${escapeAttribute(p.status)}" title="${escapeAttribute(p.message ?? p.status)}">
+              <i class="fas fa-circle"></i> ${escapeHtml(p.providerId)}: <strong>${escapeHtml(p.status.toUpperCase())}</strong>
+              ${p.lastCheckedFormatted ? `<small>(${escapeHtml(p.lastCheckedFormatted)})</small>` : ""}
+            </span>
+          `
+            )
+            .join("")}
+        </div>
+      </div>
+    </section>
+  `;
+}
+
 function renderResourceCards(accounts: readonly ResourceAccountViewModel[] = []): string {
   if (!accounts || accounts.length === 0) {
     return `<div class="dm-empty-state">No resource accounts configured in this domain.</div>`;
@@ -86,7 +116,7 @@ function renderResourceCards(accounts: readonly ResourceAccountViewModel[] = [])
               ${acc.isSecret ? `<span class="dm-badge-secret"><i class="fas fa-eye-slash"></i> Secret</span>` : ""}
               ${
                 acc.mode === "provider"
-                  ? `<span class="dm-badge-provider ${acc.providerAvailable ? "online" : "offline"}"><i class="fas fa-plug"></i> ${escapeHtml(acc.providerId ?? "Provider")} (${acc.providerAvailable ? "Active" : "Offline"})</span>`
+                  ? `<span class="dm-badge-provider ${acc.providerStatus ? `status-${escapeAttribute(acc.providerStatus)}` : acc.providerAvailable ? "online" : "offline"}"><i class="fas fa-plug"></i> ${escapeHtml(acc.providerId ?? "Provider")} (${escapeHtml((acc.providerStatus ?? (acc.providerAvailable ? "Active" : "Offline")).toUpperCase())})</span>`
                   : ""
               }
               <button type="button" class="dm-btn-icon dm-btn-detail" data-action="openResourceDetail" data-resource-id="${escapeAttribute(acc.resourceId)}" title="View details">
@@ -344,6 +374,54 @@ export function renderResourceDetailModalHtml(account: ResourceAccountViewModel)
   `;
 }
 
+export function renderTransactionHistoryModalHtml(
+  domainUuid: string,
+  transactions: readonly TransactionItemViewModel[] = []
+): string {
+  return `
+    <div class="dm-modal dm-tx-history-modal" data-modal-type="transactionHistory">
+      <h3><i class="fas fa-receipt"></i> Domain Transactions</h3>
+      <div class="dm-tx-content">
+        ${
+          transactions.length === 0
+            ? `<div class="dm-empty-state">No transaction records found for this domain.</div>`
+            : `
+          <table class="dm-transactions-table">
+            <thead>
+              <tr>
+                <th>Transaction ID</th>
+                <th>State</th>
+                <th>Epoch</th>
+                <th>Time</th>
+                <th>Details / Reason</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${transactions
+                .map(
+                  (tx) => `
+                <tr class="dm-tx-row ${escapeAttribute(tx.stateBadgeClass)}">
+                  <td><code>${escapeHtml(tx.transactionId)}</code></td>
+                  <td><span class="dm-badge-tx dm-state-${escapeAttribute(tx.stateBadgeClass)}">${escapeHtml(tx.state)}</span></td>
+                  <td>${escapeHtml(tx.authorityEpoch)}</td>
+                  <td>${escapeHtml(tx.createdAtFormatted)}</td>
+                  <td>${escapeHtml(tx.failureReason ?? "—")}</td>
+                </tr>
+              `
+                )
+                .join("")}
+            </tbody>
+          </table>
+        `
+        }
+      </div>
+      <div class="dm-modal-actions">
+        <button type="button" class="dm-btn dm-btn-primary" data-action="closeModal">Close</button>
+      </div>
+    </div>
+  `;
+}
+
 export function renderCreateAccountModalHtml(
   domainUuid: string,
   availableDefinitions: readonly { id: string; label: string; precision: number }[] = []
@@ -353,20 +431,60 @@ export function renderCreateAccountModalHtml(
       <h3><i class="fas fa-plus-circle"></i> Create Resource Account</h3>
       <form data-form-type="createAccount">
         <input type="hidden" name="domainUuid" value="${escapeAttribute(domainUuid)}" />
-        <label>
-          Resource:
-          ${
-            availableDefinitions.length > 0
-              ? `
-            <select name="resourceId" required>
-              ${availableDefinitions.map((d) => `<option value="${escapeAttribute(d.id)}" data-precision="${escapeAttribute(d.precision)}">${escapeHtml(d.label)} (${escapeHtml(d.id)})</option>`).join("")}
-            </select>
-          `
-              : `
-            <input type="text" name="resourceId" required placeholder="e.g. domain-manager:treasury" />
-          `
-          }
-        </label>
+
+        <div class="dm-form-group dm-mode-selector">
+          <label class="dm-radio-inline">
+            <input type="radio" name="creationMode" value="existing" checked data-action="toggleCreationMode" />
+            Existing Resource
+          </label>
+          <label class="dm-radio-inline">
+            <input type="radio" name="creationMode" value="quickCreate" data-action="toggleCreationMode" />
+            Quick Create Custom Resource
+          </label>
+        </div>
+
+        <div class="dm-existing-resource-group" id="dm-existing-group">
+          <label>
+            Resource:
+            ${
+              availableDefinitions.length > 0
+                ? `
+              <select name="resourceId">
+                ${availableDefinitions.map((d) => `<option value="${escapeAttribute(d.id)}" data-precision="${escapeAttribute(d.precision)}">${escapeHtml(d.label)} (${escapeHtml(d.id)})</option>`).join("")}
+              </select>
+            `
+                : `
+              <input type="text" name="resourceId" placeholder="e.g. domain-manager:treasury" />
+            `
+            }
+          </label>
+        </div>
+
+        <div class="dm-quick-resource-group" id="dm-quick-group" style="display: none;">
+          <label>
+            New Resource ID:
+            <input type="text" name="quickResourceId" placeholder="e.g. custom:mana or domain-manager:gems" />
+          </label>
+          <label>
+            Resource Label:
+            <input type="text" name="quickResourceLabel" placeholder="e.g. Mana Crystals" />
+          </label>
+          <div class="dm-form-row">
+            <label>
+              Precision:
+              <input type="number" name="quickResourcePrecision" value="0" min="0" max="4" />
+            </label>
+            <label>
+              Unit:
+              <input type="text" name="quickResourceUnit" placeholder="e.g. crystal, crystals" />
+            </label>
+          </div>
+          <label>
+            Description:
+            <input type="text" name="quickResourceDescription" placeholder="Resource description" />
+          </label>
+        </div>
+
         <label>
           Initial Balance:
           <input type="text" inputmode="decimal" name="initialBalance" placeholder="0" />

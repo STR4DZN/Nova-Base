@@ -32,16 +32,46 @@
 | Verificação | Resultado |
 |---|---|
 | TypeScript strict (`tsc --noEmit`) | PASS (0 erros) |
-| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 416/416 (0 falhas) |
-| Relatório de Aceitação | Gerado (`docs/GATE_G4_ACCEPTANCE_REPORT.md`) |
+| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 428/428 (0 falhas) |
+| Relatório de Aceitação | Gerado (`docs/GATE_G4_ACCEPTANCE_REPORT.md` e `docs/GATE_G4_REVALIDACAO_FINAL_4.md`) |
 | Regressões G0/G1/G2/G3 | 0 (todos os 335 testes anteriores preservados e passando) |
-| Testes novos Gate G4 | 81 testes dedicados (G4.1 a G4.10 + 7 suítes de auditoria, isolamento, hardening e matriz de recuperação de falhas) |
+| Testes novos Gate G4 | 93 testes dedicados (G4.1 a G4.10 + 10 suítes de auditoria, isolamento, hardening, matriz de recuperação de falhas e revalidações 3/4) |
 | Remediação de Auditoria G4-AUD-001 a G4-AUD-012 | PASS — 100% remediado, endurecido e verificado |
 | Remediação da Revalidação G4-REVAL3-001 a G4-REVAL3-007 | PASS — 100% remediado, endurecido e verificado |
+| Remediação da Revalidação G4-REVAL4-001 a G4-REVAL4-004 | PASS — 100% remediado, endurecido e verificado |
 | Build do pacote (`node build.mjs`) | PASS (`dist/main.js` gerado) |
 | Empacotamento (`node scripts/package.mjs`) | PASS (`dist/domain-manager-v0.0.3.zip` gerado) |
 | Validação de pacote (`node scripts/validate-package.mjs`) | PASS |
 | Validação de artefato (`node scripts/validate-artifact.mjs`) | PASS |
+
+## Remediação da Revalidação Final (4ª Rodada) — G4-REVAL4-001 a G4-REVAL4-004
+
+1. **G4-REVAL4-001 (ALTO — Provider Mutation Outcome, Pre-Compensation Reconciliation & Fail-Closed Stale Cache)**:
+   - Expandido contrato de provedores de recursos (`ResourceProvider`) com `ProviderMutationOutcome` (`"written"`, `"not-written"`, `"unknown"`), `operationRef`, `lastMutatedAt` e método opcional `reconcileOperation(operationRef)`.
+   - `ManualCurrencyProvider` atualizado com armazenamento durável de histórico de operações e reconciliação idempotente.
+   - Em caso de timeout/falha de rede externa durante mutação de provedor, a transação é marcada como `"needs-recovery"` sem gerar mutação errônea ou inconsistência no ledger local.
+   - O compensador de recuperação executa pré-reconciliação: se o provedor certificar que a mutação `"not-written"`, a transação é finalizada como `"failed"` sem emitir estorno reverso espúrio; se confirmar `"written"`, aplica compensação segura.
+   - Checagem rigorosa de expiração de cache (DEC-16806): se o saldo cacheado tiver idade superior ao TTL configurado, a operação falha em modo fechado com `DM_ECON_PROVIDER_STALE_CACHE`.
+   - Suíte de testes dedicada: `tests/economy/providers.test.ts`.
+
+2. **G4-REVAL4-002 (ALTO/SEGURANÇA — Eliminação de Bypass Mutável em PublicEconomyApi & Propagação de Erro de Storage em ThresholdService)**:
+   - Eliminados métodos mutáveis diretos (`registerThreshold`, `thresholds`) da fachada `PublicEconomyApi`, garantindo que toda alteração de limiar passe pelo pipeline canônico autenticado (`setThreshold` despacha comando `economy:set-threshold` via `CommandBus`).
+   - `ThresholdService.flush()` propaga rejeições de persistência assíncronas do storage adapter subjacente.
+   - Handler `economy:set-threshold` captura falhas de persistência no flush e retorna estruturado `DM_DOMAIN_STORAGE_ERROR`.
+   - Suíte de testes dedicada: `tests/economy/thresholds-and-rollup.test.ts` e `tests/economy/public-api-isolation.test.ts`.
+
+3. **G4-REVAL4-003 (ALTO — Paginação do Ledger com Consciência de Visibilidade e Proteção contra Vazamento de Metadados)**:
+   - `LedgerStore.queryPaged` atualizado para receber parâmetro `allowedResourceIds`.
+   - Filtro de visibilidade é aplicado antes do cálculo de `totalCount`, `hasMore`, `hasPrev` e cursores de paginação (`cursor`, `nextCursor`, `prevCursor`), prevenindo vazamento de existência ou volume de transações de recursos secretos para jogadores sem permissão.
+   - Fachada `PublicEconomyApi.queryLedger` computa o conjunto exato de IDs visíveis ao requisitante antes de delegar ao store.
+   - Suíte de testes dedicada: `tests/economy/ledger-pagination.test.ts`.
+
+4. **G4-REVAL4-004 (MÉDIO/ALTO — Superfícies T4: Quick Resource Create, Histórico de Transações, Provider Health Status Shell e Agregação de Contas Derivadas Incompletas)**:
+   - **Quick Resource Create**: Handler `economy:register-custom-resource` verifica duplicidade em `ResourceDefinitionRegistry` e `CustomResourceDefinitionStore`, rejeitando colisões com `DM_ECON_RESOURCE_ALREADY_EXISTS`. Na UI, o controller `dispatchQuickResourceCreateAndAccount` sanitiza os dados contra valores `undefined` garantindo payloads estritamente JSON-safe.
+   - **Histórico de Transações**: Implementados `getTransaction` e `listTransactions` em `PublicEconomyApi` com verificação de posse do documento de domínio (permissão mínima `LIMITED` / nível >= 1 para não-GMs, retornando `DM_SECURITY_PERMISSION_DENIED` se não autorizado) e sanitização em `TransactionRecordDto`.
+   - **Provider Status Shell**: Visualização e verificação de integridade de provedores (`healthy`, `degraded`, `unavailable`, `incompatible`) com `lastCheckedAt` e renderização de badges na UI (`renderProviderStatusSection`).
+   - **Agregação de Contas Derivadas**: Contas no modo `"derived"` cujos domínios de origem não puderem ser resolvidos marcam `stats.isComplete = false`, incrementam `unknownContributorCount` e registram o UUID em `unknownContributors`.
+   - Suítes de testes: `tests/economy/thresholds-and-rollup.test.ts`, `tests/economy/public-api-isolation.test.ts`, `tests/economy/economy-ui.test.ts`.
 
 ## Remediação da Revalidação Final (3ª Rodada) — G4-REVAL3-001 a G4-REVAL3-007
 
