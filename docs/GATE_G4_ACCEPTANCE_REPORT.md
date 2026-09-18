@@ -5,7 +5,7 @@
 **Normative Authorities:** `Documentos/99_DOMAIN_MANAGER_MASTER_SPECIFICATION_V1.md` (§14, §11–12, §42, DEC-1416 to DEC-2305), `Documentos/GATES/14_G4_ECONOMY_RESOURCES.md`  
 **Status:** **SUBMITTED_FOR_USER_ACCEPTANCE (Aguardando Aceitação Soberana do Usuário — Nunca aceito sem confirmação explícita)**  
 **Date:** 2026-09-18  
-**Test Suite:** 383/383 passing (0 failures, 0 regressions against G3 baseline of 335)  
+**Test Suite:** 398/398 passing (0 failures, 0 regressions against G3 baseline of 335; +63 dedicated G4 tests)  
 **TypeScript Conformance:** Strict, 0 errors via `tsc --noEmit`  
 **Package & Artifact Validation:** PASS (`dist/domain-manager-v0.0.3.zip`, validation scripts verified)
 
@@ -80,12 +80,31 @@ The test suite in `tests/economy/concurrency.test.ts` submitted the economy subs
 
 ---
 
-## 5. Verification Summary
+## 5. Structural Audit Remediation (G4-AUD-001 through G4-AUD-012)
+
+All 12 findings identified during the architecture audit have been fully remediated and validated:
+
+1. **G4-AUD-001 (Persistence)**: `LedgerStore` and `ReservationStore` survive server reload/restart via `InMemoryLedgerStorageAdapter`, `FoundryJournalLedgerStorageAdapter`, `InMemoryReservationStorageAdapter`, and `FoundryJournalReservationStorageAdapter`.
+2. **G4-AUD-002 (Fault Recovery)**: Durable `TransactionRecord` registration during multi-step transfers/conversions; automatic atomic rollback of source balance upon destination write failure (`tests/economy/fault-recovery.test.ts`).
+3. **G4-AUD-003 (Cross-Domain Integrity)**: Strict domain authorization in `consumeReservation` and `releaseReservation` returning `DM_ECON_RESERVATION_DOMAIN_MISMATCH` on cross-domain manipulation (`tests/economy/cross-domain-security.test.ts`).
+4. **G4-AUD-004 (Public API Facade)**: Public access restricted to `PublicEconomyApi` with sanitized DTOs and command dispatchers; direct mutators and mutable stores removed from `module.api`.
+5. **G4-AUD-005 (Canonical DomainControllerProvider)**: Canonical provider wired by default into economy commands.
+6. **G4-AUD-006 (Provider Integration)**: `ManualCurrencyProvider`, `NativeResourceProvider`, integration into `ProviderRegistry`, and fail-closed semantics for stale balances (`DM_ECON_PROVIDER_STALE_CACHE`) (`tests/economy/provider-integration.test.ts`).
+7. **G4-AUD-007 (Projection & Secret Visibility)**: `EconomyProjectionService` sanitizes secret accounts and ledger entries for non-GM viewers.
+8. **G4-AUD-008 (UI Precision & Completeness)**: Decimal input parsing (`parseResourceAmount`), `renderReservationsTable`, and create account modal implemented.
+9. **G4-AUD-009 (Ledger Pagination)**: Cursor-based pagination (`queryPaged`) and descending sort implemented (`tests/economy/ledger-pagination.test.ts`).
+10. **G4-AUD-010 (Thresholds & Rollup)**: `ThresholdService`, `CustomResourceDefinitionStore`, multi-domain rollup with `hiddenContributors`, soft-close accounts, and no-op zero delta adjustments (`tests/economy/thresholds-and-rollup.test.ts`).
+11. **G4-AUD-011 (Acceptance & Fault Tests)**: Complete fault injection, reload, cross-domain, and recovery test coverage.
+12. **G4-AUD-012 (Canonical Next Gate)**: Next Gate documented as **G5 — Projects / Facilities / Downtime**.
+
+---
+
+## 6. Verification Summary
 
 ```
-Total Test Suites: 75
-Total Unit & Integration Tests: 383
-Passing: 383 (100%)
+Total Test Files: 83
+Total Unit & Integration Tests: 398
+Passing: 398 (100%)
 Failing: 0
 Cancelled: 0
 Skipped: 0
@@ -97,9 +116,10 @@ Artifact Validation: PASS
 
 ---
 
-## 6. Handoff & Governance
+## 7. Handoff & Governance
 
 In strict adherence to user instructions (**"Nunca coloque um Gate como aceito até que EU ACEITE"**):
 - This report represents the complete, verified technical submission of Gate G4.
 - Gate G4 remains in state `GATE_G4_PENDING_USER_ACCEPTANCE`.
-- Gate G5 remains locked until the user explicitly confirms acceptance.
+- **Gate G5 — Projects / Facilities / Downtime** remains locked until the user explicitly confirms acceptance.
+
