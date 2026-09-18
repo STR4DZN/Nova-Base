@@ -2,14 +2,14 @@
   "id": "domain-manager",
   "title": "Domain Manager",
   "description": "Foundry VTT infrastructure module for managing domains and related operational data.",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "compatibility": {
     "minimum": "13.351",
     "verified": "13.351"
   },
   "url": "https://github.com/STR4DZN/Nova-Base",
   "manifest": "https://github.com/STR4DZN/Nova-Base/releases/latest/download/module.json",
-  "download": "https://github.com/STR4DZN/Nova-Base/releases/download/v0.0.2/domain-manager-v0.0.2.zip",
+  "download": "https://github.com/STR4DZN/Nova-Base/releases/download/v0.0.3/domain-manager-v0.0.3.zip",
   "socket": true,
   "relationships": {
     "requires": [

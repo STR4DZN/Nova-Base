@@ -1,7 +1,8 @@
 import { readFile } from "node:fs/promises";
 import { crc32, readZip } from "./zip-utils.mjs";
 
-const artifact = "dist/domain-manager-v0.0.2.zip";
+const manifestLocal = JSON.parse(await readFile("module.json", "utf8"));
+const artifact = `dist/domain-manager-v${manifestLocal.version}.zip`;
 const expected = ["module.json", "dist/main.js", "dist/main.js.map"];
 const zip = readZip(await readFile(artifact));
 const actual = [...zip.keys()].sort();
@@ -18,5 +19,5 @@ for (const name of expected) {
 
 const manifest = JSON.parse(zip.get("module.json").toString("utf8"));
 if (manifest.scripts?.[0] !== "dist/main.js") throw new Error("Invalid artifact entry point");
-if (manifest.version !== "0.0.2") throw new Error("Invalid artifact version");
+if (manifest.version !== manifestLocal.version) throw new Error("Invalid artifact version");
 console.info("Artifact validation passed");

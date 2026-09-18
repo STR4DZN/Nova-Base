@@ -199,6 +199,20 @@
       }
     }
 
+    // 6. Gate G3 (People & Governance Subsystem) Surface Verification
+    if (dm) {
+      assert(dm.people !== undefined, "G3: dm.people is exposed on runtime API");
+      assert(typeof dm.people?.getNotables === "function", "G3: dm.people.getNotables is a function");
+      assert(typeof dm.people?.openApp === "function", "G3: dm.people.openApp is a function");
+      assert(dm.repairTool !== undefined, "G3: dm.repairTool is exposed on runtime API");
+      assert(typeof dm.repairTool?.purgeDanglingOccupants === "function", "G3: dm.repairTool.purgeDanglingOccupants is a function");
+      assert(dm.controllerProvider !== undefined, "G3: dm.controllerProvider is exposed on runtime API");
+      assert(typeof dm.controllerProvider?.isDomainController === "function", "G3: dm.controllerProvider.isDomainController is a function");
+      assert(dm.admin === undefined, "G3: dm.admin is undefined (no unauthenticated privilege escalation)");
+      assert(dm.people?.asAdmin === undefined, "G3: dm.people.asAdmin is undefined");
+      assert(dm.people?.asAuthority === undefined, "G3: dm.people.asAuthority is undefined");
+    }
+
     // Summary
     const passed = results.filter((r) => r.pass).length;
     const total = results.length;
@@ -211,9 +225,9 @@
 
     if (typeof ui !== "undefined" && ui.notifications) {
       if (passed === total) {
-        ui.notifications.info(`Domain Manager G2 Smoke Test: All ${passed}/${total} checks passed!`);
+        ui.notifications.info(`Domain Manager Smoke Test: All ${passed}/${total} checks passed!`);
       } else {
-        ui.notifications.error(`Domain Manager G2 Smoke Test: ${total - passed} checks failed.`);
+        ui.notifications.error(`Domain Manager Smoke Test: ${total - passed} checks failed.`);
       }
     }
   } catch (err) {

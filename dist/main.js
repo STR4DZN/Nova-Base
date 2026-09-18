@@ -11813,7 +11813,7 @@ function composeDomainManagerRuntime(options = {}) {
 
 // src/core/versioning/build-metadata.ts
 var BUILD_METADATA = Object.freeze({
-  moduleVersion: "0.0.2",
+  moduleVersion: "0.0.3",
   buildChannel: "dev",
   target: "foundry-vtt"
 });

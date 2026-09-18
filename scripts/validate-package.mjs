@@ -7,8 +7,12 @@ for (const file of requiredFiles) {
   if (!existsSync(file)) throw new Error(`Missing package file: ${file}`);
 }
 
+const pkg = JSON.parse(readFileSync("package.json", "utf8"));
+
 if (manifest.id !== "domain-manager") throw new Error("Invalid module id");
-if (manifest.version !== "0.0.2") throw new Error("Invalid module version");
+if (manifest.version !== pkg.version) {
+  throw new Error(`Manifest version (${manifest.version}) does not match package.json (${pkg.version})`);
+}
 if (!manifest.scripts?.includes("dist/main.js")) {
   throw new Error("Manifest does not reference dist/main.js");
 }
