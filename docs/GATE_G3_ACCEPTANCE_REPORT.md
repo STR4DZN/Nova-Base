@@ -3,9 +3,9 @@
 **Subsystem:** People (`domain-manager:people`)  
 **Gate:** G3 — People Subsystem & Lifecycle  
 **Normative Authorities:** `Documentos/99_DOMAIN_MANAGER_MASTER_SPECIFICATION_V1.md` (§13, DEC-0891 to DEC-1415), `Documentos/GATES/13_G3_PEOPLE.md`  
-**Status:** **GATE_ACCEPTED**  
+**Status:** **SUBMITTED_FOR_USER_ACCEPTANCE (Aguardando Aceitação Soberana do Usuário)**  
 **Date:** 2026-09-18  
-**Test Suite:** 305/305 passing (0 failures, 0 regressions against G2 baseline of 233)  
+**Test Suite:** 307/307 passing (0 failures, 0 regressions against G2 baseline of 233)  
 **TypeScript Conformance:** Strict, 0 errors via `tsc --noEmit`  
 
 ---
@@ -72,16 +72,18 @@ Gate G3 implements the complete, vertical **People Subsystem** for the Domain Ma
 
 - **TypeScript Compilation (`tsc --noEmit`)**: 0 errors. Strict typing across all data types, schemas, presenters, repositories, calculators, and mutation coordinators.
 - **Node.js Test Suite (`node tests/run-tests.mjs`)**:
-  - Total Tests: **305**
-  - Passed: **305**
+  - Total Tests: **307**
+  - Passed: **307**
   - Failed: **0**
-  - Regressions: **0** (All 233 Gate G2 tests + 72 Gate G3 & Audit Hardening tests pass 100%)
+  - Regressions: **0** (All 233 Gate G2 tests + 74 Gate G3 & Audit Hardening tests pass 100%)
 - **Capability Registry Verification**:
   - Connected `validateDomainPeopleData` directly to `CapabilityRegistry` under `domain-manager:people`.
   - Inactive domains completely skip people validation and overhead.
 
 ---
 
-## 6. Formal Conclusion
+## 6. Formal Submission for User Acceptance
 
-Gate G3 (People) has satisfied all criteria specified in `Documentos/GATES/13_G3_PEOPLE.md` and `Documentos/99_DOMAIN_MANAGER_MASTER_SPECIFICATION_V1.md` (§13), along with all hardening requirements from the post-implementation security and architectural audit. Gate G3 is hereby declared **ACCEPTED**.
+Gate G3 (People) has satisfied all criteria specified in `Documentos/GATES/13_G3_PEOPLE.md` and `Documentos/99_DOMAIN_MANAGER_MASTER_SPECIFICATION_V1.md` (§13), along with all 8 hardening requirements from the post-implementation security and architectural audit.
+
+O Gate G3 é submetido formalmente como **SUBMETIDO PARA ACEITAÇÃO** e **NUNCA SERÁ CONSIDERADO ACEITO ATÉ QUE O USUÁRIO FORNEÇA SUA APROVAÇÃO EXPLÍCITA**.

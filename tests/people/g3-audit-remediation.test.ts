@@ -34,6 +34,7 @@ import { DomainIntegrityChecker } from "../../src/storage/integrity/domain-integ
 import { CapabilityRegistry } from "../../src/domains/domain-capabilities.js";
 import { PeopleRepairTool } from "../../src/people/services/people-repair-tool.js";
 import { PeopleAggregationService } from "../../src/aggregation/people-aggregation.js";
+import { PeopleRoleCapabilityProvider } from "../../src/aggregation/capability-resolver.js";
 import { PeopleApplicationController } from "../../src/ui/domain-patterns/people/people-app.js";
 import type { DomainRecord } from "../../src/domains/domain-schema.js";
 import type { PrimaryAuthorityService } from "../../src/authority/primary-authority-service.js";
@@ -382,6 +383,81 @@ test("G3 Remediation Item 4: evaluateRole validates definition prerequisites aga
   assert.equal(evalWithAllPrereqs.isRequirementSatisfied, true);
 });
 
+test("G3 Remediation Item 4: grantPolicy = requirementsSatisfied dynamic capability resolution", () => {
+  const roleDef: RoleDefinition = {
+    id: "domain-manager:arcanist",
+    version: 1,
+    label: "Arcanist",
+    description: "Ritual specialist",
+    occupancy: { min: 1, max: 1 },
+    prerequisites: ["cap:arcane"],
+    grantPolicy: "requirementsSatisfied",
+    grants: ["cap:ritual"]
+  };
+
+  const role: DomainRole = {
+    id: createOpaqueId("role"),
+    definitionId: "domain-manager:arcanist",
+    scope: "domain",
+    occupants: [createOpaqueId("not")],
+    visibility: "public"
+  };
+
+  const provider = new PeopleRoleCapabilityProvider();
+
+  // Context without cap:arcane
+  const ctxWithoutPrereq = {
+    domainUuid: "JournalEntry.domain-1",
+    domainRecord: {
+      ...defaultRecord,
+      definition: {
+        ...defaultRecord.definition,
+        capabilities: { enabled: ["domain-manager:domain"], config: {} }
+      }
+    },
+    peopleData: {
+      schemaVersion: 1,
+      population: { mode: "manual", total: 10, precision: "exact" },
+      populationGroups: [],
+      notables: [],
+      roles: [role],
+      operationalGroups: [],
+      assignments: [],
+      reservations: []
+    } as DomainPeopleData,
+    roleDefinitions: [roleDef]
+  };
+
+  const grantsWithout = provider.resolveGrants(ctxWithoutPrereq);
+  assert.equal(grantsWithout.some((g) => g.capabilityId === "cap:ritual"), false);
+
+  // Context with cap:arcane
+  const ctxWithPrereq = {
+    domainUuid: "JournalEntry.domain-1",
+    domainRecord: {
+      ...defaultRecord,
+      definition: {
+        ...defaultRecord.definition,
+        capabilities: { enabled: ["domain-manager:domain", "cap:arcane"], config: {} }
+      }
+    },
+    peopleData: {
+      schemaVersion: 1,
+      population: { mode: "manual", total: 10, precision: "exact" },
+      populationGroups: [],
+      notables: [],
+      roles: [role],
+      operationalGroups: [],
+      assignments: [],
+      reservations: []
+    } as DomainPeopleData,
+    roleDefinitions: [roleDef]
+  };
+
+  const grantsWith = provider.resolveGrants(ctxWithPrereq);
+  assert.equal(grantsWith.some((g) => g.capabilityId === "cap:ritual"), true);
+});
+
 test("G3 Remediation Item 2: Assignment & reservation contracts, target registry, notable capacity, world time", async () => {
   const { domains, bus } = setupTestEnvironment();
 
@@ -490,6 +566,79 @@ test("G3 Remediation Item 2: Assignment & reservation contracts, target registry
   const wfAt105 = calculateWorkforce(peopleData, { nowWorld: 105 });
   assert.equal(wfAt105.types["engineering"]?.committed ?? 0, 0);
   assert.equal(wfAt105.totalCommitted, 0);
+});
+
+test("G3 Remediation Item 2.7: Reservation overlap checks evaluate current active reservations correctly", async () => {
+  const { domains, bus } = setupTestEnvironment();
+
+  const domainRes = await domains.create({ name: "Overlap Testing Site", record: defaultRecord });
+  const domainUuid = domainRes.value.uuid;
+
+  // Create an operational group with size 10
+  const groupRes = await bus.executeLocal(
+    createTestCommand("people:create-operational-group", {
+      domainUuid,
+      group: {
+        name: "Survey Crew",
+        definitionId: "domain-manager:labor-squad",
+        membershipMode: "abstract" as const,
+        size: 10
+      }
+    })
+  );
+  assert.equal(groupRes.ok, true);
+  const groupId = (groupRes.value as any).result.id;
+
+  const nowReal = Date.now();
+
+  // Create reservation 1: takes 6 units, expires at nowReal + 100_000
+  const resv1 = await bus.executeLocal(
+    createTestCommand("people:create-reservation", {
+      domainUuid,
+      reservation: {
+        sourceRef: groupId,
+        targetRef: "prj_site_a",
+        workforceTypeId: "general",
+        amount: 6,
+        expiresAtReal: nowReal + 100_000
+      }
+    })
+  );
+  assert.equal(resv1.ok, true);
+  assert.equal(resv1.value.status, "executed");
+
+  // Create reservation 2: takes 5 units (total 6 + 5 = 11 > 10) expiring at nowReal + 50_000 -> must be REJECTED with DM_WORKFORCE_OVERCOMMIT
+  const resv2 = await bus.executeLocal(
+    createTestCommand("people:create-reservation", {
+      domainUuid,
+      reservation: {
+        sourceRef: groupId,
+        targetRef: "prj_site_b",
+        workforceTypeId: "general",
+        amount: 5,
+        expiresAtReal: nowReal + 50_000
+      }
+    })
+  );
+  assert.equal(resv2.ok, true);
+  assert.equal(resv2.value.status, "rejected");
+  assert.equal(resv2.value.error?.code, "DM_WORKFORCE_OVERCOMMIT");
+
+  // Create reservation 3: takes 4 units (total 6 + 4 = 10 <= 10) expiring at nowReal + 50_000 -> must be EXECUTED
+  const resv3 = await bus.executeLocal(
+    createTestCommand("people:create-reservation", {
+      domainUuid,
+      reservation: {
+        sourceRef: groupId,
+        targetRef: "prj_site_c",
+        workforceTypeId: "general",
+        amount: 4,
+        expiresAtReal: nowReal + 50_000
+      }
+    })
+  );
+  assert.equal(resv3.ok, true);
+  assert.equal(resv3.value.status, "executed");
 });
 
 test("G3 Remediation Item 6: Domain integrity diagnostics and PeopleRepairTool", async () => {
