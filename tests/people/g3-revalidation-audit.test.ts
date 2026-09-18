@@ -21,6 +21,10 @@ import {
 import { PeopleService, type PublicPeopleApi } from "../../src/people/services/people-service.js";
 import { PeopleRepairTool } from "../../src/people/services/people-repair-tool.js";
 import {
+  registerDomainControllerPolicy,
+  clearDomainControllerPolicies
+} from "../../src/people/commands/people-permissions.js";
+import {
   PeopleApplication,
   PeopleApplicationController
 } from "../../src/ui/domain-patterns/people/people-app.js";
@@ -63,20 +67,26 @@ const defaultRecord: DomainRecord = {
 function document(
   id: string,
   name: string,
-  value = defaultRecord
+  value = defaultRecord,
+  ownership: Record<string, number | string> = {}
 ): IdentifiedJournalEntryDocumentLike {
   let currentName = name;
   let currentFlags: Readonly<Record<string, unknown>> = { "domain-manager": value };
+  let currentOwnership: Record<string, number | string> = { ...ownership };
   return {
     id,
     uuid: `JournalEntry.${id}`,
     get name() { return currentName; },
     get flags() { return currentFlags; },
+    get ownership() { return currentOwnership; },
     update: async (data: Record<string, unknown>) => {
       if (typeof data.name === "string") currentName = data.name;
       const payload = data["flags.domain-manager"];
       if (payload !== undefined) {
         currentFlags = { ...currentFlags, "domain-manager": payload };
+      }
+      if (data.ownership !== undefined) {
+        currentOwnership = { ...data.ownership as any };
       }
     }
   };
@@ -103,7 +113,7 @@ function createStore(initialDocs: IdentifiedJournalEntryDocumentLike[] = []): Do
     list: () => [...new Set(byKey.values())],
     create: async (data) => {
       const id = `je-${nextId++}`;
-      const doc = document(id, data.name, data.flags["domain-manager"] as any);
+      const doc = document(id, data.name, data.flags["domain-manager"] as any, (data.ownership ?? {}) as any);
       registerDoc(doc);
       return doc;
     }
@@ -344,7 +354,11 @@ test("G3 Blocker 2: Authorized Player routes mutations through UI -> CommandBus.
       createdByUserId: playerUserId
     }
   };
-  const docRes = await domains.create({ name: "Guild Hall", record: playerDomainRecord });
+  const docRes = await domains.create({
+    name: "Guild Hall",
+    record: playerDomainRecord,
+    ownership: { [playerUserId]: 3 }
+  });
   assert.equal(docRes.ok, true);
   const domainUuid = docRes.value.uuid;
 
@@ -428,11 +442,13 @@ test("G3 Blocker 2: Parallel players on independent domains succeed concurrently
 
   const doc1 = await domains.create({
     name: "Domain Alpha",
-    record: { ...defaultRecord, metadata: { ...defaultRecord.metadata, createdByUserId: player1 } }
+    record: { ...defaultRecord, metadata: { ...defaultRecord.metadata, createdByUserId: player1 } },
+    ownership: { [player1]: 3 }
   });
   const doc2 = await domains.create({
     name: "Domain Beta",
-    record: { ...defaultRecord, metadata: { ...defaultRecord.metadata, createdByUserId: player2 } }
+    record: { ...defaultRecord, metadata: { ...defaultRecord.metadata, createdByUserId: player2 } },
+    ownership: { [player2]: 3 }
   });
 
   const ctrl1 = new PeopleApplicationController({
@@ -668,7 +684,8 @@ test("G3 Blocker 2: UI exclusively invokes CommandBus.execute (never executeLoca
 
   const docRes = await domains.create({
     name: "Spy Test Domain",
-    record: { ...defaultRecord, metadata: { ...defaultRecord.metadata, createdByUserId: "player-guildmaster" } }
+    record: { ...defaultRecord, metadata: { ...defaultRecord.metadata, createdByUserId: "player-guildmaster" } },
+    ownership: { "player-guildmaster": 3 }
   });
 
   const peopleService = new PeopleService(domains, { commandBus: spyBus });
@@ -735,4 +752,455 @@ test("G3 Blocker 4: Repair with stale expectedRevision is rejected with revision
   assert.equal(receiptRes.ok, true);
   assert.equal(receiptRes.value.status, "rejected");
   assert.equal(receiptRes.value.error?.code, "DM_REVISION_CONFLICT");
+});
+
+// ---------------------------------------------------------------------------
+// BLOCKER 1 TESTS: Foundry v13 ApplicationV2 Lifecycle & Real Action Dispatch
+// ---------------------------------------------------------------------------
+
+test("G3 Blocker 1: PeopleApplication complies with Foundry v13 ApplicationV2 lifecycle (_prepareContext, _renderHTML, _replaceHTML, _onRender, DEFAULT_OPTIONS.actions)", async () => {
+  const { domains, busOnAuthority } = setupMultiplayerHarness();
+  const docRes = await domains.create({
+    name: "ApplicationV2 Lifecycle Domain",
+    record: defaultRecord,
+    ownership: { "gm-user": 3 }
+  });
+  assert.equal(docRes.ok, true);
+
+  // 1. Prototype methods required by Foundry v13 ApplicationV2 specification
+  assert.equal(typeof (PeopleApplication.prototype as any)._prepareContext, "function");
+  assert.equal(typeof (PeopleApplication.prototype as any)._renderHTML, "function");
+  assert.equal(typeof (PeopleApplication.prototype as any)._replaceHTML, "function");
+  assert.equal(typeof (PeopleApplication.prototype as any)._onRender, "function");
+  assert.equal(typeof (PeopleApplication.prototype as any).attachEventListeners, "function");
+  assert.equal(typeof (PeopleApplication.prototype as any).closeModal, "function");
+
+  // 2. DEFAULT_OPTIONS actions
+  const actions = PeopleApplication.DEFAULT_OPTIONS.actions;
+  assert.equal(typeof actions.selectTab, "function");
+  assert.equal(typeof actions.selectEntity, "function");
+  assert.equal(typeof actions.openCreateModal, "function");
+  assert.equal(typeof actions.closeModal, "function");
+  assert.equal(typeof actions.submitCreate, "function");
+
+  // 3. Render execution
+  const peopleService = new PeopleService(domains, { commandBus: busOnAuthority });
+  const app = new PeopleApplication({
+    domainUuid: docRes.value.uuid,
+    commandBus: busOnAuthority,
+    peopleApi: peopleService,
+    domains,
+    viewer: { userId: "gm-user", isGm: true }
+  });
+
+  const renderedApp = await app.render(true);
+  assert.equal(renderedApp, app);
+  assert.notEqual(app.element, null);
+  assert.equal(app.element!.className.includes("dm-people-app-v2"), true);
+
+  // 4. Tabs navigation and switching
+  assert.equal(app.controller.activeTab, "notables");
+  const rolesTabBtn = app.element!.querySelector('[data-tab="roles"]');
+  assert.notEqual(rolesTabBtn, null);
+  rolesTabBtn!.dispatchEvent({ type: "click" });
+  assert.equal(app.controller.activeTab, "roles");
+
+  // 5. Open Create Modal
+  const createBtn = app.element!.querySelector('[data-action="openCreateModal"]');
+  assert.notEqual(createBtn, null);
+  createBtn!.dispatchEvent({ type: "click" });
+
+  const backdrop = app.element!.querySelector(".dm-modal-backdrop");
+  assert.notEqual(backdrop, null);
+
+  // 6. Close Modal
+  const cancelBtn = backdrop!.querySelector('[data-action="closeModal"]');
+  assert.notEqual(cancelBtn, null);
+  cancelBtn!.dispatchEvent({ type: "click" });
+
+  const backdropAfterClose = app.element!.querySelector(".dm-modal-backdrop");
+  assert.equal(backdropAfterClose, null);
+});
+
+test("G3 Blocker 1: PeopleApplication #onSubmitCreate extracts FormData and persists Notable, Role, and OperationalGroup", async () => {
+  const { domains, createPlayerBus } = setupMultiplayerHarness();
+  const playerUserId = "player-guildmaster";
+  const playerBus = createPlayerBus(playerUserId);
+
+  const docRes = await domains.create({
+    name: "Creation Test Domain",
+    record: defaultRecord,
+    ownership: { [playerUserId]: 3 }
+  });
+  assert.equal(docRes.ok, true);
+
+  const peopleService = new PeopleService(domains, { commandBus: playerBus });
+  const app = new PeopleApplication({
+    domainUuid: docRes.value.uuid,
+    commandBus: playerBus,
+    peopleApi: peopleService,
+    domains,
+    viewer: { userId: playerUserId, isGm: false }
+  });
+
+  await app.render(true);
+
+  // 1. Create Notable through UI modal form submission
+  app.openCreateModal("notables");
+  const notableForm = app.element!.querySelector('form[data-create-type="notable"]');
+  assert.notEqual(notableForm, null);
+  notableForm!.querySelector('input[name="name"]')!.value = "Master of coin";
+  notableForm!.querySelector('textarea[name="description"]')!.value = "Controls treasury";
+  notableForm!.dispatchEvent({ type: "submit" });
+
+  // Wait for async dispatch
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  // Verify Notable was persisted
+  const readRes1 = await domains.read(docRes.value.id);
+  assert.equal(readRes1.ok, true);
+  const peopleData1 = (readRes1.value.record.definition.capabilities.config as any)[PEOPLE_CAPABILITY_ID] as DomainPeopleData;
+  assert.equal(peopleData1.notables.length, 1);
+  assert.equal(peopleData1.notables[0].name, "Master of coin");
+  assert.equal(peopleData1.notables[0].description, "Controls treasury");
+  // Verify modal closed
+  assert.equal(app.element!.querySelector(".dm-modal-backdrop"), null);
+
+  // 2. Create Role through UI modal form submission
+  app.openCreateModal("roles");
+  const roleForm = app.element!.querySelector('form[data-create-type="role"]');
+  assert.notEqual(roleForm, null);
+  roleForm!.querySelector('input[name="name"]')!.value = "Council Leader";
+  roleForm!.querySelector('input[name="definitionId"]')!.value = "domain-manager:councilor";
+  roleForm!.dispatchEvent({ type: "submit" });
+
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  const readRes2 = await domains.read(docRes.value.id);
+  assert.equal(readRes2.ok, true);
+  const peopleData2 = (readRes2.value.record.definition.capabilities.config as any)[PEOPLE_CAPABILITY_ID] as DomainPeopleData;
+  assert.equal(peopleData2.roles.length, 1);
+  assert.equal(peopleData2.roles[0].definitionId, "domain-manager:councilor");
+  assert.equal(peopleData2.roles[0].customLabel, "Council Leader");
+  assert.equal(app.element!.querySelector(".dm-modal-backdrop"), null);
+
+  // 3. Create OperationalGroup through UI modal form submission
+  app.openCreateModal("operationalGroups");
+  const groupForm = app.element!.querySelector('form[data-create-type="group"]');
+  assert.notEqual(groupForm, null);
+  groupForm!.querySelector('input[name="name"]')!.value = "Iron Guard";
+  groupForm!.querySelector('input[name="definitionId"]')!.value = "domain-manager:labor-squad";
+  groupForm!.dispatchEvent({ type: "submit" });
+
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  const readRes3 = await domains.read(docRes.value.id);
+  assert.equal(readRes3.ok, true);
+  const peopleData3 = (readRes3.value.record.definition.capabilities.config as any)[PEOPLE_CAPABILITY_ID] as DomainPeopleData;
+  assert.equal(peopleData3.operationalGroups.length, 1);
+  assert.equal(peopleData3.operationalGroups[0].name, "Iron Guard");
+  assert.equal(app.element!.querySelector(".dm-modal-backdrop"), null);
+});
+
+// ---------------------------------------------------------------------------
+// BLOCKER 2 TESTS: Domain Controller Permissions & Provenance Isolation
+// ---------------------------------------------------------------------------
+
+test("G3 Blocker 2: Player who is only createdByUserId but NOT controller is DENIED", async () => {
+  const { domains, createPlayerBus } = setupMultiplayerHarness();
+  const playerAuthor = "player-author-only";
+  const authorBus = createPlayerBus(playerAuthor);
+
+  // Domain records playerAuthor in provenance metadata, but ownership is empty/none
+  const docRes = await domains.create({
+    name: "Author Provenance Domain",
+    record: { ...defaultRecord, metadata: { ...defaultRecord.metadata, createdByUserId: playerAuthor } },
+    ownership: { [playerAuthor]: 0 }
+  });
+  assert.equal(docRes.ok, true);
+
+  const controller = new PeopleApplicationController({
+    domainUuid: docRes.value.uuid,
+    commandBus: authorBus,
+    peopleApi: new PeopleService(domains, { commandBus: authorBus }),
+    domains,
+    viewer: { userId: playerAuthor, isGm: false }
+  });
+
+  const res = await controller.dispatchCreateNotable({ name: "Unauthorized Notable" });
+  assert.equal(res.ok, false);
+  assert.equal((res as any).error?.code, "DM_SECURITY_PERMISSION_DENIED");
+});
+
+test("G3 Blocker 2: Explicit Domain Controller via DomainControllerPolicy contract is ALLOWED", async () => {
+  clearDomainControllerPolicies();
+  const { domains, createPlayerBus } = setupMultiplayerHarness();
+  const trustedControllerId = "player-trusted-officer";
+  const officerBus = createPlayerBus(trustedControllerId);
+
+  const docRes = await domains.create({
+    name: "Delegated Domain",
+    record: defaultRecord,
+    ownership: { [trustedControllerId]: 0 } // No Foundry ownership
+  });
+  assert.equal(docRes.ok, true);
+
+  // 1. Without policy: DENIED
+  const ctrl = new PeopleApplicationController({
+    domainUuid: docRes.value.uuid,
+    commandBus: officerBus,
+    peopleApi: new PeopleService(domains, { commandBus: officerBus }),
+    domains,
+    viewer: { userId: trustedControllerId, isGm: false }
+  });
+  const deniedRes = await ctrl.dispatchCreateNotable({ name: "Officer Notable" });
+  assert.equal(deniedRes.ok, false);
+  assert.equal((deniedRes as any).error?.code, "DM_SECURITY_PERMISSION_DENIED");
+
+  // 2. Register explicit policy contract: ALLOWED
+  const unregister = registerDomainControllerPolicy((domainId, userId) => {
+    return domainId === docRes.value.id && userId === trustedControllerId;
+  });
+
+  const allowedRes = await ctrl.dispatchCreateNotable({ name: "Officer Notable" });
+  assert.equal(allowedRes.ok, true);
+
+  // 3. Unregister: back to DENIED
+  unregister();
+  const deniedAfter = await ctrl.dispatchCreateNotable({ name: "Second Notable" });
+  assert.equal(deniedAfter.ok, false);
+  assert.equal((deniedAfter as any).error?.code, "DM_SECURITY_PERMISSION_DENIED");
+});
+
+test("G3 Blocker 2: Historical creator after control transfer is DENIED; new owner is ALLOWED", async () => {
+  const { domains, createPlayerBus } = setupMultiplayerHarness();
+  const oldCreator = "player-founder";
+  const newOwner = "player-successor";
+  const oldBus = createPlayerBus(oldCreator);
+  const newBus = createPlayerBus(newOwner);
+
+  // Created with oldCreator as creator, but ownership transferred to newOwner
+  const docRes = await domains.create({
+    name: "Succession Domain",
+    record: { ...defaultRecord, metadata: { ...defaultRecord.metadata, createdByUserId: oldCreator } },
+    ownership: { [oldCreator]: 0, [newOwner]: 3 }
+  });
+  assert.equal(docRes.ok, true);
+
+  const oldCtrl = new PeopleApplicationController({
+    domainUuid: docRes.value.uuid,
+    commandBus: oldBus,
+    peopleApi: new PeopleService(domains, { commandBus: oldBus }),
+    domains,
+    viewer: { userId: oldCreator, isGm: false }
+  });
+
+  const newCtrl = new PeopleApplicationController({
+    domainUuid: docRes.value.uuid,
+    commandBus: newBus,
+    peopleApi: new PeopleService(domains, { commandBus: newBus }),
+    domains,
+    viewer: { userId: newOwner, isGm: false }
+  });
+
+  // Old creator denied
+  const oldRes = await oldCtrl.dispatchCreateNotable({ name: "Deposed Ruler" });
+  assert.equal(oldRes.ok, false);
+  assert.equal((oldRes as any).error?.code, "DM_SECURITY_PERMISSION_DENIED");
+
+  // New owner allowed
+  const newRes = await newCtrl.dispatchCreateNotable({ name: "New Monarch" });
+  assert.equal(newRes.ok, true);
+});
+
+test("G3 Blocker 2: Imported domain with old createdByUserId does NOT grant permission", async () => {
+  const { domains, createPlayerBus } = setupMultiplayerHarness();
+  const importedAuthor = "ancient-foreign-user";
+  const importBus = createPlayerBus(importedAuthor);
+
+  const docRes = await domains.create({
+    name: "Imported Ancient Kingdom",
+    record: {
+      ...defaultRecord,
+      metadata: {
+        createdByUserId: importedAuthor,
+        archivedAt: null,
+        source: { type: "import", ref: "backup-2024.json" }
+      }
+    },
+    ownership: { [importedAuthor]: 0 }
+  });
+  assert.equal(docRes.ok, true);
+
+  const ctrl = new PeopleApplicationController({
+    domainUuid: docRes.value.uuid,
+    commandBus: importBus,
+    peopleApi: new PeopleService(domains, { commandBus: importBus }),
+    domains,
+    viewer: { userId: importedAuthor, isGm: false }
+  });
+
+  const res = await ctrl.dispatchCreateNotable({ name: "Imported Ghost" });
+  assert.equal(res.ok, false);
+  assert.equal((res as any).error?.code, "DM_SECURITY_PERMISSION_DENIED");
+});
+
+test("G3 Blocker 2: Game Master is always ALLOWED regardless of document ownership", async () => {
+  const { domains, busOnAuthority } = setupMultiplayerHarness();
+  const gmUser = "gm-administrator";
+
+  const docRes = await domains.create({
+    name: "GM Sovereign Domain",
+    record: defaultRecord,
+    ownership: { "other-player": 3 } // GM has no explicit entry in ownership
+  });
+  assert.equal(docRes.ok, true);
+
+  setCurrentUserProvider(() => ({
+    userId: gmUser,
+    isGm: true,
+    allowedRestrictedRefs: []
+  }));
+
+  const ctrl = new PeopleApplicationController({
+    domainUuid: docRes.value.uuid,
+    commandBus: busOnAuthority,
+    peopleApi: new PeopleService(domains, { commandBus: busOnAuthority }),
+    domains,
+    viewer: { userId: gmUser, isGm: true }
+  });
+
+  const res = await ctrl.dispatchCreateNotable({ name: "Imperial Governor" });
+  assert.equal(res.ok, true);
+});
+
+test("G3 Blocker 2: Unauthorized random player without GM, ownership, or policy is DENIED", async () => {
+  const { domains, createPlayerBus } = setupMultiplayerHarness();
+  const stranger = "player-stranger";
+  const strangerBus = createPlayerBus(stranger);
+
+  const docRes = await domains.create({
+    name: "Fortress",
+    record: defaultRecord,
+    ownership: { "legitimate-owner": 3 }
+  });
+  assert.equal(docRes.ok, true);
+
+  const ctrl = new PeopleApplicationController({
+    domainUuid: docRes.value.uuid,
+    commandBus: strangerBus,
+    peopleApi: new PeopleService(domains, { commandBus: strangerBus }),
+    domains,
+    viewer: { userId: stranger, isGm: false }
+  });
+
+  const res = await ctrl.dispatchCreateNotable({ name: "Infiltrator" });
+  assert.equal(res.ok, false);
+  assert.equal((res as any).error?.code, "DM_SECURITY_PERMISSION_DENIED");
+});
+
+// ---------------------------------------------------------------------------
+// BLOCKER 3 TESTS: PeopleRepairTool Constructor, Authority Isolation & Locks
+// ---------------------------------------------------------------------------
+
+test("G3 Blocker 3: PeopleRepairTool requires CommandBus and rejects repository/coordinator construction", () => {
+  assert.throws(
+    () => new (PeopleRepairTool as any)({}, {}),
+    /PeopleRepairTool requires an authorized CommandBus instance/
+  );
+  assert.throws(
+    () => new (PeopleRepairTool as any)(null),
+    /PeopleRepairTool requires an authorized CommandBus instance/
+  );
+  assert.throws(
+    () => new (PeopleRepairTool as any)(undefined),
+    /PeopleRepairTool requires an authorized CommandBus instance/
+  );
+});
+
+test("G3 Blocker 3: Source code verification guarantees zero occurrences of local-authority fake", () => {
+  const srcDir = path.resolve(process.cwd(), "src");
+
+  function scanDir(dir: string): void {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        scanDir(fullPath);
+      } else if (entry.name.endsWith(".ts")) {
+        const content = fs.readFileSync(fullPath, "utf-8");
+        assert.equal(
+          content.includes("local-authority"),
+          false,
+          `Forbidden 'local-authority' bypass found in ${fullPath}`
+        );
+      }
+    }
+  }
+
+  scanDir(srcDir);
+});
+
+test("G3 Blocker 3: Concurrent normal mutation vs repair preserves domain lock and revision integrity", async () => {
+  const { domains, busOnAuthority, createPlayerBus } = setupMultiplayerHarness();
+  const playerUserId = "player-domain-admin";
+  const playerBus = createPlayerBus(playerUserId);
+
+  const initialData: DomainPeopleData = {
+    schemaVersion: 1,
+    population: { mode: "manual", total: 100, precision: "exact" },
+    populationGroups: [],
+    notables: [],
+    roles: [
+      {
+        id: createOpaqueId("role"),
+        definitionId: "domain-manager:councilor",
+        occupants: [createOpaqueId("not")],
+        visibility: "public",
+        scope: "domain",
+        tags: []
+      }
+    ],
+    operationalGroups: [],
+    assignments: [],
+    reservations: []
+  };
+  const recordWithDangling = withDomainPeopleData(defaultRecord, initialData);
+
+  const docRes = await domains.create({
+    name: "Concurrency Test Domain",
+    record: recordWithDangling,
+    ownership: { [playerUserId]: 3 }
+  });
+  assert.equal(docRes.ok, true);
+  const domainUuid = docRes.value.uuid;
+
+  const ctrl = new PeopleApplicationController({
+    domainUuid,
+    commandBus: playerBus,
+    peopleApi: new PeopleService(domains, { commandBus: playerBus }),
+    domains,
+    viewer: { userId: playerUserId, isGm: false }
+  });
+
+  const repairTool = new PeopleRepairTool(busOnAuthority);
+
+  // Execute normal creation and repair concurrently
+  const [createRes, repairRes] = await Promise.all([
+    ctrl.dispatchCreateNotable({ name: "Concurrent Notable" }),
+    repairTool.purgeDanglingOccupants(domainUuid)
+  ]);
+
+  assert.equal(createRes.ok, true);
+  assert.equal(repairRes.ok, true);
+
+  // Verify final state has revision advanced to 2 without conflicts or data loss
+  const finalDoc = await domains.read(docRes.value.id);
+  assert.equal(finalDoc.ok, true);
+  assert.equal(finalDoc.value.record.revision, 2);
+
+  const peopleData = (finalDoc.value.record.definition.capabilities.config as any)[PEOPLE_CAPABILITY_ID] as DomainPeopleData;
+  assert.equal(peopleData.notables.length, 1);
+  assert.equal(peopleData.notables[0].name, "Concurrent Notable");
+  assert.equal(peopleData.roles[0].occupants.length, 0);
 });

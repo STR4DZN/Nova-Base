@@ -14,6 +14,7 @@ export interface FoundryDomainStoreRuntime {
   createJournalEntry(data: {
     readonly name: string;
     readonly flags: Readonly<Record<string, unknown>>;
+    readonly ownership?: Readonly<Record<string, number | string>>;
   }): Promise<IdentifiedJournalEntryDocumentLike | null | undefined>;
 }
 
@@ -24,6 +25,7 @@ function runtimeFromGlobals(): FoundryDomainStoreRuntime {
       create(data: {
         readonly name: string;
         readonly flags: Readonly<Record<string, unknown>>;
+        readonly ownership?: Readonly<Record<string, number | string>>;
       }): Promise<IdentifiedJournalEntryDocumentLike | null | undefined>;
     };
   };
@@ -69,6 +71,7 @@ export class FoundryDomainDocumentStore implements DomainDocumentStore {
   async create(data: {
     readonly name: string;
     readonly flags: Readonly<Record<string, unknown>>;
+    readonly ownership?: Readonly<Record<string, number | string>>;
   }): Promise<IdentifiedJournalEntryDocumentLike> {
     const created = await this.runtime.createJournalEntry(data);
     if (created === null || created === undefined) {

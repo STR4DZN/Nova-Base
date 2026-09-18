@@ -1,26 +1,67 @@
 import { createPublicError, type PublicError } from "../../core/contracts/public-error.js";
 import { err, ok, type Result } from "../../core/contracts/result.js";
 import type { AuthenticatedCommandContext } from "../../commands/authenticated-command-context.js";
-import type { DomainRepositoryContract } from "../../storage/repositories/domain-repository.js";
-import { PEOPLE_CAPABILITY_ID } from "../people-data.js";
+import type {
+  DomainDocument,
+  DomainRepositoryContract
+} from "../../storage/repositories/domain-repository.js";
+import type { DomainRecord } from "../../domains/domain-schema.js";
+
+/**
+ * Contract for explicit Domain Controller authorization policies.
+ * Allows systems/extensions to register trusted controller resolution logic.
+ */
+export type DomainControllerPolicy = (
+  domainId: string,
+  userId: string,
+  context: {
+    readonly record: DomainRecord;
+    readonly document?: DomainDocument;
+  }
+) => boolean | Promise<boolean>;
+
+const activeControllerPolicies = new Set<DomainControllerPolicy>();
+
+/**
+ * Registers an explicit Domain Controller policy.
+ * Returns an unregister function.
+ */
+export function registerDomainControllerPolicy(policy: DomainControllerPolicy): () => void {
+  activeControllerPolicies.add(policy);
+  return () => {
+    activeControllerPolicies.delete(policy);
+  };
+}
+
+/**
+ * Clears all registered domain controller policies (primarily for test isolation).
+ */
+export function clearDomainControllerPolicies(): void {
+  activeControllerPolicies.clear();
+}
+
+export interface ValidatePeoplePermissionOptions {
+  readonly controllerPolicy?: DomainControllerPolicy;
+}
 
 /**
  * Validates whether the authenticated command sender is authorized to execute People mutations.
  *
- * Master Spec §11.2, §13, DEC-0573–0582:
- * An operation is authorized if:
- * 1. Sender is the Primary Authority itself or local system/tick (ctx.senderUserId === null or ctx.senderUserId === ctx.authorityUserId).
- * 2. Sender is a Game Master in Foundry (game.users.get(senderUserId)?.isGM).
- * 3. Sender is an authorized Domain Controller:
- *    - Domain creator: metadata.createdByUserId === ctx.senderUserId
- *    - Explicit controller in capability config: domain.definition.capabilities.config.controllers includes senderUserId
- *    - Explicit controller in people config: domain.definition.capabilities.config[PEOPLE_CAPABILITY_ID].controllers includes senderUserId
- *    - Foundry document owner: ownership[senderUserId] >= 3
+ * Master Spec §5.5, §11.2, §13:
+ * Canonical sources of truth for Domain Controller authority:
+ * 1. Primary Authority itself or local system/tick (ctx.senderUserId === null or ctx.senderUserId === ctx.authorityUserId).
+ * 2. Game Master in Foundry (game.users.get(senderUserId)?.isGM).
+ * 3. Document Ownership layer in Foundry (ownership[senderUserId] >= 3 / OWNER, or testUserPermission).
+ * 4. Explicit Domain Controller Policy: custom trusted controller policy contract.
+ *
+ * NOTE (DEC-018): `metadata.createdByUserId` is strictly provenance and audit metadata.
+ * Historic creation does NOT confer current Domain Controller authorization (e.g. after control transfer or import).
  */
 export async function validatePeopleCommandPermission(
   ctx: AuthenticatedCommandContext<any>,
   domains: DomainRepositoryContract,
-  domainUuidExtractor?: (payload: any) => string | undefined
+  domainUuidExtractor?: (payload: any) => string | undefined,
+  options?: ValidatePeoplePermissionOptions
 ): Promise<Result<boolean, PublicError>> {
   // 1. Local system or Primary Authority
   if (ctx.senderUserId === null || ctx.senderUserId === ctx.authorityUserId) {
@@ -33,7 +74,7 @@ export async function validatePeopleCommandPermission(
     return ok(true);
   }
 
-  // 3. Domain Controller validation
+  // 3. Resolve target domain context
   const rawDomainUuid =
     (domainUuidExtractor ? domainUuidExtractor(ctx.command.payload) : undefined) ??
     ctx.command.payload?.domainUuid ??
@@ -67,30 +108,53 @@ export async function validatePeopleCommandPermission(
   const doc = docRes.value;
   const record = doc.record;
 
-  // 3a. Creator is Domain Controller
-  if (record.metadata?.createdByUserId === ctx.senderUserId) {
-    return ok(true);
+  // 4. Foundry Document Ownership layer (3 = OWNER)
+  const docOwnership =
+    doc.ownership ??
+    (doc as any).doc?.ownership ??
+    (doc as any).flags?.ownership ??
+    (globalThis as any).game?.journal?.get?.(cleanId)?.ownership;
+
+  if (docOwnership) {
+    const userOwnership = docOwnership[ctx.senderUserId];
+    if (userOwnership >= 3 || userOwnership === "owner" || userOwnership === 3) {
+      return ok(true);
+    }
   }
 
-  // 3b. Explicit controllers in domain capability config
-  const generalControllers = (record.definition?.capabilities?.config as any)?.controllers;
-  if (Array.isArray(generalControllers) && generalControllers.includes(ctx.senderUserId)) {
-    return ok(true);
+  const journalDoc = (globalThis as any).game?.journal?.get?.(cleanId);
+  if (journalDoc && typeof journalDoc.testUserPermission === "function") {
+    const hasOwnerPermission = journalDoc.testUserPermission(
+      gameUser ?? { id: ctx.senderUserId },
+      3
+    );
+    if (hasOwnerPermission) {
+      return ok(true);
+    }
   }
 
-  // 3c. Explicit controllers in people capability config
-  const peopleConfig = (record.definition?.capabilities?.config as any)?.[PEOPLE_CAPABILITY_ID];
-  const peopleControllers = peopleConfig?.controllers;
-  if (Array.isArray(peopleControllers) && peopleControllers.includes(ctx.senderUserId)) {
-    return ok(true);
+  // 5. Explicit Domain Controller Policy contract
+  if (options?.controllerPolicy) {
+    const policyResult = await options.controllerPolicy(cleanId, ctx.senderUserId, {
+      record,
+      document: doc
+    });
+    if (policyResult) {
+      return ok(true);
+    }
   }
 
-  // 3d. Foundry document ownership (3 = OWNER)
-  const docOwnership = (doc as any).doc?.ownership ?? (doc as any).flags?.ownership;
-  if (docOwnership && (docOwnership[ctx.senderUserId] >= 3 || docOwnership[ctx.senderUserId] === "owner")) {
-    return ok(true);
+  for (const policy of activeControllerPolicies) {
+    const policyResult = await policy(cleanId, ctx.senderUserId, {
+      record,
+      document: doc
+    });
+    if (policyResult) {
+      return ok(true);
+    }
   }
 
+  // 6. Fail-closed
   return err(
     createPublicError({
       code: "DM_SECURITY_PERMISSION_DENIED",

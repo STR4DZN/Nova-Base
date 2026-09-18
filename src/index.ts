@@ -19,3 +19,8 @@ export {
   type PublicPeopleApi,
   type PeopleServiceOptions
 } from "./people/services/people-service.js";
+export {
+  type DomainControllerPolicy,
+  registerDomainControllerPolicy,
+  clearDomainControllerPolicies
+} from "./people/commands/people-permissions.js";

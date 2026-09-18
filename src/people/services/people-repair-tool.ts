@@ -1,20 +1,15 @@
 import { createPublicError } from "../../core/contracts/public-error.js";
 import { err, ok, type Result } from "../../core/contracts/result.js";
-import type { DomainRepositoryContract } from "../../storage/repositories/domain-repository.js";
-import type { MutationCoordinator } from "../../mutations/mutation-coordinator.js";
 import { CommandBus } from "../../commands/command-bus.js";
-import { CommandRegistry } from "../../commands/command-registry.js";
 import {
   COMMAND_CONTRACT_VERSION_V1,
   createCommandId,
   type DomainCommand
 } from "../../commands/command-envelope.js";
-import type { PrimaryAuthorityService } from "../../authority/primary-authority-service.js";
-import {
-  registerRepairCommandHandlers,
-  type PeopleRepairAction,
-  type PeopleRepairPayload,
-  type PeopleRepairReceiptResult
+import type {
+  PeopleRepairAction,
+  PeopleRepairPayload,
+  PeopleRepairReceiptResult
 } from "../commands/repair-commands.js";
 
 export interface PeopleRepairResult {
@@ -26,39 +21,12 @@ export interface PeopleRepairResult {
 
 export class PeopleRepairTool {
   readonly #commandBus: CommandBus;
-  readonly #domains?: DomainRepositoryContract;
-  readonly #coordinator?: MutationCoordinator;
 
-  constructor(
-    commandBusOrDomains: CommandBus | DomainRepositoryContract,
-    coordinator?: MutationCoordinator,
-    commandBus?: CommandBus
-  ) {
-    if ("execute" in commandBusOrDomains || "executeLocal" in commandBusOrDomains) {
-      this.#commandBus = commandBusOrDomains as CommandBus;
-    } else if (commandBus) {
-      this.#commandBus = commandBus;
-      this.#domains = commandBusOrDomains as DomainRepositoryContract;
-      this.#coordinator = coordinator;
-    } else {
-      // Direct construction with (domains, coordinator) — wire transactional pipeline
-      this.#domains = commandBusOrDomains as DomainRepositoryContract;
-      this.#coordinator = coordinator;
-      const registry = new CommandRegistry();
-      if (coordinator) {
-        registerRepairCommandHandlers(registry, coordinator, this.#domains);
-      }
-      const authority = {
-        isCurrentUser: () => true,
-        getCurrent: () => "local-authority",
-        getStatus: () => ({ authorityUserId: "local-authority", authorityEpoch: 1, available: true })
-      } as unknown as PrimaryAuthorityService<any>;
-      this.#commandBus = new CommandBus({
-        registry,
-        coordinator: coordinator!,
-        authorityService: authority
-      });
+  constructor(commandBus: CommandBus) {
+    if (!commandBus || typeof (commandBus as any).execute !== "function") {
+      throw new TypeError("PeopleRepairTool requires an authorized CommandBus instance");
     }
+    this.#commandBus = commandBus;
   }
 
   get commandBus(): CommandBus {

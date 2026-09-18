@@ -90,4 +90,9 @@ export { composeDomainManagerRuntime, type DomainManagerRuntime } from "./bootst
 export { PeopleApplication, PeopleApplicationController } from "./ui/domain-patterns/people/people-app.js";
 export { PeopleRepairTool } from "./people/services/people-repair-tool.js";
 export { PeopleService, type PublicPeopleApi } from "./people/services/people-service.js";
+export {
+  type DomainControllerPolicy,
+  registerDomainControllerPolicy,
+  clearDomainControllerPolicies
+} from "./people/commands/people-permissions.js";
 

@@ -10,17 +10,26 @@ import {
 export interface JournalEntryDocumentLike {
   readonly name: string;
   readonly flags?: Readonly<Record<string, unknown>>;
+  readonly ownership?: Readonly<Record<string, number | string>>;
   update(data: Record<string, unknown>): Promise<void>;
 }
 
 export class DomainJournalEntryAdapter {
   constructor(private readonly document: JournalEntryDocumentLike) {}
 
-  read(): Result<{ readonly name: string; readonly record: DomainRecord }> {
+  read(): Result<{
+    readonly name: string;
+    readonly record: DomainRecord;
+    readonly ownership?: Readonly<Record<string, number | string>>;
+  }> {
     const payload = this.document.flags?.[DOMAIN_FLAG_NAMESPACE];
     const decoded = decodeDomainRecord(payload);
     if (!decoded.ok) return decoded;
-    return ok({ name: this.document.name, record: decoded.value });
+    return ok({
+      name: this.document.name,
+      record: decoded.value,
+      ...(this.document.ownership !== undefined ? { ownership: this.document.ownership } : {})
+    });
   }
 
   async write(name: string, record: DomainRecord): Promise<Result<void>> {

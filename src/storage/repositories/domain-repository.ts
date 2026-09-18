@@ -33,6 +33,7 @@ export interface DomainDocumentStore {
   create(data: {
     readonly name: string;
     readonly flags: Readonly<Record<string, unknown>>;
+    readonly ownership?: Readonly<Record<string, number | string>>;
   }): Promise<IdentifiedJournalEntryDocumentLike>;
 }
 
@@ -41,6 +42,7 @@ export interface DomainDocument {
   readonly uuid: string;
   readonly name: string;
   readonly record: DomainRecord;
+  readonly ownership?: Readonly<Record<string, number | string>>;
 }
 
 export interface DomainQuery {
@@ -58,6 +60,7 @@ export interface DomainQuery {
 export interface DomainCreateInput {
   readonly name: string;
   readonly record: DomainRecord;
+  readonly ownership?: Readonly<Record<string, number | string>>;
 }
 
 export interface DomainRepositoryOptions {
@@ -202,7 +205,14 @@ function toDomainDocument(document: IdentifiedJournalEntryDocumentLike): Result<
   if (!isJournalEntryUuid(document.uuid)) return invalid("Stored Domain document has an invalid JournalEntry UUID");
   const decoded = new DomainJournalEntryAdapter(document).read();
   if (!decoded.ok) return decoded;
-  return ok({ id: document.id, uuid: document.uuid, name: decoded.value.name, record: decoded.value.record });
+  const ownership = decoded.value.ownership ?? document.ownership;
+  return ok({
+    id: document.id,
+    uuid: document.uuid,
+    name: decoded.value.name,
+    record: decoded.value.record,
+    ...(ownership !== undefined ? { ownership } : {})
+  });
 }
 
 export class DomainRepository implements DomainRepositoryContract {
@@ -301,7 +311,11 @@ export class DomainRepository implements DomainRepositoryContract {
     if (!parentValidation.ok) return parentValidation;
 
     try {
-      const created = await this.store.create({ name: normalizedInput.name, flags: { [DOMAIN_FLAG_NAMESPACE]: encodeDomainRecord(normalizedInput.record) } });
+      const created = await this.store.create({
+        name: normalizedInput.name,
+        flags: { [DOMAIN_FLAG_NAMESPACE]: encodeDomainRecord(normalizedInput.record) },
+        ...(input.ownership !== undefined ? { ownership: input.ownership } : {})
+      });
       if (typeof created.id !== "string" || created.id.trim().length === 0 || !isJournalEntryUuid(created.uuid)) return storageFailure("create");
       const createdDocument = toDomainDocument(created);
       if (!createdDocument.ok) return createdDocument;

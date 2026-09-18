@@ -5,7 +5,7 @@
 **Normative Authorities:** `Documentos/99_DOMAIN_MANAGER_MASTER_SPECIFICATION_V1.md` (§13, DEC-0891 to DEC-1415), `Documentos/GATES/13_G3_PEOPLE.md`  
 **Status:** **SUBMITTED_FOR_USER_ACCEPTANCE (Aguardando Aceitação Soberana do Usuário)**  
 **Date:** 2026-09-18  
-**Test Suite:** 317/317 passing (0 failures, 0 regressions against G2 baseline of 233)  
+**Test Suite:** 328/328 passing (0 failures, 0 regressions against G2 baseline of 233)  
 **TypeScript Conformance:** Strict, 0 errors via `tsc --noEmit`  
 
 ---
@@ -68,25 +68,25 @@ Gate G3 implements the complete, vertical **People Subsystem** for the Domain Ma
 
 ---
 
-## 5. Revalidação Externa Final: Resolução dos 4 Bloqueios Estruturais
+## 5. Revalidação Externa Final: Resolução dos Bloqueios Estruturais e Endurecimento Canônico
 
 | Bloqueio | Descrição do Bloqueio | Causa Raiz Auditada | Remediação Canônica Implementada | Evidência de Verificação | Status |
 |:---:|---|---|---|---|:---:|
 | **B1** | **PublicPeopleApi / AdminPeopleApi Security & Clearance Bypasses** | `asAdmin()` e `asAuthority()` permitiam escalada não autenticada; `resolveCurrentViewer` aceitava `userId`, `isGm` e `allowedRestrictedRefs` arbitrários do chamador; `buildViewModel` aceitava `viewerIsGm: true` de jogadores. | Removidos `asAdmin()` e `asAuthority()` de `PublicPeopleApi` e do runtime. `resolveCurrentViewer()` impõe clamping estrito contra o contexto da sessão (não-GM tem `isGm` forçado para `false` e `allowedRestrictedRefs` restrito aos permitidos pela sessão). `buildViewModel` deriva `effectiveIsGm` exclusivamente do viewer clampado. | `tests/people/g3-revalidation-audit.test.ts` | **PASS** |
-| **B2** | **Multiplayer — UI Mutating as Player & Authority Permissions** | UI usava `executeLocal`, executando apenas na máquina local como autoridade; remetentes remotos sofriam erro ou bypassavam permissão na autoridade. | `CommandBus.execute()` roteia automaticamente via `executeLocal` na autoridade e via `transport.send` em clientes jogadores. `CommandBus` aguarda `permissionValidator` assíncrono. Implementado `validatePeopleCommandPermission` validando criadores do domínio (`createdByUserId`), controladores de capacidade/people e ownership de documentos no Foundry. | `tests/people/g3-revalidation-audit.test.ts` | **PASS** |
-| **B3** | **G3.9 UI Production Composition & Action Wiring** | `PeopleApplication` e modais não estavam expostos no bundle de produção `dist/main.js` ou conectados a ações DOM reais. | Implementada classe `PeopleApplication` (Foundry ApplicationV2 / DOM adapter) conectando listeners DOM reais para troca de abas (`selectTab`), seleção (`selectEntity`), abertura de modais (`openCreateModal`) e submissão (`submitCreate`). Exportados em `src/index.ts`, `src/main.ts` e compilados em `dist/main.js`. | `tests/people/g3-revalidation-audit.test.ts` | **PASS** |
-| **B4** | **PeopleRepairTool via Pipeline Transacional** | `PeopleRepairTool` mutava repositório diretamente fora do pipeline transacional sem locks ordenados ou reconciliação de concorrência. | Criado comando transacional `people:repair` no `CommandRegistry` com lock ordenado (`domain:<cleanId>`), fresh read com revision, commit com update e autorização estrita GM-only (`requireGmOnlyPermission`). `PeopleRepairTool` refatorado para despachar estritamente via `CommandBus.execute()`. | `tests/people/g3-revalidation-audit.test.ts` | **PASS** |
+| **B2** | **Multiplayer — UI Mutating as Player & Domain Controller Authority (DEC-018)** | `metadata.createdByUserId` conferia autoridade indevida; transferências de domínio ou importações legadas mantinham criador histórico com controle; ownership do Foundry não era verificado canonicamente. | Conforme DEC-018 e Master Spec §5.5/§11.2/§13: `metadata.createdByUserId` é estritamente procedência/auditoria. Fontes canônicas de autoridade: (1) Primary Authority/sistema, (2) GM do Foundry, (3) Nível de ownership do Foundry >= 3 (`OWNER`), (4) Contrato explícito `DomainControllerPolicy`. Integrado suporte a `ownership` em `DomainJournalEntryAdapter`, `FoundryDomainDocumentStore` e `DomainRepository`. | `tests/people/g3-revalidation-audit.test.ts` | **PASS** |
+| **B3** | **ApplicationV2 Lifecycle Completo & Form Submissions Reais** | `PeopleApplication` não implementava `_replaceHTML`, `_onRender`, `DEFAULT_OPTIONS.actions`, nem disparava comandos reais no `#onSubmitCreate`. Forms não criavam entidades no Foundry real. | Implementado ciclo de vida canônico Foundry v13 `ApplicationV2`: `_prepareContext`, `_renderHTML`, `_replaceHTML`, `_onRender` e `DEFAULT_OPTIONS.actions` (`selectTab`, `selectEntity`, `openCreateModal`, `closeModal`, `submitCreate`). Implementado `#onSubmitCreate` que extrai `FormData`, despacha `dispatchCreateNotable`, `dispatchCreateRole` e `dispatchCreateOperationalGroup`, fecha modais e recarrega a view model. | `tests/people/g3-revalidation-audit.test.ts` | **PASS** |
+| **B4** | **PeopleRepairTool via Pipeline Transacional & Isolamento de Autoridade** | `PeopleRepairTool` mantinha construtor legado `(domains, coordinator)` que usava autoridade falsa `'local-authority'` para burlar permissões e locks. | Removida sobrecarga de construtor legada: `PeopleRepairTool` aceita estritamente `constructor(commandBus: CommandBus)` autenticado. Eliminada 100% de qualquer ocorrência de `'local-authority'` em todo o código-fonte (`src/`). Todas as operações de reparo executam transacionalmente via comando `people:repair` com locks ordenados e integridade de revisão testada contra concorrência. | `tests/people/g3-revalidation-audit.test.ts` | **PASS** |
 
 ---
 
 ## 6. Verification & Quality Metrics
 
-- **TypeScript Compilation (`tsc --noEmit`)**: 0 erros. Strict typing across all data types, schemas, presenters, repositories, calculators, and mutation coordinators.
+- **TypeScript Compilation (`tsc --noEmit`)**: 0 erros. Strict typing across all data types, schemas, presenters, repositories, calculators, mutation coordinators, and ApplicationV2 UI.
 - **Node.js Test Suite (`node tests/run-tests.mjs`)**:
-  - Total Tests: **317**
-  - Passed: **317**
+  - Total Tests: **328**
+  - Passed: **328**
   - Failed: **0**
-  - Regressions: **0** (All 233 Gate G2 tests + 74 Gate G3 tests + 10 Revalidation Audit tests pass 100%)
+  - Regressions: **0** (All 233 Gate G2 tests + 74 Gate G3 tests + 21 Revalidation Audit tests pass 100%)
 - **Capability Registry Verification**:
   - Connected `validateDomainPeopleData` directly to `CapabilityRegistry` under `domain-manager:people`.
   - Inactive domains completely skip people validation and overhead.
@@ -95,6 +95,6 @@ Gate G3 implements the complete, vertical **People Subsystem** for the Domain Ma
 
 ## 7. Formal Submission for User Acceptance
 
-Gate G3 (People) has satisfied all criteria specified in `Documentos/GATES/13_G3_PEOPLE.md` and `Documentos/99_DOMAIN_MANAGER_MASTER_SPECIFICATION_V1.md` (§13), along with all 4 structural blocker resolutions from the final revalidation audit.
+Gate G3 (People) has satisfied all criteria specified in `Documentos/GATES/13_G3_PEOPLE.md` and `Documentos/99_DOMAIN_MANAGER_MASTER_SPECIFICATION_V1.md` (§13), along with all structural blocker resolutions and hardening from the final external revalidation audit.
 
 O Gate G3 é submetido formalmente como **SUBMETIDO PARA ACEITAÇÃO** e **NUNCA SERÁ CONSIDERADO ACEITO ATÉ QUE O USUÁRIO FORNEÇA SUA APROVAÇÃO EXPLÍCITA**.

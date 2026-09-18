@@ -566,11 +566,15 @@ export class PeopleApplicationController {
               <label>Description: <textarea name="description"></textarea></label>
               <label>Visibility:
                 <select name="visibility">
-                  <option value="public">Public</option>
+                  <option value="public" selected>Public</option>
+                  <option value="restricted">Restricted</option>
                   <option value="secret">Secret</option>
                 </select>
               </label>
-              <button type="submit" class="dm-btn dm-btn-primary">Create</button>
+              <div class="dm-modal-actions">
+                <button type="button" class="dm-btn dm-btn-secondary" data-action="closeModal">Cancel</button>
+                <button type="submit" class="dm-btn dm-btn-primary" data-action="submitCreate">Create</button>
+              </div>
             </form>
           </div>
         `;
@@ -583,11 +587,21 @@ export class PeopleApplicationController {
               <label>Definition ID: <input type="text" name="definitionId" required /></label>
               <label>Scope:
                 <select name="scope">
-                  <option value="domain">Domain</option>
+                  <option value="domain" selected>Domain</option>
                   <option value="operational-group">Operational Group</option>
                 </select>
               </label>
-              <button type="submit" class="dm-btn dm-btn-primary">Create</button>
+              <label>Visibility:
+                <select name="visibility">
+                  <option value="public" selected>Public</option>
+                  <option value="restricted">Restricted</option>
+                  <option value="secret">Secret</option>
+                </select>
+              </label>
+              <div class="dm-modal-actions">
+                <button type="button" class="dm-btn dm-btn-secondary" data-action="closeModal">Cancel</button>
+                <button type="submit" class="dm-btn dm-btn-primary" data-action="submitCreate">Create</button>
+              </div>
             </form>
           </div>
         `;
@@ -597,14 +611,24 @@ export class PeopleApplicationController {
             <h3>Create Operational Group</h3>
             <form data-action="submitCreate" data-create-type="group">
               <label>Name: <input type="text" name="name" required /></label>
-              <label>Type: <input type="text" name="type" required /></label>
+              <label>Definition ID: <input type="text" name="definitionId" required /></label>
               <label>Membership Mode:
                 <select name="membershipMode">
-                  <option value="abstract">Abstract</option>
+                  <option value="abstract" selected>Abstract</option>
                   <option value="explicit">Explicit</option>
                 </select>
               </label>
-              <button type="submit" class="dm-btn dm-btn-primary">Create</button>
+              <label>Visibility:
+                <select name="visibility">
+                  <option value="public" selected>Public</option>
+                  <option value="restricted">Restricted</option>
+                  <option value="secret">Secret</option>
+                </select>
+              </label>
+              <div class="dm-modal-actions">
+                <button type="button" class="dm-btn dm-btn-secondary" data-action="closeModal">Cancel</button>
+                <button type="submit" class="dm-btn dm-btn-primary" data-action="submitCreate">Create</button>
+              </div>
             </form>
           </div>
         `;
@@ -614,10 +638,306 @@ export class PeopleApplicationController {
             <h3>Create ${escapeHtml(createType)}</h3>
             <form data-action="submitCreate" data-create-type="${escapeAttribute(createType)}">
               <label>Name: <input type="text" name="name" required /></label>
-              <button type="submit" class="dm-btn dm-btn-primary">Create</button>
+              <div class="dm-modal-actions">
+                <button type="button" class="dm-btn dm-btn-secondary" data-action="closeModal">Cancel</button>
+                <button type="submit" class="dm-btn dm-btn-primary" data-action="submitCreate">Create</button>
+              </div>
             </form>
           </div>
         `;
+    }
+  }
+}
+
+function extractFormData(form: HTMLElement): Record<string, string> {
+  const data: Record<string, string> = {};
+  if (
+    typeof FormData !== "undefined" &&
+    typeof (globalThis as any).HTMLFormElement !== "undefined" &&
+    form instanceof (globalThis as any).HTMLFormElement
+  ) {
+    try {
+      const fd = new FormData(form as HTMLFormElement);
+      (fd as any).forEach?.((val: unknown, key: string) => {
+        if (typeof val === "string") {
+          data[key] = val.trim();
+        }
+      });
+      return data;
+    } catch {}
+  }
+
+  const elements = (form as any).querySelectorAll?.("input, select, textarea") ?? [];
+  elements.forEach((el: any) => {
+    const name = el.getAttribute?.("name") || el.name;
+    if (!name) return;
+    let value = el.value;
+    if (el.tagName === "SELECT" && (!value || value === "")) {
+      const selectedOption = el.querySelector?.("option[selected]") ?? el.querySelector?.("option");
+      if (selectedOption) {
+        value = selectedOption.getAttribute?.("value") ?? selectedOption.value ?? "";
+      }
+    }
+    if (el.tagName === "TEXTAREA" && (!value || value === "")) {
+      if (el.textContent) {
+        value = el.textContent;
+      }
+    }
+    if (value === undefined || value === null || value === "") {
+      const attrVal = el.getAttribute?.("value");
+      if (attrVal !== undefined && attrVal !== null) {
+        value = attrVal;
+      }
+    }
+    if (value !== undefined && value !== null) {
+      data[name] = String(value).trim();
+    }
+  });
+  return data;
+}
+
+function matchesSelector(el: any, sel: string): boolean {
+  sel = sel.trim();
+  if (sel.includes(",")) {
+    return sel.split(",").some((part) => matchesSelector(el, part.trim()));
+  }
+  if (sel.startsWith(".")) {
+    const cls = sel.slice(1);
+    const classes = (el.className || "").split(/\s+/);
+    return classes.includes(cls);
+  }
+  if (sel.startsWith("[")) {
+    const attrMatch = sel.match(/^\[([a-zA-Z0-9_:-]+)(?:=(?:"([^"]*)"|'([^']*)'|([^\]]+)))?\]$/);
+    if (attrMatch) {
+      const attrName = attrMatch[1];
+      const expectedVal = attrMatch[2] ?? attrMatch[3] ?? attrMatch[4];
+      if (expectedVal === undefined) return el.hasAttribute?.(attrName) ?? false;
+      return el.getAttribute?.(attrName) === expectedVal;
+    }
+  }
+  if (sel.includes("[")) {
+    const parts = sel.match(/^([a-zA-Z0-9_-]+)(\[.+\])$/);
+    if (parts) {
+      return matchesSelector(el, parts[1]) && matchesSelector(el, parts[2]);
+    }
+  }
+  return (el.tagName || "").toLowerCase() === sel.toLowerCase();
+}
+
+function querySelectorMock(root: any, selector: string): any {
+  if (selector.includes(",")) {
+    const parts = selector.split(",").map((s) => s.trim());
+    for (const part of parts) {
+      const found = querySelectorMock(root, part);
+      if (found) return found;
+    }
+    return null;
+  }
+  for (const child of root.children ?? []) {
+    if (matchesSelector(child, selector)) return child;
+    const found = querySelectorMock(child, selector);
+    if (found) return found;
+  }
+  return null;
+}
+
+function querySelectorAllMock(root: any, selector: string): any[] {
+  if (selector.includes(",")) {
+    const parts = selector.split(",").map((s) => s.trim());
+    const set = new Set<any>();
+    for (const part of parts) {
+      for (const el of querySelectorAllMock(root, part)) {
+        set.add(el);
+      }
+    }
+    return Array.from(set);
+  }
+  const results: any[] = [];
+  for (const child of root.children ?? []) {
+    if (matchesSelector(child, selector)) results.push(child);
+    results.push(...querySelectorAllMock(child, selector));
+  }
+  return results;
+}
+
+export function createMockElement(tagName: string, props: any = {}): any {
+  const listeners: Record<string, Function[]> = {};
+  const children: any[] = [];
+  const attributes: Record<string, string> = {};
+  let innerHtml = props.innerHTML ?? "";
+
+  const element = {
+    tagName: tagName.toUpperCase(),
+    className: props.className ?? "",
+    attributes,
+    children,
+    parent: null as any,
+    value: props.value ?? "",
+    name: props.name ?? "",
+    ownerDocument: {
+      createElement: (tag: string) => createMockElement(tag)
+    },
+    get innerHTML(): string {
+      return innerHtml;
+    },
+    set innerHTML(val: string) {
+      innerHtml = val;
+      parseHtmlToMockTree(element, val);
+    },
+    get textContent(): string {
+      return innerHtml.replace(/<[^>]*>/g, "");
+    },
+    set textContent(val: string) {
+      innerHtml = val;
+    },
+    getAttribute(name: string): string | null {
+      return attributes[name] ?? null;
+    },
+    setAttribute(name: string, value: string): void {
+      attributes[name] = String(value);
+      if (name === "class") element.className = String(value);
+      if (name === "name") element.name = String(value);
+      if (name === "value") element.value = String(value);
+    },
+    hasAttribute(name: string): boolean {
+      return Object.prototype.hasOwnProperty.call(attributes, name);
+    },
+    appendChild(child: any): any {
+      child.parent = element;
+      children.push(child);
+      return child;
+    },
+    prepend(child: any): any {
+      child.parent = element;
+      children.unshift(child);
+      return child;
+    },
+    remove(): void {
+      if (element.parent) {
+        const idx = element.parent.children.indexOf(element);
+        if (idx !== -1) element.parent.children.splice(idx, 1);
+        element.parent = null;
+      }
+    },
+    replaceChildren(...newChildren: any[]): void {
+      children.length = 0;
+      for (const c of newChildren) {
+        c.parent = element;
+        children.push(c);
+      }
+    },
+    addEventListener(type: string, listener: Function): void {
+      listeners[type] = listeners[type] ?? [];
+      listeners[type].push(listener);
+    },
+    dispatchEvent(event: any): boolean {
+      event.target = element;
+      if (!event.preventDefault) {
+        event.preventDefault = () => {};
+      }
+      let curr: any = element;
+      while (curr) {
+        const handlers = curr._listeners?.[event.type] ?? [];
+        for (const h of handlers) {
+          h(event);
+        }
+        curr = curr.parent;
+      }
+      return true;
+    },
+    async dispatchEventAsync(event: any): Promise<boolean> {
+      event.target = element;
+      if (!event.preventDefault) {
+        event.preventDefault = () => {};
+      }
+      let curr: any = element;
+      while (curr) {
+        const handlers = curr._listeners?.[event.type] ?? [];
+        for (const h of handlers) {
+          await h(event);
+        }
+        curr = curr.parent;
+      }
+      return true;
+    },
+    querySelector(selector: string): any {
+      return querySelectorMock(element, selector);
+    },
+    querySelectorAll(selector: string): any[] {
+      return querySelectorAllMock(element, selector);
+    },
+    closest(selector: string): any {
+      let curr: any = element;
+      while (curr) {
+        if (matchesSelector(curr, selector)) return curr;
+        curr = curr.parent;
+      }
+      return null;
+    },
+    get _listeners() {
+      return listeners;
+    }
+  };
+
+  if (props.attributes) {
+    for (const [k, v] of Object.entries(props.attributes)) {
+      element.setAttribute(k, String(v));
+    }
+  }
+
+  if (innerHtml) {
+    parseHtmlToMockTree(element, innerHtml);
+  }
+
+  return element;
+}
+
+function parseHtmlToMockTree(root: any, html: string): void {
+  root.children.length = 0;
+  const selfClosing = new Set(["input", "img", "br", "hr", "meta", "link"]);
+  const stack: any[] = [root];
+
+  const tokenRegex = /<(\/?)([a-zA-Z0-9_-]+)([^>]*)>/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = tokenRegex.exec(html)) !== null) {
+    const isClosing = match[1] === "/";
+    const tagName = match[2].toUpperCase();
+    const rawAttrs = match[3] ?? "";
+
+    if (isClosing) {
+      for (let i = stack.length - 1; i >= 1; i--) {
+        if (stack[i].tagName === tagName) {
+          while (stack.length >= i + 1) {
+            stack.pop();
+          }
+          break;
+        }
+      }
+      continue;
+    }
+
+    const isSelfClosing = rawAttrs.trim().endsWith("/") || selfClosing.has(tagName.toLowerCase());
+
+    const child = createMockElement(tagName);
+    child.parent = stack[stack.length - 1];
+
+    const attrRegex = /([a-zA-Z0-9_:-]+)(?:=(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?/g;
+    let attrMatch: RegExpExecArray | null;
+    while ((attrMatch = attrRegex.exec(rawAttrs)) !== null) {
+      const attrName = attrMatch[1];
+      if (attrName === "/") continue;
+      const attrVal = attrMatch[2] ?? attrMatch[3] ?? attrMatch[4] ?? "";
+      child.setAttribute(attrName, attrVal);
+      if (attrName === "class") child.className = attrVal;
+      if (attrName === "name") child.name = attrVal;
+      if (attrName === "value") child.value = attrVal;
+    }
+
+    stack[stack.length - 1].appendChild(child);
+
+    if (!isSelfClosing) {
+      stack.push(child);
     }
   }
 }
@@ -626,13 +946,50 @@ const BaseApp =
   (globalThis as any).foundry?.applications?.api?.ApplicationV2 ??
   class MockApplicationV2 {
     options: any;
+    element: any = null;
+
     constructor(options: any = {}) {
       this.options = options;
     }
-    async render(force?: boolean): Promise<this> {
+
+    async _prepareContext(options?: any): Promise<any> {
+      return {};
+    }
+
+    _renderHTML(context: any, options?: any): any {
+      return "";
+    }
+
+    _replaceHTML(result: any, content: any, options?: any): void {
+      if (typeof result === "string") {
+        content.innerHTML = result;
+      } else if (result && typeof content.replaceChildren === "function") {
+        content.replaceChildren(result);
+      }
+    }
+
+    _onRender(context: any, options?: any): void {}
+
+    async render(force?: boolean, options?: any): Promise<this> {
+      if (!this.element) {
+        if (typeof (globalThis as any).document?.createElement === "function") {
+          this.element = (globalThis as any).document.createElement("div");
+        } else {
+          this.element = createMockElement("div", {
+            className: "domain-manager dm-people-app-v2"
+          });
+        }
+      }
+      const context = await this._prepareContext(options);
+      const result = await this._renderHTML(context, options);
+      this._replaceHTML(result, this.element, options);
+      this._onRender(context, options);
       return this;
     }
-    async close(): Promise<void> {}
+
+    async close(options?: any): Promise<void> {
+      this.element = null;
+    }
   };
 
 /**
@@ -657,6 +1014,7 @@ export class PeopleApplication extends BaseApp {
       selectTab: PeopleApplication.#onSelectTab,
       selectEntity: PeopleApplication.#onSelectEntity,
       openCreateModal: PeopleApplication.#onOpenCreateModal,
+      closeModal: PeopleApplication.#onCloseModal,
       submitCreate: PeopleApplication.#onSubmitCreate
     }
   };
@@ -671,6 +1029,10 @@ export class PeopleApplication extends BaseApp {
 
   get controller(): PeopleApplicationController {
     return this.#controller;
+  }
+
+  get element(): HTMLElement | null {
+    return ((this as any)._element as HTMLElement | null) ?? this.#element;
   }
 
   async _prepareContext(options?: any): Promise<{ viewModel: PeopleSubsystemViewModel | null; error: any }> {
@@ -688,75 +1050,188 @@ export class PeopleApplication extends BaseApp {
     return this.#controller.render(context.viewModel);
   }
 
+  _replaceHTML(result: any, content: HTMLElement, options?: any): void {
+    if (typeof result === "string") {
+      content.innerHTML = result;
+    } else if (result && typeof (content as any).replaceChildren === "function") {
+      (content as any).replaceChildren(result);
+    } else if (result) {
+      content.innerHTML = String(result);
+    }
+  }
+
+  _onRender(context: any, options?: any): void {
+    const el = this.element ?? (this as any)._element ?? this.#element;
+    if (el) {
+      this.attachEventListeners(el);
+    }
+  }
+
   attachEventListeners(element: HTMLElement): void {
     this.#element = element;
-    element.addEventListener("click", async (event) => {
-      const target = (event.target as HTMLElement).closest?.("[data-action]") as HTMLElement | null;
+
+    // Attach submit listeners to forms that haven't been bound yet
+    const forms = element.querySelectorAll?.("form") ?? [];
+    forms.forEach((form: any) => {
+      if (form.__submitBound) return;
+      form.__submitBound = true;
+      form.addEventListener?.("submit", async (event: any) => {
+        event.preventDefault?.();
+        await PeopleApplication.#onSubmitCreate.call(this, event, form as HTMLElement);
+      });
+    });
+
+    if ((element as any).__clickBound) return;
+    (element as any).__clickBound = true;
+
+    element.addEventListener?.("click", async (event: any) => {
+      const target = (event.target as HTMLElement)?.closest?.("[data-action]") as HTMLElement | null;
       if (!target) return;
-      const action = target.getAttribute("data-action");
+      const action = target.getAttribute?.("data-action");
 
       if (action === "selectTab") {
-        const tab = target.getAttribute("data-tab") as PeopleTab;
-        if (tab) {
-          this.#controller.selectTab(tab);
-          const vmRes = await this.#controller.loadViewModel();
-          if (vmRes.ok) {
-            element.innerHTML = this.#controller.render(vmRes.value);
-          }
-        }
+        await PeopleApplication.#onSelectTab.call(this, event, target);
       } else if (action === "selectEntity") {
-        const type = target.getAttribute("data-entity-type") as SelectedEntity["type"];
-        const id = target.getAttribute("data-entity-id");
-        if (type && id) {
-          this.#controller.selectEntity(type, id);
-          const vmRes = await this.#controller.loadViewModel();
-          if (vmRes.ok) {
-            element.innerHTML = this.#controller.render(vmRes.value);
-          }
-        }
+        await PeopleApplication.#onSelectEntity.call(this, event, target);
       } else if (action === "openCreateModal") {
-        const createType = target.getAttribute("data-create-type") ?? this.#controller.activeTab;
-        this.openCreateModal(createType);
+        await PeopleApplication.#onOpenCreateModal.call(this, event, target);
+      } else if (action === "closeModal") {
+        await PeopleApplication.#onCloseModal.call(this, event, target);
+      } else if (action === "submitCreate") {
+        const form = (target.tagName === "FORM" ? target : target.closest?.("form")) as HTMLElement | null;
+        if (form) {
+          await PeopleApplication.#onSubmitCreate.call(this, event, form);
+        }
       }
     });
   }
 
+  closeModal(): void {
+    const el = this.element ?? this.#element;
+    if (el) {
+      const backdrops = el.querySelectorAll?.(".dm-modal-backdrop") ?? [];
+      backdrops.forEach((b: any) => b.remove?.());
+    }
+  }
+
   openCreateModal(createType: string): { readonly type: string; readonly html: string } {
     const modal = this.#controller.openCreateModal(createType);
-    if (this.#element) {
-      const modalContainer = (globalThis as any).document?.createElement?.("div");
-      if (modalContainer) {
-        modalContainer.className = "dm-modal-backdrop";
-        modalContainer.innerHTML = modal.html;
-        this.#element.appendChild(modalContainer);
+    const el = this.element ?? this.#element;
+    if (el) {
+      let modalContainer: any;
+      if (typeof (globalThis as any).document?.createElement === "function") {
+        modalContainer = (globalThis as any).document.createElement("div");
+      } else {
+        modalContainer = createMockElement("div", { className: "dm-modal-backdrop" });
       }
+      modalContainer.className = "dm-modal-backdrop";
+      modalContainer.innerHTML = modal.html;
+      el.appendChild(modalContainer);
+      this.attachEventListeners(el);
     }
     return modal;
   }
 
   static async #onSelectTab(this: PeopleApplication, event: Event, target: HTMLElement): Promise<void> {
-    const tab = target.getAttribute("data-tab") as PeopleTab;
+    const tab = target.getAttribute?.("data-tab") as PeopleTab;
     if (tab) {
       this.#controller.selectTab(tab);
+      await this.#controller.loadViewModel();
       await (this as any).render?.();
     }
   }
 
   static async #onSelectEntity(this: PeopleApplication, event: Event, target: HTMLElement): Promise<void> {
-    const type = target.getAttribute("data-entity-type") as SelectedEntity["type"];
-    const id = target.getAttribute("data-entity-id");
+    const type = target.getAttribute?.("data-entity-type") as SelectedEntity["type"];
+    const id = target.getAttribute?.("data-entity-id");
     if (type && id) {
       this.#controller.selectEntity(type, id);
+      await this.#controller.loadViewModel();
       await (this as any).render?.();
     }
   }
 
   static async #onOpenCreateModal(this: PeopleApplication, event: Event, target: HTMLElement): Promise<void> {
-    const createType = target.getAttribute("data-create-type") ?? this.#controller.activeTab;
+    const createType = target.getAttribute?.("data-create-type") ?? this.#controller.activeTab;
     this.openCreateModal(createType);
   }
 
+  static async #onCloseModal(this: PeopleApplication, event: Event, target: HTMLElement): Promise<void> {
+    event?.preventDefault?.();
+    this.closeModal();
+  }
+
   static async #onSubmitCreate(this: PeopleApplication, event: Event, target: HTMLElement): Promise<void> {
+    event?.preventDefault?.();
+    const form = (target.tagName === "FORM" ? target : target.closest?.("form")) as HTMLFormElement | null;
+    if (!form) return;
+
+    const createType = form.getAttribute?.("data-create-type") ?? target.getAttribute?.("data-create-type") ?? "";
+    const formData = extractFormData(form);
+
+    let result: Result<unknown>;
+    switch (createType) {
+      case "notables":
+      case "notable": {
+        result = await this.#controller.dispatchCreateNotable({
+          name: formData.name,
+          type: (formData.type as any) || "inline",
+          actorUuid: formData.actorUuid || undefined,
+          description: formData.description || undefined,
+          visibility: (formData.visibility as any) || "public"
+        });
+        break;
+      }
+      case "roles":
+      case "role": {
+        result = await this.#controller.dispatchCreateRole({
+          definitionId: formData.definitionId,
+          customLabel: formData.name || formData.customLabel || undefined,
+          scope: (formData.scope as any) || "domain",
+          visibility: (formData.visibility as any) || "public"
+        });
+        break;
+      }
+      case "group":
+      case "operationalGroups": {
+        result = await this.#controller.dispatchCreateOperationalGroup({
+          name: formData.name,
+          definitionId: formData.definitionId || formData.type,
+          membershipMode: (formData.membershipMode as any) || "abstract",
+          visibility: (formData.visibility as any) || "public"
+        });
+        break;
+      }
+      default: {
+        result = err(
+          createPublicError({
+            code: "DM_UNKNOWN_CREATE_TYPE",
+            category: "validation",
+            message: `Unknown create type: ${createType}`
+          })
+        );
+      }
+    }
+
+    if (!result.ok) {
+      const errorMsg = result.error.message;
+      const notify = (globalThis as any).ui?.notifications?.error;
+      if (typeof notify === "function") {
+        notify(`Failed to create ${createType}: ${errorMsg}`);
+      }
+      let errorContainer = form.querySelector?.(".dm-form-error") as HTMLElement | null;
+      if (!errorContainer && form.ownerDocument) {
+        errorContainer = form.ownerDocument.createElement("div");
+        errorContainer.className = "dm-form-error";
+        form.prepend?.(errorContainer);
+      }
+      if (errorContainer) {
+        errorContainer.textContent = errorMsg;
+      }
+      return;
+    }
+
+    this.closeModal();
     await this.#controller.loadViewModel();
     await (this as any).render?.();
   }

@@ -32,6 +32,7 @@ import { calculateWorkforce } from "../../src/people/workforce/workforce-calcula
 import { DomainIntegrityChecker } from "../../src/storage/integrity/domain-integrity-checker.js";
 import { CapabilityRegistry } from "../../src/domains/domain-capabilities.js";
 import { PeopleRepairTool } from "../../src/people/services/people-repair-tool.js";
+import { registerRepairCommandHandlers } from "../../src/people/commands/repair-commands.js";
 import { PeopleAggregationService } from "../../src/aggregation/people-aggregation.js";
 import { PeopleRoleCapabilityProvider } from "../../src/aggregation/capability-resolver.js";
 import { PeopleApplicationController } from "../../src/ui/domain-patterns/people/people-app.js";
@@ -136,6 +137,7 @@ function setupTestEnvironment() {
   registerRoleCommandHandlers(registry, coordinator, domains);
   registerOperationalGroupCommandHandlers(registry, coordinator, domains);
   registerAssignmentCommandHandlers(registry, coordinator, domains);
+  registerRepairCommandHandlers(registry, coordinator, domains);
 
   const mockAuthority = {
     isCurrentUser: () => true,
@@ -643,7 +645,7 @@ test("G3 Remediation Item 2.7: Reservation overlap checks evaluate current activ
 });
 
 test("G3 Remediation Item 6: Domain integrity diagnostics and PeopleRepairTool", async () => {
-  const { domains, coordinator } = setupTestEnvironment();
+  const { domains, coordinator, bus } = setupTestEnvironment();
 
   const domainRes = await domains.create({ name: "Corrupted Domain", record: defaultRecord });
   const domainUuid = domainRes.value.uuid;
@@ -734,7 +736,7 @@ test("G3 Remediation Item 6: Domain integrity diagnostics and PeopleRepairTool",
   assert.equal(codes.includes("DM_PEOPLE_EXPLICIT_MEMBERSHIP_MISMATCH"), true);
 
   // Run PeopleRepairTool
-  const repairTool = new PeopleRepairTool(domains, coordinator);
+  const repairTool = new PeopleRepairTool(bus);
 
   // 1. Purge dangling occupants
   const purgeRes = await repairTool.purgeDanglingOccupants(domainUuid);

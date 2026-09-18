@@ -2283,7 +2283,11 @@ var DomainJournalEntryAdapter = class {
     const payload = this.document.flags?.[DOMAIN_FLAG_NAMESPACE];
     const decoded = decodeDomainRecord(payload);
     if (!decoded.ok) return decoded;
-    return ok({ name: this.document.name, record: decoded.value });
+    return ok({
+      name: this.document.name,
+      record: decoded.value,
+      ...this.document.ownership !== void 0 ? { ownership: this.document.ownership } : {}
+    });
   }
   async write(name, record) {
     if (name.trim().length === 0) {
@@ -3171,7 +3175,14 @@ function toDomainDocument(document) {
   if (!isJournalEntryUuid(document.uuid)) return invalid5("Stored Domain document has an invalid JournalEntry UUID");
   const decoded = new DomainJournalEntryAdapter(document).read();
   if (!decoded.ok) return decoded;
-  return ok({ id: document.id, uuid: document.uuid, name: decoded.value.name, record: decoded.value.record });
+  const ownership = decoded.value.ownership ?? document.ownership;
+  return ok({
+    id: document.id,
+    uuid: document.uuid,
+    name: decoded.value.name,
+    record: decoded.value.record,
+    ...ownership !== void 0 ? { ownership } : {}
+  });
 }
 var DomainRepository = class {
   constructor(store, options = {}) {
@@ -3261,7 +3272,11 @@ var DomainRepository = class {
     const parentValidation = this.validateCreateParent(normalizedInput.record.definition.hierarchy.parentDomainUuid);
     if (!parentValidation.ok) return parentValidation;
     try {
-      const created = await this.store.create({ name: normalizedInput.name, flags: { [DOMAIN_FLAG_NAMESPACE]: encodeDomainRecord(normalizedInput.record) } });
+      const created = await this.store.create({
+        name: normalizedInput.name,
+        flags: { [DOMAIN_FLAG_NAMESPACE]: encodeDomainRecord(normalizedInput.record) },
+        ...input.ownership !== void 0 ? { ownership: input.ownership } : {}
+      });
       if (typeof created.id !== "string" || created.id.trim().length === 0 || !isJournalEntryUuid(created.uuid)) return storageFailure("create");
       const createdDocument = toDomainDocument(created);
       if (!createdDocument.ok) return createdDocument;
@@ -6397,7 +6412,17 @@ function registerDomainCommandHandlers(registry, coordinator, domains) {
 }
 
 // src/people/commands/people-permissions.ts
-async function validatePeopleCommandPermission(ctx, domains, domainUuidExtractor) {
+var activeControllerPolicies = /* @__PURE__ */ new Set();
+function registerDomainControllerPolicy(policy) {
+  activeControllerPolicies.add(policy);
+  return () => {
+    activeControllerPolicies.delete(policy);
+  };
+}
+function clearDomainControllerPolicies() {
+  activeControllerPolicies.clear();
+}
+async function validatePeopleCommandPermission(ctx, domains, domainUuidExtractor, options) {
   if (ctx.senderUserId === null || ctx.senderUserId === ctx.authorityUserId) {
     return ok(true);
   }
@@ -6428,21 +6453,40 @@ async function validatePeopleCommandPermission(ctx, domains, domainUuidExtractor
   }
   const doc = docRes.value;
   const record = doc.record;
-  if (record.metadata?.createdByUserId === ctx.senderUserId) {
-    return ok(true);
+  const docOwnership = doc.ownership ?? doc.doc?.ownership ?? doc.flags?.ownership ?? globalThis.game?.journal?.get?.(cleanId)?.ownership;
+  if (docOwnership) {
+    const userOwnership = docOwnership[ctx.senderUserId];
+    if (userOwnership >= 3 || userOwnership === "owner" || userOwnership === 3) {
+      return ok(true);
+    }
   }
-  const generalControllers = record.definition?.capabilities?.config?.controllers;
-  if (Array.isArray(generalControllers) && generalControllers.includes(ctx.senderUserId)) {
-    return ok(true);
+  const journalDoc = globalThis.game?.journal?.get?.(cleanId);
+  if (journalDoc && typeof journalDoc.testUserPermission === "function") {
+    const hasOwnerPermission = journalDoc.testUserPermission(
+      gameUser ?? { id: ctx.senderUserId },
+      3
+    );
+    if (hasOwnerPermission) {
+      return ok(true);
+    }
   }
-  const peopleConfig = record.definition?.capabilities?.config?.[PEOPLE_CAPABILITY_ID];
-  const peopleControllers = peopleConfig?.controllers;
-  if (Array.isArray(peopleControllers) && peopleControllers.includes(ctx.senderUserId)) {
-    return ok(true);
+  if (options?.controllerPolicy) {
+    const policyResult = await options.controllerPolicy(cleanId, ctx.senderUserId, {
+      record,
+      document: doc
+    });
+    if (policyResult) {
+      return ok(true);
+    }
   }
-  const docOwnership = doc.doc?.ownership ?? doc.flags?.ownership;
-  if (docOwnership && (docOwnership[ctx.senderUserId] >= 3 || docOwnership[ctx.senderUserId] === "owner")) {
-    return ok(true);
+  for (const policy of activeControllerPolicies) {
+    const policyResult = await policy(cleanId, ctx.senderUserId, {
+      record,
+      document: doc
+    });
+    if (policyResult) {
+      return ok(true);
+    }
   }
   return err(
     createPublicError({
@@ -10691,11 +10735,15 @@ var PeopleApplicationController = class {
               <label>Description: <textarea name="description"></textarea></label>
               <label>Visibility:
                 <select name="visibility">
-                  <option value="public">Public</option>
+                  <option value="public" selected>Public</option>
+                  <option value="restricted">Restricted</option>
                   <option value="secret">Secret</option>
                 </select>
               </label>
-              <button type="submit" class="dm-btn dm-btn-primary">Create</button>
+              <div class="dm-modal-actions">
+                <button type="button" class="dm-btn dm-btn-secondary" data-action="closeModal">Cancel</button>
+                <button type="submit" class="dm-btn dm-btn-primary" data-action="submitCreate">Create</button>
+              </div>
             </form>
           </div>
         `;
@@ -10708,11 +10756,21 @@ var PeopleApplicationController = class {
               <label>Definition ID: <input type="text" name="definitionId" required /></label>
               <label>Scope:
                 <select name="scope">
-                  <option value="domain">Domain</option>
+                  <option value="domain" selected>Domain</option>
                   <option value="operational-group">Operational Group</option>
                 </select>
               </label>
-              <button type="submit" class="dm-btn dm-btn-primary">Create</button>
+              <label>Visibility:
+                <select name="visibility">
+                  <option value="public" selected>Public</option>
+                  <option value="restricted">Restricted</option>
+                  <option value="secret">Secret</option>
+                </select>
+              </label>
+              <div class="dm-modal-actions">
+                <button type="button" class="dm-btn dm-btn-secondary" data-action="closeModal">Cancel</button>
+                <button type="submit" class="dm-btn dm-btn-primary" data-action="submitCreate">Create</button>
+              </div>
             </form>
           </div>
         `;
@@ -10722,14 +10780,24 @@ var PeopleApplicationController = class {
             <h3>Create Operational Group</h3>
             <form data-action="submitCreate" data-create-type="group">
               <label>Name: <input type="text" name="name" required /></label>
-              <label>Type: <input type="text" name="type" required /></label>
+              <label>Definition ID: <input type="text" name="definitionId" required /></label>
               <label>Membership Mode:
                 <select name="membershipMode">
-                  <option value="abstract">Abstract</option>
+                  <option value="abstract" selected>Abstract</option>
                   <option value="explicit">Explicit</option>
                 </select>
               </label>
-              <button type="submit" class="dm-btn dm-btn-primary">Create</button>
+              <label>Visibility:
+                <select name="visibility">
+                  <option value="public" selected>Public</option>
+                  <option value="restricted">Restricted</option>
+                  <option value="secret">Secret</option>
+                </select>
+              </label>
+              <div class="dm-modal-actions">
+                <button type="button" class="dm-btn dm-btn-secondary" data-action="closeModal">Cancel</button>
+                <button type="submit" class="dm-btn dm-btn-primary" data-action="submitCreate">Create</button>
+              </div>
             </form>
           </div>
         `;
@@ -10739,22 +10807,328 @@ var PeopleApplicationController = class {
             <h3>Create ${escapeHtml(createType)}</h3>
             <form data-action="submitCreate" data-create-type="${escapeAttribute(createType)}">
               <label>Name: <input type="text" name="name" required /></label>
-              <button type="submit" class="dm-btn dm-btn-primary">Create</button>
+              <div class="dm-modal-actions">
+                <button type="button" class="dm-btn dm-btn-secondary" data-action="closeModal">Cancel</button>
+                <button type="submit" class="dm-btn dm-btn-primary" data-action="submitCreate">Create</button>
+              </div>
             </form>
           </div>
         `;
     }
   }
 };
+function extractFormData(form) {
+  const data = {};
+  if (typeof FormData !== "undefined" && typeof globalThis.HTMLFormElement !== "undefined" && form instanceof globalThis.HTMLFormElement) {
+    try {
+      const fd = new FormData(form);
+      fd.forEach?.((val, key) => {
+        if (typeof val === "string") {
+          data[key] = val.trim();
+        }
+      });
+      return data;
+    } catch {
+    }
+  }
+  const elements = form.querySelectorAll?.("input, select, textarea") ?? [];
+  elements.forEach((el) => {
+    const name = el.getAttribute?.("name") || el.name;
+    if (!name) return;
+    let value = el.value;
+    if (el.tagName === "SELECT" && (!value || value === "")) {
+      const selectedOption = el.querySelector?.("option[selected]") ?? el.querySelector?.("option");
+      if (selectedOption) {
+        value = selectedOption.getAttribute?.("value") ?? selectedOption.value ?? "";
+      }
+    }
+    if (el.tagName === "TEXTAREA" && (!value || value === "")) {
+      if (el.textContent) {
+        value = el.textContent;
+      }
+    }
+    if (value === void 0 || value === null || value === "") {
+      const attrVal = el.getAttribute?.("value");
+      if (attrVal !== void 0 && attrVal !== null) {
+        value = attrVal;
+      }
+    }
+    if (value !== void 0 && value !== null) {
+      data[name] = String(value).trim();
+    }
+  });
+  return data;
+}
+function matchesSelector(el, sel) {
+  sel = sel.trim();
+  if (sel.includes(",")) {
+    return sel.split(",").some((part) => matchesSelector(el, part.trim()));
+  }
+  if (sel.startsWith(".")) {
+    const cls = sel.slice(1);
+    const classes = (el.className || "").split(/\s+/);
+    return classes.includes(cls);
+  }
+  if (sel.startsWith("[")) {
+    const attrMatch = sel.match(/^\[([a-zA-Z0-9_:-]+)(?:=(?:"([^"]*)"|'([^']*)'|([^\]]+)))?\]$/);
+    if (attrMatch) {
+      const attrName = attrMatch[1];
+      const expectedVal = attrMatch[2] ?? attrMatch[3] ?? attrMatch[4];
+      if (expectedVal === void 0) return el.hasAttribute?.(attrName) ?? false;
+      return el.getAttribute?.(attrName) === expectedVal;
+    }
+  }
+  if (sel.includes("[")) {
+    const parts = sel.match(/^([a-zA-Z0-9_-]+)(\[.+\])$/);
+    if (parts) {
+      return matchesSelector(el, parts[1]) && matchesSelector(el, parts[2]);
+    }
+  }
+  return (el.tagName || "").toLowerCase() === sel.toLowerCase();
+}
+function querySelectorMock(root, selector) {
+  if (selector.includes(",")) {
+    const parts = selector.split(",").map((s) => s.trim());
+    for (const part of parts) {
+      const found = querySelectorMock(root, part);
+      if (found) return found;
+    }
+    return null;
+  }
+  for (const child of root.children ?? []) {
+    if (matchesSelector(child, selector)) return child;
+    const found = querySelectorMock(child, selector);
+    if (found) return found;
+  }
+  return null;
+}
+function querySelectorAllMock(root, selector) {
+  if (selector.includes(",")) {
+    const parts = selector.split(",").map((s) => s.trim());
+    const set = /* @__PURE__ */ new Set();
+    for (const part of parts) {
+      for (const el of querySelectorAllMock(root, part)) {
+        set.add(el);
+      }
+    }
+    return Array.from(set);
+  }
+  const results = [];
+  for (const child of root.children ?? []) {
+    if (matchesSelector(child, selector)) results.push(child);
+    results.push(...querySelectorAllMock(child, selector));
+  }
+  return results;
+}
+function createMockElement(tagName, props = {}) {
+  const listeners = {};
+  const children = [];
+  const attributes = {};
+  let innerHtml = props.innerHTML ?? "";
+  const element = {
+    tagName: tagName.toUpperCase(),
+    className: props.className ?? "",
+    attributes,
+    children,
+    parent: null,
+    value: props.value ?? "",
+    name: props.name ?? "",
+    ownerDocument: {
+      createElement: (tag) => createMockElement(tag)
+    },
+    get innerHTML() {
+      return innerHtml;
+    },
+    set innerHTML(val) {
+      innerHtml = val;
+      parseHtmlToMockTree(element, val);
+    },
+    get textContent() {
+      return innerHtml.replace(/<[^>]*>/g, "");
+    },
+    set textContent(val) {
+      innerHtml = val;
+    },
+    getAttribute(name) {
+      return attributes[name] ?? null;
+    },
+    setAttribute(name, value) {
+      attributes[name] = String(value);
+      if (name === "class") element.className = String(value);
+      if (name === "name") element.name = String(value);
+      if (name === "value") element.value = String(value);
+    },
+    hasAttribute(name) {
+      return Object.prototype.hasOwnProperty.call(attributes, name);
+    },
+    appendChild(child) {
+      child.parent = element;
+      children.push(child);
+      return child;
+    },
+    prepend(child) {
+      child.parent = element;
+      children.unshift(child);
+      return child;
+    },
+    remove() {
+      if (element.parent) {
+        const idx = element.parent.children.indexOf(element);
+        if (idx !== -1) element.parent.children.splice(idx, 1);
+        element.parent = null;
+      }
+    },
+    replaceChildren(...newChildren) {
+      children.length = 0;
+      for (const c of newChildren) {
+        c.parent = element;
+        children.push(c);
+      }
+    },
+    addEventListener(type, listener) {
+      listeners[type] = listeners[type] ?? [];
+      listeners[type].push(listener);
+    },
+    dispatchEvent(event) {
+      event.target = element;
+      if (!event.preventDefault) {
+        event.preventDefault = () => {
+        };
+      }
+      let curr = element;
+      while (curr) {
+        const handlers = curr._listeners?.[event.type] ?? [];
+        for (const h of handlers) {
+          h(event);
+        }
+        curr = curr.parent;
+      }
+      return true;
+    },
+    async dispatchEventAsync(event) {
+      event.target = element;
+      if (!event.preventDefault) {
+        event.preventDefault = () => {
+        };
+      }
+      let curr = element;
+      while (curr) {
+        const handlers = curr._listeners?.[event.type] ?? [];
+        for (const h of handlers) {
+          await h(event);
+        }
+        curr = curr.parent;
+      }
+      return true;
+    },
+    querySelector(selector) {
+      return querySelectorMock(element, selector);
+    },
+    querySelectorAll(selector) {
+      return querySelectorAllMock(element, selector);
+    },
+    closest(selector) {
+      let curr = element;
+      while (curr) {
+        if (matchesSelector(curr, selector)) return curr;
+        curr = curr.parent;
+      }
+      return null;
+    },
+    get _listeners() {
+      return listeners;
+    }
+  };
+  if (props.attributes) {
+    for (const [k, v] of Object.entries(props.attributes)) {
+      element.setAttribute(k, String(v));
+    }
+  }
+  if (innerHtml) {
+    parseHtmlToMockTree(element, innerHtml);
+  }
+  return element;
+}
+function parseHtmlToMockTree(root, html) {
+  root.children.length = 0;
+  const selfClosing = /* @__PURE__ */ new Set(["input", "img", "br", "hr", "meta", "link"]);
+  const stack = [root];
+  const tokenRegex = /<(\/?)([a-zA-Z0-9_-]+)([^>]*)>/g;
+  let match;
+  while ((match = tokenRegex.exec(html)) !== null) {
+    const isClosing = match[1] === "/";
+    const tagName = match[2].toUpperCase();
+    const rawAttrs = match[3] ?? "";
+    if (isClosing) {
+      for (let i = stack.length - 1; i >= 1; i--) {
+        if (stack[i].tagName === tagName) {
+          while (stack.length >= i + 1) {
+            stack.pop();
+          }
+          break;
+        }
+      }
+      continue;
+    }
+    const isSelfClosing = rawAttrs.trim().endsWith("/") || selfClosing.has(tagName.toLowerCase());
+    const child = createMockElement(tagName);
+    child.parent = stack[stack.length - 1];
+    const attrRegex = /([a-zA-Z0-9_:-]+)(?:=(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?/g;
+    let attrMatch;
+    while ((attrMatch = attrRegex.exec(rawAttrs)) !== null) {
+      const attrName = attrMatch[1];
+      if (attrName === "/") continue;
+      const attrVal = attrMatch[2] ?? attrMatch[3] ?? attrMatch[4] ?? "";
+      child.setAttribute(attrName, attrVal);
+      if (attrName === "class") child.className = attrVal;
+      if (attrName === "name") child.name = attrVal;
+      if (attrName === "value") child.value = attrVal;
+    }
+    stack[stack.length - 1].appendChild(child);
+    if (!isSelfClosing) {
+      stack.push(child);
+    }
+  }
+}
 var BaseApp = globalThis.foundry?.applications?.api?.ApplicationV2 ?? class MockApplicationV2 {
   options;
+  element = null;
   constructor(options = {}) {
     this.options = options;
   }
-  async render(force) {
+  async _prepareContext(options) {
+    return {};
+  }
+  _renderHTML(context, options) {
+    return "";
+  }
+  _replaceHTML(result, content, options) {
+    if (typeof result === "string") {
+      content.innerHTML = result;
+    } else if (result && typeof content.replaceChildren === "function") {
+      content.replaceChildren(result);
+    }
+  }
+  _onRender(context, options) {
+  }
+  async render(force, options) {
+    if (!this.element) {
+      if (typeof globalThis.document?.createElement === "function") {
+        this.element = globalThis.document.createElement("div");
+      } else {
+        this.element = createMockElement("div", {
+          className: "domain-manager dm-people-app-v2"
+        });
+      }
+    }
+    const context = await this._prepareContext(options);
+    const result = await this._renderHTML(context, options);
+    this._replaceHTML(result, this.element, options);
+    this._onRender(context, options);
     return this;
   }
-  async close() {
+  async close(options) {
+    this.element = null;
   }
 };
 var PeopleApplication = class _PeopleApplication extends BaseApp {
@@ -10776,6 +11150,7 @@ var PeopleApplication = class _PeopleApplication extends BaseApp {
       selectTab: _PeopleApplication.#onSelectTab,
       selectEntity: _PeopleApplication.#onSelectEntity,
       openCreateModal: _PeopleApplication.#onOpenCreateModal,
+      closeModal: _PeopleApplication.#onCloseModal,
       submitCreate: _PeopleApplication.#onSubmitCreate
     }
   };
@@ -10787,6 +11162,9 @@ var PeopleApplication = class _PeopleApplication extends BaseApp {
   }
   get controller() {
     return this.#controller;
+  }
+  get element() {
+    return this._element ?? this.#element;
   }
   async _prepareContext(options) {
     const vmRes = await this.#controller.loadViewModel();
@@ -10801,69 +11179,170 @@ var PeopleApplication = class _PeopleApplication extends BaseApp {
     }
     return this.#controller.render(context.viewModel);
   }
+  _replaceHTML(result, content, options) {
+    if (typeof result === "string") {
+      content.innerHTML = result;
+    } else if (result && typeof content.replaceChildren === "function") {
+      content.replaceChildren(result);
+    } else if (result) {
+      content.innerHTML = String(result);
+    }
+  }
+  _onRender(context, options) {
+    const el = this.element ?? this._element ?? this.#element;
+    if (el) {
+      this.attachEventListeners(el);
+    }
+  }
   attachEventListeners(element) {
     this.#element = element;
-    element.addEventListener("click", async (event) => {
-      const target = event.target.closest?.("[data-action]");
+    const forms = element.querySelectorAll?.("form") ?? [];
+    forms.forEach((form) => {
+      if (form.__submitBound) return;
+      form.__submitBound = true;
+      form.addEventListener?.("submit", async (event) => {
+        event.preventDefault?.();
+        await _PeopleApplication.#onSubmitCreate.call(this, event, form);
+      });
+    });
+    if (element.__clickBound) return;
+    element.__clickBound = true;
+    element.addEventListener?.("click", async (event) => {
+      const target = event.target?.closest?.("[data-action]");
       if (!target) return;
-      const action = target.getAttribute("data-action");
+      const action = target.getAttribute?.("data-action");
       if (action === "selectTab") {
-        const tab = target.getAttribute("data-tab");
-        if (tab) {
-          this.#controller.selectTab(tab);
-          const vmRes = await this.#controller.loadViewModel();
-          if (vmRes.ok) {
-            element.innerHTML = this.#controller.render(vmRes.value);
-          }
-        }
+        await _PeopleApplication.#onSelectTab.call(this, event, target);
       } else if (action === "selectEntity") {
-        const type = target.getAttribute("data-entity-type");
-        const id = target.getAttribute("data-entity-id");
-        if (type && id) {
-          this.#controller.selectEntity(type, id);
-          const vmRes = await this.#controller.loadViewModel();
-          if (vmRes.ok) {
-            element.innerHTML = this.#controller.render(vmRes.value);
-          }
-        }
+        await _PeopleApplication.#onSelectEntity.call(this, event, target);
       } else if (action === "openCreateModal") {
-        const createType = target.getAttribute("data-create-type") ?? this.#controller.activeTab;
-        this.openCreateModal(createType);
+        await _PeopleApplication.#onOpenCreateModal.call(this, event, target);
+      } else if (action === "closeModal") {
+        await _PeopleApplication.#onCloseModal.call(this, event, target);
+      } else if (action === "submitCreate") {
+        const form = target.tagName === "FORM" ? target : target.closest?.("form");
+        if (form) {
+          await _PeopleApplication.#onSubmitCreate.call(this, event, form);
+        }
       }
     });
   }
+  closeModal() {
+    const el = this.element ?? this.#element;
+    if (el) {
+      const backdrops = el.querySelectorAll?.(".dm-modal-backdrop") ?? [];
+      backdrops.forEach((b) => b.remove?.());
+    }
+  }
   openCreateModal(createType) {
     const modal = this.#controller.openCreateModal(createType);
-    if (this.#element) {
-      const modalContainer = globalThis.document?.createElement?.("div");
-      if (modalContainer) {
-        modalContainer.className = "dm-modal-backdrop";
-        modalContainer.innerHTML = modal.html;
-        this.#element.appendChild(modalContainer);
+    const el = this.element ?? this.#element;
+    if (el) {
+      let modalContainer;
+      if (typeof globalThis.document?.createElement === "function") {
+        modalContainer = globalThis.document.createElement("div");
+      } else {
+        modalContainer = createMockElement("div", { className: "dm-modal-backdrop" });
       }
+      modalContainer.className = "dm-modal-backdrop";
+      modalContainer.innerHTML = modal.html;
+      el.appendChild(modalContainer);
+      this.attachEventListeners(el);
     }
     return modal;
   }
   static async #onSelectTab(event, target) {
-    const tab = target.getAttribute("data-tab");
+    const tab = target.getAttribute?.("data-tab");
     if (tab) {
       this.#controller.selectTab(tab);
+      await this.#controller.loadViewModel();
       await this.render?.();
     }
   }
   static async #onSelectEntity(event, target) {
-    const type = target.getAttribute("data-entity-type");
-    const id = target.getAttribute("data-entity-id");
+    const type = target.getAttribute?.("data-entity-type");
+    const id = target.getAttribute?.("data-entity-id");
     if (type && id) {
       this.#controller.selectEntity(type, id);
+      await this.#controller.loadViewModel();
       await this.render?.();
     }
   }
   static async #onOpenCreateModal(event, target) {
-    const createType = target.getAttribute("data-create-type") ?? this.#controller.activeTab;
+    const createType = target.getAttribute?.("data-create-type") ?? this.#controller.activeTab;
     this.openCreateModal(createType);
   }
+  static async #onCloseModal(event, target) {
+    event?.preventDefault?.();
+    this.closeModal();
+  }
   static async #onSubmitCreate(event, target) {
+    event?.preventDefault?.();
+    const form = target.tagName === "FORM" ? target : target.closest?.("form");
+    if (!form) return;
+    const createType = form.getAttribute?.("data-create-type") ?? target.getAttribute?.("data-create-type") ?? "";
+    const formData = extractFormData(form);
+    let result;
+    switch (createType) {
+      case "notables":
+      case "notable": {
+        result = await this.#controller.dispatchCreateNotable({
+          name: formData.name,
+          type: formData.type || "inline",
+          actorUuid: formData.actorUuid || void 0,
+          description: formData.description || void 0,
+          visibility: formData.visibility || "public"
+        });
+        break;
+      }
+      case "roles":
+      case "role": {
+        result = await this.#controller.dispatchCreateRole({
+          definitionId: formData.definitionId,
+          customLabel: formData.name || formData.customLabel || void 0,
+          scope: formData.scope || "domain",
+          visibility: formData.visibility || "public"
+        });
+        break;
+      }
+      case "group":
+      case "operationalGroups": {
+        result = await this.#controller.dispatchCreateOperationalGroup({
+          name: formData.name,
+          definitionId: formData.definitionId || formData.type,
+          membershipMode: formData.membershipMode || "abstract",
+          visibility: formData.visibility || "public"
+        });
+        break;
+      }
+      default: {
+        result = err(
+          createPublicError({
+            code: "DM_UNKNOWN_CREATE_TYPE",
+            category: "validation",
+            message: `Unknown create type: ${createType}`
+          })
+        );
+      }
+    }
+    if (!result.ok) {
+      const errorMsg = result.error.message;
+      const notify = globalThis.ui?.notifications?.error;
+      if (typeof notify === "function") {
+        notify(`Failed to create ${createType}: ${errorMsg}`);
+      }
+      let errorContainer = form.querySelector?.(".dm-form-error");
+      if (!errorContainer && form.ownerDocument) {
+        errorContainer = form.ownerDocument.createElement("div");
+        errorContainer.className = "dm-form-error";
+        form.prepend?.(errorContainer);
+      }
+      if (errorContainer) {
+        errorContainer.textContent = errorMsg;
+      }
+      return;
+    }
+    this.closeModal();
     await this.#controller.loadViewModel();
     await this.render?.();
   }
@@ -11022,33 +11501,11 @@ var PeopleService = class {
 // src/people/services/people-repair-tool.ts
 var PeopleRepairTool = class {
   #commandBus;
-  #domains;
-  #coordinator;
-  constructor(commandBusOrDomains, coordinator, commandBus) {
-    if ("execute" in commandBusOrDomains || "executeLocal" in commandBusOrDomains) {
-      this.#commandBus = commandBusOrDomains;
-    } else if (commandBus) {
-      this.#commandBus = commandBus;
-      this.#domains = commandBusOrDomains;
-      this.#coordinator = coordinator;
-    } else {
-      this.#domains = commandBusOrDomains;
-      this.#coordinator = coordinator;
-      const registry = new CommandRegistry();
-      if (coordinator) {
-        registerRepairCommandHandlers(registry, coordinator, this.#domains);
-      }
-      const authority = {
-        isCurrentUser: () => true,
-        getCurrent: () => "local-authority",
-        getStatus: () => ({ authorityUserId: "local-authority", authorityEpoch: 1, available: true })
-      };
-      this.#commandBus = new CommandBus({
-        registry,
-        coordinator,
-        authorityService: authority
-      });
+  constructor(commandBus) {
+    if (!commandBus || typeof commandBus.execute !== "function") {
+      throw new TypeError("PeopleRepairTool requires an authorized CommandBus instance");
     }
+    this.#commandBus = commandBus;
   }
   get commandBus() {
     return this.#commandBus;
@@ -11376,6 +11833,8 @@ export {
   PeopleApplicationController,
   PeopleRepairTool,
   PeopleService,
-  composeDomainManagerRuntime
+  clearDomainControllerPolicies,
+  composeDomainManagerRuntime,
+  registerDomainControllerPolicy
 };
 //# sourceMappingURL=main.js.map
