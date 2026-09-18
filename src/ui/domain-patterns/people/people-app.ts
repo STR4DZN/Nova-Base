@@ -64,6 +64,10 @@ export class PeopleApplicationController {
     return this.#activeTab;
   }
 
+  get viewModel(): PeopleSubsystemViewModel | null {
+    return this.#lastViewModel;
+  }
+
   get selectedEntity(): SelectedEntity | null {
     return this.#selectedEntity;
   }
@@ -110,6 +114,7 @@ export class PeopleApplicationController {
           })
       );
     }
+    await this.loadViewModel();
     return ok(res.value.result);
   }
 

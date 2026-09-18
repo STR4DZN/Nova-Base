@@ -41,10 +41,10 @@
 | Verificação | Resultado |
 |---|---|
 | TypeScript strict (`node ./node_modules/typescript/bin/tsc --noEmit`) | PASS (0 erros) |
-| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 314/314 (0 falhas) |
+| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 317/317 (0 falhas) |
 | Relatório de Aceitação | Submetido para revisão e aceitação do usuário (`docs/GATE_G3_ACCEPTANCE_REPORT.md`) |
 | Regressões G2 | 0 (todos os 233 testes de base preservados e passando) |
 
 ## Próxima ação canônica
  
-- **Gate G4 (Economy & Resources)**: Com a implementação e remediação completa dos 4 bloqueios da revalidação do Gate G3 (People) e 314/314 testes aprovados, a transição para o Gate G4 aguarda formalmente a homologação e aceitação do Gate G3 por parte do usuário.
+- **Gate G4 (Economy & Resources)**: Com a implementação e remediação completa dos 4 bloqueios da revalidação do Gate G3 (People) e 317/317 testes aprovados, a transição para o Gate G4 aguarda formalmente a homologação e aceitação do Gate G3 por parte do usuário.

@@ -10276,6 +10276,9 @@ var PeopleApplicationController = class {
   get activeTab() {
     return this.#activeTab;
   }
+  get viewModel() {
+    return this.#lastViewModel;
+  }
   get selectedEntity() {
     return this.#selectedEntity;
   }
@@ -10311,6 +10314,7 @@ var PeopleApplicationController = class {
         })
       );
     }
+    await this.loadViewModel();
     return ok(res.value.result);
   }
   // Action Dispatchers via CommandBus

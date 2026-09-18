@@ -5,7 +5,7 @@
 **Normative Authorities:** `Documentos/99_DOMAIN_MANAGER_MASTER_SPECIFICATION_V1.md` (§13, DEC-0891 to DEC-1415), `Documentos/GATES/13_G3_PEOPLE.md`  
 **Status:** **SUBMITTED_FOR_USER_ACCEPTANCE (Aguardando Aceitação Soberana do Usuário)**  
 **Date:** 2026-09-18  
-**Test Suite:** 314/314 passing (0 failures, 0 regressions against G2 baseline of 233)  
+**Test Suite:** 317/317 passing (0 failures, 0 regressions against G2 baseline of 233)  
 **TypeScript Conformance:** Strict, 0 errors via `tsc --noEmit`  
 
 ---
@@ -83,10 +83,10 @@ Gate G3 implements the complete, vertical **People Subsystem** for the Domain Ma
 
 - **TypeScript Compilation (`tsc --noEmit`)**: 0 erros. Strict typing across all data types, schemas, presenters, repositories, calculators, and mutation coordinators.
 - **Node.js Test Suite (`node tests/run-tests.mjs`)**:
-  - Total Tests: **314**
-  - Passed: **314**
+  - Total Tests: **317**
+  - Passed: **317**
   - Failed: **0**
-  - Regressions: **0** (All 233 Gate G2 tests + 74 Gate G3 tests + 7 Revalidation Audit tests pass 100%)
+  - Regressions: **0** (All 233 Gate G2 tests + 74 Gate G3 tests + 10 Revalidation Audit tests pass 100%)
 - **Capability Registry Verification**:
   - Connected `validateDomainPeopleData` directly to `CapabilityRegistry` under `domain-manager:people`.
   - Inactive domains completely skip people validation and overhead.

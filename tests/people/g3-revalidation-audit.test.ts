@@ -277,11 +277,53 @@ test("G3 Blocker 1: Public People API has no asAdmin, no asAuthority, and strips
   assert.equal(vm.notables.length, 1);
   assert.equal(vm.notables[0].notable.name, "Captain of the Guard");
 
-  // Reset provider to GM
+  // 6. Non-GM runtime composition does not expose runtime.admin or raw mutable domain repository
+  const mockAuth = {
+    service: {
+      isCurrentUser: () => true,
+      getStatus: () => ({ isAuthority: true, authorityEpoch: 1, authorityUserId: "gm-user", available: true }),
+      reconcile: async () => {},
+      onChanged: () => () => {},
+      isAvailable: () => true
+    },
+    reconcile: async () => {},
+    synchronizePersistedState: () => {},
+    destroy: () => {}
+  };
+  const mockTrans = {
+    send: async () => ({ ok: true }),
+    registerInboundHandler: () => () => {},
+    onReceive: () => () => {},
+    isAvailable: () => true,
+    destroy: () => {}
+  };
+
+  const runtime = composeDomainManagerRuntime({
+    domainStore: store,
+    authority: mockAuth as any,
+    transport: mockTrans as any
+  });
+  assert.equal((runtime as any).admin, undefined, "runtime.admin must be completely undefined");
+  assert.equal((runtime.domains as any).create, undefined, "runtime.domains must not expose create");
+  assert.equal((runtime.domains as any).update, undefined, "runtime.domains must not expose update");
+  assert.equal((runtime.domains as any).save, undefined, "runtime.domains must not expose save");
+
+  // 7. Legitimate GM receives full visibility including secret notables
   setCurrentUserProvider(() => ({
     userId: "gm-user",
-    isGm: true
+    isGm: true,
+    allowedRestrictedRefs: []
   }));
+
+  const gmNotablesRes = await publicApi.getNotables(domainUuid);
+  assert.equal(gmNotablesRes.ok, true);
+  assert.equal(gmNotablesRes.value.length, 2);
+  assert.equal(gmNotablesRes.value.some((n) => n.id === secretNotable.id), true);
+  assert.equal(gmNotablesRes.value.some((n) => n.id === publicNotable.id), true);
+
+  const gmVm = publicApi.buildViewModel(docRes.value);
+  assert.equal(gmVm.viewerIsGm, true);
+  assert.equal(gmVm.notables.length, 2);
 });
 
 // ---------------------------------------------------------------------------
@@ -604,4 +646,93 @@ test("G3 Blocker 4: PeopleRepairTool routes all repairs through people:repair tr
   const repeatPurge = await gmRepairTool.purgeDanglingOccupants(domainUuid);
   assert.equal(repeatPurge.ok, true);
   assert.equal(repeatPurge.value.repaired, false);
+});
+
+test("G3 Blocker 2: UI exclusively invokes CommandBus.execute (never executeLocal) and refreshes after receipt", async () => {
+  const { domains, createPlayerBus } = setupMultiplayerHarness();
+  const playerBus = createPlayerBus("player-guildmaster");
+
+  let executeCalled = false;
+  let executeLocalCalled = false;
+
+  const spyBus = {
+    execute: async (cmd: any, opts: any) => {
+      executeCalled = true;
+      return playerBus.execute(cmd, opts);
+    },
+    executeLocal: async () => {
+      executeLocalCalled = true;
+      throw new Error("UI must NEVER call executeLocal directly!");
+    }
+  } as unknown as CommandBus;
+
+  const docRes = await domains.create({
+    name: "Spy Test Domain",
+    record: { ...defaultRecord, metadata: { ...defaultRecord.metadata, createdByUserId: "player-guildmaster" } }
+  });
+
+  const peopleService = new PeopleService(domains, { commandBus: spyBus });
+  const controller = new PeopleApplicationController({
+    domainUuid: docRes.value.uuid,
+    commandBus: spyBus,
+    peopleApi: peopleService,
+    domains,
+    viewer: { userId: "player-guildmaster", isGm: false }
+  });
+
+  await controller.loadViewModel();
+  assert.equal(controller.viewModel?.notables.length, 0);
+
+  const res = await controller.dispatchCreateNotable({ name: "Treasurer" });
+  assert.equal(res.ok, true);
+  assert.equal(executeCalled, true, "UI must call commandBus.execute");
+  assert.equal(executeLocalCalled, false, "UI must never call executeLocal");
+
+  // Verify UI reloaded/refreshed view model after receipt
+  assert.equal(controller.viewModel?.notables.length, 1);
+  assert.equal(controller.viewModel?.notables[0].notable.name, "Treasurer");
+});
+
+test("G3 Blocker 4: Secondary GM or client without local Primary Authority cannot execute repair locally", async () => {
+  const { registry, coordinator } = setupMultiplayerHarness();
+
+  const nonAuthorityService = {
+    isCurrentUser: () => false,
+    getCurrent: () => "primary-gm",
+    getStatus: () => ({ authorityUserId: "primary-gm", authorityEpoch: 1, available: true })
+  } as unknown as PrimaryAuthorityService<any>;
+
+  const remoteBus = new CommandBus({
+    registry,
+    coordinator,
+    authorityService: nonAuthorityService
+  });
+
+  const tool = new PeopleRepairTool(remoteBus);
+  const res = await tool.purgeDanglingOccupants("JournalEntry.fake-uuid");
+  assert.equal(res.ok, false);
+});
+
+test("G3 Blocker 4: Repair with stale expectedRevision is rejected with revision conflict", async () => {
+  const { domains, busOnAuthority } = setupMultiplayerHarness();
+
+  const docRes = await domains.create({ name: "Revision Domain", record: defaultRecord });
+  assert.equal(docRes.ok, true);
+
+  const staleCmd: DomainCommand<any> = {
+    contractVersion: COMMAND_CONTRACT_VERSION_V1,
+    commandId: createCommandId(),
+    type: "people:repair",
+    payload: {
+      domainUuid: docRes.value.uuid,
+      operation: { type: "purge-dangling-occupants" }
+    },
+    expectedRevision: 999, // Stale! Actual revision is 0
+    issuedAtReal: Date.now()
+  };
+
+  const receiptRes = await busOnAuthority.execute(staleCmd);
+  assert.equal(receiptRes.ok, true);
+  assert.equal(receiptRes.value.status, "rejected");
+  assert.equal(receiptRes.value.error?.code, "DM_REVISION_CONFLICT");
 });
