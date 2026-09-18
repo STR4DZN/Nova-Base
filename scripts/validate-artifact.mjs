@@ -18,6 +18,7 @@ for (const name of expected) {
 }
 
 const manifest = JSON.parse(zip.get("module.json").toString("utf8"));
-if (manifest.scripts?.[0] !== "dist/main.js") throw new Error("Invalid artifact entry point");
+if (manifest.esmodules?.[0] !== "dist/main.js") throw new Error("Invalid artifact entry point (expected dist/main.js in esmodules)");
+if (manifest.scripts?.includes("dist/main.js")) throw new Error("Artifact must not reference dist/main.js in scripts (ESM bundle requires esmodules)");
 if (manifest.version !== manifestLocal.version) throw new Error("Invalid artifact version");
 console.info("Artifact validation passed");

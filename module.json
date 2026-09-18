@@ -24,7 +24,7 @@
       }
     ]
   },
-  "scripts": [
+  "esmodules": [
     "dist/main.js"
   ]
 }

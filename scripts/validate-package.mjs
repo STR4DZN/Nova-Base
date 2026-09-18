@@ -13,8 +13,11 @@ if (manifest.id !== "domain-manager") throw new Error("Invalid module id");
 if (manifest.version !== pkg.version) {
   throw new Error(`Manifest version (${manifest.version}) does not match package.json (${pkg.version})`);
 }
-if (!manifest.scripts?.includes("dist/main.js")) {
-  throw new Error("Manifest does not reference dist/main.js");
+if (!manifest.esmodules?.includes("dist/main.js")) {
+  throw new Error("Manifest does not reference dist/main.js in esmodules");
+}
+if (manifest.scripts?.includes("dist/main.js")) {
+  throw new Error("Manifest must not reference dist/main.js in scripts (ESM bundle requires esmodules)");
 }
 if (manifest.socket !== true) {
   throw new Error("Manifest must specify socket: true for Foundry v13 module socket routing");

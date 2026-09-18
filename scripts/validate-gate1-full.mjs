@@ -43,7 +43,8 @@ if (forbidden.length > 0) throw new Error(`Unexpected Gate 1 entries: ${forbidde
 const manifest = JSON.parse(zip.get("module.json").toString("utf8"));
 if (manifest.id !== "domain-manager") throw new Error("Invalid Gate 1 module id");
 if (manifest.version !== "0.0.2") throw new Error("Invalid Gate 1 module version");
-if (JSON.stringify(manifest.scripts) !== JSON.stringify(["dist/main.js"])) {
+const entrypoint = manifest.esmodules ?? manifest.scripts;
+if (JSON.stringify(entrypoint) !== JSON.stringify(["dist/main.js"])) {
   throw new Error("Invalid Gate 1 module entry point");
 }
 
