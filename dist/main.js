@@ -11132,6 +11132,9 @@ function parseHtmlToMockTree(root, html) {
 var BaseApp = globalThis.foundry?.applications?.api?.ApplicationV2 ?? class MockApplicationV2 {
   options;
   element = null;
+  get rendered() {
+    return this.element !== null;
+  }
   constructor(options = {}) {
     this.options = options;
   }
@@ -11166,11 +11169,14 @@ var BaseApp = globalThis.foundry?.applications?.api?.ApplicationV2 ?? class Mock
   }
   async render(force, options) {
     if (!this.element) {
+      const classes = (this.constructor.DEFAULT_OPTIONS?.classes ?? ["domain-manager", "dm-people-app-v2"]).join(" ");
       if (typeof globalThis.document?.createElement === "function") {
-        this.element = globalThis.document.createElement("div");
+        const el = globalThis.document.createElement("div");
+        el.className = classes;
+        this.element = el;
       } else {
         this.element = createMockElement("div", {
-          className: "domain-manager dm-people-app-v2"
+          className: classes
         });
       }
     }
@@ -11208,16 +11214,12 @@ var PeopleApplication = class _PeopleApplication extends BaseApp {
     }
   };
   #controller;
-  #element = null;
   constructor(options) {
     super(options);
     this.#controller = new PeopleApplicationController(options);
   }
   get controller() {
     return this.#controller;
-  }
-  get element() {
-    return this._element ?? this.#element;
   }
   async _prepareContext(options) {
     const vmRes = await this.#controller.loadViewModel();
@@ -11242,13 +11244,12 @@ var PeopleApplication = class _PeopleApplication extends BaseApp {
     }
   }
   _onRender(context, options) {
-    const el = this.element ?? this._element ?? this.#element;
+    const el = this.element;
     if (el) {
       this.attachEventListeners(el);
     }
   }
   attachEventListeners(element) {
-    this.#element = element;
     const forms = element.querySelectorAll?.("form") ?? [];
     forms.forEach((form) => {
       if (form.__submitBound) return;
@@ -11260,7 +11261,7 @@ var PeopleApplication = class _PeopleApplication extends BaseApp {
     });
   }
   closeModal() {
-    const el = this.element ?? this.#element;
+    const el = this.element;
     if (el) {
       const backdrops = el.querySelectorAll?.(".dm-modal-backdrop") ?? [];
       backdrops.forEach((b) => b.remove?.());
@@ -11269,7 +11270,7 @@ var PeopleApplication = class _PeopleApplication extends BaseApp {
   openCreateModal(createType) {
     this.closeModal();
     const modal = this.#controller.openCreateModal(createType);
-    const el = this.element ?? this.#element;
+    const el = this.element;
     if (el) {
       let modalContainer;
       if (typeof globalThis.document?.createElement === "function") {

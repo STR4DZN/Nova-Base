@@ -1541,3 +1541,38 @@ test("G3 Blocker 2: composeDomainManagerRuntime wires DefaultDomainControllerPro
   // Clean up
   runtime.destroy();
 });
+
+test("G3 Blocker: PeopleApplication inherits native ApplicationV2 element accessor and does not mask it with a custom getter", async () => {
+  // 1. Prototype contract: PeopleApplication must NOT define an own 'element' property/getter
+  const ownDesc = Object.getOwnPropertyDescriptor(PeopleApplication.prototype, "element");
+  assert.equal(ownDesc, undefined, "PeopleApplication.prototype must not shadow or override ApplicationV2.prototype.element");
+
+  // 2. Render instance: app.element must be populated upon render() with required classes
+  const { domains, createPlayerBus } = setupMultiplayerHarness();
+  const playerBus = createPlayerBus("gm-user");
+  const doc = await domains.create({
+    name: "Element Accessor Test Domain",
+    record: defaultRecord
+  });
+
+  const app = new PeopleApplication({
+    domainUuid: doc.value.uuid,
+    commandBus: playerBus,
+    peopleApi: new PeopleService(domains, { commandBus: playerBus }),
+    domains,
+    viewer: { userId: "gm-user", isGm: true }
+  });
+
+  assert.equal(app.element, null, "app.element must be null before render");
+  assert.equal((app as any).rendered, false, "app.rendered must be false before render");
+
+  await (app as any).render(true);
+
+  assert.ok(app.element, "app.element must be defined after render");
+  assert.equal((app as any).rendered, true, "app.rendered must be true after render");
+  assert.ok(
+    app.element.classList?.contains?.("dm-people-app-v2") ||
+      app.element.className?.includes?.("dm-people-app-v2"),
+    "app.element must carry .dm-people-app-v2 class"
+  );
+});

@@ -83,10 +83,10 @@ Gate G3 implements the complete, vertical **People Subsystem** for the Domain Ma
 
 - **TypeScript Compilation (`tsc --noEmit`)**: 0 erros. Strict typing across all data types, schemas, presenters, repositories, calculators, mutation coordinators, and ApplicationV2 UI.
 - **Node.js Test Suite (`node tests/run-tests.mjs`)**:
-  - Total Tests: **334**
-  - Passed: **334**
+  - Total Tests: **335**
+  - Passed: **335**
   - Failed: **0**
-  - Regressions: **0** (All 233 Gate G2 tests + 74 Gate G3 tests + 27 Revalidation & Action Unification Audit tests pass 100%)
+  - Regressions: **0** (All 233 Gate G2 tests + 74 Gate G3 tests + 28 Revalidation & Action Unification Audit tests pass 100%)
 - **Capability Registry Verification**:
   - Connected `validateDomainPeopleData` directly to `CapabilityRegistry` under `domain-manager:people`.
   - Inactive domains completely skip people validation and overhead.

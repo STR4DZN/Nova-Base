@@ -980,6 +980,10 @@ const BaseApp =
     options: any;
     element: any = null;
 
+    get rendered(): boolean {
+      return this.element !== null;
+    }
+
     constructor(options: any = {}) {
       this.options = options;
     }
@@ -1019,11 +1023,14 @@ const BaseApp =
 
     async render(force?: boolean, options?: any): Promise<this> {
       if (!this.element) {
+        const classes = ((this.constructor as any).DEFAULT_OPTIONS?.classes ?? ["domain-manager", "dm-people-app-v2"]).join(" ");
         if (typeof (globalThis as any).document?.createElement === "function") {
-          this.element = (globalThis as any).document.createElement("div");
+          const el = (globalThis as any).document.createElement("div");
+          el.className = classes;
+          this.element = el;
         } else {
           this.element = createMockElement("div", {
-            className: "domain-manager dm-people-app-v2"
+            className: classes
           });
         }
       }
@@ -1067,7 +1074,6 @@ export class PeopleApplication extends BaseApp {
   };
 
   readonly #controller: PeopleApplicationController;
-  #element: HTMLElement | null = null;
 
   constructor(options: PeopleAppOptions) {
     super(options);
@@ -1076,10 +1082,6 @@ export class PeopleApplication extends BaseApp {
 
   get controller(): PeopleApplicationController {
     return this.#controller;
-  }
-
-  get element(): HTMLElement | null {
-    return ((this as any)._element as HTMLElement | null) ?? this.#element;
   }
 
   async _prepareContext(options?: any): Promise<{ viewModel: PeopleSubsystemViewModel | null; error: any }> {
@@ -1108,15 +1110,13 @@ export class PeopleApplication extends BaseApp {
   }
 
   _onRender(context: any, options?: any): void {
-    const el = this.element ?? (this as any)._element ?? this.#element;
+    const el = this.element;
     if (el) {
       this.attachEventListeners(el);
     }
   }
 
   attachEventListeners(element: HTMLElement): void {
-    this.#element = element;
-
     // Attach submit listeners to forms that haven't been bound yet
     const forms = element.querySelectorAll?.("form") ?? [];
     forms.forEach((form: any) => {
@@ -1130,7 +1130,7 @@ export class PeopleApplication extends BaseApp {
   }
 
   closeModal(): void {
-    const el = this.element ?? this.#element;
+    const el = this.element;
     if (el) {
       const backdrops = el.querySelectorAll?.(".dm-modal-backdrop") ?? [];
       backdrops.forEach((b: any) => b.remove?.());
@@ -1140,7 +1140,7 @@ export class PeopleApplication extends BaseApp {
   openCreateModal(createType: string): { readonly type: string; readonly html: string } {
     this.closeModal();
     const modal = this.#controller.openCreateModal(createType);
-    const el = this.element ?? this.#element;
+    const el = this.element;
     if (el) {
       let modalContainer: any;
       if (typeof (globalThis as any).document?.createElement === "function") {
