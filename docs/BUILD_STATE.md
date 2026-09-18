@@ -3,48 +3,46 @@
 ## Identidade
 
 - Module version: `0.0.3`
-- Gate de código atual: `G3 — People Subsystem & Lifecycle (HOMOLOGADO E ACEITO PELO USUÁRIO)`
-- Estado local: `GATE_G3_HOMOLOGATED_AND_ACCEPTED`
-- Estado externo: `GATE_G3_HOMOLOGATED_AND_ACCEPTED (Foundry VTT v13.351 + Socketlib In-World Smoke Test PASS)`
+- Gate de código atual: `G4 — Economy & Resources (IMPLEMENTAÇÃO COMPLETA — PENDENTE ACEITAÇÃO DO USUÁRIO)`
+- Estado local: `GATE_G4_PENDING_USER_ACCEPTANCE`
+- Estado externo: `GATE_G4_PENDING_USER_ACCEPTANCE (Aguardando homologação e aceitação soberana do usuário)`
 - Schema Domain: `1`
-- Data de homologação do Gate G3: `2026-09-18`
+- Data de conclusão da implementação do Gate G4: `2026-09-18`
 
 ## Estado canônico
 
 - **Gate G0**: Concluído e verificado.
 - **Gate G1**: Concluído e verificado (Domain schema, validators, JournalEntry adapter, repository, index incremental, cycle prevention).
 - **Gate G2**: Concluído, auditado, homologado e aceito em ambiente real Foundry VTT v13.351 + Socketlib.
-  - Primary Authority determinística com epoch monotônico e persistência leve em world settings.
-  - Command Transport seguro estritamente via Socketlib directed RPC (`executeAsUser`), autenticando o remetente via `this.socketdata.userId`.
-  - Fail-closed no canal nativo de broadcast do Foundry (`module.domain-manager`).
-  - Concorrência de até 10 conexões concorrentes demonstrada em testes de carga, sem vazamento de permits ou locks.
-  - Anti-spoofing estrito, rate limiting pré-validação, dedupe store em memória com compartilhamento in-flight, LockManager ordenado e Transaction/Recovery shell.
-  - Smoke test in-world (`scripts/foundry-v13-socketlib-smoke-test.js`) 100% aprovado no Foundry VTT v13.351.
-- **Gate G3**: Concluído, auditado, remediado contra todos os bloqueios da revalidação externa, homologado e aceito soberanamente pelo usuário.
-  - Smoke test in-world 100% aprovado no Foundry VTT v13.351 em ambas as fases (GM e Player remoto via Socketlib).
-  - O Gate G3 está formalmente homologado e fechado, não devendo ser reaberto sem evidência concreta de regressão.
-  - **G3.1 (Population Modes)**: modos `manual`, `sumGroups`, `hybrid`, precisão `exact`/`estimated`/`unknown`, cálculo e propagação estrita.
-  - **G3.2 (PopulationGroup Entity & Commands)**: `DomainPeopleData`, repositório e comandos transacionais (`people:set-population`, `people:create-population-group`, `people:update-population-group`, `people:delete-population-group`).
-  - **G3.3 (Notables)**: union discriminada `inline`/`actor`, IDs opacos `not_*`, resolução resiliente de `broken-ref`, anti-duplicação de ator no mesmo domínio, upgrade de inline para ator, guard de deleção para ocupantes de papéis.
-  - **G3.4 (RoleDefinition & Roles)**: papéis canônicos padrão, regras de ocupação (`single`, `unique`, `multiple`), comandos transacionais de atribuição/desatribuição e avaliação de preenchimento (`evaluateRole`).
-  - **G3.5 (OperationalGroup)**: modos de membresia `abstract`, `partial`, `explicit`, lifecycles `active`, `inactive`, `disbanded`, derivação estrita de tamanho para grupos explícitos.
-  - **G3.6 (Workforce Contributions & Resolution)**: cálculo de `capacity`, `committed`, `reserved` e `available`, prevenção de contagem dupla para grupos operacionais atrelados a grupos populacionais, desconsideração de grupos inativos/dissolvidos, liberação de reservas expiradas.
-  - **G3.7 (Assignments & Reservations Shell)**: modelos e comandos para atribuição e reserva de força de trabalho com bloqueio contra overcommit (`DM_WORKFORCE_OVERCOMMIT`) e override do GM.
-  - **G3.8 (Capability Grants & People Aggregation)**: resolução dinâmica de concessões de capacidades (`resolvePeopleEffectiveCapabilities`) por papéis preenchidos e grupos operacionais ativos com rastreamento de proveniência e zero efeitos colaterais de persistência.
-  - **G3.9 (People UI Presentation & Views)**: presenter com sanitização de visão GM vs Jogador (ocultação de notáveis/papéis/grupos secretos) e templates HTML semânticos.
-  - **ApplicationV2 UI & Multi-user Socketlib Pipeline**: `PeopleApplication` e `PeopleApplicationController` 100% operacionais no Foundry VTT v13 com herança de element accessor nativo, despacho de comandos remotos pelo `CommandBus` e resolução canônica de `DomainControllerProvider` (DEC-018).
-  - **Authoritative PeopleRepairTool**: Execução GM-only via pipeline transacional (`people:repair`) com locks ordenados e integridade de revisão.
+- **Gate G3**: Concluído, auditado, homologado e aceito soberanamente pelo usuário (`GATE_G3_HOMOLOGATED_AND_ACCEPTED`).
+- **Gate G4**: Implementação completa de todos os 10 microbuilds (G4.1 a G4.10) de acordo com o Master Specification (§14, §11–12, §42, DEC-1416–2305) e `Documentos/GATES/14_G4_ECONOMY_RESOURCES.md`.
+  - **G4.1 (ResourceDefinition & Precision)**: Registro de definições de recursos (`ResourceDefinitionRegistry`), validação de precisão decimal (0..4), tags, metadados e recursos canônicos padrão (`domain-manager:treasury`, `domain-manager:supplies`, `domain-manager:materials`).
+  - **G4.2 (ResourceAccount Modes & Domain Integration)**: Modos `native`, `derived`, `provider-backed`, armazenamento acoplado à capacidade `domain-manager:economy` (`DomainEconomyData`), visibilidade pública e secreta com sanitização em projeção.
+  - **G4.3 (Minor-Unit Math & Safe Integers)**: Representação canônica exclusivamente em inteiros seguros (`Number.isSafeInteger`), conversão e arredondamento exato com eliminação de float drift binário, formatação localizada e parser robusto.
+  - **G4.4 (Ledger Append-Only & Reversals)**: Livro-razão estritamente append-only (`LedgerStore`), sequência estritamente crescente, mutações de saldo auditáveis, compensação por reversão (`reversesEntryId`) com proteção contra dupla reversão (`DM_ECON_REVERSAL_ALREADY_EXISTS`) e proibição de estornos em cascata.
+  - **G4.5 (Reservations & Availability Lifecycle)**: Separação canônica entre saldo e disponibilidade (`available = balance - reserved`), ciclo de vida de reservas (`active`, `partially-consumed`, `consumed`, `released`, `expired`), consumo parcial/total com geração de ledger entry atrelado a `reservationId`.
+  - **G4.6 (Capacity Resolver & Thresholds)**: Cálculo de capacidade efetiva (`resolveEffectiveCapacity`) sem persistência de valores derivados, avaliação de limites e alertas de ocupação (`over-capacity`, `near-capacity`, `low-reserve`).
+  - **G4.7 (EconomyService, EconomyPlan & Commands)**: Serviço orquestrador `EconomyService` desacoplando `Preview` (`EconomyPlan`) de `Commit`, comandos transacionais seguros registrados no `CommandRegistry` (`economy:adjust`, `economy:transfer`, `economy:convert`, `economy:reserve`, `economy:consume-reservation`, `economy:release-reservation`, `economy:create-account`, `economy:close-account`, `economy:reversal`).
+  - **G4.8 (Provider Shell & Fault Tolerance)**: Registro e contrato de provedores externos (`InventoryProvider`, `SystemEconomyProvider`), fail-closed para provedores offline ou não-responsivos, proibição de débito em saldos cacheados desatualizados.
+  - **G4.9 (Economy UI, Presentation & Projection)**: `buildEconomyViewModel` com sanitização estrita de contas e transações secretas para não-GMs, `renderEconomySubsystemHtml` com templates semânticos e proteção contra XSS, e `EconomyApplication` compatível com ApplicationV2 no Foundry VTT v13.
+  - **G4.10 (Hardening, Concurrency Tests & Runtime Integration)**: Testes de estresse concorrente comprovando ausência de deadlocks em transferências cruzadas cíclicas através de ordenação canônica de locks lexicais no `LockManager`, conservação estrita de massa (`sum(balances) = invariant`), proteção contra over-reservation concorrente e composição vertical completa no runtime (`DomainManagerRuntime.economy`).
 
-## Evidência local Gate G3
+## Evidência local Gate G4
 
 | Verificação | Resultado |
 |---|---|
-| TypeScript strict (`node ./node_modules/typescript/bin/tsc --noEmit`) | PASS (0 erros) |
-| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 335/335 (0 falhas) |
-| Relatório de Aceitação | Homologado e aceito pelo usuário (`docs/GATE_G3_ACCEPTANCE_REPORT.md`) |
-| Regressões G2 | 0 (todos os 233 testes de base preservados e passando) |
-| In-World Smoke Test (Foundry VTT v13.351) | PASS (Fases GM e Player 100% aprovadas) |
+| TypeScript strict (`tsc --noEmit`) | PASS (0 erros) |
+| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 383/383 (0 falhas) |
+| Relatório de Aceitação | Gerado (`docs/GATE_G4_ACCEPTANCE_REPORT.md`) |
+| Regressões G0/G1/G2/G3 | 0 (todos os 335 testes anteriores preservados e passando) |
+| Testes novos Gate G4 | 48 testes dedicados (G4.1 a G4.10) |
+| Build do pacote (`node build.mjs`) | PASS (`dist/main.js` gerado) |
+| Empacotamento (`node scripts/package.mjs`) | PASS (`dist/domain-manager-v0.0.3.zip` gerado) |
+| Validação de pacote (`node scripts/validate-package.mjs`) | PASS |
+| Validação de artefato (`node scripts/validate-artifact.mjs`) | PASS |
 
 ## Próxima ação canônica
 
-- **Gate G4 (Economy & Resources)**: Com a homologação e aceitação formal do Gate G3 pelo usuário, o Gate G4 está LIBERADO para início de especificação e desenvolvimento de acordo com o plano diretor.
+- **Aguardar Aceitação Soberana do Usuário para Gate G4 (Economy & Resources)**: Conforme regra mandatória, o Gate G4 (Economy & Resources) permanecerá em `GATE_G4_PENDING_USER_ACCEPTANCE` até que o usuário teste e declare formalmente sua aceitação.
+- Após a aceitação e homologação pelo usuário, o Gate G5 (Governance & Decisions) será liberado.
+

@@ -39,6 +39,15 @@ import {
   G2DiagnosticsProvider,
   type G2DiagnosticsSnapshot
 } from "../diagnostics/g2-diagnostics-provider.js";
+import {
+  ResourceDefinitionRegistry,
+  createDefaultResourceRegistry
+} from "../economy/definitions/resource-registry.js";
+import { LedgerStore } from "../economy/ledger/ledger-store.js";
+import { ReservationStore } from "../economy/reservations/reservation-store.js";
+import { EconomyService } from "../economy/services/economy-service.js";
+import { registerEconomyCommands } from "../economy/commands/economy-commands.js";
+import { EconomyApplication, EconomyApplicationController } from "../ui/domain-patterns/economy/economy-app.js";
 
 /**
  * Runtime services owned by the Domain Manager composition root.
@@ -62,6 +71,10 @@ export interface DomainManagerRuntime {
   readonly people: PublicPeopleApi;
   readonly repairTool: PeopleRepairTool;
   readonly controllerProvider: DomainControllerProvider;
+  readonly economy: EconomyService;
+  readonly resourceRegistry: ResourceDefinitionRegistry;
+  readonly ledgerStore: LedgerStore;
+  readonly reservationStore: ReservationStore;
   destroy(): void;
 }
 
@@ -75,6 +88,9 @@ export interface DomainManagerRuntimeOptions {
   readonly dedupeStore?: CommandDedupeStore;
   readonly commandQueue?: CommandQueue;
   readonly controllerProvider?: DomainControllerProvider;
+  readonly resourceRegistry?: ResourceDefinitionRegistry;
+  readonly ledgerStore?: LedgerStore;
+  readonly reservationStore?: ReservationStore;
 }
 
 /**
@@ -92,6 +108,17 @@ export function composeDomainManagerRuntime(
   const transactionStore = options.transactionStore ?? new TransactionStore();
   const recovery = new RecoveryService({ transactionStore, lockManager });
 
+  const resourceRegistry = options.resourceRegistry ?? createDefaultResourceRegistry();
+  const ledgerStore = options.ledgerStore ?? new LedgerStore();
+  const reservationStore = options.reservationStore ?? new ReservationStore();
+  const economy = new EconomyService({
+    domains: mutableDomainRepo,
+    resourceRegistry,
+    ledgerStore,
+    reservationStore,
+    lockManager
+  });
+
   const registry = new CommandRegistry();
   registerDomainCommandHandlers(registry, coordinator, mutableDomainRepo);
   registerPopulationCommandHandlers(registry, coordinator, mutableDomainRepo);
@@ -100,6 +127,12 @@ export function composeDomainManagerRuntime(
   registerOperationalGroupCommandHandlers(registry, coordinator, mutableDomainRepo);
   registerAssignmentCommandHandlers(registry, coordinator, mutableDomainRepo);
   registerRepairCommandHandlers(registry, coordinator, mutableDomainRepo);
+  registerEconomyCommands({
+    registry,
+    economyService: economy,
+    domains: mutableDomainRepo,
+    controllerProvider: options.controllerProvider
+  });
   registry.freeze();
 
   const commandQueue = options.commandQueue ?? new CommandQueue({ maxConcurrency: 10 });
@@ -173,6 +206,10 @@ export function composeDomainManagerRuntime(
     people,
     repairTool,
     controllerProvider,
+    economy,
+    resourceRegistry,
+    ledgerStore,
+    reservationStore,
     destroy: () => {
       unregisterPolicy();
       commandBus.destroy();
@@ -192,4 +229,12 @@ export {
 export { PeopleRepairTool } from "../people/services/people-repair-tool.js";
 export { PeopleApplication, PeopleApplicationController } from "../ui/domain-patterns/people/people-app.js";
 export { PeopleService, type PublicPeopleApi } from "../people/services/people-service.js";
+export {
+  ResourceDefinitionRegistry,
+  createDefaultResourceRegistry
+} from "../economy/definitions/resource-registry.js";
+export { LedgerStore } from "../economy/ledger/ledger-store.js";
+export { ReservationStore } from "../economy/reservations/reservation-store.js";
+export { EconomyService } from "../economy/services/economy-service.js";
+export { EconomyApplication, EconomyApplicationController } from "../ui/domain-patterns/economy/economy-app.js";
 

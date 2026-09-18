@@ -513,7 +513,7 @@ function createOpaqueId(prefix) {
 }
 function isOpaqueId(value, prefix) {
   if (typeof value !== "string") return false;
-  const pattern = prefix === void 0 ? /^(cmd|tx|prj|rel|rep|led|resv|req|role|pop|not|opg|asg)_[0-9a-f-]{36}$/ : new RegExp(`^${prefix}_[0-9a-f-]{36}$`);
+  const pattern = prefix === void 0 ? /^(cmd|tx|prj|rel|rep|led|resv|req|role|pop|not|opg|asg|plan)_[0-9a-f-]{36}$/ : new RegExp(`^${prefix}_[0-9a-f-]{36}$`);
   return pattern.test(value);
 }
 
@@ -2048,6 +2048,394 @@ function withDomainPeopleData(domain, peopleData) {
   };
 }
 
+// src/economy/definitions/resource-definition-types.ts
+function isNamespacedResourceId(value) {
+  return typeof value === "string" && /^[a-z0-9][a-z0-9._-]*:[a-z0-9][a-z0-9._-]*$/.test(value);
+}
+function validateResourceDefinition(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return err(
+      createPublicError({
+        code: "DM_ECON_RESOURCE_INVALID",
+        category: "validation",
+        message: "ResourceDefinition must be an object"
+      })
+    );
+  }
+  const candidate = raw;
+  if (!isNamespacedResourceId(candidate.id)) {
+    return err(
+      createPublicError({
+        code: "DM_ECON_RESOURCE_INVALID_ID",
+        category: "validation",
+        message: `ResourceDefinition ID must be namespaced (e.g. 'domain-manager:treasury' or 'world:gold'): received '${String(candidate.id)}'`
+      })
+    );
+  }
+  const version = typeof candidate.version === "number" ? candidate.version : 1;
+  if (!Number.isSafeInteger(version) || version < 1) {
+    return err(
+      createPublicError({
+        code: "DM_ECON_RESOURCE_INVALID",
+        category: "validation",
+        message: "ResourceDefinition version must be a positive safe integer >= 1"
+      })
+    );
+  }
+  if (typeof candidate.label !== "string" || candidate.label.trim().length === 0) {
+    return err(
+      createPublicError({
+        code: "DM_ECON_RESOURCE_INVALID",
+        category: "validation",
+        message: "ResourceDefinition label must be a non-empty string"
+      })
+    );
+  }
+  const precision = candidate.precision;
+  if (typeof precision !== "number" || !Number.isSafeInteger(precision) || precision < 0 || precision > 4) {
+    return err(
+      createPublicError({
+        code: "DM_ECON_PRECISION_INVALID",
+        category: "validation",
+        message: `Resource precision must be an integer between 0 and 4: received '${String(precision)}'`
+      })
+    );
+  }
+  const allowNegative = Boolean(candidate.allowNegative);
+  let minimumMinor = null;
+  if (candidate.minimumMinor !== void 0 && candidate.minimumMinor !== null) {
+    if (typeof candidate.minimumMinor !== "number" || !Number.isSafeInteger(candidate.minimumMinor)) {
+      return err(
+        createPublicError({
+          code: "DM_ECON_RESOURCE_INVALID",
+          category: "validation",
+          message: "minimumMinor must be a safe integer or null"
+        })
+      );
+    }
+    minimumMinor = candidate.minimumMinor;
+  } else if (!allowNegative) {
+    minimumMinor = 0;
+  }
+  let maximumMinor = null;
+  if (candidate.maximumMinor !== void 0 && candidate.maximumMinor !== null) {
+    if (typeof candidate.maximumMinor !== "number" || !Number.isSafeInteger(candidate.maximumMinor)) {
+      return err(
+        createPublicError({
+          code: "DM_ECON_RESOURCE_INVALID",
+          category: "validation",
+          message: "maximumMinor must be a safe integer or null"
+        })
+      );
+    }
+    maximumMinor = candidate.maximumMinor;
+  }
+  if (minimumMinor !== null && maximumMinor !== null && minimumMinor > maximumMinor) {
+    return err(
+      createPublicError({
+        code: "DM_ECON_RESOURCE_INVALID",
+        category: "validation",
+        message: `minimumMinor (${minimumMinor}) cannot exceed maximumMinor (${maximumMinor})`
+      })
+    );
+  }
+  if (!allowNegative && minimumMinor !== null && minimumMinor < 0) {
+    return err(
+      createPublicError({
+        code: "DM_ECON_RESOURCE_INVALID",
+        category: "validation",
+        message: "minimumMinor cannot be negative when allowNegative is false"
+      })
+    );
+  }
+  const validPolicies = ["block", "allow-with-warning", "overflow", "provider"];
+  const capacityPolicy = candidate.defaultCapacityPolicy || "block";
+  if (!validPolicies.includes(capacityPolicy)) {
+    return err(
+      createPublicError({
+        code: "DM_ECON_RESOURCE_INVALID",
+        category: "validation",
+        message: `Invalid defaultCapacityPolicy: received '${String(capacityPolicy)}'`
+      })
+    );
+  }
+  const lifecycle = candidate.lifecycle || "active";
+  if (lifecycle !== "active" && lifecycle !== "archived") {
+    return err(
+      createPublicError({
+        code: "DM_ECON_RESOURCE_INVALID",
+        category: "validation",
+        message: `Invalid lifecycle: received '${String(lifecycle)}'`
+      })
+    );
+  }
+  const tags = Array.isArray(candidate.tags) ? candidate.tags.filter((t) => typeof t === "string") : [];
+  let displayUnit = void 0;
+  if (candidate.displayUnit && typeof candidate.displayUnit === "object") {
+    const rawUnit = candidate.displayUnit;
+    displayUnit = {
+      ...typeof rawUnit.singular === "string" ? { singular: rawUnit.singular } : {},
+      ...typeof rawUnit.plural === "string" ? { plural: rawUnit.plural } : {},
+      ...typeof rawUnit.abbreviation === "string" ? { abbreviation: rawUnit.abbreviation } : {}
+    };
+  }
+  return ok({
+    id: candidate.id,
+    version,
+    label: candidate.label.trim(),
+    ...typeof candidate.description === "string" ? { description: candidate.description } : {},
+    ...typeof candidate.icon === "string" ? { icon: candidate.icon } : {},
+    categoryId: typeof candidate.categoryId === "string" ? candidate.categoryId : null,
+    tags: Object.freeze(tags),
+    precision,
+    ...displayUnit ? { displayUnit } : {},
+    minimumMinor,
+    maximumMinor,
+    allowNegative,
+    defaultCapacityPolicy: capacityPolicy,
+    lifecycle
+  });
+}
+
+// src/economy/accounts/account-types.ts
+var VALID_VISIBILITIES = Object.freeze([
+  "public",
+  "restricted",
+  "secret"
+]);
+function validateResourceAccount(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return err(
+      createPublicError({
+        code: "DM_ECON_ACCOUNT_INVALID",
+        category: "validation",
+        message: "ResourceAccount must be an object"
+      })
+    );
+  }
+  const candidate = raw;
+  if (typeof candidate.domainUuid !== "string" || candidate.domainUuid.trim().length === 0) {
+    return err(
+      createPublicError({
+        code: "DM_ECON_ACCOUNT_INVALID",
+        category: "validation",
+        message: "ResourceAccount domainUuid must be a non-empty string"
+      })
+    );
+  }
+  if (!isNamespacedResourceId(candidate.resourceId)) {
+    return err(
+      createPublicError({
+        code: "DM_ECON_ACCOUNT_INVALID",
+        category: "validation",
+        message: `ResourceAccount resourceId must be namespaced: received '${String(candidate.resourceId)}'`
+      })
+    );
+  }
+  let visibility = void 0;
+  if (candidate.visibility !== void 0 && candidate.visibility !== null) {
+    if (!VALID_VISIBILITIES.includes(candidate.visibility)) {
+      return err(
+        createPublicError({
+          code: "DM_ECON_ACCOUNT_INVALID",
+          category: "validation",
+          message: `Invalid visibility: received '${String(candidate.visibility)}'`
+        })
+      );
+    }
+    visibility = candidate.visibility;
+  }
+  const mode = candidate.mode;
+  switch (mode) {
+    case "native": {
+      const balance = candidate.balanceMinor;
+      if (typeof balance !== "number" || !Number.isSafeInteger(balance)) {
+        return err(
+          createPublicError({
+            code: "DM_ECON_ACCOUNT_INVALID",
+            category: "validation",
+            message: `Native account balanceMinor must be a safe integer: received '${String(balance)}'`
+          })
+        );
+      }
+      let baseCapacity = null;
+      if (candidate.baseCapacityMinor !== void 0 && candidate.baseCapacityMinor !== null) {
+        if (typeof candidate.baseCapacityMinor !== "number" || !Number.isSafeInteger(candidate.baseCapacityMinor) || candidate.baseCapacityMinor < 0) {
+          return err(
+            createPublicError({
+              code: "DM_ECON_ACCOUNT_INVALID",
+              category: "validation",
+              message: "baseCapacityMinor must be a non-negative safe integer or null"
+            })
+          );
+        }
+        baseCapacity = candidate.baseCapacityMinor;
+      }
+      return ok({
+        mode: "native",
+        domainUuid: candidate.domainUuid.trim(),
+        resourceId: candidate.resourceId,
+        balanceMinor: balance,
+        baseCapacityMinor: baseCapacity,
+        ...visibility ? { visibility } : {}
+      });
+    }
+    case "derived": {
+      if (typeof candidate.resolverId !== "string" || candidate.resolverId.trim().length === 0) {
+        return err(
+          createPublicError({
+            code: "DM_ECON_ACCOUNT_INVALID",
+            category: "validation",
+            message: "Derived account must specify a non-empty resolverId"
+          })
+        );
+      }
+      return ok({
+        mode: "derived",
+        domainUuid: candidate.domainUuid.trim(),
+        resourceId: candidate.resourceId,
+        resolverId: candidate.resolverId.trim(),
+        ...visibility ? { visibility } : {}
+      });
+    }
+    case "provider": {
+      if (typeof candidate.providerId !== "string" || candidate.providerId.trim().length === 0) {
+        return err(
+          createPublicError({
+            code: "DM_ECON_ACCOUNT_INVALID",
+            category: "validation",
+            message: "Provider account must specify a non-empty providerId"
+          })
+        );
+      }
+      if (typeof candidate.providerRef !== "string" || candidate.providerRef.trim().length === 0) {
+        return err(
+          createPublicError({
+            code: "DM_ECON_ACCOUNT_INVALID",
+            category: "validation",
+            message: "Provider account must specify a non-empty providerRef"
+          })
+        );
+      }
+      return ok({
+        mode: "provider",
+        domainUuid: candidate.domainUuid.trim(),
+        resourceId: candidate.resourceId,
+        providerId: candidate.providerId.trim(),
+        providerRef: candidate.providerRef.trim(),
+        ...visibility ? { visibility } : {}
+      });
+    }
+    default:
+      return err(
+        createPublicError({
+          code: "DM_ECON_ACCOUNT_INVALID",
+          category: "validation",
+          message: `Invalid ResourceAccount mode: '${String(mode)}'. Expected 'native', 'derived', or 'provider'`
+        })
+      );
+  }
+}
+
+// src/economy/economy-data.ts
+var ECONOMY_CAPABILITY_ID = "domain-manager:economy";
+var ECONOMY_CAPABILITY_ALIAS = "domain:economy";
+var ECONOMY_SCHEMA_VERSION = 1;
+function createDefaultDomainEconomyData() {
+  return {
+    schemaVersion: ECONOMY_SCHEMA_VERSION,
+    accounts: Object.freeze([])
+  };
+}
+function validateDomainEconomyData(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return err(
+      createPublicError({
+        code: "DM_ECON_DATA_INVALID",
+        category: "validation",
+        message: "Economy data must be an object"
+      })
+    );
+  }
+  const candidate = raw;
+  if (candidate.schemaVersion !== ECONOMY_SCHEMA_VERSION) {
+    return err(
+      createPublicError({
+        code: "DM_ECON_INVALID_SCHEMA_VERSION",
+        category: "validation",
+        message: `Invalid Economy schemaVersion: ${String(candidate.schemaVersion)}. Expected ${ECONOMY_SCHEMA_VERSION}`
+      })
+    );
+  }
+  if (!Array.isArray(candidate.accounts)) {
+    return err(
+      createPublicError({
+        code: "DM_ECON_DATA_INVALID",
+        category: "validation",
+        message: "Economy accounts must be an array"
+      })
+    );
+  }
+  const validatedAccounts = [];
+  const resourceIds = /* @__PURE__ */ new Set();
+  for (const a of candidate.accounts) {
+    const accRes = validateResourceAccount(a);
+    if (!accRes.ok) {
+      return accRes;
+    }
+    const acc = accRes.value;
+    if (resourceIds.has(acc.resourceId)) {
+      return err(
+        createPublicError({
+          code: "DM_ECON_DUPLICATE_RESOURCE_ACCOUNT",
+          category: "validation",
+          message: `Duplicate account for resource '${acc.resourceId}' in domain '${acc.domainUuid}'`
+        })
+      );
+    }
+    resourceIds.add(acc.resourceId);
+    validatedAccounts.push(acc);
+  }
+  return ok({
+    schemaVersion: ECONOMY_SCHEMA_VERSION,
+    accounts: Object.freeze(validatedAccounts)
+  });
+}
+function tryGetDomainEconomyData(domain) {
+  const record = "record" in domain ? domain.record : domain;
+  const config = record?.definition?.capabilities?.config ?? {};
+  const rawEconomy = config[ECONOMY_CAPABILITY_ID] ?? config[ECONOMY_CAPABILITY_ALIAS];
+  if (!rawEconomy) {
+    return ok(createDefaultDomainEconomyData());
+  }
+  return validateDomainEconomyData(rawEconomy);
+}
+function getDomainEconomyData(domain) {
+  const res = tryGetDomainEconomyData(domain);
+  if (!res.ok) {
+    throw new Error(`Domain economy data corruption: [${res.error.code}] ${res.error.message}`);
+  }
+  return res.value;
+}
+function withDomainEconomyData(domain, economyData) {
+  const currentEnabled = domain.definition.capabilities.enabled;
+  const newEnabled = currentEnabled.includes(ECONOMY_CAPABILITY_ID) ? currentEnabled : Object.freeze([...currentEnabled, ECONOMY_CAPABILITY_ID]);
+  const newConfig = Object.freeze({
+    ...domain.definition.capabilities.config,
+    [ECONOMY_CAPABILITY_ID]: economyData
+  });
+  return {
+    ...domain,
+    definition: {
+      ...domain.definition,
+      capabilities: {
+        enabled: newEnabled,
+        config: newConfig
+      }
+    }
+  };
+}
+
 // src/domains/domain-capabilities.ts
 var CapabilityRegistry = class {
   definitions = /* @__PURE__ */ new Map();
@@ -2184,6 +2572,16 @@ function createDefaultCapabilityRegistry() {
     validateConfig: (config) => {
       if (config === void 0 || config === null) return ok(void 0);
       const res = validateDomainPeopleData(config);
+      return res.ok ? ok(void 0) : err(res.error);
+    }
+  });
+  registry.register({
+    id: "domain-manager:economy",
+    label: "Economy & Resources",
+    functional: true,
+    validateConfig: (config) => {
+      if (config === void 0 || config === null) return ok(void 0);
+      const res = validateDomainEconomyData(config);
       return res.ok ? ok(void 0) : err(res.error);
     }
   });
@@ -11724,6 +12122,3230 @@ var G2DiagnosticsProvider = class {
   }
 };
 
+// src/economy/definitions/canonical-definitions.ts
+var CANONICAL_RESOURCE_TREASURY = Object.freeze({
+  id: "domain-manager:treasury",
+  version: 1,
+  label: "Treasury",
+  description: "Standard sovereign treasury and fungible monetary currency.",
+  icon: "fas fa-coins",
+  categoryId: "currency",
+  tags: Object.freeze(["currency", "monetary", "core"]),
+  precision: 2,
+  displayUnit: Object.freeze({
+    singular: "credit",
+    plural: "credits",
+    abbreviation: "cr"
+  }),
+  minimumMinor: 0,
+  maximumMinor: null,
+  allowNegative: false,
+  defaultCapacityPolicy: "block",
+  lifecycle: "active"
+});
+var CANONICAL_RESOURCE_SUPPLIES = Object.freeze({
+  id: "domain-manager:supplies",
+  version: 1,
+  label: "Supplies",
+  description: "General subsistence, provisions, rations and maintenance supplies.",
+  icon: "fas fa-boxes",
+  categoryId: "logistics",
+  tags: Object.freeze(["logistics", "upkeep", "core"]),
+  precision: 0,
+  displayUnit: Object.freeze({
+    singular: "crate",
+    plural: "crates",
+    abbreviation: "bx"
+  }),
+  minimumMinor: 0,
+  maximumMinor: null,
+  allowNegative: false,
+  defaultCapacityPolicy: "block",
+  lifecycle: "active"
+});
+var CANONICAL_RESOURCE_MATERIALS = Object.freeze({
+  id: "domain-manager:materials",
+  version: 1,
+  label: "Materials",
+  description: "Raw and processed materials for construction, expansion and manufacturing.",
+  icon: "fas fa-cubes",
+  categoryId: "production",
+  tags: Object.freeze(["production", "construction", "core"]),
+  precision: 0,
+  displayUnit: Object.freeze({
+    singular: "unit",
+    plural: "units",
+    abbreviation: "mat"
+  }),
+  minimumMinor: 0,
+  maximumMinor: null,
+  allowNegative: false,
+  defaultCapacityPolicy: "block",
+  lifecycle: "active"
+});
+var DEFAULT_CANONICAL_RESOURCES = Object.freeze([
+  CANONICAL_RESOURCE_TREASURY,
+  CANONICAL_RESOURCE_SUPPLIES,
+  CANONICAL_RESOURCE_MATERIALS
+]);
+
+// src/economy/definitions/resource-registry.ts
+var ResourceDefinitionRegistry = class {
+  #definitions = /* @__PURE__ */ new Map();
+  #frozen = false;
+  register(definition) {
+    if (this.#frozen) {
+      return err(
+        createPublicError({
+          code: "DM_ECON_REGISTRY_FROZEN",
+          category: "validation",
+          message: "ResourceDefinitionRegistry is frozen and cannot accept new registrations"
+        })
+      );
+    }
+    const valRes = validateResourceDefinition(definition);
+    if (!valRes.ok) {
+      return valRes;
+    }
+    const validated = valRes.value;
+    if (this.#definitions.has(validated.id)) {
+      return err(
+        createPublicError({
+          code: "DM_ECON_RESOURCE_ALREADY_EXISTS",
+          category: "validation",
+          message: `ResourceDefinition already registered with ID '${validated.id}'`
+        })
+      );
+    }
+    this.#definitions.set(validated.id, validated);
+    return ok(void 0);
+  }
+  get(id) {
+    return this.#definitions.get(id);
+  }
+  has(id) {
+    return this.#definitions.has(id);
+  }
+  list(filter) {
+    const all = Array.from(this.#definitions.values());
+    if (!filter) {
+      return Object.freeze(all);
+    }
+    const filtered = all.filter((d) => {
+      if (filter.lifecycle !== void 0 && d.lifecycle !== filter.lifecycle) {
+        return false;
+      }
+      if (filter.categoryId !== void 0 && d.categoryId !== filter.categoryId) {
+        return false;
+      }
+      if (filter.tag !== void 0 && !d.tags.includes(filter.tag)) {
+        return false;
+      }
+      return true;
+    });
+    return Object.freeze(filtered);
+  }
+  freeze() {
+    this.#frozen = true;
+  }
+  isFrozen() {
+    return this.#frozen;
+  }
+};
+function createDefaultResourceRegistry() {
+  const registry = new ResourceDefinitionRegistry();
+  for (const def of DEFAULT_CANONICAL_RESOURCES) {
+    const res = registry.register(def);
+    if (!res.ok) {
+      throw new Error(`Failed to register canonical resource '${def.id}': ${res.error.message}`);
+    }
+  }
+  return registry;
+}
+
+// src/economy/ledger/ledger-types.ts
+var CANONICAL_LEDGER_KINDS = Object.freeze([
+  "opening-balance",
+  "adjustment",
+  "transfer-debit",
+  "transfer-credit",
+  "consumption",
+  "production",
+  "income",
+  "upkeep",
+  "fee",
+  "waste",
+  "decay",
+  "conversion-debit",
+  "conversion-credit",
+  "reversal",
+  "migration"
+]);
+function validateLedgerEntry(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return err(
+      createPublicError({
+        code: "DM_ECON_LEDGER_INVALID",
+        category: "validation",
+        message: "LedgerEntry must be an object"
+      })
+    );
+  }
+  const candidate = raw;
+  if (typeof candidate.id !== "string" || !candidate.id.startsWith("led_")) {
+    return err(
+      createPublicError({
+        code: "DM_ECON_LEDGER_INVALID",
+        category: "validation",
+        message: `LedgerEntry ID must start with 'led_': received '${String(candidate.id)}'`
+      })
+    );
+  }
+  if (typeof candidate.domainUuid !== "string" || candidate.domainUuid.trim().length === 0) {
+    return err(
+      createPublicError({
+        code: "DM_ECON_LEDGER_INVALID",
+        category: "validation",
+        message: "LedgerEntry domainUuid must be a non-empty string"
+      })
+    );
+  }
+  if (!isNamespacedResourceId(candidate.resourceId)) {
+    return err(
+      createPublicError({
+        code: "DM_ECON_LEDGER_INVALID",
+        category: "validation",
+        message: `LedgerEntry resourceId must be namespaced: received '${String(candidate.resourceId)}'`
+      })
+    );
+  }
+  const delta = candidate.deltaMinor;
+  if (typeof delta !== "number" || !Number.isSafeInteger(delta) || delta === 0) {
+    return err(
+      createPublicError({
+        code: "DM_ECON_LEDGER_INVALID",
+        category: "validation",
+        message: `LedgerEntry deltaMinor must be a non-zero safe integer: received '${String(delta)}'`
+      })
+    );
+  }
+  const kind = candidate.kind;
+  if (!CANONICAL_LEDGER_KINDS.includes(kind)) {
+    return err(
+      createPublicError({
+        code: "DM_ECON_LEDGER_INVALID",
+        category: "validation",
+        message: `Invalid LedgerEntry kind: received '${String(kind)}'`
+      })
+    );
+  }
+  const sequence = candidate.sequence;
+  if (typeof sequence !== "number" || !Number.isSafeInteger(sequence) || sequence < 1) {
+    return err(
+      createPublicError({
+        code: "DM_ECON_LEDGER_INVALID",
+        category: "validation",
+        message: "LedgerEntry sequence must be a positive safe integer >= 1"
+      })
+    );
+  }
+  const timestampReal = candidate.timestampReal;
+  if (typeof timestampReal !== "number" || !Number.isFinite(timestampReal)) {
+    return err(
+      createPublicError({
+        code: "DM_ECON_LEDGER_INVALID",
+        category: "validation",
+        message: "LedgerEntry timestampReal must be a finite number"
+      })
+    );
+  }
+  if (!candidate.source || typeof candidate.source !== "object") {
+    return err(
+      createPublicError({
+        code: "DM_ECON_LEDGER_INVALID",
+        category: "validation",
+        message: "LedgerEntry source must be an object"
+      })
+    );
+  }
+  const rawSource = candidate.source;
+  if (typeof rawSource.type !== "string" || rawSource.type.trim().length === 0) {
+    return err(
+      createPublicError({
+        code: "DM_ECON_LEDGER_INVALID",
+        category: "validation",
+        message: "LedgerEntry source.type must be a non-empty string"
+      })
+    );
+  }
+  const source = {
+    type: rawSource.type.trim(),
+    ...typeof rawSource.ref === "string" ? { ref: rawSource.ref.trim() } : {},
+    ...typeof rawSource.reason === "string" ? { reason: rawSource.reason.trim() } : {},
+    ...typeof rawSource.userId === "string" ? { userId: rawSource.userId.trim() } : {}
+  };
+  return ok({
+    id: candidate.id,
+    domainUuid: candidate.domainUuid.trim(),
+    resourceId: candidate.resourceId,
+    deltaMinor: delta,
+    kind,
+    timestampReal,
+    ...typeof candidate.timestampWorld === "number" ? { timestampWorld: candidate.timestampWorld } : {},
+    ...typeof candidate.transactionId === "string" ? { transactionId: candidate.transactionId } : {},
+    ...typeof candidate.reservationId === "string" ? { reservationId: candidate.reservationId } : {},
+    ...typeof candidate.reversesEntryId === "string" ? { reversesEntryId: candidate.reversesEntryId } : {},
+    source,
+    sequence
+  });
+}
+
+// src/economy/ledger/ledger-store.ts
+var LedgerStore = class {
+  #entries = /* @__PURE__ */ new Map();
+  #reversedTargetIds = /* @__PURE__ */ new Set();
+  #nextSequence = 1;
+  append(input) {
+    const id = createOpaqueId("led");
+    const sequence = this.#nextSequence;
+    const fullEntry = {
+      ...input,
+      id,
+      sequence,
+      timestampReal: input.timestampReal ?? Date.now()
+    };
+    const valRes = validateLedgerEntry(fullEntry);
+    if (!valRes.ok) {
+      return valRes;
+    }
+    const entry = valRes.value;
+    if (entry.reversesEntryId) {
+      if (this.#reversedTargetIds.has(entry.reversesEntryId)) {
+        return err(
+          createPublicError({
+            code: "DM_ECON_REVERSAL_ALREADY_EXISTS",
+            category: "validation",
+            message: `Entry '${entry.reversesEntryId}' has already been reversed`
+          })
+        );
+      }
+      this.#reversedTargetIds.add(entry.reversesEntryId);
+    }
+    this.#entries.set(entry.id, entry);
+    this.#nextSequence++;
+    return ok(entry);
+  }
+  get(id) {
+    return this.#entries.get(id);
+  }
+  query(filter) {
+    let list = Array.from(this.#entries.values());
+    if (!filter) {
+      return Object.freeze(list);
+    }
+    if (filter.domainUuid !== void 0) {
+      list = list.filter((e) => e.domainUuid === filter.domainUuid);
+    }
+    if (filter.resourceId !== void 0) {
+      list = list.filter((e) => e.resourceId === filter.resourceId);
+    }
+    if (filter.transactionId !== void 0) {
+      list = list.filter((e) => e.transactionId === filter.transactionId);
+    }
+    if (filter.reservationId !== void 0) {
+      list = list.filter((e) => e.reservationId === filter.reservationId);
+    }
+    if (filter.kind !== void 0) {
+      list = list.filter((e) => e.kind === filter.kind);
+    }
+    if (filter.sourceRef !== void 0) {
+      list = list.filter((e) => e.source.ref === filter.sourceRef);
+    }
+    if (filter.fromSequence !== void 0) {
+      list = list.filter((e) => e.sequence >= filter.fromSequence);
+    }
+    if (filter.toSequence !== void 0) {
+      list = list.filter((e) => e.sequence <= filter.toSequence);
+    }
+    list.sort((a, b) => a.sequence - b.sequence);
+    if (filter.limit !== void 0 && filter.limit > 0) {
+      list = list.slice(0, filter.limit);
+    }
+    return Object.freeze(list);
+  }
+  createReversal(targetEntryId, sourceOrReason, userId) {
+    const source = typeof sourceOrReason === "string" ? { type: "reversal", reason: sourceOrReason, userId } : sourceOrReason;
+    const target = this.#entries.get(targetEntryId);
+    if (!target) {
+      return err(
+        createPublicError({
+          code: "DM_ECON_LEDGER_ENTRY_NOT_FOUND",
+          category: "validation",
+          message: `Target LedgerEntry '${targetEntryId}' not found for reversal`
+        })
+      );
+    }
+    if (target.kind === "reversal") {
+      return err(
+        createPublicError({
+          code: "DM_ECON_CANNOT_REVERSE_REVERSAL",
+          category: "validation",
+          message: `Cannot reverse entry '${targetEntryId}' because it is already a reversal`
+        })
+      );
+    }
+    if (this.#reversedTargetIds.has(targetEntryId)) {
+      return err(
+        createPublicError({
+          code: "DM_ECON_REVERSAL_ALREADY_EXISTS",
+          category: "validation",
+          message: `Entry '${targetEntryId}' has already been reversed`
+        })
+      );
+    }
+    return this.append({
+      domainUuid: target.domainUuid,
+      resourceId: target.resourceId,
+      deltaMinor: -target.deltaMinor,
+      // opposing amount
+      kind: "reversal",
+      timestampReal: Date.now(),
+      reversesEntryId: target.id,
+      source
+    });
+  }
+  get count() {
+    return this.#entries.size;
+  }
+};
+
+// src/economy/reservations/reservation-types.ts
+var CANONICAL_RESERVATION_STATUSES = Object.freeze([
+  "active",
+  "partially-consumed",
+  "consumed",
+  "released",
+  "expired"
+]);
+function validateReservation2(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return err(
+      createPublicError({
+        code: "DM_ECON_RESERVATION_INVALID",
+        category: "validation",
+        message: "Reservation must be an object"
+      })
+    );
+  }
+  const candidate = raw;
+  if (typeof candidate.id !== "string" || !candidate.id.startsWith("resv_")) {
+    return err(
+      createPublicError({
+        code: "DM_ECON_RESERVATION_INVALID",
+        category: "validation",
+        message: `Reservation ID must start with 'resv_': received '${String(candidate.id)}'`
+      })
+    );
+  }
+  if (typeof candidate.domainUuid !== "string" || candidate.domainUuid.trim().length === 0) {
+    return err(
+      createPublicError({
+        code: "DM_ECON_RESERVATION_INVALID",
+        category: "validation",
+        message: "Reservation domainUuid must be a non-empty string"
+      })
+    );
+  }
+  if (!isNamespacedResourceId(candidate.resourceId)) {
+    return err(
+      createPublicError({
+        code: "DM_ECON_RESERVATION_INVALID",
+        category: "validation",
+        message: `Reservation resourceId must be namespaced: received '${String(candidate.resourceId)}'`
+      })
+    );
+  }
+  const orig = candidate.originalAmountMinor;
+  if (typeof orig !== "number" || !Number.isSafeInteger(orig) || orig <= 0) {
+    return err(
+      createPublicError({
+        code: "DM_ECON_RESERVATION_INVALID",
+        category: "validation",
+        message: `originalAmountMinor must be a positive safe integer (> 0): received '${String(orig)}'`
+      })
+    );
+  }
+  const remaining = candidate.remainingAmountMinor;
+  if (typeof remaining !== "number" || !Number.isSafeInteger(remaining) || remaining < 0 || remaining > orig) {
+    return err(
+      createPublicError({
+        code: "DM_ECON_RESERVATION_INVALID",
+        category: "validation",
+        message: `remainingAmountMinor must be between 0 and originalAmountMinor (${orig}): received '${String(remaining)}'`
+      })
+    );
+  }
+  const status = candidate.status;
+  if (!CANONICAL_RESERVATION_STATUSES.includes(status)) {
+    return err(
+      createPublicError({
+        code: "DM_ECON_RESERVATION_INVALID",
+        category: "validation",
+        message: `Invalid reservation status: received '${String(status)}'`
+      })
+    );
+  }
+  if (remaining === 0 && (status === "active" || status === "partially-consumed")) {
+    return err(
+      createPublicError({
+        code: "DM_ECON_RESERVATION_INVALID",
+        category: "validation",
+        message: `Reservation with 0 remaining amount cannot have status '${status}'`
+      })
+    );
+  }
+  if (!candidate.source || typeof candidate.source !== "object") {
+    return err(
+      createPublicError({
+        code: "DM_ECON_RESERVATION_INVALID",
+        category: "validation",
+        message: "Reservation source must be an object"
+      })
+    );
+  }
+  const rawSource = candidate.source;
+  if (typeof rawSource.type !== "string" || rawSource.type.trim().length === 0) {
+    return err(
+      createPublicError({
+        code: "DM_ECON_RESERVATION_INVALID",
+        category: "validation",
+        message: "Reservation source.type must be a non-empty string"
+      })
+    );
+  }
+  const source = {
+    type: rawSource.type.trim(),
+    ...typeof rawSource.ref === "string" ? { ref: rawSource.ref.trim() } : {},
+    ...typeof rawSource.reason === "string" ? { reason: rawSource.reason.trim() } : {},
+    ...typeof rawSource.userId === "string" ? { userId: rawSource.userId.trim() } : {}
+  };
+  const revision = typeof candidate.revision === "number" ? candidate.revision : 0;
+  return ok({
+    id: candidate.id,
+    domainUuid: candidate.domainUuid.trim(),
+    resourceId: candidate.resourceId,
+    originalAmountMinor: orig,
+    remainingAmountMinor: remaining,
+    status,
+    source,
+    createdAtReal: typeof candidate.createdAtReal === "number" ? candidate.createdAtReal : Date.now(),
+    ...typeof candidate.createdAtWorld === "number" ? { createdAtWorld: candidate.createdAtWorld } : {},
+    ...typeof candidate.expiresAtWorld === "number" ? { expiresAtWorld: candidate.expiresAtWorld } : {},
+    ...typeof candidate.expiresAtReal === "number" ? { expiresAtReal: candidate.expiresAtReal } : {},
+    revision
+  });
+}
+
+// src/economy/reservations/reservation-store.ts
+var ReservationStore = class {
+  #reservations = /* @__PURE__ */ new Map();
+  create(input) {
+    const id = createOpaqueId("resv");
+    const raw = {
+      id,
+      domainUuid: input.domainUuid,
+      resourceId: input.resourceId,
+      originalAmountMinor: input.originalAmountMinor,
+      remainingAmountMinor: input.originalAmountMinor,
+      status: "active",
+      source: input.source,
+      createdAtReal: Date.now(),
+      ...input.createdAtWorld !== void 0 ? { createdAtWorld: input.createdAtWorld } : {},
+      ...input.expiresAtWorld !== void 0 ? { expiresAtWorld: input.expiresAtWorld } : {},
+      ...input.expiresAtReal !== void 0 ? { expiresAtReal: input.expiresAtReal } : {},
+      revision: 0
+    };
+    const valRes = validateReservation2(raw);
+    if (!valRes.ok) {
+      return valRes;
+    }
+    this.#reservations.set(valRes.value.id, valRes.value);
+    return ok(valRes.value);
+  }
+  get(id) {
+    return this.#reservations.get(id);
+  }
+  list(filter) {
+    let all = Array.from(this.#reservations.values());
+    if (!filter) {
+      return Object.freeze(all);
+    }
+    if (filter.domainUuid !== void 0) {
+      all = all.filter((r) => r.domainUuid === filter.domainUuid);
+    }
+    if (filter.resourceId !== void 0) {
+      all = all.filter((r) => r.resourceId === filter.resourceId);
+    }
+    if (filter.status !== void 0) {
+      all = all.filter((r) => r.status === filter.status);
+    }
+    if (filter.sourceRef !== void 0) {
+      all = all.filter((r) => r.source.ref === filter.sourceRef);
+    }
+    return Object.freeze(all);
+  }
+  getReservedTotal(domainUuid, resourceId) {
+    let total = 0;
+    for (const r of this.#reservations.values()) {
+      if (r.domainUuid === domainUuid && r.resourceId === resourceId && (r.status === "active" || r.status === "partially-consumed")) {
+        total += r.remainingAmountMinor;
+      }
+    }
+    return total;
+  }
+  consume(reservationId, amountMinor) {
+    const existing = this.#reservations.get(reservationId);
+    if (!existing) {
+      return err(
+        createPublicError({
+          code: "DM_ECON_RESERVATION_NOT_FOUND",
+          category: "validation",
+          message: `Reservation '${reservationId}' not found`
+        })
+      );
+    }
+    if (existing.status !== "active" && existing.status !== "partially-consumed") {
+      return err(
+        createPublicError({
+          code: "DM_ECON_RESERVATION_NOT_ACTIVE",
+          category: "validation",
+          message: `Cannot consume from reservation in '${existing.status}' status`
+        })
+      );
+    }
+    if (!Number.isSafeInteger(amountMinor) || amountMinor <= 0) {
+      return err(
+        createPublicError({
+          code: "DM_ECON_AMOUNT_INVALID",
+          category: "validation",
+          message: `Consumed amount must be a positive safe integer (> 0): received ${String(amountMinor)}`
+        })
+      );
+    }
+    if (amountMinor > existing.remainingAmountMinor) {
+      return err(
+        createPublicError({
+          code: "DM_ECON_RESERVATION_EXHAUSTED",
+          category: "validation",
+          message: `Requested consumption (${amountMinor}) exceeds remaining reserved amount (${existing.remainingAmountMinor})`
+        })
+      );
+    }
+    const newRemaining = existing.remainingAmountMinor - amountMinor;
+    const newStatus = newRemaining === 0 ? "consumed" : "partially-consumed";
+    const updated = {
+      ...existing,
+      remainingAmountMinor: newRemaining,
+      status: newStatus,
+      revision: existing.revision + 1
+    };
+    this.#reservations.set(reservationId, updated);
+    return ok({ reservation: updated, consumedAmount: amountMinor });
+  }
+  release(reservationId, amountMinor) {
+    const existing = this.#reservations.get(reservationId);
+    if (!existing) {
+      return err(
+        createPublicError({
+          code: "DM_ECON_RESERVATION_NOT_FOUND",
+          category: "validation",
+          message: `Reservation '${reservationId}' not found`
+        })
+      );
+    }
+    if (existing.status !== "active" && existing.status !== "partially-consumed") {
+      return err(
+        createPublicError({
+          code: "DM_ECON_RESERVATION_NOT_ACTIVE",
+          category: "validation",
+          message: `Cannot release reservation in '${existing.status}' status`
+        })
+      );
+    }
+    const toRelease = amountMinor !== void 0 ? amountMinor : existing.remainingAmountMinor;
+    if (!Number.isSafeInteger(toRelease) || toRelease <= 0) {
+      return err(
+        createPublicError({
+          code: "DM_ECON_AMOUNT_INVALID",
+          category: "validation",
+          message: `Released amount must be a positive safe integer (> 0): received ${String(toRelease)}`
+        })
+      );
+    }
+    if (toRelease > existing.remainingAmountMinor) {
+      return err(
+        createPublicError({
+          code: "DM_ECON_RESERVATION_EXHAUSTED",
+          category: "validation",
+          message: `Requested release amount (${toRelease}) exceeds remaining reserved amount (${existing.remainingAmountMinor})`
+        })
+      );
+    }
+    const newRemaining = existing.remainingAmountMinor - toRelease;
+    const newStatus = newRemaining === 0 ? "released" : "partially-consumed";
+    const updated = {
+      ...existing,
+      remainingAmountMinor: newRemaining,
+      status: newStatus,
+      revision: existing.revision + 1
+    };
+    this.#reservations.set(reservationId, updated);
+    return ok({ reservation: updated, releasedAmount: toRelease });
+  }
+  expire(reservationId) {
+    const existing = this.#reservations.get(reservationId);
+    if (!existing) {
+      return err(
+        createPublicError({
+          code: "DM_ECON_RESERVATION_NOT_FOUND",
+          category: "validation",
+          message: `Reservation '${reservationId}' not found`
+        })
+      );
+    }
+    if (existing.status === "consumed" || existing.status === "released" || existing.status === "expired") {
+      return ok(existing);
+    }
+    const updated = {
+      ...existing,
+      remainingAmountMinor: 0,
+      status: "expired",
+      revision: existing.revision + 1
+    };
+    this.#reservations.set(reservationId, updated);
+    return ok(updated);
+  }
+};
+
+// src/economy/accounts/capacity-resolver.ts
+function resolveEffectiveCapacity(baseCapacityMinor, modifiers = [], resourceDef) {
+  if (baseCapacityMinor === null) {
+    return {
+      effectiveCapacityMinor: null,
+      baseCapacityMinor: null,
+      modifiers: Object.freeze([...modifiers]),
+      hardLimitClamped: false
+    };
+  }
+  if (!Number.isSafeInteger(baseCapacityMinor) || baseCapacityMinor < 0) {
+    throw new Error(
+      `baseCapacityMinor must be a non-negative safe integer or null, got: ${String(baseCapacityMinor)}`
+    );
+  }
+  let totalCapacity = baseCapacityMinor;
+  for (const mod of modifiers) {
+    if (mod.active) {
+      totalCapacity += mod.deltaMinor;
+    }
+  }
+  if (totalCapacity < 0) {
+    totalCapacity = 0;
+  }
+  if (!Number.isSafeInteger(totalCapacity)) {
+    throw new Error(
+      `Effective capacity overflowed safe integer bounds: ${totalCapacity}`
+    );
+  }
+  let hardLimitClamped = false;
+  if (resourceDef?.maximumMinor !== null && resourceDef?.maximumMinor !== void 0) {
+    if (totalCapacity > resourceDef.maximumMinor) {
+      totalCapacity = resourceDef.maximumMinor;
+      hardLimitClamped = true;
+    }
+  }
+  return {
+    effectiveCapacityMinor: totalCapacity,
+    baseCapacityMinor,
+    modifiers: Object.freeze([...modifiers]),
+    hardLimitClamped
+  };
+}
+function evaluateCapacity(proposedBalanceMinor, effectiveCapacityMinor, policy, resourceDef) {
+  if (!Number.isSafeInteger(proposedBalanceMinor)) {
+    return {
+      allowed: false,
+      effectiveCapacityMinor,
+      proposedBalanceMinor,
+      excessMinor: 0,
+      policy,
+      error: createPublicError({
+        code: "DM_ECON_AMOUNT_INVALID",
+        category: "validation",
+        message: `Proposed balance must be a safe integer: received '${String(proposedBalanceMinor)}'`
+      })
+    };
+  }
+  if (resourceDef) {
+    if (!resourceDef.allowNegative && proposedBalanceMinor < 0) {
+      return {
+        allowed: false,
+        effectiveCapacityMinor,
+        proposedBalanceMinor,
+        excessMinor: 0,
+        policy,
+        error: createPublicError({
+          code: "DM_ECON_NEGATIVE_NOT_ALLOWED",
+          category: "validation",
+          message: `Resource '${resourceDef.id}' does not permit negative balance: proposed ${proposedBalanceMinor}`
+        })
+      };
+    }
+    if (resourceDef.minimumMinor !== null && resourceDef.minimumMinor !== void 0) {
+      if (proposedBalanceMinor < resourceDef.minimumMinor) {
+        return {
+          allowed: false,
+          effectiveCapacityMinor,
+          proposedBalanceMinor,
+          excessMinor: 0,
+          policy,
+          error: createPublicError({
+            code: "DM_ECON_MINIMUM_EXCEEDED",
+            category: "validation",
+            message: `Proposed balance ${proposedBalanceMinor} is below absolute minimum ${resourceDef.minimumMinor}`
+          })
+        };
+      }
+    }
+    if (resourceDef.maximumMinor !== null && resourceDef.maximumMinor !== void 0) {
+      if (proposedBalanceMinor > resourceDef.maximumMinor) {
+        return {
+          allowed: false,
+          effectiveCapacityMinor,
+          proposedBalanceMinor,
+          excessMinor: proposedBalanceMinor - resourceDef.maximumMinor,
+          policy,
+          error: createPublicError({
+            code: "DM_ECON_CAPACITY_EXCEEDED",
+            category: "validation",
+            message: `Proposed balance ${proposedBalanceMinor} exceeds definition absolute maximum ${resourceDef.maximumMinor}`
+          })
+        };
+      }
+    }
+  }
+  if (effectiveCapacityMinor === null) {
+    return {
+      allowed: true,
+      effectiveCapacityMinor: null,
+      proposedBalanceMinor,
+      excessMinor: 0,
+      policy
+    };
+  }
+  if (proposedBalanceMinor <= effectiveCapacityMinor) {
+    return {
+      allowed: true,
+      effectiveCapacityMinor,
+      proposedBalanceMinor,
+      excessMinor: 0,
+      policy
+    };
+  }
+  const excessMinor = proposedBalanceMinor - effectiveCapacityMinor;
+  switch (policy) {
+    case "block":
+      return {
+        allowed: false,
+        effectiveCapacityMinor,
+        proposedBalanceMinor,
+        excessMinor,
+        policy,
+        error: createPublicError({
+          code: "DM_ECON_CAPACITY_EXCEEDED",
+          category: "validation",
+          message: `Proposed balance ${proposedBalanceMinor} exceeds effective capacity ${effectiveCapacityMinor} by ${excessMinor} minor units`
+        })
+      };
+    case "allow-with-warning":
+      return {
+        allowed: true,
+        effectiveCapacityMinor,
+        proposedBalanceMinor,
+        excessMinor,
+        policy,
+        warning: `Capacity exceeded by ${excessMinor} minor units (capacity: ${effectiveCapacityMinor}, proposed: ${proposedBalanceMinor})`
+      };
+    case "overflow":
+      return {
+        allowed: true,
+        effectiveCapacityMinor,
+        proposedBalanceMinor,
+        excessMinor,
+        policy,
+        warning: `Overflow detected: ${excessMinor} minor units exceed storage capacity`
+      };
+    case "provider":
+      return {
+        allowed: true,
+        effectiveCapacityMinor,
+        proposedBalanceMinor,
+        excessMinor,
+        policy
+      };
+  }
+}
+
+// src/economy/plans/economy-plan.ts
+function buildAdjustPlan(params) {
+  const warnings = [];
+  const blockers = [];
+  const domainUuids = Object.freeze([params.domainUuid]);
+  if (!params.reason || params.reason.trim().length === 0) {
+    blockers.push(
+      createPublicError({
+        code: "DM_ECON_ADJUST_REASON_REQUIRED",
+        category: "validation",
+        message: "Manual adjustment strictly requires a non-empty reason"
+      })
+    );
+  }
+  const currentBalance = params.account ? params.account.balanceMinor : 0;
+  let deltaMinor;
+  if (params.deltaMinor !== void 0) {
+    deltaMinor = params.deltaMinor;
+  } else if (params.targetBalanceMinor !== void 0) {
+    deltaMinor = params.targetBalanceMinor - currentBalance;
+  } else {
+    blockers.push(
+      createPublicError({
+        code: "DM_ECON_ADJUST_INVALID",
+        category: "validation",
+        message: "Adjust requires either deltaMinor or targetBalanceMinor"
+      })
+    );
+    deltaMinor = 0;
+  }
+  if (!Number.isSafeInteger(deltaMinor)) {
+    blockers.push(
+      createPublicError({
+        code: "DM_ECON_AMOUNT_INVALID",
+        category: "validation",
+        message: `Adjustment delta must be a safe integer: received '${String(deltaMinor)}'`
+      })
+    );
+  }
+  if (deltaMinor === 0 && blockers.length === 0) {
+    warnings.push("Adjustment delta is zero: operation is a no-op");
+  }
+  const proposedBalance = currentBalance + deltaMinor;
+  if (!Number.isSafeInteger(proposedBalance)) {
+    blockers.push(
+      createPublicError({
+        code: "DM_ECON_AMOUNT_OVERFLOW",
+        category: "validation",
+        message: `Proposed balance ${proposedBalance} overflows safe integer limits`
+      })
+    );
+  }
+  const capEval = evaluateCapacity(
+    proposedBalance,
+    params.effectiveCapacityMinor,
+    params.definition.defaultCapacityPolicy,
+    params.definition
+  );
+  if (!capEval.allowed && capEval.error) {
+    blockers.push(capEval.error);
+  }
+  if (capEval.warning) {
+    warnings.push(capEval.warning);
+  }
+  const ledgerIntents = [];
+  if (deltaMinor !== 0 && blockers.length === 0) {
+    ledgerIntents.push({
+      domainUuid: params.domainUuid,
+      resourceId: params.resourceId,
+      deltaMinor,
+      kind: "adjustment",
+      source: {
+        type: "manual",
+        reason: params.reason.trim(),
+        userId: params.userId
+      }
+    });
+  }
+  return {
+    planId: createOpaqueId("plan"),
+    planType: "adjust",
+    domainUuids,
+    ledgerIntents: Object.freeze(ledgerIntents),
+    reservationEffects: Object.freeze([]),
+    warnings: Object.freeze(warnings),
+    blockers: Object.freeze(blockers),
+    isExecutable: blockers.length === 0 && deltaMinor !== 0,
+    createdAt: (/* @__PURE__ */ new Date()).toISOString()
+  };
+}
+function buildTransferPlan(params) {
+  const warnings = [];
+  const blockers = [];
+  const domainUuids = Object.freeze(
+    [params.sourceDomainUuid, params.targetDomainUuid].sort((a, b) => a.localeCompare(b))
+  );
+  if (params.sourceDomainUuid === params.targetDomainUuid) {
+    blockers.push(
+      createPublicError({
+        code: "DM_ECON_TRANSFER_SAME_DOMAIN",
+        category: "validation",
+        message: "Transfer source and target domain cannot be the same"
+      })
+    );
+  }
+  if (typeof params.amountMinor !== "number" || !Number.isSafeInteger(params.amountMinor) || params.amountMinor <= 0) {
+    blockers.push(
+      createPublicError({
+        code: "DM_ECON_AMOUNT_INVALID",
+        category: "validation",
+        message: `Transfer amount must be a positive safe integer: received '${String(params.amountMinor)}'`
+      })
+    );
+  }
+  const sourceBalance = params.sourceAccount?.balanceMinor ?? 0;
+  const sourceReserved = params.sourceReservedMinor ?? 0;
+  const sourceAvailable = sourceBalance - sourceReserved;
+  if (params.amountMinor > sourceAvailable) {
+    blockers.push(
+      createPublicError({
+        code: "DM_ECON_INSUFFICIENT_AVAILABLE",
+        category: "validation",
+        message: `Insufficient available funds for transfer: available is ${sourceAvailable}, requested ${params.amountMinor}`
+      })
+    );
+  }
+  const targetBalance = params.targetAccount?.balanceMinor ?? 0;
+  const proposedTargetBalance = targetBalance + params.amountMinor;
+  const capEval = evaluateCapacity(
+    proposedTargetBalance,
+    params.targetCapacityMinor,
+    params.definition.defaultCapacityPolicy,
+    params.definition
+  );
+  if (!capEval.allowed && capEval.error) {
+    blockers.push(capEval.error);
+  }
+  if (capEval.warning) {
+    warnings.push(capEval.warning);
+  }
+  const ledgerIntents = [];
+  if (blockers.length === 0) {
+    ledgerIntents.push({
+      domainUuid: params.sourceDomainUuid,
+      resourceId: params.resourceId,
+      deltaMinor: -params.amountMinor,
+      kind: "transfer-debit",
+      source: {
+        type: "transfer",
+        ref: `transfer_to:${params.targetDomainUuid}`,
+        reason: params.reason,
+        userId: params.userId
+      }
+    });
+    ledgerIntents.push({
+      domainUuid: params.targetDomainUuid,
+      resourceId: params.resourceId,
+      deltaMinor: params.amountMinor,
+      kind: "transfer-credit",
+      source: {
+        type: "transfer",
+        ref: `transfer_from:${params.sourceDomainUuid}`,
+        reason: params.reason,
+        userId: params.userId
+      }
+    });
+  }
+  return {
+    planId: createOpaqueId("plan"),
+    planType: "transfer",
+    domainUuids,
+    ledgerIntents: Object.freeze(ledgerIntents),
+    reservationEffects: Object.freeze([]),
+    warnings: Object.freeze(warnings),
+    blockers: Object.freeze(blockers),
+    isExecutable: blockers.length === 0,
+    createdAt: (/* @__PURE__ */ new Date()).toISOString()
+  };
+}
+function buildConvertPlan(params) {
+  const warnings = [];
+  const blockers = [];
+  const domainUuids = Object.freeze([params.domainUuid]);
+  if (params.fromResourceId === params.toResourceId) {
+    blockers.push(
+      createPublicError({
+        code: "DM_ECON_CONVERT_SAME_RESOURCE",
+        category: "validation",
+        message: "Conversion source and target resource cannot be the same"
+      })
+    );
+  }
+  if (typeof params.fromAmountMinor !== "number" || !Number.isSafeInteger(params.fromAmountMinor) || params.fromAmountMinor <= 0) {
+    blockers.push(
+      createPublicError({
+        code: "DM_ECON_AMOUNT_INVALID",
+        category: "validation",
+        message: `fromAmountMinor must be a positive safe integer: received '${String(params.fromAmountMinor)}'`
+      })
+    );
+  }
+  if (typeof params.toAmountMinor !== "number" || !Number.isSafeInteger(params.toAmountMinor) || params.toAmountMinor <= 0) {
+    blockers.push(
+      createPublicError({
+        code: "DM_ECON_AMOUNT_INVALID",
+        category: "validation",
+        message: `toAmountMinor must be a positive safe integer: received '${String(params.toAmountMinor)}'`
+      })
+    );
+  }
+  const fromBalance = params.fromAccount?.balanceMinor ?? 0;
+  const fromReserved = params.fromReservedMinor ?? 0;
+  const fromAvailable = fromBalance - fromReserved;
+  if (params.fromAmountMinor > fromAvailable) {
+    blockers.push(
+      createPublicError({
+        code: "DM_ECON_INSUFFICIENT_AVAILABLE",
+        category: "validation",
+        message: `Insufficient available funds for conversion: available is ${fromAvailable}, required ${params.fromAmountMinor}`
+      })
+    );
+  }
+  const toBalance = params.toAccount?.balanceMinor ?? 0;
+  const proposedToBalance = toBalance + params.toAmountMinor;
+  const capEval = evaluateCapacity(
+    proposedToBalance,
+    params.toCapacityMinor,
+    params.toDefinition.defaultCapacityPolicy,
+    params.toDefinition
+  );
+  if (!capEval.allowed && capEval.error) {
+    blockers.push(capEval.error);
+  }
+  if (capEval.warning) {
+    warnings.push(capEval.warning);
+  }
+  const ledgerIntents = [];
+  if (blockers.length === 0) {
+    ledgerIntents.push({
+      domainUuid: params.domainUuid,
+      resourceId: params.fromResourceId,
+      deltaMinor: -params.fromAmountMinor,
+      kind: "conversion-debit",
+      source: {
+        type: "conversion",
+        ref: `converted_to:${params.toResourceId}`,
+        reason: params.reason ?? params.rateDescription,
+        userId: params.userId
+      }
+    });
+    ledgerIntents.push({
+      domainUuid: params.domainUuid,
+      resourceId: params.toResourceId,
+      deltaMinor: params.toAmountMinor,
+      kind: "conversion-credit",
+      source: {
+        type: "conversion",
+        ref: `converted_from:${params.fromResourceId}`,
+        reason: params.reason ?? params.rateDescription,
+        userId: params.userId
+      }
+    });
+  }
+  return {
+    planId: createOpaqueId("plan"),
+    planType: "convert",
+    domainUuids,
+    ledgerIntents: Object.freeze(ledgerIntents),
+    reservationEffects: Object.freeze([]),
+    warnings: Object.freeze(warnings),
+    blockers: Object.freeze(blockers),
+    isExecutable: blockers.length === 0,
+    createdAt: (/* @__PURE__ */ new Date()).toISOString()
+  };
+}
+
+// src/economy/services/economy-service.ts
+var EconomyService = class {
+  #domains;
+  #resourceRegistry;
+  #ledgerStore;
+  #reservationStore;
+  #lockManager;
+  constructor(options) {
+    this.#domains = options.domains;
+    this.#resourceRegistry = options.resourceRegistry;
+    this.#ledgerStore = options.ledgerStore;
+    this.#reservationStore = options.reservationStore;
+    this.#lockManager = options.lockManager ?? new LockManager();
+  }
+  get registry() {
+    return this.#resourceRegistry;
+  }
+  get ledgerStore() {
+    return this.#ledgerStore;
+  }
+  get reservationStore() {
+    return this.#reservationStore;
+  }
+  getResourceDefinition(resourceId) {
+    return this.#resourceRegistry.get(resourceId);
+  }
+  async getAccount(domainUuid, resourceId) {
+    const docRes = await this.#domains.read(this.#cleanUuid(domainUuid));
+    if (!docRes.ok) {
+      return docRes;
+    }
+    const econDataRes = tryGetDomainEconomyData(docRes.value.record);
+    if (!econDataRes.ok) {
+      return econDataRes;
+    }
+    const acc = econDataRes.value.accounts.find((a) => a.resourceId === resourceId);
+    return ok(acc);
+  }
+  async getAllAccounts(domainUuid) {
+    const docRes = await this.#domains.read(this.#cleanUuid(domainUuid));
+    if (!docRes.ok) {
+      return docRes;
+    }
+    const econDataRes = tryGetDomainEconomyData(docRes.value.record);
+    if (!econDataRes.ok) {
+      return econDataRes;
+    }
+    return ok(econDataRes.value.accounts);
+  }
+  async getAccountAvailability(domainUuid, resourceId) {
+    const accRes = await this.getAccount(domainUuid, resourceId);
+    if (!accRes.ok) {
+      return accRes;
+    }
+    const acc = accRes.value;
+    if (!acc || acc.mode !== "native") {
+      return ok(void 0);
+    }
+    const reservedMinor = this.#reservationStore.getReservedTotal(domainUuid, resourceId);
+    const availableMinor = acc.balanceMinor - reservedMinor;
+    const def = this.#resourceRegistry.get(resourceId);
+    const effectiveCap = resolveEffectiveCapacity(acc.baseCapacityMinor, [], def);
+    return ok({
+      account: acc,
+      balanceMinor: acc.balanceMinor,
+      reservedMinor,
+      availableMinor,
+      effectiveCapacityMinor: effectiveCap.effectiveCapacityMinor
+    });
+  }
+  async createAccount(params) {
+    const def = this.#resourceRegistry.get(params.resourceId);
+    if (!def) {
+      return err(
+        createPublicError({
+          code: "DM_ECON_RESOURCE_NOT_FOUND",
+          category: "not-found",
+          message: `Resource '${params.resourceId}' is not registered`
+        })
+      );
+    }
+    const initialBalance = params.initialBalanceMinor ?? 0;
+    if (!Number.isSafeInteger(initialBalance)) {
+      return err(
+        createPublicError({
+          code: "DM_ECON_AMOUNT_INVALID",
+          category: "validation",
+          message: "initialBalanceMinor must be a safe integer"
+        })
+      );
+    }
+    const txId = createOpaqueId("tx");
+    const lockKey = `domain:${params.domainUuid}`;
+    const lockRes = await this.#lockManager.acquireLocks({
+      ownerId: `create-account:${txId}`,
+      keys: [lockKey]
+    });
+    if (!lockRes.ok) return lockRes;
+    try {
+      const docRes = await this.#domains.read(this.#cleanUuid(params.domainUuid));
+      if (!docRes.ok) return docRes;
+      const doc = docRes.value;
+      const econData = getDomainEconomyData(doc.record);
+      if (econData.accounts.some((a) => a.resourceId === params.resourceId)) {
+        return err(
+          createPublicError({
+            code: "DM_ECON_ACCOUNT_ALREADY_EXISTS",
+            category: "conflict",
+            message: `Account for resource '${params.resourceId}' already exists in domain '${params.domainUuid}'`
+          })
+        );
+      }
+      const newAccount = {
+        mode: "native",
+        domainUuid: params.domainUuid,
+        resourceId: params.resourceId,
+        balanceMinor: initialBalance,
+        baseCapacityMinor: params.baseCapacityMinor ?? null,
+        ...params.visibility ? { visibility: params.visibility } : {}
+      };
+      const valRes = validateResourceAccount(newAccount);
+      if (!valRes.ok) return valRes;
+      const updatedEconData = {
+        ...econData,
+        accounts: Object.freeze([...econData.accounts, valRes.value])
+      };
+      const updatedRecord = withDomainEconomyData(doc.record, updatedEconData);
+      const updateRes = await this.#domains.update({ ...doc, record: updatedRecord });
+      if (!updateRes.ok) return updateRes;
+      if (initialBalance !== 0) {
+        this.#ledgerStore.append({
+          domainUuid: params.domainUuid,
+          resourceId: params.resourceId,
+          deltaMinor: initialBalance,
+          kind: "opening-balance",
+          source: {
+            type: "account-creation",
+            reason: params.reason ?? "Account initial opening balance",
+            userId: params.userId
+          }
+        });
+      }
+      return ok(newAccount);
+    } finally {
+      await lockRes.value.release();
+    }
+  }
+  async closeAccount(params) {
+    const txId = createOpaqueId("tx");
+    const lockKey = `domain:${params.domainUuid}`;
+    const lockRes = await this.#lockManager.acquireLocks({
+      ownerId: `close-account:${txId}`,
+      keys: [lockKey]
+    });
+    if (!lockRes.ok) return lockRes;
+    try {
+      const docRes = await this.#domains.read(this.#cleanUuid(params.domainUuid));
+      if (!docRes.ok) return docRes;
+      const doc = docRes.value;
+      const econData = getDomainEconomyData(doc.record);
+      const acc = econData.accounts.find((a) => a.resourceId === params.resourceId);
+      if (!acc) {
+        return err(
+          createPublicError({
+            code: "DM_ECON_ACCOUNT_NOT_FOUND",
+            category: "not-found",
+            message: `Account for resource '${params.resourceId}' not found in domain '${params.domainUuid}'`
+          })
+        );
+      }
+      if (acc.mode === "native") {
+        if (acc.balanceMinor !== 0) {
+          return err(
+            createPublicError({
+              code: "DM_ECON_ACCOUNT_NOT_EMPTY",
+              category: "validation",
+              message: `Cannot close account '${params.resourceId}' with non-zero balance: ${acc.balanceMinor}`
+            })
+          );
+        }
+        const activeReserved = this.#reservationStore.getReservedTotal(params.domainUuid, params.resourceId);
+        if (activeReserved > 0) {
+          return err(
+            createPublicError({
+              code: "DM_ECON_ACCOUNT_HAS_RESERVATIONS",
+              category: "validation",
+              message: `Cannot close account '${params.resourceId}' with active reservations total: ${activeReserved}`
+            })
+          );
+        }
+      }
+      const updatedAccounts = econData.accounts.filter((a) => a.resourceId !== params.resourceId);
+      const updatedEconData = {
+        ...econData,
+        accounts: Object.freeze(updatedAccounts)
+      };
+      const updatedRecord = withDomainEconomyData(doc.record, updatedEconData);
+      const updateRes = await this.#domains.update({ ...doc, record: updatedRecord });
+      if (!updateRes.ok) return updateRes;
+      return ok({ success: true });
+    } finally {
+      await lockRes.value.release();
+    }
+  }
+  async previewAdjust(params) {
+    const def = this.#resourceRegistry.get(params.resourceId);
+    if (!def) {
+      return err(
+        createPublicError({
+          code: "DM_ECON_RESOURCE_NOT_FOUND",
+          category: "not-found",
+          message: `Resource '${params.resourceId}' is not registered`
+        })
+      );
+    }
+    const accRes = await this.getAccount(params.domainUuid, params.resourceId);
+    if (!accRes.ok) return accRes;
+    const account = accRes.value?.mode === "native" ? accRes.value : void 0;
+    const effectiveCap = resolveEffectiveCapacity(account?.baseCapacityMinor ?? null, [], def);
+    const plan = buildAdjustPlan({
+      domainUuid: params.domainUuid,
+      resourceId: params.resourceId,
+      deltaMinor: params.deltaMinor,
+      targetBalanceMinor: params.targetBalanceMinor,
+      reason: params.reason,
+      userId: params.userId,
+      account,
+      definition: def,
+      effectiveCapacityMinor: effectiveCap.effectiveCapacityMinor
+    });
+    return ok(plan);
+  }
+  async commitAdjust(params) {
+    const txId = createOpaqueId("tx");
+    const lockKey = `domain:${params.domainUuid}`;
+    const lockRes = await this.#lockManager.acquireLocks({
+      ownerId: `adjust:${txId}`,
+      keys: [lockKey]
+    });
+    if (!lockRes.ok) return lockRes;
+    try {
+      const docRes = await this.#domains.read(this.#cleanUuid(params.domainUuid));
+      if (!docRes.ok) return docRes;
+      const doc = docRes.value;
+      const def = this.#resourceRegistry.get(params.resourceId);
+      if (!def) {
+        return err(
+          createPublicError({
+            code: "DM_ECON_RESOURCE_NOT_FOUND",
+            category: "not-found",
+            message: `Resource '${params.resourceId}' is not registered`
+          })
+        );
+      }
+      const econData = getDomainEconomyData(doc.record);
+      const accIndex = econData.accounts.findIndex((a) => a.resourceId === params.resourceId);
+      if (accIndex < 0 || econData.accounts[accIndex].mode !== "native") {
+        return err(
+          createPublicError({
+            code: "DM_ECON_ACCOUNT_NOT_FOUND",
+            category: "not-found",
+            message: `Native account for resource '${params.resourceId}' not found in domain '${params.domainUuid}'`
+          })
+        );
+      }
+      const existingAccount = econData.accounts[accIndex];
+      const effectiveCap = resolveEffectiveCapacity(existingAccount.baseCapacityMinor, [], def);
+      const plan = buildAdjustPlan({
+        domainUuid: params.domainUuid,
+        resourceId: params.resourceId,
+        deltaMinor: params.deltaMinor,
+        targetBalanceMinor: params.targetBalanceMinor,
+        reason: params.reason,
+        userId: params.userId,
+        account: existingAccount,
+        definition: def,
+        effectiveCapacityMinor: effectiveCap.effectiveCapacityMinor
+      });
+      if (!plan.isExecutable) {
+        return err(
+          plan.blockers[0] ?? createPublicError({
+            code: "DM_ECON_PLAN_INVALID",
+            category: "validation",
+            message: "Adjust plan is not executable"
+          })
+        );
+      }
+      const intent = plan.ledgerIntents[0];
+      const newBalance = existingAccount.balanceMinor + intent.deltaMinor;
+      const updatedAccount = {
+        ...existingAccount,
+        balanceMinor: newBalance
+      };
+      const updatedAccounts = [...econData.accounts];
+      updatedAccounts[accIndex] = updatedAccount;
+      const updatedRecord = withDomainEconomyData(doc.record, {
+        ...econData,
+        accounts: Object.freeze(updatedAccounts)
+      });
+      const updateDocRes = await this.#domains.update({ ...doc, record: updatedRecord });
+      if (!updateDocRes.ok) return updateDocRes;
+      const entryRes = this.#ledgerStore.append({
+        domainUuid: params.domainUuid,
+        resourceId: params.resourceId,
+        deltaMinor: intent.deltaMinor,
+        kind: intent.kind,
+        source: intent.source
+      });
+      if (!entryRes.ok) return entryRes;
+      return ok({
+        account: updatedAccount,
+        entry: entryRes.value
+      });
+    } finally {
+      await lockRes.value.release();
+    }
+  }
+  async previewTransfer(params) {
+    const def = this.#resourceRegistry.get(params.resourceId);
+    if (!def) {
+      return err(
+        createPublicError({
+          code: "DM_ECON_RESOURCE_NOT_FOUND",
+          category: "not-found",
+          message: `Resource '${params.resourceId}' is not registered`
+        })
+      );
+    }
+    const srcAccRes = await this.getAccount(params.sourceDomainUuid, params.resourceId);
+    if (!srcAccRes.ok) return srcAccRes;
+    const srcAccount = srcAccRes.value?.mode === "native" ? srcAccRes.value : void 0;
+    const tgtAccRes = await this.getAccount(params.targetDomainUuid, params.resourceId);
+    if (!tgtAccRes.ok) return tgtAccRes;
+    const tgtAccount = tgtAccRes.value?.mode === "native" ? tgtAccRes.value : void 0;
+    const srcReserved = this.#reservationStore.getReservedTotal(
+      params.sourceDomainUuid,
+      params.resourceId
+    );
+    const tgtEffectiveCap = resolveEffectiveCapacity(tgtAccount?.baseCapacityMinor ?? null, [], def);
+    const plan = buildTransferPlan({
+      sourceDomainUuid: params.sourceDomainUuid,
+      targetDomainUuid: params.targetDomainUuid,
+      resourceId: params.resourceId,
+      amountMinor: params.amountMinor,
+      reason: params.reason,
+      userId: params.userId,
+      sourceAccount: srcAccount,
+      sourceReservedMinor: srcReserved,
+      targetAccount: tgtAccount,
+      definition: def,
+      targetCapacityMinor: tgtEffectiveCap.effectiveCapacityMinor
+    });
+    return ok(plan);
+  }
+  async commitTransfer(params) {
+    if (params.sourceDomainUuid === params.targetDomainUuid) {
+      return err(
+        createPublicError({
+          code: "DM_ECON_TRANSFER_SAME_DOMAIN",
+          category: "validation",
+          message: "Transfer source and target domain cannot be the same"
+        })
+      );
+    }
+    const lockKeys = [params.sourceDomainUuid, params.targetDomainUuid].sort((a, b) => a.localeCompare(b)).map((u) => `domain:${u}`);
+    const transactionId = createOpaqueId("tx");
+    const lockRes = await this.#lockManager.acquireLocks({
+      ownerId: `transfer:${transactionId}`,
+      keys: lockKeys
+    });
+    if (!lockRes.ok) return lockRes;
+    try {
+      const def = this.#resourceRegistry.get(params.resourceId);
+      if (!def) {
+        return err(
+          createPublicError({
+            code: "DM_ECON_RESOURCE_NOT_FOUND",
+            category: "not-found",
+            message: `Resource '${params.resourceId}' is not registered`
+          })
+        );
+      }
+      const srcDocRes = await this.#domains.read(this.#cleanUuid(params.sourceDomainUuid));
+      if (!srcDocRes.ok) return srcDocRes;
+      const srcDoc = srcDocRes.value;
+      const tgtDocRes = await this.#domains.read(this.#cleanUuid(params.targetDomainUuid));
+      if (!tgtDocRes.ok) return tgtDocRes;
+      const tgtDoc = tgtDocRes.value;
+      const srcEcon = getDomainEconomyData(srcDoc.record);
+      const srcAccIndex = srcEcon.accounts.findIndex((a) => a.resourceId === params.resourceId);
+      if (srcAccIndex < 0 || srcEcon.accounts[srcAccIndex].mode !== "native") {
+        return err(
+          createPublicError({
+            code: "DM_ECON_ACCOUNT_NOT_FOUND",
+            category: "not-found",
+            message: `Source domain '${params.sourceDomainUuid}' does not have a native account for '${params.resourceId}'`
+          })
+        );
+      }
+      const srcAccount = srcEcon.accounts[srcAccIndex];
+      const tgtEcon = getDomainEconomyData(tgtDoc.record);
+      const tgtAccIndex = tgtEcon.accounts.findIndex((a) => a.resourceId === params.resourceId);
+      if (tgtAccIndex < 0 || tgtEcon.accounts[tgtAccIndex].mode !== "native") {
+        return err(
+          createPublicError({
+            code: "DM_ECON_ACCOUNT_NOT_FOUND",
+            category: "not-found",
+            message: `Target domain '${params.targetDomainUuid}' does not have a native account for '${params.resourceId}'`
+          })
+        );
+      }
+      const tgtAccount = tgtEcon.accounts[tgtAccIndex];
+      const srcReserved = this.#reservationStore.getReservedTotal(
+        params.sourceDomainUuid,
+        params.resourceId
+      );
+      const tgtEffectiveCap = resolveEffectiveCapacity(tgtAccount.baseCapacityMinor, [], def);
+      const plan = buildTransferPlan({
+        sourceDomainUuid: params.sourceDomainUuid,
+        targetDomainUuid: params.targetDomainUuid,
+        resourceId: params.resourceId,
+        amountMinor: params.amountMinor,
+        reason: params.reason,
+        userId: params.userId,
+        sourceAccount: srcAccount,
+        sourceReservedMinor: srcReserved,
+        targetAccount: tgtAccount,
+        definition: def,
+        targetCapacityMinor: tgtEffectiveCap.effectiveCapacityMinor
+      });
+      if (!plan.isExecutable) {
+        return err(
+          plan.blockers[0] ?? createPublicError({
+            code: "DM_ECON_PLAN_INVALID",
+            category: "validation",
+            message: "Transfer plan is not executable"
+          })
+        );
+      }
+      const updatedSrcAccount = {
+        ...srcAccount,
+        balanceMinor: srcAccount.balanceMinor - params.amountMinor
+      };
+      const updatedTgtAccount = {
+        ...tgtAccount,
+        balanceMinor: tgtAccount.balanceMinor + params.amountMinor
+      };
+      const srcAccounts = [...srcEcon.accounts];
+      srcAccounts[srcAccIndex] = updatedSrcAccount;
+      const updatedSrcRecord = withDomainEconomyData(srcDoc.record, {
+        ...srcEcon,
+        accounts: Object.freeze(srcAccounts)
+      });
+      const tgtAccounts = [...tgtEcon.accounts];
+      tgtAccounts[tgtAccIndex] = updatedTgtAccount;
+      const updatedTgtRecord = withDomainEconomyData(tgtDoc.record, {
+        ...tgtEcon,
+        accounts: Object.freeze(tgtAccounts)
+      });
+      const updateSrcRes = await this.#domains.update({ ...srcDoc, record: updatedSrcRecord });
+      if (!updateSrcRes.ok) return updateSrcRes;
+      const updateTgtRes = await this.#domains.update({ ...tgtDoc, record: updatedTgtRecord });
+      if (!updateTgtRes.ok) return updateTgtRes;
+      const debitEntryRes = this.#ledgerStore.append({
+        domainUuid: params.sourceDomainUuid,
+        resourceId: params.resourceId,
+        deltaMinor: -params.amountMinor,
+        kind: "transfer-debit",
+        transactionId,
+        source: {
+          type: "transfer",
+          ref: `transfer_to:${params.targetDomainUuid}`,
+          reason: params.reason,
+          userId: params.userId
+        }
+      });
+      if (!debitEntryRes.ok) return debitEntryRes;
+      const creditEntryRes = this.#ledgerStore.append({
+        domainUuid: params.targetDomainUuid,
+        resourceId: params.resourceId,
+        deltaMinor: params.amountMinor,
+        kind: "transfer-credit",
+        transactionId,
+        source: {
+          type: "transfer",
+          ref: `transfer_from:${params.sourceDomainUuid}`,
+          reason: params.reason,
+          userId: params.userId
+        }
+      });
+      if (!creditEntryRes.ok) return creditEntryRes;
+      return ok({
+        sourceAccount: updatedSrcAccount,
+        targetAccount: updatedTgtAccount,
+        debitEntry: debitEntryRes.value,
+        creditEntry: creditEntryRes.value,
+        transactionId
+      });
+    } finally {
+      await lockRes.value.release();
+    }
+  }
+  async previewConvert(params) {
+    const fromDef = this.#resourceRegistry.get(params.fromResourceId);
+    if (!fromDef) {
+      return err(
+        createPublicError({
+          code: "DM_ECON_RESOURCE_NOT_FOUND",
+          category: "not-found",
+          message: `Resource '${params.fromResourceId}' is not registered`
+        })
+      );
+    }
+    const toDef = this.#resourceRegistry.get(params.toResourceId);
+    if (!toDef) {
+      return err(
+        createPublicError({
+          code: "DM_ECON_RESOURCE_NOT_FOUND",
+          category: "not-found",
+          message: `Resource '${params.toResourceId}' is not registered`
+        })
+      );
+    }
+    const fromAccRes = await this.getAccount(params.domainUuid, params.fromResourceId);
+    if (!fromAccRes.ok) return fromAccRes;
+    const fromAccount = fromAccRes.value?.mode === "native" ? fromAccRes.value : void 0;
+    const toAccRes = await this.getAccount(params.domainUuid, params.toResourceId);
+    if (!toAccRes.ok) return toAccRes;
+    const toAccount = toAccRes.value?.mode === "native" ? toAccRes.value : void 0;
+    const fromReserved = this.#reservationStore.getReservedTotal(
+      params.domainUuid,
+      params.fromResourceId
+    );
+    const toEffectiveCap = resolveEffectiveCapacity(toAccount?.baseCapacityMinor ?? null, [], toDef);
+    const plan = buildConvertPlan({
+      domainUuid: params.domainUuid,
+      fromResourceId: params.fromResourceId,
+      toResourceId: params.toResourceId,
+      fromAmountMinor: params.fromAmountMinor,
+      toAmountMinor: params.toAmountMinor,
+      rateDescription: params.rateDescription,
+      reason: params.reason,
+      userId: params.userId,
+      fromAccount,
+      fromReservedMinor: fromReserved,
+      toAccount,
+      fromDefinition: fromDef,
+      toDefinition: toDef,
+      toCapacityMinor: toEffectiveCap.effectiveCapacityMinor
+    });
+    return ok(plan);
+  }
+  async commitConvert(params) {
+    const lockKey = `domain:${params.domainUuid}`;
+    const transactionId = createOpaqueId("tx");
+    const lockRes = await this.#lockManager.acquireLocks({
+      ownerId: `convert:${transactionId}`,
+      keys: [lockKey]
+    });
+    if (!lockRes.ok) return lockRes;
+    try {
+      const fromDef = this.#resourceRegistry.get(params.fromResourceId);
+      if (!fromDef) {
+        return err(
+          createPublicError({
+            code: "DM_ECON_RESOURCE_NOT_FOUND",
+            category: "not-found",
+            message: `Resource '${params.fromResourceId}' is not registered`
+          })
+        );
+      }
+      const toDef = this.#resourceRegistry.get(params.toResourceId);
+      if (!toDef) {
+        return err(
+          createPublicError({
+            code: "DM_ECON_RESOURCE_NOT_FOUND",
+            category: "not-found",
+            message: `Resource '${params.toResourceId}' is not registered`
+          })
+        );
+      }
+      const docRes = await this.#domains.read(this.#cleanUuid(params.domainUuid));
+      if (!docRes.ok) return docRes;
+      const doc = docRes.value;
+      const econData = getDomainEconomyData(doc.record);
+      const fromAccIndex = econData.accounts.findIndex((a) => a.resourceId === params.fromResourceId);
+      if (fromAccIndex < 0 || econData.accounts[fromAccIndex].mode !== "native") {
+        return err(
+          createPublicError({
+            code: "DM_ECON_ACCOUNT_NOT_FOUND",
+            category: "not-found",
+            message: `Source account '${params.fromResourceId}' not found in domain '${params.domainUuid}'`
+          })
+        );
+      }
+      const fromAccount = econData.accounts[fromAccIndex];
+      const toAccIndex = econData.accounts.findIndex((a) => a.resourceId === params.toResourceId);
+      if (toAccIndex < 0 || econData.accounts[toAccIndex].mode !== "native") {
+        return err(
+          createPublicError({
+            code: "DM_ECON_ACCOUNT_NOT_FOUND",
+            category: "not-found",
+            message: `Destination account '${params.toResourceId}' not found in domain '${params.domainUuid}'`
+          })
+        );
+      }
+      const toAccount = econData.accounts[toAccIndex];
+      const fromReserved = this.#reservationStore.getReservedTotal(
+        params.domainUuid,
+        params.fromResourceId
+      );
+      const toEffectiveCap = resolveEffectiveCapacity(toAccount.baseCapacityMinor, [], toDef);
+      const plan = buildConvertPlan({
+        domainUuid: params.domainUuid,
+        fromResourceId: params.fromResourceId,
+        toResourceId: params.toResourceId,
+        fromAmountMinor: params.fromAmountMinor,
+        toAmountMinor: params.toAmountMinor,
+        rateDescription: params.rateDescription,
+        reason: params.reason,
+        userId: params.userId,
+        fromAccount,
+        fromReservedMinor: fromReserved,
+        toAccount,
+        fromDefinition: fromDef,
+        toDefinition: toDef,
+        toCapacityMinor: toEffectiveCap.effectiveCapacityMinor
+      });
+      if (!plan.isExecutable) {
+        return err(
+          plan.blockers[0] ?? createPublicError({
+            code: "DM_ECON_PLAN_INVALID",
+            category: "validation",
+            message: "Convert plan is not executable"
+          })
+        );
+      }
+      const updatedFromAccount = {
+        ...fromAccount,
+        balanceMinor: fromAccount.balanceMinor - params.fromAmountMinor
+      };
+      const updatedToAccount = {
+        ...toAccount,
+        balanceMinor: toAccount.balanceMinor + params.toAmountMinor
+      };
+      const updatedAccounts = [...econData.accounts];
+      updatedAccounts[fromAccIndex] = updatedFromAccount;
+      updatedAccounts[toAccIndex] = updatedToAccount;
+      const updatedRecord = withDomainEconomyData(doc.record, {
+        ...econData,
+        accounts: Object.freeze(updatedAccounts)
+      });
+      const updateRes = await this.#domains.update({ ...doc, record: updatedRecord });
+      if (!updateRes.ok) return updateRes;
+      const debitEntryRes = this.#ledgerStore.append({
+        domainUuid: params.domainUuid,
+        resourceId: params.fromResourceId,
+        deltaMinor: -params.fromAmountMinor,
+        kind: "conversion-debit",
+        transactionId,
+        source: {
+          type: "conversion",
+          ref: `converted_to:${params.toResourceId}`,
+          reason: params.reason ?? params.rateDescription,
+          userId: params.userId
+        }
+      });
+      if (!debitEntryRes.ok) return debitEntryRes;
+      const creditEntryRes = this.#ledgerStore.append({
+        domainUuid: params.domainUuid,
+        resourceId: params.toResourceId,
+        deltaMinor: params.toAmountMinor,
+        kind: "conversion-credit",
+        transactionId,
+        source: {
+          type: "conversion",
+          ref: `converted_from:${params.fromResourceId}`,
+          reason: params.reason ?? params.rateDescription,
+          userId: params.userId
+        }
+      });
+      if (!creditEntryRes.ok) return creditEntryRes;
+      return ok({
+        fromAccount: updatedFromAccount,
+        toAccount: updatedToAccount,
+        debitEntry: debitEntryRes.value,
+        creditEntry: creditEntryRes.value,
+        transactionId
+      });
+    } finally {
+      await lockRes.value.release();
+    }
+  }
+  async reserve(params) {
+    const txId = createOpaqueId("tx");
+    const lockKey = `domain:${params.domainUuid}`;
+    const lockRes = await this.#lockManager.acquireLocks({
+      ownerId: `reserve:${txId}`,
+      keys: [lockKey]
+    });
+    if (!lockRes.ok) return lockRes;
+    try {
+      const accRes = await this.getAccount(params.domainUuid, params.resourceId);
+      if (!accRes.ok) return accRes;
+      const acc = accRes.value;
+      if (!acc || acc.mode !== "native") {
+        return err(
+          createPublicError({
+            code: "DM_ECON_ACCOUNT_NOT_FOUND",
+            category: "not-found",
+            message: `Native account '${params.resourceId}' not found in domain '${params.domainUuid}'`
+          })
+        );
+      }
+      const currentReserved = this.#reservationStore.getReservedTotal(
+        params.domainUuid,
+        params.resourceId
+      );
+      const available = acc.balanceMinor - currentReserved;
+      if (params.amountMinor > available) {
+        return err(
+          createPublicError({
+            code: "DM_ECON_INSUFFICIENT_AVAILABLE",
+            category: "validation",
+            message: `Cannot reserve ${params.amountMinor}: only ${available} available (balance: ${acc.balanceMinor}, reserved: ${currentReserved})`
+          })
+        );
+      }
+      return this.#reservationStore.create({
+        domainUuid: params.domainUuid,
+        resourceId: params.resourceId,
+        originalAmountMinor: params.amountMinor,
+        source: params.source,
+        expiresAtWorld: params.expiresAtWorld,
+        expiresAtReal: params.expiresAtReal
+      });
+    } finally {
+      await lockRes.value.release();
+    }
+  }
+  async consumeReservation(params) {
+    const txId = createOpaqueId("tx");
+    const lockKey = `domain:${params.domainUuid}`;
+    const lockRes = await this.#lockManager.acquireLocks({
+      ownerId: `consume-reservation:${txId}`,
+      keys: [lockKey]
+    });
+    if (!lockRes.ok) return lockRes;
+    try {
+      const consumeRes = this.#reservationStore.consume(params.reservationId, params.amountMinor);
+      if (!consumeRes.ok) return consumeRes;
+      const { reservation, consumedAmount } = consumeRes.value;
+      const docRes = await this.#domains.read(this.#cleanUuid(params.domainUuid));
+      if (!docRes.ok) return docRes;
+      const doc = docRes.value;
+      const econData = getDomainEconomyData(doc.record);
+      const accIndex = econData.accounts.findIndex((a) => a.resourceId === reservation.resourceId);
+      if (accIndex < 0 || econData.accounts[accIndex].mode !== "native") {
+        return err(
+          createPublicError({
+            code: "DM_ECON_ACCOUNT_NOT_FOUND",
+            category: "not-found",
+            message: `Account '${reservation.resourceId}' not found for consuming reservation`
+          })
+        );
+      }
+      const existingAccount = econData.accounts[accIndex];
+      const updatedAccount = {
+        ...existingAccount,
+        balanceMinor: existingAccount.balanceMinor - consumedAmount
+      };
+      const updatedAccounts = [...econData.accounts];
+      updatedAccounts[accIndex] = updatedAccount;
+      const updatedRecord = withDomainEconomyData(doc.record, {
+        ...econData,
+        accounts: Object.freeze(updatedAccounts)
+      });
+      const updateDocRes = await this.#domains.update({ ...doc, record: updatedRecord });
+      if (!updateDocRes.ok) return updateDocRes;
+      const entryRes = this.#ledgerStore.append({
+        domainUuid: params.domainUuid,
+        resourceId: reservation.resourceId,
+        deltaMinor: -consumedAmount,
+        kind: "consumption",
+        reservationId: reservation.id,
+        source: {
+          type: reservation.source.type,
+          ref: reservation.source.ref,
+          reason: params.reason ?? "Reservation consumption",
+          userId: params.userId
+        }
+      });
+      if (!entryRes.ok) return entryRes;
+      return ok({
+        reservation,
+        entry: entryRes.value,
+        account: updatedAccount
+      });
+    } finally {
+      await lockRes.value.release();
+    }
+  }
+  async releaseReservation(params) {
+    return this.#reservationStore.release(params.reservationId, params.amountMinor);
+  }
+  async reverseLedgerEntry(params) {
+    const originalEntry = this.#ledgerStore.get(params.entryId);
+    if (!originalEntry) {
+      return err(
+        createPublicError({
+          code: "DM_ECON_LEDGER_NOT_FOUND",
+          category: "not-found",
+          message: `Ledger entry '${params.entryId}' not found`
+        })
+      );
+    }
+    if (originalEntry.domainUuid !== params.domainUuid) {
+      return err(
+        createPublicError({
+          code: "DM_ECON_DOMAIN_MISMATCH",
+          category: "validation",
+          message: `Entry '${params.entryId}' belongs to domain '${originalEntry.domainUuid}', not '${params.domainUuid}'`
+        })
+      );
+    }
+    const txId = createOpaqueId("tx");
+    const lockKey = `domain:${params.domainUuid}`;
+    const lockRes = await this.#lockManager.acquireLocks({
+      ownerId: `reversal:${txId}`,
+      keys: [lockKey]
+    });
+    if (!lockRes.ok) return lockRes;
+    try {
+      const docRes = await this.#domains.read(this.#cleanUuid(params.domainUuid));
+      if (!docRes.ok) return docRes;
+      const doc = docRes.value;
+      const econData = getDomainEconomyData(doc.record);
+      const accIndex = econData.accounts.findIndex((a) => a.resourceId === originalEntry.resourceId);
+      if (accIndex < 0 || econData.accounts[accIndex].mode !== "native") {
+        return err(
+          createPublicError({
+            code: "DM_ECON_ACCOUNT_NOT_FOUND",
+            category: "not-found",
+            message: `Native account for resource '${originalEntry.resourceId}' not found`
+          })
+        );
+      }
+      const existingAccount = econData.accounts[accIndex];
+      const reversalRes = this.#ledgerStore.createReversal(
+        params.entryId,
+        params.reason,
+        params.userId
+      );
+      if (!reversalRes.ok) return reversalRes;
+      const reversalEntry = reversalRes.value;
+      const newBalance = existingAccount.balanceMinor + reversalEntry.deltaMinor;
+      const updatedAccount = {
+        ...existingAccount,
+        balanceMinor: newBalance
+      };
+      const updatedAccounts = [...econData.accounts];
+      updatedAccounts[accIndex] = updatedAccount;
+      const updatedRecord = withDomainEconomyData(doc.record, {
+        ...econData,
+        accounts: Object.freeze(updatedAccounts)
+      });
+      const updateDocRes = await this.#domains.update({ ...doc, record: updatedRecord });
+      if (!updateDocRes.ok) return updateDocRes;
+      return ok({
+        reversalEntry,
+        account: updatedAccount
+      });
+    } finally {
+      await lockRes.value.release();
+    }
+  }
+  #cleanUuid(uuid) {
+    return uuid.startsWith("JournalEntry.") ? uuid.slice("JournalEntry.".length) : uuid;
+  }
+};
+
+// src/economy/commands/economy-permissions.ts
+async function validateEconomyCommandPermission(ctx, domains, domainUuids, options) {
+  if (ctx.senderUserId === null || ctx.senderUserId === ctx.authorityUserId) {
+    return ok(true);
+  }
+  const gameUser = globalThis.game?.users?.get?.(ctx.senderUserId);
+  if (gameUser?.isGM) {
+    return ok(true);
+  }
+  if (options?.gmOnly) {
+    return err(
+      createPublicError({
+        code: "DM_SECURITY_PERMISSION_DENIED",
+        category: "permission",
+        message: "Economy operation requires Game Master authorization"
+      })
+    );
+  }
+  if (domainUuids.length === 0) {
+    return err(
+      createPublicError({
+        code: "DM_SECURITY_PERMISSION_DENIED",
+        category: "permission",
+        message: "Permission denied: target domain context required"
+      })
+    );
+  }
+  for (const rawDomainUuid of domainUuids) {
+    const cleanId = rawDomainUuid.startsWith("JournalEntry.") ? rawDomainUuid.slice("JournalEntry.".length) : rawDomainUuid;
+    const docRes = await domains.read(cleanId);
+    if (!docRes.ok) {
+      return err(
+        createPublicError({
+          code: "DM_SECURITY_PERMISSION_DENIED",
+          category: "permission",
+          message: `Permission denied: unable to resolve target domain '${rawDomainUuid}'`
+        })
+      );
+    }
+    const doc = docRes.value;
+    if (options?.controllerProvider) {
+      const isController = await options.controllerProvider.isDomainController(
+        doc.uuid,
+        ctx.senderUserId,
+        { record: doc.record, document: doc }
+      );
+      if (isController) {
+        continue;
+      }
+    }
+    const ownership = doc.ownership;
+    const userLevel = ownership ? ownership[ctx.senderUserId] ?? ownership.default ?? 0 : 0;
+    if (userLevel >= 3) {
+      continue;
+    }
+    return err(
+      createPublicError({
+        code: "DM_SECURITY_PERMISSION_DENIED",
+        category: "permission",
+        message: `User '${ctx.senderUserId}' is not authorized as Domain Controller for domain '${rawDomainUuid}'`
+      })
+    );
+  }
+  return ok(true);
+}
+
+// src/economy/commands/economy-commands.ts
+function registerEconomyCommands(options) {
+  const { registry, economyService, domains, controllerProvider } = options;
+  registry.register({
+    type: "economy:adjust",
+    visibility: "public",
+    description: "Authoritatively adjusts resource balance on a domain (GM only)",
+    schemaValidator: (payload) => {
+      if (!payload || typeof payload !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Payload must be an object"
+          })
+        );
+      }
+      const p = payload;
+      if (typeof p.domainUuid !== "string" || !p.domainUuid.trim()) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "domainUuid is required"
+          })
+        );
+      }
+      if (!isNamespacedResourceId(p.resourceId)) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "resourceId must be namespaced"
+          })
+        );
+      }
+      if (typeof p.reason !== "string" || !p.reason.trim()) {
+        return err(
+          createPublicError({
+            code: "DM_ECON_ADJUST_REASON_REQUIRED",
+            category: "validation",
+            message: "Adjustment requires a reason"
+          })
+        );
+      }
+      return ok(p);
+    },
+    permissionValidator: (ctx) => validateEconomyCommandPermission(ctx, domains, [ctx.command.payload.domainUuid], {
+      controllerProvider,
+      gmOnly: true
+    }),
+    handler: async (ctx) => {
+      const p = ctx.command.payload;
+      return economyService.commitAdjust({
+        domainUuid: p.domainUuid,
+        resourceId: p.resourceId,
+        deltaMinor: p.deltaMinor,
+        targetBalanceMinor: p.targetBalanceMinor,
+        reason: p.reason,
+        userId: ctx.senderUserId ?? void 0
+      });
+    }
+  });
+  registry.register({
+    type: "economy:transfer",
+    visibility: "public",
+    description: "Authoritatively transfers resources between two domains",
+    schemaValidator: (payload) => {
+      if (!payload || typeof payload !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Payload must be an object"
+          })
+        );
+      }
+      const p = payload;
+      if (typeof p.sourceDomainUuid !== "string" || !p.sourceDomainUuid.trim()) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "sourceDomainUuid is required"
+          })
+        );
+      }
+      if (typeof p.targetDomainUuid !== "string" || !p.targetDomainUuid.trim()) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "targetDomainUuid is required"
+          })
+        );
+      }
+      if (!isNamespacedResourceId(p.resourceId)) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "resourceId must be namespaced"
+          })
+        );
+      }
+      if (typeof p.amountMinor !== "number" || !Number.isSafeInteger(p.amountMinor) || p.amountMinor <= 0) {
+        return err(
+          createPublicError({
+            code: "DM_ECON_AMOUNT_INVALID",
+            category: "validation",
+            message: "amountMinor must be a positive safe integer"
+          })
+        );
+      }
+      return ok(p);
+    },
+    permissionValidator: (ctx) => validateEconomyCommandPermission(
+      ctx,
+      domains,
+      [ctx.command.payload.sourceDomainUuid, ctx.command.payload.targetDomainUuid],
+      { controllerProvider }
+    ),
+    handler: async (ctx) => {
+      const p = ctx.command.payload;
+      return economyService.commitTransfer({
+        sourceDomainUuid: p.sourceDomainUuid,
+        targetDomainUuid: p.targetDomainUuid,
+        resourceId: p.resourceId,
+        amountMinor: p.amountMinor,
+        reason: p.reason,
+        userId: ctx.senderUserId ?? void 0
+      });
+    }
+  });
+  registry.register({
+    type: "economy:convert",
+    visibility: "public",
+    description: "Converts one resource to another within a domain",
+    schemaValidator: (payload) => {
+      if (!payload || typeof payload !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Payload must be an object"
+          })
+        );
+      }
+      const p = payload;
+      if (typeof p.domainUuid !== "string" || !p.domainUuid.trim()) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "domainUuid is required"
+          })
+        );
+      }
+      if (!isNamespacedResourceId(p.fromResourceId) || !isNamespacedResourceId(p.toResourceId)) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "fromResourceId and toResourceId must be namespaced"
+          })
+        );
+      }
+      if (typeof p.fromAmountMinor !== "number" || !Number.isSafeInteger(p.fromAmountMinor) || p.fromAmountMinor <= 0) {
+        return err(
+          createPublicError({
+            code: "DM_ECON_AMOUNT_INVALID",
+            category: "validation",
+            message: "fromAmountMinor must be a positive safe integer"
+          })
+        );
+      }
+      if (typeof p.toAmountMinor !== "number" || !Number.isSafeInteger(p.toAmountMinor) || p.toAmountMinor <= 0) {
+        return err(
+          createPublicError({
+            code: "DM_ECON_AMOUNT_INVALID",
+            category: "validation",
+            message: "toAmountMinor must be a positive safe integer"
+          })
+        );
+      }
+      return ok(p);
+    },
+    permissionValidator: (ctx) => validateEconomyCommandPermission(ctx, domains, [ctx.command.payload.domainUuid], {
+      controllerProvider
+    }),
+    handler: async (ctx) => {
+      const p = ctx.command.payload;
+      return economyService.commitConvert({
+        domainUuid: p.domainUuid,
+        fromResourceId: p.fromResourceId,
+        toResourceId: p.toResourceId,
+        fromAmountMinor: p.fromAmountMinor,
+        toAmountMinor: p.toAmountMinor,
+        rateDescription: p.rateDescription,
+        reason: p.reason,
+        userId: ctx.senderUserId ?? void 0
+      });
+    }
+  });
+  registry.register({
+    type: "economy:reserve",
+    visibility: "public",
+    description: "Creates a resource reservation",
+    schemaValidator: (payload) => {
+      if (!payload || typeof payload !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Payload must be an object"
+          })
+        );
+      }
+      const p = payload;
+      if (typeof p.domainUuid !== "string" || !p.domainUuid.trim()) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "domainUuid is required"
+          })
+        );
+      }
+      if (!isNamespacedResourceId(p.resourceId)) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "resourceId must be namespaced"
+          })
+        );
+      }
+      if (typeof p.amountMinor !== "number" || !Number.isSafeInteger(p.amountMinor) || p.amountMinor <= 0) {
+        return err(
+          createPublicError({
+            code: "DM_ECON_AMOUNT_INVALID",
+            category: "validation",
+            message: "amountMinor must be a positive safe integer"
+          })
+        );
+      }
+      return ok(p);
+    },
+    permissionValidator: (ctx) => validateEconomyCommandPermission(ctx, domains, [ctx.command.payload.domainUuid], {
+      controllerProvider
+    }),
+    handler: async (ctx) => {
+      const p = ctx.command.payload;
+      return economyService.reserve({
+        domainUuid: p.domainUuid,
+        resourceId: p.resourceId,
+        amountMinor: p.amountMinor,
+        source: p.source ?? { type: "command", ref: ctx.command.commandId },
+        expiresAtWorld: p.expiresAtWorld,
+        expiresAtReal: p.expiresAtReal
+      });
+    }
+  });
+  registry.register({
+    type: "economy:consume-reservation",
+    visibility: "public",
+    description: "Consumes a reservation, debiting account balance and recording ledger entry",
+    schemaValidator: (payload) => {
+      if (!payload || typeof payload !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Payload must be an object"
+          })
+        );
+      }
+      const p = payload;
+      if (typeof p.domainUuid !== "string" || !p.domainUuid.trim()) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "domainUuid is required"
+          })
+        );
+      }
+      if (typeof p.reservationId !== "string" || !p.reservationId.trim()) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "reservationId is required"
+          })
+        );
+      }
+      if (typeof p.amountMinor !== "number" || !Number.isSafeInteger(p.amountMinor) || p.amountMinor <= 0) {
+        return err(
+          createPublicError({
+            code: "DM_ECON_AMOUNT_INVALID",
+            category: "validation",
+            message: "amountMinor must be a positive safe integer"
+          })
+        );
+      }
+      return ok(p);
+    },
+    permissionValidator: (ctx) => validateEconomyCommandPermission(ctx, domains, [ctx.command.payload.domainUuid], {
+      controllerProvider
+    }),
+    handler: async (ctx) => {
+      const p = ctx.command.payload;
+      return economyService.consumeReservation({
+        domainUuid: p.domainUuid,
+        reservationId: p.reservationId,
+        amountMinor: p.amountMinor,
+        reason: p.reason,
+        userId: ctx.senderUserId ?? void 0
+      });
+    }
+  });
+  registry.register({
+    type: "economy:release-reservation",
+    visibility: "public",
+    description: "Releases a reservation, freeing up availability without changing balance",
+    schemaValidator: (payload) => {
+      if (!payload || typeof payload !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Payload must be an object"
+          })
+        );
+      }
+      const p = payload;
+      if (typeof p.domainUuid !== "string" || !p.domainUuid.trim()) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "domainUuid is required"
+          })
+        );
+      }
+      if (typeof p.reservationId !== "string" || !p.reservationId.trim()) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "reservationId is required"
+          })
+        );
+      }
+      return ok(p);
+    },
+    permissionValidator: (ctx) => validateEconomyCommandPermission(ctx, domains, [ctx.command.payload.domainUuid], {
+      controllerProvider
+    }),
+    handler: async (ctx) => {
+      const p = ctx.command.payload;
+      return economyService.releaseReservation({
+        domainUuid: p.domainUuid,
+        reservationId: p.reservationId,
+        amountMinor: p.amountMinor
+      });
+    }
+  });
+  registry.register({
+    type: "economy:create-account",
+    visibility: "public",
+    description: "Creates a resource account in a domain (GM only)",
+    schemaValidator: (payload) => {
+      if (!payload || typeof payload !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Payload must be an object"
+          })
+        );
+      }
+      const p = payload;
+      if (typeof p.domainUuid !== "string" || !p.domainUuid.trim()) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "domainUuid is required"
+          })
+        );
+      }
+      if (!isNamespacedResourceId(p.resourceId)) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "resourceId must be namespaced"
+          })
+        );
+      }
+      return ok(p);
+    },
+    permissionValidator: (ctx) => validateEconomyCommandPermission(ctx, domains, [ctx.command.payload.domainUuid], {
+      controllerProvider,
+      gmOnly: true
+    }),
+    handler: async (ctx) => {
+      const p = ctx.command.payload;
+      return economyService.createAccount({
+        domainUuid: p.domainUuid,
+        resourceId: p.resourceId,
+        initialBalanceMinor: p.initialBalanceMinor,
+        baseCapacityMinor: p.baseCapacityMinor,
+        visibility: p.visibility,
+        reason: p.reason,
+        userId: ctx.senderUserId ?? void 0
+      });
+    }
+  });
+  registry.register({
+    type: "economy:close-account",
+    visibility: "public",
+    description: "Closes an empty resource account in a domain (GM only)",
+    schemaValidator: (payload) => {
+      if (!payload || typeof payload !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Payload must be an object"
+          })
+        );
+      }
+      const p = payload;
+      if (typeof p.domainUuid !== "string" || !p.domainUuid.trim()) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "domainUuid is required"
+          })
+        );
+      }
+      if (!isNamespacedResourceId(p.resourceId)) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "resourceId must be namespaced"
+          })
+        );
+      }
+      return ok(p);
+    },
+    permissionValidator: (ctx) => validateEconomyCommandPermission(ctx, domains, [ctx.command.payload.domainUuid], {
+      controllerProvider,
+      gmOnly: true
+    }),
+    handler: async (ctx) => {
+      const p = ctx.command.payload;
+      return economyService.closeAccount({
+        domainUuid: p.domainUuid,
+        resourceId: p.resourceId,
+        reason: p.reason,
+        userId: ctx.senderUserId ?? void 0
+      });
+    }
+  });
+  registry.register({
+    type: "economy:reversal",
+    visibility: "public",
+    description: "Appends a compensating reversal entry to the ledger and updates balance (GM only)",
+    schemaValidator: (payload) => {
+      if (!payload || typeof payload !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Payload must be an object"
+          })
+        );
+      }
+      const p = payload;
+      if (typeof p.domainUuid !== "string" || !p.domainUuid.trim()) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "domainUuid is required"
+          })
+        );
+      }
+      if (typeof p.entryId !== "string" || !p.entryId.trim()) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "entryId is required"
+          })
+        );
+      }
+      if (typeof p.reason !== "string" || !p.reason.trim()) {
+        return err(
+          createPublicError({
+            code: "DM_ECON_ADJUST_REASON_REQUIRED",
+            category: "validation",
+            message: "Reversal requires a reason"
+          })
+        );
+      }
+      return ok(p);
+    },
+    permissionValidator: (ctx) => validateEconomyCommandPermission(ctx, domains, [ctx.command.payload.domainUuid], {
+      controllerProvider,
+      gmOnly: true
+    }),
+    handler: async (ctx) => {
+      const p = ctx.command.payload;
+      return economyService.reverseLedgerEntry({
+        domainUuid: p.domainUuid,
+        entryId: p.entryId,
+        reason: p.reason,
+        userId: ctx.senderUserId ?? void 0
+      });
+    }
+  });
+}
+
+// src/economy/math/minor-units.ts
+function minorToMajor(amountMinor, precision) {
+  if (precision === 0) return amountMinor;
+  const factor = 10 ** precision;
+  return amountMinor / factor;
+}
+function formatResourceAmount(amountMinor, definition, options) {
+  const precision = definition.precision;
+  const major = minorToMajor(amountMinor, precision);
+  const locale = options?.locale ?? "en-US";
+  const formattedNumber = major.toLocaleString(locale, {
+    minimumFractionDigits: precision,
+    maximumFractionDigits: precision
+  });
+  if (!options?.showUnit || !definition.displayUnit) {
+    return formattedNumber;
+  }
+  const unit = definition.displayUnit;
+  if (unit.abbreviation) {
+    return `${formattedNumber} ${unit.abbreviation}`;
+  }
+  const isSingular = Math.abs(major) === 1;
+  const unitLabel = isSingular ? unit.singular ?? unit.plural ?? "" : unit.plural ?? unit.singular ?? "";
+  return unitLabel ? `${formattedNumber} ${unitLabel}` : formattedNumber;
+}
+
+// src/ui/domain-patterns/economy/economy-presenter.ts
+function buildEconomyViewModel(domainInput, options) {
+  const record = "record" in domainInput ? domainInput.record : "flags" in domainInput && domainInput.flags?.["domain-manager"] ? domainInput.flags["domain-manager"] : domainInput;
+  const domainUuid = "uuid" in domainInput ? domainInput.uuid : "unknown";
+  const economyData = getDomainEconomyData(record);
+  const accountVMs = [];
+  for (const acc of economyData.accounts) {
+    if (!options.viewerIsGm && acc.visibility === "secret") {
+      continue;
+    }
+    const def = options.resourceRegistry.get(acc.resourceId);
+    const label = def?.label ?? acc.resourceId;
+    const precision = def?.precision ?? 0;
+    const unit = def?.displayUnit?.singular ?? def?.displayUnit?.abbreviation ?? "";
+    const balanceMinor = acc.mode === "native" ? acc.balanceMinor : 0;
+    const reservedMinor = options.reservationStore ? options.reservationStore.getReservedTotal(domainUuid, acc.resourceId) : 0;
+    const availableMinor = balanceMinor - reservedMinor;
+    const baseCap = acc.mode === "native" ? acc.baseCapacityMinor : null;
+    const effectiveCap = resolveEffectiveCapacity(baseCap, [], def);
+    const effectiveCapacityMinor = effectiveCap.effectiveCapacityMinor;
+    let capacityPercentage = null;
+    let statusBadgeClass = "normal";
+    if (effectiveCapacityMinor !== null && effectiveCapacityMinor > 0) {
+      capacityPercentage = Math.min(100, Math.round(balanceMinor / effectiveCapacityMinor * 100));
+      if (balanceMinor > effectiveCapacityMinor) {
+        statusBadgeClass = "over-capacity";
+      } else if (capacityPercentage >= 85) {
+        statusBadgeClass = "near-capacity";
+      }
+    }
+    if (availableMinor < 0) {
+      statusBadgeClass = "low-reserve";
+    }
+    const resDef = def ?? {
+      id: acc.resourceId,
+      version: 1,
+      label,
+      description: "",
+      icon: "",
+      categoryId: "custom",
+      tags: [],
+      precision,
+      displayUnit: { singular: unit, plural: unit },
+      minimumMinor: 0,
+      maximumMinor: null,
+      allowNegative: false,
+      defaultCapacityPolicy: "block",
+      lifecycle: "active"
+    };
+    const balanceFormatted = formatResourceAmount(balanceMinor, resDef, { showUnit: true });
+    const reservedFormatted = formatResourceAmount(reservedMinor, resDef, { showUnit: true });
+    const availableFormatted = formatResourceAmount(availableMinor, resDef, { showUnit: true });
+    const capacityFormatted = effectiveCapacityMinor !== null ? formatResourceAmount(effectiveCapacityMinor, resDef, { showUnit: true }) : "Unlimited";
+    accountVMs.push({
+      resourceId: acc.resourceId,
+      label,
+      ...def?.icon ? { icon: def.icon } : {},
+      displayUnit: unit,
+      balanceMinor,
+      balanceFormatted,
+      reservedMinor,
+      reservedFormatted,
+      availableMinor,
+      availableFormatted,
+      effectiveCapacityMinor,
+      capacityFormatted,
+      capacityPercentage,
+      isSecret: acc.visibility === "secret",
+      statusBadgeClass
+    });
+  }
+  const ledgerVMs = [];
+  if (options.ledgerStore) {
+    const rawEntries = options.ledgerStore.query({ domainUuid, limit: 20 });
+    const visibleResourceIds = new Set(accountVMs.map((a) => a.resourceId));
+    for (const entry of rawEntries) {
+      if (!options.viewerIsGm && !visibleResourceIds.has(entry.resourceId)) {
+        continue;
+      }
+      const def = options.resourceRegistry.get(entry.resourceId);
+      const label = def?.label ?? entry.resourceId;
+      const precision = def?.precision ?? 0;
+      const unit = def?.displayUnit?.singular ?? "";
+      const resDef = def ?? {
+        id: entry.resourceId,
+        version: 1,
+        label,
+        description: "",
+        icon: "",
+        categoryId: "custom",
+        tags: [],
+        precision,
+        displayUnit: { singular: unit, plural: unit },
+        minimumMinor: 0,
+        maximumMinor: null,
+        allowNegative: false,
+        defaultCapacityPolicy: "block",
+        lifecycle: "active"
+      };
+      const deltaFormatted = (entry.deltaMinor > 0 ? "+" : "") + formatResourceAmount(entry.deltaMinor, resDef, { showUnit: true });
+      ledgerVMs.push({
+        id: entry.id,
+        timestampFormatted: new Date(entry.timestampReal).toLocaleTimeString(),
+        kind: entry.kind,
+        deltaFormatted,
+        deltaClass: entry.deltaMinor >= 0 ? "positive" : "negative",
+        reason: entry.source?.reason,
+        resourceLabel: def?.label ?? entry.resourceId
+      });
+    }
+  }
+  return {
+    domainUuid,
+    viewerIsGm: options.viewerIsGm,
+    accounts: Object.freeze(accountVMs),
+    recentLedger: Object.freeze(ledgerVMs)
+  };
+}
+
+// src/ui/domain-patterns/economy/economy-view.ts
+function escapeHtml2(value) {
+  if (value === null || value === void 0) return "";
+  return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+function escapeAttribute2(value) {
+  return escapeHtml2(value);
+}
+function renderEconomySubsystemHtml(vm) {
+  return `
+    <div class="dm-economy-subsystem" data-domain-uuid="${escapeAttribute2(vm.domainUuid)}">
+      <header class="dm-economy-header">
+        <div class="dm-header-title">
+          <h3><i class="fas fa-coins"></i> Economy & Resources</h3>
+        </div>
+        <div class="dm-header-actions">
+          <button type="button" class="dm-btn dm-btn-secondary" data-action="openTransferModal">
+            <i class="fas fa-exchange-alt"></i> Transfer
+          </button>
+          ${vm.viewerIsGm ? `
+            <button type="button" class="dm-btn dm-btn-secondary" data-action="openAdjustModal">
+              <i class="fas fa-sliders-h"></i> Adjust
+            </button>
+            <button type="button" class="dm-btn dm-btn-primary" data-action="openCreateAccountModal">
+              <i class="fas fa-plus"></i> New Account
+            </button>
+          ` : ""}
+        </div>
+      </header>
+
+      <section class="dm-resource-cards-section">
+        ${renderResourceCards(vm.accounts)}
+      </section>
+
+      <section class="dm-ledger-history-section">
+        <h4><i class="fas fa-history"></i> Recent Ledger Activity</h4>
+        ${renderLedgerTable(vm.recentLedger)}
+      </section>
+    </div>
+  `;
+}
+function renderResourceCards(accounts) {
+  if (accounts.length === 0) {
+    return `<div class="dm-empty-state">No resource accounts configured in this domain.</div>`;
+  }
+  return `
+    <div class="dm-resource-grid">
+      ${accounts.map(
+    (acc) => `
+        <div class="dm-card dm-resource-card ${escapeAttribute2(acc.statusBadgeClass)} ${acc.isSecret ? "secret" : ""}"
+             data-resource-id="${escapeAttribute2(acc.resourceId)}">
+          <div class="dm-card-header">
+            <div class="dm-card-icon"><i class="${escapeAttribute2(acc.icon ?? "fas fa-box")}"></i></div>
+            <h4 class="dm-card-title">${escapeHtml2(acc.label)}</h4>
+            ${acc.isSecret ? `<span class="dm-badge-secret"><i class="fas fa-eye-slash"></i> Secret</span>` : ""}
+          </div>
+
+          <div class="dm-card-balance">
+            <span class="dm-balance-major">${escapeHtml2(acc.balanceFormatted)}</span>
+          </div>
+
+          <div class="dm-card-metrics">
+            <div class="dm-metric">
+              <span class="dm-metric-label">Reserved:</span>
+              <span class="dm-metric-value">${escapeHtml2(acc.reservedFormatted)}</span>
+            </div>
+            <div class="dm-metric">
+              <span class="dm-metric-label">Available:</span>
+              <span class="dm-metric-value dm-metric-available">${escapeHtml2(acc.availableFormatted)}</span>
+            </div>
+            <div class="dm-metric">
+              <span class="dm-metric-label">Capacity:</span>
+              <span class="dm-metric-value">${escapeHtml2(acc.capacityFormatted)}</span>
+            </div>
+          </div>
+
+          ${acc.capacityPercentage !== null ? `
+            <div class="dm-capacity-progress-bar">
+              <div class="dm-progress-fill ${escapeAttribute2(acc.statusBadgeClass)}" style="width: ${acc.capacityPercentage}%"></div>
+            </div>
+          ` : ""}
+        </div>
+      `
+  ).join("")}
+    </div>
+  `;
+}
+function renderLedgerTable(entries) {
+  if (entries.length === 0) {
+    return `<div class="dm-empty-state">No recent ledger transactions recorded.</div>`;
+  }
+  return `
+    <table class="dm-ledger-table">
+      <thead>
+        <tr>
+          <th>Time</th>
+          <th>Resource</th>
+          <th>Type</th>
+          <th>Delta</th>
+          <th>Reason</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${entries.map(
+    (e) => `
+          <tr class="dm-ledger-row">
+            <td class="dm-col-time">${escapeHtml2(e.timestampFormatted)}</td>
+            <td class="dm-col-resource">${escapeHtml2(e.resourceLabel)}</td>
+            <td class="dm-col-kind"><span class="dm-kind-badge">${escapeHtml2(e.kind)}</span></td>
+            <td class="dm-col-delta ${escapeAttribute2(e.deltaClass)}">${escapeHtml2(e.deltaFormatted)}</td>
+            <td class="dm-col-reason">${escapeHtml2(e.reason ?? "\u2014")}</td>
+          </tr>
+        `
+  ).join("")}
+      </tbody>
+    </table>
+  `;
+}
+function renderTransferModalHtml(domainUuid, accounts) {
+  return `
+    <div class="dm-modal dm-transfer-modal" data-modal-type="transfer">
+      <h3><i class="fas fa-exchange-alt"></i> Transfer Resources</h3>
+      <form data-form-type="transfer">
+        <input type="hidden" name="sourceDomainUuid" value="${escapeAttribute2(domainUuid)}" />
+        <label>
+          Resource:
+          <select name="resourceId" required>
+            ${accounts.map((a) => `<option value="${escapeAttribute2(a.resourceId)}">${escapeHtml2(a.label)} (Available: ${escapeHtml2(a.availableFormatted)})</option>`).join("")}
+          </select>
+        </label>
+        <label>
+          Target Domain UUID:
+          <input type="text" name="targetDomainUuid" required placeholder="JournalEntry.id..." />
+        </label>
+        <label>
+          Amount:
+          <input type="number" name="amount" min="1" step="1" required />
+        </label>
+        <label>
+          Reason:
+          <input type="text" name="reason" placeholder="Transfer notes or motivation" />
+        </label>
+        <div class="dm-modal-actions">
+          <button type="button" class="dm-btn dm-btn-secondary" data-action="closeModal">Cancel</button>
+          <button type="submit" class="dm-btn dm-btn-primary">Transfer</button>
+        </div>
+      </form>
+    </div>
+  `;
+}
+function renderAdjustModalHtml(domainUuid, accounts) {
+  return `
+    <div class="dm-modal dm-adjust-modal" data-modal-type="adjust">
+      <h3><i class="fas fa-sliders-h"></i> Authoritative Adjustment</h3>
+      <form data-form-type="adjust">
+        <input type="hidden" name="domainUuid" value="${escapeAttribute2(domainUuid)}" />
+        <label>
+          Resource:
+          <select name="resourceId" required>
+            ${accounts.map((a) => `<option value="${escapeAttribute2(a.resourceId)}">${escapeHtml2(a.label)} (Current: ${escapeHtml2(a.balanceFormatted)})</option>`).join("")}
+          </select>
+        </label>
+        <label>
+          Delta Amount (positive or negative):
+          <input type="number" name="delta" step="1" required />
+        </label>
+        <label>
+          Reason (Required):
+          <input type="text" name="reason" required placeholder="Mandatory audit explanation" />
+        </label>
+        <div class="dm-modal-actions">
+          <button type="button" class="dm-btn dm-btn-secondary" data-action="closeModal">Cancel</button>
+          <button type="submit" class="dm-btn dm-btn-primary">Apply Adjustment</button>
+        </div>
+      </form>
+    </div>
+  `;
+}
+
+// src/ui/domain-patterns/economy/economy-app.ts
+function makeCommand2(type, payload) {
+  return {
+    contractVersion: COMMAND_CONTRACT_VERSION_V1,
+    commandId: createCommandId(),
+    type,
+    payload,
+    issuedAtReal: Date.now()
+  };
+}
+var EconomyApplicationController = class {
+  #domainUuid;
+  #commandBus;
+  #economyService;
+  #domains;
+  #viewer;
+  #activeModal = null;
+  #lastViewModel = null;
+  constructor(options) {
+    this.#domainUuid = options.domainUuid;
+    this.#commandBus = options.commandBus;
+    this.#economyService = options.economyService;
+    this.#domains = options.domains;
+    this.#viewer = options.viewer;
+  }
+  get domainUuid() {
+    return this.#domainUuid;
+  }
+  get activeModal() {
+    return this.#activeModal;
+  }
+  get viewModel() {
+    return this.#lastViewModel;
+  }
+  async loadViewModel() {
+    const cleanId = this.#domainUuid.startsWith("JournalEntry.") ? this.#domainUuid.slice("JournalEntry.".length) : this.#domainUuid;
+    const docRes = await this.#domains.read(cleanId);
+    if (!docRes.ok) {
+      return docRes;
+    }
+    const isGm = Boolean(
+      this.#viewer?.isGm ?? globalThis.game?.user?.isGM ?? true
+    );
+    const presenterOptions = {
+      viewerIsGm: isGm,
+      resourceRegistry: this.#economyService.registry,
+      ledgerStore: this.#economyService.ledgerStore,
+      reservationStore: this.#economyService.reservationStore
+    };
+    const vm = buildEconomyViewModel(docRes.value, presenterOptions);
+    this.#lastViewModel = vm;
+    return ok(vm);
+  }
+  openModal(modalType) {
+    this.#activeModal = modalType;
+  }
+  closeModal() {
+    this.#activeModal = null;
+  }
+  async dispatchTransfer(payload) {
+    const cmd = makeCommand2("economy:transfer", {
+      sourceDomainUuid: this.#domainUuid,
+      targetDomainUuid: payload.targetDomainUuid,
+      resourceId: payload.resourceId,
+      amountMinor: payload.amountMinor,
+      reason: payload.reason
+    });
+    return this.#executeCommand(cmd);
+  }
+  async dispatchAdjust(payload) {
+    const cmd = makeCommand2("economy:adjust", {
+      domainUuid: this.#domainUuid,
+      resourceId: payload.resourceId,
+      deltaMinor: payload.deltaMinor,
+      targetBalanceMinor: payload.targetBalanceMinor,
+      reason: payload.reason
+    });
+    return this.#executeCommand(cmd);
+  }
+  async #executeCommand(cmd) {
+    const receiptRes = await this.#commandBus.execute(cmd);
+    if (!receiptRes.ok) {
+      return receiptRes;
+    }
+    const receipt = receiptRes.value;
+    if (receipt.status === "rejected") {
+      return err(
+        receipt.error ?? createPublicError({
+          code: "DM_COMMAND_REJECTED",
+          category: "internal",
+          message: "Economy command rejected"
+        })
+      );
+    }
+    return ok(receipt.result);
+  }
+  render(vm) {
+    if (!vm) {
+      return `<div class="dm-loading">Loading Economy Subsystem...</div>`;
+    }
+    const mainHtml = renderEconomySubsystemHtml(vm);
+    let modalHtml = "";
+    if (this.#activeModal === "transfer") {
+      modalHtml = renderTransferModalHtml(this.#domainUuid, vm.accounts);
+    } else if (this.#activeModal === "adjust") {
+      modalHtml = renderAdjustModalHtml(this.#domainUuid, vm.accounts);
+    }
+    return `
+      <div class="dm-economy-app-v2" data-domain-uuid="${escapeAttribute2(this.#domainUuid)}">
+        ${mainHtml}
+        ${modalHtml ? `<div class="dm-modal-backdrop">${modalHtml}</div>` : ""}
+      </div>
+    `;
+  }
+};
+var MockApplicationV22 = class {
+  element = null;
+  options;
+  constructor(options = {}) {
+    this.options = options;
+  }
+  async _prepareContext(options) {
+    return {};
+  }
+  _renderHTML(context, options) {
+    return "";
+  }
+  _replaceHTML(result, content, options) {
+    if (typeof result === "string") {
+      content.innerHTML = result;
+    }
+  }
+  async render(force, options) {
+    if (!this.element) {
+      const classes = (this.constructor.DEFAULT_OPTIONS?.classes ?? ["domain-manager", "dm-economy-app-v2"]).join(" ");
+      if (typeof globalThis.document?.createElement === "function") {
+        const el = globalThis.document.createElement("div");
+        el.className = classes;
+        this.element = el;
+      } else {
+        this.element = {
+          className: classes,
+          innerHTML: "",
+          children: [],
+          querySelectorAll: () => [],
+          querySelector: () => null,
+          addEventListener: () => {
+          }
+        };
+      }
+    }
+    const context = await this._prepareContext(options);
+    const result = await this._renderHTML(context, options);
+    this._replaceHTML(result, this.element, options);
+    this._onRender(context, options);
+    return this;
+  }
+  _onRender(context, options) {
+  }
+  async close(options) {
+    this.element = null;
+  }
+};
+var BaseApp2 = globalThis.foundry?.applications?.api?.ApplicationV2 ?? MockApplicationV22;
+var EconomyApplication = class _EconomyApplication extends BaseApp2 {
+  static DEFAULT_OPTIONS = {
+    id: "domain-manager-economy-{id}",
+    classes: ["domain-manager", "dm-economy-app-v2"],
+    tag: "div",
+    window: {
+      title: "Economy & Resources",
+      icon: "fas fa-coins",
+      resizable: true,
+      minimizable: true
+    },
+    position: {
+      width: 780,
+      height: 600
+    },
+    actions: {
+      openTransferModal: _EconomyApplication.#onOpenTransferModal,
+      openAdjustModal: _EconomyApplication.#onOpenAdjustModal,
+      closeModal: _EconomyApplication.#onCloseModal
+    }
+  };
+  #controller;
+  constructor(options) {
+    super(options);
+    this.#controller = new EconomyApplicationController(options);
+  }
+  get controller() {
+    return this.#controller;
+  }
+  async _prepareContext(options) {
+    const vmRes = await this.#controller.loadViewModel();
+    return {
+      viewModel: vmRes.ok ? vmRes.value : null,
+      error: !vmRes.ok ? vmRes.error : null
+    };
+  }
+  _renderHTML(context, options) {
+    if (context.error) {
+      return `<div class="dm-error-state">${escapeHtml2(context.error.message)}</div>`;
+    }
+    return this.#controller.render(context.viewModel);
+  }
+  _replaceHTML(result, content, options) {
+    if (typeof result === "string") {
+      content.innerHTML = result;
+    } else if (result && typeof content.replaceChildren === "function") {
+      content.replaceChildren(result);
+    } else if (result) {
+      content.innerHTML = String(result);
+    }
+  }
+  _onRender(context, options) {
+    const el = this.element;
+    if (el) {
+      this.attachEventListeners(el);
+    }
+  }
+  attachEventListeners(element) {
+    const forms = element.querySelectorAll?.("form[data-form-type]") ?? [];
+    forms.forEach((form) => {
+      if (form._dmSubmitBound) return;
+      form._dmSubmitBound = true;
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const formType = form.getAttribute?.("data-form-type");
+        const formData = new FormData(form);
+        const data = {};
+        formData.forEach((val, key) => {
+          data[key] = String(val).trim();
+        });
+        if (formType === "transfer") {
+          const amount = parseInt(data.amount, 10);
+          if (!isNaN(amount) && amount > 0) {
+            await this.#controller.dispatchTransfer({
+              targetDomainUuid: data.targetDomainUuid,
+              resourceId: data.resourceId,
+              amountMinor: amount,
+              reason: data.reason || void 0
+            });
+            this.#controller.closeModal();
+            this.render();
+          }
+        } else if (formType === "adjust") {
+          const delta = parseInt(data.delta, 10);
+          if (!isNaN(delta) && data.reason) {
+            await this.#controller.dispatchAdjust({
+              resourceId: data.resourceId,
+              deltaMinor: delta,
+              reason: data.reason
+            });
+            this.#controller.closeModal();
+            this.render();
+          }
+        }
+      });
+    });
+  }
+  static #onOpenTransferModal() {
+    this.#controller.openModal("transfer");
+    this.render();
+  }
+  static #onOpenAdjustModal() {
+    this.#controller.openModal("adjust");
+    this.render();
+  }
+  static #onCloseModal() {
+    this.#controller.closeModal();
+    this.render();
+  }
+};
+
 // src/bootstrap/domain-manager-runtime.ts
 function composeDomainManagerRuntime(options = {}) {
   const domainStore = options.domainStore ?? new FoundryDomainDocumentStore();
@@ -11733,6 +15355,16 @@ function composeDomainManagerRuntime(options = {}) {
   const coordinator = new MutationCoordinator({ lockManager });
   const transactionStore = options.transactionStore ?? new TransactionStore();
   const recovery = new RecoveryService({ transactionStore, lockManager });
+  const resourceRegistry = options.resourceRegistry ?? createDefaultResourceRegistry();
+  const ledgerStore = options.ledgerStore ?? new LedgerStore();
+  const reservationStore = options.reservationStore ?? new ReservationStore();
+  const economy = new EconomyService({
+    domains: mutableDomainRepo,
+    resourceRegistry,
+    ledgerStore,
+    reservationStore,
+    lockManager
+  });
   const registry = new CommandRegistry();
   registerDomainCommandHandlers(registry, coordinator, mutableDomainRepo);
   registerPopulationCommandHandlers(registry, coordinator, mutableDomainRepo);
@@ -11741,6 +15373,12 @@ function composeDomainManagerRuntime(options = {}) {
   registerOperationalGroupCommandHandlers(registry, coordinator, mutableDomainRepo);
   registerAssignmentCommandHandlers(registry, coordinator, mutableDomainRepo);
   registerRepairCommandHandlers(registry, coordinator, mutableDomainRepo);
+  registerEconomyCommands({
+    registry,
+    economyService: economy,
+    domains: mutableDomainRepo,
+    controllerProvider: options.controllerProvider
+  });
   registry.freeze();
   const commandQueue = options.commandQueue ?? new CommandQueue({ maxConcurrency: 10 });
   const dedupeStore = options.dedupeStore ?? new CommandDedupeStore();
@@ -11801,6 +15439,10 @@ function composeDomainManagerRuntime(options = {}) {
     people,
     repairTool,
     controllerProvider,
+    economy,
+    resourceRegistry,
+    ledgerStore,
+    reservationStore,
     destroy: () => {
       unregisterPolicy();
       commandBus.destroy();
@@ -11916,12 +15558,19 @@ Hooks.once("ready", () => {
 });
 export {
   DefaultDomainControllerProvider,
+  EconomyApplication,
+  EconomyApplicationController,
+  EconomyService,
+  LedgerStore,
   PeopleApplication,
   PeopleApplicationController,
   PeopleRepairTool,
   PeopleService,
+  ReservationStore,
+  ResourceDefinitionRegistry,
   clearDomainControllerPolicies,
   composeDomainManagerRuntime,
+  createDefaultResourceRegistry,
   registerDomainControllerPolicy
 };
 //# sourceMappingURL=main.js.map

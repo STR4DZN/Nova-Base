@@ -2,6 +2,7 @@ import { err, ok, type Result } from "../core/contracts/result.js";
 import { createPublicError, type Warning } from "../core/contracts/public-error.js";
 import type { DomainCapabilities } from "./domain-schema.js";
 import { validateDomainPeopleData } from "../people/people-data.js";
+import { validateDomainEconomyData } from "../economy/economy-data.js";
 
 export type CapabilityConfigValidator = (config: unknown) => Result<void>;
 
@@ -193,6 +194,16 @@ export function createDefaultCapabilityRegistry(): CapabilityRegistry {
     validateConfig: (config) => {
       if (config === undefined || config === null) return ok(undefined);
       const res = validateDomainPeopleData(config);
+      return res.ok ? ok(undefined) : err(res.error);
+    }
+  });
+  registry.register({
+    id: "domain-manager:economy",
+    label: "Economy & Resources",
+    functional: true,
+    validateConfig: (config) => {
+      if (config === undefined || config === null) return ok(undefined);
+      const res = validateDomainEconomyData(config);
       return res.ok ? ok(undefined) : err(res.error);
     }
   });

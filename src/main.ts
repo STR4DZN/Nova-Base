@@ -100,4 +100,12 @@ export {
   type DomainControllerProvider,
   type DomainControllerEvaluationContext
 } from "./domains/domain-controller-provider.js";
+export {
+  ResourceDefinitionRegistry,
+  createDefaultResourceRegistry
+} from "./economy/definitions/resource-registry.js";
+export { LedgerStore } from "./economy/ledger/ledger-store.js";
+export { ReservationStore } from "./economy/reservations/reservation-store.js";
+export { EconomyService } from "./economy/services/economy-service.js";
+export { EconomyApplication, EconomyApplicationController } from "./ui/domain-patterns/economy/economy-app.js";
 
