@@ -124,13 +124,20 @@ import {
   InMemoryCommandTransport,
   InMemoryTransportHub
 } from "../../src/commands/in-memory-command-transport.js";
+import { DefaultDomainControllerProvider } from "../../src/domains/domain-controller-provider.js";
 
 function setupMultiplayerHarness() {
+  clearDomainControllerPolicies();
   const store = createStore();
   const domains = new StorageDomainRepository(store);
   const lockManager = new LockManager();
   const coordinator = new MutationCoordinator({ lockManager });
   const registry = new CommandRegistry();
+
+  const controllerProvider = new DefaultDomainControllerProvider();
+  registerDomainControllerPolicy((domainId, userId, context) => {
+    return controllerProvider.isDomainController(domainId, userId, context);
+  });
 
   registerDomainCommandHandlers(registry, coordinator, domains);
   registerPopulationCommandHandlers(registry, coordinator, domains);
@@ -201,7 +208,8 @@ function setupMultiplayerHarness() {
     coordinator,
     lockManager,
     busOnAuthority,
-    createPlayerBus
+    createPlayerBus,
+    controllerProvider
   };
 }
 
@@ -496,7 +504,7 @@ test("G3 Blocker 3: Production bundle dist/main.js exports UI components and act
   assert.equal(bundleCode.includes("renderCreateModal"), true);
   assert.equal(bundleCode.includes("selectTab"), true);
   assert.equal(bundleCode.includes("selectEntity"), true);
-  assert.equal(bundleCode.includes("submitCreate"), true);
+  assert.equal(bundleCode.includes("closeModal"), true);
 });
 
 test("G3 Blocker 3: PeopleApplication and PeopleApplicationController modal and navigation wiring", async () => {
@@ -535,7 +543,8 @@ test("G3 Blocker 3: PeopleApplication and PeopleApplicationController modal and 
   const modalNotables = app.controller.openCreateModal("notables");
   assert.equal(modalNotables.type, "notables");
   assert.equal(modalNotables.html.includes("Create Notable"), true);
-  assert.equal(modalNotables.html.includes("data-action=\"submitCreate\""), true);
+  assert.equal(modalNotables.html.includes("data-action=\"submitCreate\""), false);
+  assert.equal(modalNotables.html.includes('data-create-type="notable"'), true);
 
   const modalRoles = app.controller.openCreateModal("roles");
   assert.equal(modalRoles.type, "roles");
@@ -781,7 +790,7 @@ test("G3 Blocker 1: PeopleApplication complies with Foundry v13 ApplicationV2 li
   assert.equal(typeof actions.selectEntity, "function");
   assert.equal(typeof actions.openCreateModal, "function");
   assert.equal(typeof actions.closeModal, "function");
-  assert.equal(typeof actions.submitCreate, "function");
+  assert.equal((actions as any).submitCreate, undefined);
 
   // 3. Render execution
   const peopleService = new PeopleService(domains, { commandBus: busOnAuthority });
@@ -1203,4 +1212,332 @@ test("G3 Blocker 3: Concurrent normal mutation vs repair preserves domain lock a
   assert.equal(peopleData.notables.length, 1);
   assert.equal(peopleData.notables[0].name, "Concurrent Notable");
   assert.equal(peopleData.roles[0].occupants.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// REMEDIATION VERIFICATION TESTS: UI Action Unification & Canonical Controllers
+// ---------------------------------------------------------------------------
+
+test("G3 Blocker 1: UI action model unification - clicking input causes 0 commands, button click triggers exactly 1 command, Enter triggers exactly 1 command", async () => {
+  const { domains, createPlayerBus } = setupMultiplayerHarness();
+  const playerUserId = "player-guildmaster";
+  const playerBus = createPlayerBus(playerUserId);
+
+  let commandsExecuted = 0;
+  const countingBus = {
+    execute: async (cmd: any, opts: any) => {
+      commandsExecuted++;
+      return playerBus.execute(cmd, opts);
+    },
+    executeLocal: async () => {
+      throw new Error("executeLocal should not be called");
+    }
+  } as unknown as CommandBus;
+
+  const docRes = await domains.create({
+    name: "Unified Action Test Domain",
+    record: defaultRecord,
+    ownership: { [playerUserId]: 3 }
+  });
+
+  const peopleService = new PeopleService(domains, { commandBus: countingBus });
+  const app = new PeopleApplication({
+    domainUuid: docRes.value.uuid,
+    commandBus: countingBus,
+    peopleApi: peopleService,
+    domains,
+    viewer: { userId: playerUserId, isGm: false }
+  });
+
+  await app.render(true);
+
+  // Open Create Notable Modal
+  app.openCreateModal("notables");
+  const form = app.element!.querySelector('form[data-create-type="notable"]');
+  assert.notEqual(form, null);
+  const nameInput = form!.querySelector('input[name="name"]');
+  assert.notEqual(nameInput, null);
+
+  // 1. Clicking an input element inside the form must trigger 0 commands (no premature action dispatch)
+  nameInput!.dispatchEvent({ type: "click" });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(commandsExecuted, 0, "Clicking input must trigger 0 commands");
+
+  // 2. Clicking the submit button triggers form submission and exactly 1 command
+  nameInput!.value = "Master of coin";
+  const submitBtn = form!.querySelector('button[type="submit"]');
+  assert.notEqual(submitBtn, null);
+  await submitBtn!.dispatchEventAsync({ type: "click" });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(commandsExecuted, 1, "Clicking submit button must trigger exactly 1 command");
+
+  // Verify modal is closed
+  assert.equal(app.element!.querySelector(".dm-modal-backdrop"), null);
+
+  // Re-open Create Modal to test Enter submission
+  app.openCreateModal("roles");
+  const roleForm = app.element!.querySelector('form[data-create-type="role"]');
+  assert.notEqual(roleForm, null);
+  roleForm!.querySelector('input[name="name"]')!.value = "Council Steward";
+  roleForm!.querySelector('input[name="definitionId"]')!.value = "domain-manager:councilor";
+
+  // 3. Submitting via form submit event (Enter in field) triggers exactly 1 command
+  await roleForm!.dispatchEventAsync({ type: "submit" });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(commandsExecuted, 2, "Enter submission must trigger exactly 1 additional command");
+});
+
+test("G3 Blocker 1: Opening Create Modal multiple times results in exactly 1 backdrop and listeners are not duplicated across re-renders", async () => {
+  const { domains, createPlayerBus } = setupMultiplayerHarness();
+  const playerUserId = "player-guildmaster";
+  const playerBus = createPlayerBus(playerUserId);
+
+  const docRes = await domains.create({
+    name: "Modal Dedupe Test Domain",
+    record: defaultRecord,
+    ownership: { [playerUserId]: 3 }
+  });
+
+  const peopleService = new PeopleService(domains, { commandBus: playerBus });
+  const app = new PeopleApplication({
+    domainUuid: docRes.value.uuid,
+    commandBus: playerBus,
+    peopleApi: peopleService,
+    domains,
+    viewer: { userId: playerUserId, isGm: false }
+  });
+
+  await app.render(true);
+
+  // 1. Call openCreateModal 3 times consecutively
+  app.openCreateModal("notables");
+  app.openCreateModal("roles");
+  app.openCreateModal("operationalGroups");
+
+  const backdrops = app.element!.querySelectorAll(".dm-modal-backdrop");
+  assert.equal(backdrops.length, 1, "There must be exactly 1 modal backdrop even after opening 3 times");
+  assert.notEqual(app.element!.querySelector('form[data-create-type="group"]'), null);
+
+  // Close modal
+  app.closeModal();
+  assert.equal(app.element!.querySelectorAll(".dm-modal-backdrop").length, 0);
+
+  // 2. Re-rendering multiple times does not duplicate listeners
+  await app.render(true);
+  await app.render(true);
+
+  const rolesTab = app.element!.querySelector('[data-tab="roles"]');
+  assert.notEqual(rolesTab, null);
+
+  // Click tab once
+  rolesTab!.dispatchEvent({ type: "click" });
+  assert.equal(app.controller.activeTab, "roles");
+
+  // Open modal again and submit once: exactly 1 command should execute
+  let submitCount = 0;
+  const countingBus = {
+    execute: async (cmd: any, opts: any) => {
+      submitCount++;
+      return playerBus.execute(cmd, opts);
+    },
+    executeLocal: async () => {}
+  } as unknown as CommandBus;
+
+  const countingApp = new PeopleApplication({
+    domainUuid: docRes.value.uuid,
+    commandBus: countingBus,
+    peopleApi: new PeopleService(domains, { commandBus: countingBus }),
+    domains,
+    viewer: { userId: playerUserId, isGm: false }
+  });
+
+  await countingApp.render(true);
+  await countingApp.render(true); // Re-render before modal
+
+  countingApp.openCreateModal("roles");
+  const roleForm = countingApp.element!.querySelector('form[data-create-type="role"]');
+  roleForm!.querySelector('input[name="name"]')!.value = "Warden";
+  roleForm!.querySelector('input[name="definitionId"]')!.value = "domain-manager:councilor";
+  await roleForm!.dispatchEventAsync({ type: "submit" });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(submitCount, 1, "Submit handler must not execute multiple times due to re-renders");
+});
+
+test("G3 Blocker 2: Player with OBSERVER (ownership 2) + designated Domain Controller is ALLOWED; without controller is DENIED", async () => {
+  const { domains, createPlayerBus, controllerProvider } = setupMultiplayerHarness();
+  const playerObserver = "player-observer-user";
+  const observerBus = createPlayerBus(playerObserver);
+
+  // Domain with player having OBSERVER (2) ownership
+  const docRes = await domains.create({
+    name: "Observer Domain",
+    record: defaultRecord,
+    ownership: { [playerObserver]: 2 }
+  });
+  assert.equal(docRes.ok, true);
+
+  const ctrl = new PeopleApplicationController({
+    domainUuid: docRes.value.uuid,
+    commandBus: observerBus,
+    peopleApi: new PeopleService(domains, { commandBus: observerBus }),
+    domains,
+    viewer: { userId: playerObserver, isGm: false }
+  });
+
+  // 1. Without controller assignment: DENIED
+  const deniedRes = await ctrl.dispatchCreateNotable({ name: "Observer Notable" });
+  assert.equal(deniedRes.ok, false);
+  assert.equal((deniedRes as any).error?.code, "DM_SECURITY_PERMISSION_DENIED");
+
+  // 2. Assign controller via DomainControllerProvider: ALLOWED
+  controllerProvider.assignController(docRes.value.id, playerObserver);
+  assert.deepEqual(controllerProvider.getControllers(docRes.value.id), [playerObserver]);
+
+  const allowedRes = await ctrl.dispatchCreateNotable({ name: "Authorized Controller Notable" });
+  assert.equal(allowedRes.ok, true);
+
+  // 3. Revoke controller: DENIED again
+  controllerProvider.revokeController(docRes.value.id, playerObserver);
+  assert.deepEqual(controllerProvider.getControllers(docRes.value.id), []);
+
+  const deniedAgainRes = await ctrl.dispatchCreateNotable({ name: "Post-Revocation Notable" });
+  assert.equal(deniedAgainRes.ok, false);
+  assert.equal((deniedAgainRes as any).error?.code, "DM_SECURITY_PERMISSION_DENIED");
+});
+
+test("G3 Blocker 2: Persisted capability controllers authorize OBSERVER player without in-memory assignment", async () => {
+  const { domains, createPlayerBus } = setupMultiplayerHarness();
+  const playerController = "player-persisted-controller";
+  const controllerBus = createPlayerBus(playerController);
+
+  // Persisted controller in definition.capabilities.config["domain-manager:domain"].controllers
+  const domainRecordWithControllers: DomainRecord = {
+    ...defaultRecord,
+    definition: {
+      ...defaultRecord.definition,
+      capabilities: {
+        ...defaultRecord.definition.capabilities,
+        config: {
+          "domain-manager:domain": {
+            controllers: [playerController]
+          }
+        }
+      }
+    }
+  };
+
+  const docRes = await domains.create({
+    name: "Persisted Controller Domain",
+    record: domainRecordWithControllers,
+    ownership: { [playerController]: 2 } // OBSERVER
+  });
+  assert.equal(docRes.ok, true);
+
+  const ctrl = new PeopleApplicationController({
+    domainUuid: docRes.value.uuid,
+    commandBus: controllerBus,
+    peopleApi: new PeopleService(domains, { commandBus: controllerBus }),
+    domains,
+    viewer: { userId: playerController, isGm: false }
+  });
+
+  const res = await ctrl.dispatchCreateNotable({ name: "Persisted Controller Notable" });
+  assert.equal(res.ok, true);
+});
+
+test("G3 Blocker 2: Two OBSERVER controllers on different domains execute concurrently via multiplayer bus", async () => {
+  const { domains, createPlayerBus, controllerProvider } = setupMultiplayerHarness();
+  const controller1 = "player-controller-1";
+  const controller2 = "player-controller-2";
+  const bus1 = createPlayerBus(controller1);
+  const bus2 = createPlayerBus(controller2);
+
+  const doc1 = await domains.create({
+    name: "Domain 1",
+    record: defaultRecord,
+    ownership: { [controller1]: 2, [controller2]: 0 }
+  });
+  const doc2 = await domains.create({
+    name: "Domain 2",
+    record: defaultRecord,
+    ownership: { [controller1]: 0, [controller2]: 2 }
+  });
+
+  // Assign each controller to their own domain
+  controllerProvider.assignController(doc1.value.id, controller1);
+  controllerProvider.assignController(doc2.value.id, controller2);
+
+  const ctrl1 = new PeopleApplicationController({
+    domainUuid: doc1.value.uuid,
+    commandBus: bus1,
+    peopleApi: new PeopleService(domains, { commandBus: bus1 }),
+    domains,
+    viewer: { userId: controller1, isGm: false }
+  });
+
+  const ctrl2 = new PeopleApplicationController({
+    domainUuid: doc2.value.uuid,
+    commandBus: bus2,
+    peopleApi: new PeopleService(domains, { commandBus: bus2 }),
+    domains,
+    viewer: { userId: controller2, isGm: false }
+  });
+
+  // Execute mutations concurrently
+  const [res1, res2] = await Promise.all([
+    ctrl1.dispatchCreateNotable({ name: "Notable on Domain 1" }),
+    ctrl2.dispatchCreateNotable({ name: "Notable on Domain 2" })
+  ]);
+
+  assert.equal(res1.ok, true);
+  assert.equal(res2.ok, true);
+
+  // Cross-domain mutation attempt must be DENIED
+  const crossCtrl1 = new PeopleApplicationController({
+    domainUuid: doc2.value.uuid,
+    commandBus: bus1,
+    peopleApi: new PeopleService(domains, { commandBus: bus1 }),
+    domains,
+    viewer: { userId: controller1, isGm: false }
+  });
+  const crossRes = await crossCtrl1.dispatchCreateNotable({ name: "Unauthorized Cross Notable" });
+  assert.equal(crossRes.ok, false);
+  assert.equal((crossRes as any).error?.code, "DM_SECURITY_PERMISSION_DENIED");
+});
+
+test("G3 Blocker 2: composeDomainManagerRuntime wires DefaultDomainControllerProvider and unregisters on destroy", async () => {
+  const store = createStore();
+  const mockAuth: PrimaryAuthorityService<any> = {
+    isCurrentUser: () => true,
+    getCurrent: () => "gm-user",
+    getStatus: () => ({ authorityUserId: "gm-user", authorityEpoch: 1, available: true }),
+    reconcile: async () => {},
+    onChanged: () => () => {},
+    synchronizePersistedState: () => {},
+    destroy: () => {}
+  };
+  const mockTrans = {
+    send: async () => ({ ok: true }),
+    registerInboundHandler: () => () => {},
+    onReceive: () => () => {},
+    isAvailable: () => true,
+    destroy: () => {}
+  };
+
+  const runtime = composeDomainManagerRuntime({
+    domainStore: store,
+    authority: mockAuth as any,
+    transport: mockTrans as any
+  });
+
+  assert.ok(runtime.controllerProvider);
+  assert.equal(typeof runtime.controllerProvider.isDomainController, "function");
+  assert.equal(typeof runtime.controllerProvider.assignController, "function");
+
+  runtime.controllerProvider.assignController?.("test-domain", "user-assigned");
+  assert.equal(runtime.controllerProvider.isDomainController("test-domain", "user-assigned"), true);
+  assert.equal(runtime.controllerProvider.isDomainController("test-domain", "other-user"), false);
+
+  // Clean up
+  runtime.destroy();
 });

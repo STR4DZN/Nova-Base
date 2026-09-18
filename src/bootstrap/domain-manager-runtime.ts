@@ -31,6 +31,11 @@ import { PeopleService, type PublicPeopleApi } from "../people/services/people-s
 import { PeopleRepairTool } from "../people/services/people-repair-tool.js";
 import { PeopleApplication, PeopleApplicationController } from "../ui/domain-patterns/people/people-app.js";
 import {
+  DefaultDomainControllerProvider,
+  type DomainControllerProvider
+} from "../domains/domain-controller-provider.js";
+import { registerDomainControllerPolicy } from "../people/commands/people-permissions.js";
+import {
   G2DiagnosticsProvider,
   type G2DiagnosticsSnapshot
 } from "../diagnostics/g2-diagnostics-provider.js";
@@ -56,6 +61,7 @@ export interface DomainManagerRuntime {
   readonly diagnostics: G2DiagnosticsProvider;
   readonly people: PublicPeopleApi;
   readonly repairTool: PeopleRepairTool;
+  readonly controllerProvider: DomainControllerProvider;
   destroy(): void;
 }
 
@@ -68,6 +74,7 @@ export interface DomainManagerRuntimeOptions {
   readonly rateLimiter?: RateLimiter;
   readonly dedupeStore?: CommandDedupeStore;
   readonly commandQueue?: CommandQueue;
+  readonly controllerProvider?: DomainControllerProvider;
 }
 
 /**
@@ -141,6 +148,13 @@ export function composeDomainManagerRuntime(
     }
   });
 
+  const controllerProvider = options.controllerProvider ?? new DefaultDomainControllerProvider();
+
+  // Wire canonical DomainControllerPolicy for the runtime
+  const unregisterPolicy = registerDomainControllerPolicy((domainId, userId, context) => {
+    return controllerProvider.isDomainController(domainId, userId, context);
+  });
+
   const people = new PeopleService(readOnlyDomains, { commandBus });
   const repairTool = new PeopleRepairTool(commandBus);
 
@@ -158,7 +172,9 @@ export function composeDomainManagerRuntime(
     diagnostics,
     people,
     repairTool,
+    controllerProvider,
     destroy: () => {
+      unregisterPolicy();
       commandBus.destroy();
       if ("destroy" in transport && typeof (transport as any).destroy === "function") {
         (transport as any).destroy();
@@ -168,6 +184,11 @@ export function composeDomainManagerRuntime(
   });
 }
 
+export {
+  DefaultDomainControllerProvider,
+  type DomainControllerProvider,
+  type DomainControllerEvaluationContext
+} from "../domains/domain-controller-provider.js";
 export { PeopleRepairTool } from "../people/services/people-repair-tool.js";
 export { PeopleApplication, PeopleApplicationController } from "../ui/domain-patterns/people/people-app.js";
 export { PeopleService, type PublicPeopleApi } from "../people/services/people-service.js";

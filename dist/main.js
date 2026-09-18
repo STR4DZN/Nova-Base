@@ -6470,6 +6470,15 @@ async function validatePeopleCommandPermission(ctx, domains, domainUuidExtractor
       return ok(true);
     }
   }
+  if (options?.controllerProvider) {
+    const providerResult = await options.controllerProvider.isDomainController(cleanId, ctx.senderUserId, {
+      record,
+      document: doc
+    });
+    if (providerResult) {
+      return ok(true);
+    }
+  }
   if (options?.controllerPolicy) {
     const policyResult = await options.controllerPolicy(cleanId, ctx.senderUserId, {
       record,
@@ -10723,7 +10732,7 @@ var PeopleApplicationController = class {
         return `
           <div class="dm-modal dm-create-notable-modal" data-modal-type="notable">
             <h3>Create Notable</h3>
-            <form data-action="submitCreate" data-create-type="notable">
+            <form data-create-type="notable">
               <label>Name: <input type="text" name="name" required /></label>
               <label>Type: 
                 <select name="type">
@@ -10742,7 +10751,7 @@ var PeopleApplicationController = class {
               </label>
               <div class="dm-modal-actions">
                 <button type="button" class="dm-btn dm-btn-secondary" data-action="closeModal">Cancel</button>
-                <button type="submit" class="dm-btn dm-btn-primary" data-action="submitCreate">Create</button>
+                <button type="submit" class="dm-btn dm-btn-primary">Create</button>
               </div>
             </form>
           </div>
@@ -10751,7 +10760,7 @@ var PeopleApplicationController = class {
         return `
           <div class="dm-modal dm-create-role-modal" data-modal-type="role">
             <h3>Create Role</h3>
-            <form data-action="submitCreate" data-create-type="role">
+            <form data-create-type="role">
               <label>Title/Label: <input type="text" name="name" required /></label>
               <label>Definition ID: <input type="text" name="definitionId" required /></label>
               <label>Scope:
@@ -10769,7 +10778,7 @@ var PeopleApplicationController = class {
               </label>
               <div class="dm-modal-actions">
                 <button type="button" class="dm-btn dm-btn-secondary" data-action="closeModal">Cancel</button>
-                <button type="submit" class="dm-btn dm-btn-primary" data-action="submitCreate">Create</button>
+                <button type="submit" class="dm-btn dm-btn-primary">Create</button>
               </div>
             </form>
           </div>
@@ -10778,7 +10787,7 @@ var PeopleApplicationController = class {
         return `
           <div class="dm-modal dm-create-group-modal" data-modal-type="group">
             <h3>Create Operational Group</h3>
-            <form data-action="submitCreate" data-create-type="group">
+            <form data-create-type="group">
               <label>Name: <input type="text" name="name" required /></label>
               <label>Definition ID: <input type="text" name="definitionId" required /></label>
               <label>Membership Mode:
@@ -10796,7 +10805,7 @@ var PeopleApplicationController = class {
               </label>
               <div class="dm-modal-actions">
                 <button type="button" class="dm-btn dm-btn-secondary" data-action="closeModal">Cancel</button>
-                <button type="submit" class="dm-btn dm-btn-primary" data-action="submitCreate">Create</button>
+                <button type="submit" class="dm-btn dm-btn-primary">Create</button>
               </div>
             </form>
           </div>
@@ -10805,11 +10814,11 @@ var PeopleApplicationController = class {
         return `
           <div class="dm-modal dm-create-default-modal">
             <h3>Create ${escapeHtml(createType)}</h3>
-            <form data-action="submitCreate" data-create-type="${escapeAttribute(createType)}">
+            <form data-create-type="${escapeAttribute(createType)}">
               <label>Name: <input type="text" name="name" required /></label>
               <div class="dm-modal-actions">
                 <button type="button" class="dm-btn dm-btn-secondary" data-action="closeModal">Cancel</button>
-                <button type="submit" class="dm-btn dm-btn-primary" data-action="submitCreate">Create</button>
+                <button type="submit" class="dm-btn dm-btn-primary">Create</button>
               </div>
             </form>
           </div>
@@ -10991,8 +11000,10 @@ function createMockElement(tagName, props = {}) {
     },
     dispatchEvent(event) {
       event.target = element;
+      let defaultPrevented = false;
       if (!event.preventDefault) {
         event.preventDefault = () => {
+          defaultPrevented = true;
         };
       }
       let curr = element;
@@ -11003,12 +11014,24 @@ function createMockElement(tagName, props = {}) {
         }
         curr = curr.parent;
       }
+      if (!defaultPrevented && event.type === "click") {
+        const isBtn = element.tagName === "BUTTON" || element.tagName === "INPUT" && attributes.type === "submit";
+        const btnType = attributes.type ?? (element.tagName === "BUTTON" ? "submit" : "button");
+        if (isBtn && btnType === "submit") {
+          const form = element.closest?.("form");
+          if (form) {
+            form.dispatchEvent({ type: "submit", target: form });
+          }
+        }
+      }
       return true;
     },
     async dispatchEventAsync(event) {
       event.target = element;
+      let defaultPrevented = false;
       if (!event.preventDefault) {
         event.preventDefault = () => {
+          defaultPrevented = true;
         };
       }
       let curr = element;
@@ -11019,7 +11042,23 @@ function createMockElement(tagName, props = {}) {
         }
         curr = curr.parent;
       }
+      if (!defaultPrevented && event.type === "click") {
+        const isBtn = element.tagName === "BUTTON" || element.tagName === "INPUT" && attributes.type === "submit";
+        const btnType = attributes.type ?? (element.tagName === "BUTTON" ? "submit" : "button");
+        if (isBtn && btnType === "submit") {
+          const form = element.closest?.("form");
+          if (form) {
+            await form.dispatchEventAsync({ type: "submit", target: form });
+          }
+        }
+      }
       return true;
+    },
+    click() {
+      element.dispatchEvent({ type: "click" });
+    },
+    async clickAsync() {
+      await element.dispatchEventAsync({ type: "click" });
     },
     querySelector(selector) {
       return querySelectorMock(element, selector);
@@ -11109,6 +11148,20 @@ var BaseApp = globalThis.foundry?.applications?.api?.ApplicationV2 ?? class Mock
       content.replaceChildren(result);
     }
   }
+  _attachActionListeners(element) {
+    if (!element || element.__actionsBound) return;
+    element.__actionsBound = true;
+    const actions = this.constructor.DEFAULT_OPTIONS?.actions ?? {};
+    element.addEventListener("click", async (event) => {
+      const actionEl = event.target?.closest?.("[data-action]");
+      if (!actionEl) return;
+      const actionName = actionEl.getAttribute?.("data-action");
+      if (actionName && typeof actions[actionName] === "function") {
+        event.preventDefault?.();
+        await actions[actionName].call(this, event, actionEl);
+      }
+    });
+  }
   _onRender(context, options) {
   }
   async render(force, options) {
@@ -11124,6 +11177,7 @@ var BaseApp = globalThis.foundry?.applications?.api?.ApplicationV2 ?? class Mock
     const context = await this._prepareContext(options);
     const result = await this._renderHTML(context, options);
     this._replaceHTML(result, this.element, options);
+    this._attachActionListeners(this.element);
     this._onRender(context, options);
     return this;
   }
@@ -11150,8 +11204,7 @@ var PeopleApplication = class _PeopleApplication extends BaseApp {
       selectTab: _PeopleApplication.#onSelectTab,
       selectEntity: _PeopleApplication.#onSelectEntity,
       openCreateModal: _PeopleApplication.#onOpenCreateModal,
-      closeModal: _PeopleApplication.#onCloseModal,
-      submitCreate: _PeopleApplication.#onSubmitCreate
+      closeModal: _PeopleApplication.#onCloseModal
     }
   };
   #controller;
@@ -11205,27 +11258,6 @@ var PeopleApplication = class _PeopleApplication extends BaseApp {
         await _PeopleApplication.#onSubmitCreate.call(this, event, form);
       });
     });
-    if (element.__clickBound) return;
-    element.__clickBound = true;
-    element.addEventListener?.("click", async (event) => {
-      const target = event.target?.closest?.("[data-action]");
-      if (!target) return;
-      const action = target.getAttribute?.("data-action");
-      if (action === "selectTab") {
-        await _PeopleApplication.#onSelectTab.call(this, event, target);
-      } else if (action === "selectEntity") {
-        await _PeopleApplication.#onSelectEntity.call(this, event, target);
-      } else if (action === "openCreateModal") {
-        await _PeopleApplication.#onOpenCreateModal.call(this, event, target);
-      } else if (action === "closeModal") {
-        await _PeopleApplication.#onCloseModal.call(this, event, target);
-      } else if (action === "submitCreate") {
-        const form = target.tagName === "FORM" ? target : target.closest?.("form");
-        if (form) {
-          await _PeopleApplication.#onSubmitCreate.call(this, event, form);
-        }
-      }
-    });
   }
   closeModal() {
     const el = this.element ?? this.#element;
@@ -11235,6 +11267,7 @@ var PeopleApplication = class _PeopleApplication extends BaseApp {
     }
   }
   openCreateModal(createType) {
+    this.closeModal();
     const modal = this.#controller.openCreateModal(createType);
     const el = this.element ?? this.#element;
     if (el) {
@@ -11572,6 +11605,52 @@ var PeopleRepairTool = class {
   }
 };
 
+// src/domains/domain-controller-provider.ts
+var DefaultDomainControllerProvider = class {
+  #assignedControllers = /* @__PURE__ */ new Map();
+  assignController(domainId, userId) {
+    const cleanId = domainId.startsWith("JournalEntry.") ? domainId.slice("JournalEntry.".length) : domainId;
+    let set = this.#assignedControllers.get(cleanId);
+    if (!set) {
+      set = /* @__PURE__ */ new Set();
+      this.#assignedControllers.set(cleanId, set);
+    }
+    set.add(userId);
+  }
+  revokeController(domainId, userId) {
+    const cleanId = domainId.startsWith("JournalEntry.") ? domainId.slice("JournalEntry.".length) : domainId;
+    this.#assignedControllers.get(cleanId)?.delete(userId);
+  }
+  getControllers(domainId) {
+    const cleanId = domainId.startsWith("JournalEntry.") ? domainId.slice("JournalEntry.".length) : domainId;
+    const set = this.#assignedControllers.get(cleanId);
+    return set ? Array.from(set) : [];
+  }
+  clear() {
+    this.#assignedControllers.clear();
+  }
+  isDomainController(domainId, userId, context) {
+    const cleanId = domainId.startsWith("JournalEntry.") ? domainId.slice("JournalEntry.".length) : domainId;
+    const assigned = this.#assignedControllers.get(cleanId);
+    if (assigned && assigned.has(userId)) {
+      return true;
+    }
+    const record = context?.record ?? context?.document?.record;
+    if (record?.definition?.capabilities?.config) {
+      const config = record.definition.capabilities.config;
+      const domainCapConfig = config["domain-manager:domain"];
+      if (domainCapConfig && Array.isArray(domainCapConfig.controllers) && domainCapConfig.controllers.includes(userId)) {
+        return true;
+      }
+      const generalControllers = config.controllers;
+      if (Array.isArray(generalControllers) && generalControllers.includes(userId)) {
+        return true;
+      }
+    }
+    return false;
+  }
+};
+
 // src/diagnostics/g2-diagnostics-provider.ts
 var G2DiagnosticsProvider = class {
   #authorityService;
@@ -11700,6 +11779,10 @@ function composeDomainManagerRuntime(options = {}) {
       });
     }
   });
+  const controllerProvider = options.controllerProvider ?? new DefaultDomainControllerProvider();
+  const unregisterPolicy = registerDomainControllerPolicy((domainId, userId, context) => {
+    return controllerProvider.isDomainController(domainId, userId, context);
+  });
   const people = new PeopleService(readOnlyDomains, { commandBus });
   const repairTool = new PeopleRepairTool(commandBus);
   return Object.freeze({
@@ -11716,7 +11799,9 @@ function composeDomainManagerRuntime(options = {}) {
     diagnostics,
     people,
     repairTool,
+    controllerProvider,
     destroy: () => {
+      unregisterPolicy();
       commandBus.destroy();
       if ("destroy" in transport && typeof transport.destroy === "function") {
         transport.destroy();
@@ -11829,6 +11914,7 @@ Hooks.once("ready", () => {
   });
 });
 export {
+  DefaultDomainControllerProvider,
   PeopleApplication,
   PeopleApplicationController,
   PeopleRepairTool,

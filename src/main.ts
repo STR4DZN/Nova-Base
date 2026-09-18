@@ -95,4 +95,9 @@ export {
   registerDomainControllerPolicy,
   clearDomainControllerPolicies
 } from "./people/commands/people-permissions.js";
+export {
+  DefaultDomainControllerProvider,
+  type DomainControllerProvider,
+  type DomainControllerEvaluationContext
+} from "./domains/domain-controller-provider.js";
 

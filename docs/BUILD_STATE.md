@@ -32,8 +32,8 @@
   - **G3.9 (People UI Presentation & Views)**: presenter com sanitização de visão GM vs Jogador (ocultação de notáveis/papéis/grupos secretos) e templates HTML semânticos.
   - **G3 Revalidação Externa & Resolução dos 4 Bloqueios Estruturais**:
     - **Bloqueio 1 (Public People API & Viewer Clamping)**: Removidos `asAdmin()` e `asAuthority()` da API pública e do runtime. Clamping estrito em `resolveCurrentViewer()` impedindo qualquer spoofing de `userId`, `isGm` ou `allowedRestrictedRefs` por callers não-GM. Acesso raw restrito a GM.
-    - **Bloqueio 2 (Multiplayer — UI Mutating as Player & Authority Permissions)**: `PeopleApplicationController` despacha comandos via `CommandBus.execute()`, que roteia para transporte de rede para clientes remotos (jogadores). Implementado `validatePeopleCommandPermission()` na autoridade, autenticando criadores de domínio (`createdByUserId`), controladores de capacidade/people e proprietários de JournalEntry do Foundry.
-    - **Bloqueio 3 (UI Production Composition & Action Wiring)**: Adaptador DOM e ApplicationV2 `PeopleApplication` e `PeopleApplicationController` implementados com suporte a seleção de abas, seleção de entidades, abertura de modais (`openCreateModal`) e submissão (`submitCreate`), expostos no bundle de produção `dist/main.js`.
+    - **Bloqueio 2 (Multiplayer — UI Mutating as Player & Authority Permissions)**: `PeopleApplicationController` despacha comandos via `CommandBus.execute()`, que roteia para transporte de rede para clientes remotos (jogadores). Implementado `validatePeopleCommandPermission()` na autoridade (G3: GM, Primary Authority, Journal OWNER ownership >= 3, or canonical `DomainControllerProvider` authority; provenance `createdByUserId` does NOT grant mutation rights per DEC-018).
+    - **Bloqueio 3 (UI Production Composition & Action Wiring)**: Adaptador DOM e ApplicationV2 `PeopleApplication` e `PeopleApplicationController` implementados com suporte a seleção de abas, seleção de entidades, abertura de modais (`openCreateModal`) e submissão via formulário, expostos no bundle de produção `dist/main.js`.
     - **Bloqueio 4 (PeopleRepairTool via Pipeline Transacional)**: Criado comando transacional `people:repair` com locks ordenados (`domain:<cleanId>`), fresh read com revision, operações de reparo puras e idempotentes, validação de permissão GM-only e commit via update. `PeopleRepairTool` refatorada para despachar estritamente via `CommandBus.execute()`.
 
 ## Evidência local Gate G3
@@ -41,10 +41,10 @@
 | Verificação | Resultado |
 |---|---|
 | TypeScript strict (`node ./node_modules/typescript/bin/tsc --noEmit`) | PASS (0 erros) |
-| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 328/328 (0 falhas) |
+| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 334/334 (0 falhas) |
 | Relatório de Aceitação | Submetido para revisão e aceitação do usuário (`docs/GATE_G3_ACCEPTANCE_REPORT.md`) |
 | Regressões G2 | 0 (todos os 233 testes de base preservados e passando) |
 
 ## Próxima ação canônica
  
-- **Gate G4 (Economy & Resources)**: Com a implementação e remediação completa de todos os bloqueios da revalidação do Gate G3 (People) e 328/328 testes aprovados, a transição para o Gate G4 aguarda formalmente a homologação e aceitação soberana do Gate G3 por parte do usuário.
+- **Gate G4 (Economy & Resources)**: Com a implementação e remediação completa de todos os bloqueios da revalidação do Gate G3 (People) e 334/334 testes aprovados, a transição para o Gate G4 aguarda formalmente a homologação e aceitação soberana do Gate G3 por parte do usuário.

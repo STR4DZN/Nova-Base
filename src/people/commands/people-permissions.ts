@@ -1,11 +1,9 @@
 import { createPublicError, type PublicError } from "../../core/contracts/public-error.js";
 import { err, ok, type Result } from "../../core/contracts/result.js";
 import type { AuthenticatedCommandContext } from "../../commands/authenticated-command-context.js";
-import type {
-  DomainDocument,
-  DomainRepositoryContract
-} from "../../storage/repositories/domain-repository.js";
+import type { DomainDocument, DomainRepositoryContract } from "../../storage/repositories/domain-repository.js";
 import type { DomainRecord } from "../../domains/domain-schema.js";
+import type { DomainControllerProvider } from "../../domains/domain-controller-provider.js";
 
 /**
  * Contract for explicit Domain Controller authorization policies.
@@ -42,6 +40,7 @@ export function clearDomainControllerPolicies(): void {
 
 export interface ValidatePeoplePermissionOptions {
   readonly controllerPolicy?: DomainControllerPolicy;
+  readonly controllerProvider?: DomainControllerProvider;
 }
 
 /**
@@ -133,7 +132,17 @@ export async function validatePeopleCommandPermission(
     }
   }
 
-  // 5. Explicit Domain Controller Policy contract
+  // 5. Explicit Domain Controller Provider / Policy contract
+  if (options?.controllerProvider) {
+    const providerResult = await options.controllerProvider.isDomainController(cleanId, ctx.senderUserId, {
+      record,
+      document: doc
+    });
+    if (providerResult) {
+      return ok(true);
+    }
+  }
+
   if (options?.controllerPolicy) {
     const policyResult = await options.controllerPolicy(cleanId, ctx.senderUserId, {
       record,

@@ -554,7 +554,7 @@ export class PeopleApplicationController {
         return `
           <div class="dm-modal dm-create-notable-modal" data-modal-type="notable">
             <h3>Create Notable</h3>
-            <form data-action="submitCreate" data-create-type="notable">
+            <form data-create-type="notable">
               <label>Name: <input type="text" name="name" required /></label>
               <label>Type: 
                 <select name="type">
@@ -573,7 +573,7 @@ export class PeopleApplicationController {
               </label>
               <div class="dm-modal-actions">
                 <button type="button" class="dm-btn dm-btn-secondary" data-action="closeModal">Cancel</button>
-                <button type="submit" class="dm-btn dm-btn-primary" data-action="submitCreate">Create</button>
+                <button type="submit" class="dm-btn dm-btn-primary">Create</button>
               </div>
             </form>
           </div>
@@ -582,7 +582,7 @@ export class PeopleApplicationController {
         return `
           <div class="dm-modal dm-create-role-modal" data-modal-type="role">
             <h3>Create Role</h3>
-            <form data-action="submitCreate" data-create-type="role">
+            <form data-create-type="role">
               <label>Title/Label: <input type="text" name="name" required /></label>
               <label>Definition ID: <input type="text" name="definitionId" required /></label>
               <label>Scope:
@@ -600,7 +600,7 @@ export class PeopleApplicationController {
               </label>
               <div class="dm-modal-actions">
                 <button type="button" class="dm-btn dm-btn-secondary" data-action="closeModal">Cancel</button>
-                <button type="submit" class="dm-btn dm-btn-primary" data-action="submitCreate">Create</button>
+                <button type="submit" class="dm-btn dm-btn-primary">Create</button>
               </div>
             </form>
           </div>
@@ -609,7 +609,7 @@ export class PeopleApplicationController {
         return `
           <div class="dm-modal dm-create-group-modal" data-modal-type="group">
             <h3>Create Operational Group</h3>
-            <form data-action="submitCreate" data-create-type="group">
+            <form data-create-type="group">
               <label>Name: <input type="text" name="name" required /></label>
               <label>Definition ID: <input type="text" name="definitionId" required /></label>
               <label>Membership Mode:
@@ -627,7 +627,7 @@ export class PeopleApplicationController {
               </label>
               <div class="dm-modal-actions">
                 <button type="button" class="dm-btn dm-btn-secondary" data-action="closeModal">Cancel</button>
-                <button type="submit" class="dm-btn dm-btn-primary" data-action="submitCreate">Create</button>
+                <button type="submit" class="dm-btn dm-btn-primary">Create</button>
               </div>
             </form>
           </div>
@@ -636,11 +636,11 @@ export class PeopleApplicationController {
         return `
           <div class="dm-modal dm-create-default-modal">
             <h3>Create ${escapeHtml(createType)}</h3>
-            <form data-action="submitCreate" data-create-type="${escapeAttribute(createType)}">
+            <form data-create-type="${escapeAttribute(createType)}">
               <label>Name: <input type="text" name="name" required /></label>
               <div class="dm-modal-actions">
                 <button type="button" class="dm-btn dm-btn-secondary" data-action="closeModal">Cancel</button>
-                <button type="submit" class="dm-btn dm-btn-primary" data-action="submitCreate">Create</button>
+                <button type="submit" class="dm-btn dm-btn-primary">Create</button>
               </div>
             </form>
           </div>
@@ -832,8 +832,11 @@ export function createMockElement(tagName: string, props: any = {}): any {
     },
     dispatchEvent(event: any): boolean {
       event.target = element;
+      let defaultPrevented = false;
       if (!event.preventDefault) {
-        event.preventDefault = () => {};
+        event.preventDefault = () => {
+          defaultPrevented = true;
+        };
       }
       let curr: any = element;
       while (curr) {
@@ -843,12 +846,25 @@ export function createMockElement(tagName: string, props: any = {}): any {
         }
         curr = curr.parent;
       }
+      if (!defaultPrevented && event.type === "click") {
+        const isBtn = element.tagName === "BUTTON" || (element.tagName === "INPUT" && attributes.type === "submit");
+        const btnType = attributes.type ?? (element.tagName === "BUTTON" ? "submit" : "button");
+        if (isBtn && btnType === "submit") {
+          const form = element.closest?.("form");
+          if (form) {
+            form.dispatchEvent({ type: "submit", target: form });
+          }
+        }
+      }
       return true;
     },
     async dispatchEventAsync(event: any): Promise<boolean> {
       event.target = element;
+      let defaultPrevented = false;
       if (!event.preventDefault) {
-        event.preventDefault = () => {};
+        event.preventDefault = () => {
+          defaultPrevented = true;
+        };
       }
       let curr: any = element;
       while (curr) {
@@ -858,7 +874,23 @@ export function createMockElement(tagName: string, props: any = {}): any {
         }
         curr = curr.parent;
       }
+      if (!defaultPrevented && event.type === "click") {
+        const isBtn = element.tagName === "BUTTON" || (element.tagName === "INPUT" && attributes.type === "submit");
+        const btnType = attributes.type ?? (element.tagName === "BUTTON" ? "submit" : "button");
+        if (isBtn && btnType === "submit") {
+          const form = element.closest?.("form");
+          if (form) {
+            await form.dispatchEventAsync({ type: "submit", target: form });
+          }
+        }
+      }
       return true;
+    },
+    click(): void {
+      element.dispatchEvent({ type: "click" });
+    },
+    async clickAsync(): Promise<void> {
+      await element.dispatchEventAsync({ type: "click" });
     },
     querySelector(selector: string): any {
       return querySelectorMock(element, selector);
@@ -968,6 +1000,21 @@ const BaseApp =
       }
     }
 
+    _attachActionListeners(element: any): void {
+      if (!element || element.__actionsBound) return;
+      element.__actionsBound = true;
+      const actions = (this.constructor as any).DEFAULT_OPTIONS?.actions ?? {};
+      element.addEventListener("click", async (event: any) => {
+        const actionEl = event.target?.closest?.("[data-action]");
+        if (!actionEl) return;
+        const actionName = actionEl.getAttribute?.("data-action");
+        if (actionName && typeof actions[actionName] === "function") {
+          event.preventDefault?.();
+          await actions[actionName].call(this, event, actionEl);
+        }
+      });
+    }
+
     _onRender(context: any, options?: any): void {}
 
     async render(force?: boolean, options?: any): Promise<this> {
@@ -983,6 +1030,7 @@ const BaseApp =
       const context = await this._prepareContext(options);
       const result = await this._renderHTML(context, options);
       this._replaceHTML(result, this.element, options);
+      this._attachActionListeners(this.element);
       this._onRender(context, options);
       return this;
     }
@@ -1014,8 +1062,7 @@ export class PeopleApplication extends BaseApp {
       selectTab: PeopleApplication.#onSelectTab,
       selectEntity: PeopleApplication.#onSelectEntity,
       openCreateModal: PeopleApplication.#onOpenCreateModal,
-      closeModal: PeopleApplication.#onCloseModal,
-      submitCreate: PeopleApplication.#onSubmitCreate
+      closeModal: PeopleApplication.#onCloseModal
     }
   };
 
@@ -1080,30 +1127,6 @@ export class PeopleApplication extends BaseApp {
         await PeopleApplication.#onSubmitCreate.call(this, event, form as HTMLElement);
       });
     });
-
-    if ((element as any).__clickBound) return;
-    (element as any).__clickBound = true;
-
-    element.addEventListener?.("click", async (event: any) => {
-      const target = (event.target as HTMLElement)?.closest?.("[data-action]") as HTMLElement | null;
-      if (!target) return;
-      const action = target.getAttribute?.("data-action");
-
-      if (action === "selectTab") {
-        await PeopleApplication.#onSelectTab.call(this, event, target);
-      } else if (action === "selectEntity") {
-        await PeopleApplication.#onSelectEntity.call(this, event, target);
-      } else if (action === "openCreateModal") {
-        await PeopleApplication.#onOpenCreateModal.call(this, event, target);
-      } else if (action === "closeModal") {
-        await PeopleApplication.#onCloseModal.call(this, event, target);
-      } else if (action === "submitCreate") {
-        const form = (target.tagName === "FORM" ? target : target.closest?.("form")) as HTMLElement | null;
-        if (form) {
-          await PeopleApplication.#onSubmitCreate.call(this, event, form);
-        }
-      }
-    });
   }
 
   closeModal(): void {
@@ -1115,6 +1138,7 @@ export class PeopleApplication extends BaseApp {
   }
 
   openCreateModal(createType: string): { readonly type: string; readonly html: string } {
+    this.closeModal();
     const modal = this.#controller.openCreateModal(createType);
     const el = this.element ?? this.#element;
     if (el) {
