@@ -104,8 +104,14 @@ export {
   ResourceDefinitionRegistry,
   createDefaultResourceRegistry
 } from "./economy/definitions/resource-registry.js";
-export { LedgerStore } from "./economy/ledger/ledger-store.js";
-export { ReservationStore } from "./economy/reservations/reservation-store.js";
-export { EconomyService } from "./economy/services/economy-service.js";
+export {
+  DefaultPublicEconomyApi,
+  type PublicEconomyApi
+} from "./economy/services/public-economy-api.js";
+export {
+  ProviderRegistry,
+  createDefaultProviderRegistry
+} from "./economy/providers/provider-registry.js";
+export { ThresholdService } from "./economy/thresholds/threshold-service.js";
 export { EconomyApplication, EconomyApplicationController } from "./ui/domain-patterns/economy/economy-app.js";
 

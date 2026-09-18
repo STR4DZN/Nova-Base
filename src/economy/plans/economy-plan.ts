@@ -37,6 +37,7 @@ export interface EconomyPlan {
   readonly warnings: readonly string[];
   readonly blockers: readonly PublicError[];
   readonly isExecutable: boolean;
+  readonly isNoop?: boolean;
   readonly createdAt: string;
 }
 
@@ -142,6 +143,8 @@ export function buildAdjustPlan(params: BuildAdjustPlanParams): EconomyPlan {
     });
   }
 
+  const isNoop = deltaMinor === 0;
+
   return {
     planId: createOpaqueId("plan"),
     planType: "adjust",
@@ -150,7 +153,8 @@ export function buildAdjustPlan(params: BuildAdjustPlanParams): EconomyPlan {
     reservationEffects: Object.freeze([]),
     warnings: Object.freeze(warnings),
     blockers: Object.freeze(blockers),
-    isExecutable: blockers.length === 0 && deltaMinor !== 0,
+    isExecutable: blockers.length === 0,
+    isNoop,
     createdAt: new Date().toISOString()
   };
 }

@@ -17,6 +17,36 @@ export const CANONICAL_RESERVATION_STATUSES: readonly ReservationStatus[] = Obje
   "expired"
 ]);
 
+export type ReservationEventType =
+  | "created"
+  | "partially-consumed"
+  | "consumed"
+  | "released"
+  | "expired"
+  | "adjusted";
+
+export const CANONICAL_RESERVATION_EVENT_TYPES: readonly ReservationEventType[] = Object.freeze([
+  "created",
+  "partially-consumed",
+  "consumed",
+  "released",
+  "expired",
+  "adjusted"
+]);
+
+export interface ReservationEvent {
+  readonly id: string; // reve_*
+  readonly reservationId: string;
+  readonly type: ReservationEventType;
+  readonly deltaMinor: number; // change to remainingAmountMinor
+  readonly remainingAmountMinor: number;
+  readonly timestampReal: number;
+  readonly timestampWorld?: number | null;
+  readonly reason?: string;
+  readonly sourceRef?: string;
+  readonly userId?: string;
+}
+
 export interface ReservationSource {
   readonly type: string;
   readonly ref?: string;

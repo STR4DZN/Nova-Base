@@ -46,16 +46,24 @@ import {
 import { LedgerStore } from "../economy/ledger/ledger-store.js";
 import { ReservationStore } from "../economy/reservations/reservation-store.js";
 import { EconomyService } from "../economy/services/economy-service.js";
+import {
+  DefaultPublicEconomyApi,
+  type PublicEconomyApi
+} from "../economy/services/public-economy-api.js";
 import { registerEconomyCommands } from "../economy/commands/economy-commands.js";
+import {
+  ProviderRegistry,
+  createDefaultProviderRegistry
+} from "../economy/providers/provider-registry.js";
 import { EconomyApplication, EconomyApplicationController } from "../ui/domain-patterns/economy/economy-app.js";
 
 /**
  * Runtime services owned by the Domain Manager composition root.
  *
- * Implements Master Spec §11.1, §11.2, G2-AUD-001, G2-AUD-008:
- * - Public UI/services only see read operations via `domains: DomainReadRepository`.
+ * Implements Master Spec §11.1, §11.2, G2-AUD-001, G2-AUD-008, G4-AUD-004:
+ * - Public UI/services only see read operations and sanitized DTOs via read-only facades.
  * - State mutations must strictly be dispatched via `commandBus`.
- * - Complete Gate G2 and G3 verticals are composed and reachable from production entrypoint.
+ * - Complete Gate G2, G3, and G4 verticals are composed and reachable from production entrypoint.
  */
 export interface DomainManagerRuntime {
   readonly domains: DomainReadRepository;
@@ -71,10 +79,11 @@ export interface DomainManagerRuntime {
   readonly people: PublicPeopleApi;
   readonly repairTool: PeopleRepairTool;
   readonly controllerProvider: DomainControllerProvider;
-  readonly economy: EconomyService;
+  readonly economy: PublicEconomyApi;
   readonly resourceRegistry: ResourceDefinitionRegistry;
   readonly ledgerStore: LedgerStore;
   readonly reservationStore: ReservationStore;
+  readonly providerRegistry: ProviderRegistry;
   destroy(): void;
 }
 
@@ -91,10 +100,11 @@ export interface DomainManagerRuntimeOptions {
   readonly resourceRegistry?: ResourceDefinitionRegistry;
   readonly ledgerStore?: LedgerStore;
   readonly reservationStore?: ReservationStore;
+  readonly providerRegistry?: ProviderRegistry;
 }
 
 /**
- * Composes the complete Gate G1 and G2 runtime.
+ * Composes the complete Domain Manager runtime.
  */
 export function composeDomainManagerRuntime(
   options: DomainManagerRuntimeOptions = {}
@@ -111,13 +121,22 @@ export function composeDomainManagerRuntime(
   const resourceRegistry = options.resourceRegistry ?? createDefaultResourceRegistry();
   const ledgerStore = options.ledgerStore ?? new LedgerStore();
   const reservationStore = options.reservationStore ?? new ReservationStore();
-  const economy = new EconomyService({
+  const providerRegistry =
+    options.providerRegistry ?? createDefaultProviderRegistry(mutableDomainRepo);
+
+  const economyService = new EconomyService({
     domains: mutableDomainRepo,
     resourceRegistry,
     ledgerStore,
     reservationStore,
-    lockManager
+    lockManager,
+    transactionStore,
+    recoveryService: recovery,
+    providerRegistry
   });
+
+  // G4-AUD-005: Instantiate canonical DomainControllerProvider BEFORE registering economy commands
+  const controllerProvider = options.controllerProvider ?? new DefaultDomainControllerProvider();
 
   const registry = new CommandRegistry();
   registerDomainCommandHandlers(registry, coordinator, mutableDomainRepo);
@@ -129,9 +148,9 @@ export function composeDomainManagerRuntime(
   registerRepairCommandHandlers(registry, coordinator, mutableDomainRepo);
   registerEconomyCommands({
     registry,
-    economyService: economy,
+    economyService,
     domains: mutableDomainRepo,
-    controllerProvider: options.controllerProvider
+    controllerProvider
   });
   registry.freeze();
 
@@ -181,8 +200,6 @@ export function composeDomainManagerRuntime(
     }
   });
 
-  const controllerProvider = options.controllerProvider ?? new DefaultDomainControllerProvider();
-
   // Wire canonical DomainControllerPolicy for the runtime
   const unregisterPolicy = registerDomainControllerPolicy((domainId, userId, context) => {
     return controllerProvider.isDomainController(domainId, userId, context);
@@ -191,8 +208,18 @@ export function composeDomainManagerRuntime(
   const people = new PeopleService(readOnlyDomains, { commandBus });
   const repairTool = new PeopleRepairTool(commandBus);
 
+  // G4-AUD-004: Public Economy API facade prevents raw mutable store access
+  const publicEconomy = new DefaultPublicEconomyApi({
+    domains: readOnlyDomains,
+    commandBus,
+    resourceRegistry,
+    ledgerStore,
+    reservationStore,
+    providerRegistry
+  });
+
   return Object.freeze({
-    // G2-AUD-008: Read-only facade exposed publicly
+    // G2-AUD-008 & G4-AUD-004: Read-only facades exposed publicly
     domains: readOnlyDomains,
     authority,
     commandBus,
@@ -206,10 +233,11 @@ export function composeDomainManagerRuntime(
     people,
     repairTool,
     controllerProvider,
-    economy,
+    economy: publicEconomy,
     resourceRegistry,
     ledgerStore,
     reservationStore,
+    providerRegistry,
     destroy: () => {
       unregisterPolicy();
       commandBus.destroy();
@@ -236,5 +264,12 @@ export {
 export { LedgerStore } from "../economy/ledger/ledger-store.js";
 export { ReservationStore } from "../economy/reservations/reservation-store.js";
 export { EconomyService } from "../economy/services/economy-service.js";
+export {
+  DefaultPublicEconomyApi,
+  type PublicEconomyApi
+} from "../economy/services/public-economy-api.js";
+export {
+  ProviderRegistry,
+  createDefaultProviderRegistry
+} from "../economy/providers/provider-registry.js";
 export { EconomyApplication, EconomyApplicationController } from "../ui/domain-patterns/economy/economy-app.js";
-

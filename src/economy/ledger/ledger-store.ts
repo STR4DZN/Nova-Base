@@ -7,6 +7,11 @@ import {
   type LedgerEntrySource,
   validateLedgerEntry
 } from "./ledger-types.js";
+import {
+  LEDGER_STORAGE_SCHEMA_VERSION,
+  type LedgerSnapshot,
+  type LedgerStorageAdapter
+} from "../storage/ledger-storage-adapter.js";
 
 export interface LedgerFilter {
   readonly domainUuid?: string;
@@ -14,16 +19,67 @@ export interface LedgerFilter {
   readonly transactionId?: string;
   readonly reservationId?: string;
   readonly kind?: LedgerEntryKind;
+  readonly sourceType?: string;
   readonly sourceRef?: string;
   readonly fromSequence?: number;
   readonly toSequence?: number;
+  readonly beforeSequence?: number;
+  readonly afterSequence?: number;
+  readonly sinceRealTime?: number;
+  readonly untilRealTime?: number;
+  readonly sinceWorldTime?: number;
+  readonly untilWorldTime?: number;
+  readonly cursor?: string;
   readonly limit?: number;
+  readonly direction?: "asc" | "desc";
+  readonly recent?: boolean;
+}
+
+export interface PagedLedgerResult {
+  readonly entries: readonly LedgerEntry[];
+  readonly totalCount: number;
+  readonly hasMore: boolean;
+  readonly nextCursor?: string;
+  readonly prevCursor?: string;
+}
+
+export interface LedgerStoreOptions {
+  readonly storageAdapter?: LedgerStorageAdapter;
 }
 
 export class LedgerStore {
   readonly #entries = new Map<string, LedgerEntry>();
   readonly #reversedTargetIds = new Set<string>();
+  readonly #sequenceIndex: LedgerEntry[] = [];
   #nextSequence = 1;
+  readonly #storageAdapter?: LedgerStorageAdapter;
+
+  constructor(options: LedgerStoreOptions = {}) {
+    this.#storageAdapter = options.storageAdapter;
+  }
+
+  async rehydrate(): Promise<void> {
+    if (!this.#storageAdapter) return;
+    const snapshot = await this.#storageAdapter.loadSnapshot();
+    if (snapshot) {
+      this.#entries.clear();
+      this.#reversedTargetIds.clear();
+      this.#sequenceIndex.length = 0;
+
+      for (const id of snapshot.reversedTargetIds) {
+        this.#reversedTargetIds.add(id);
+      }
+
+      const sorted = [...snapshot.entries].sort((a, b) => a.sequence - b.sequence);
+      for (const entry of sorted) {
+        this.#entries.set(entry.id, entry);
+        this.#sequenceIndex.push(entry);
+      }
+
+      const maxSeq = sorted.length > 0 ? sorted[sorted.length - 1].sequence : 0;
+      this.#nextSequence = Math.max(snapshot.nextSequence ?? 1, maxSeq + 1);
+    }
+  }
 
   append(
     input: Omit<LedgerEntry, "id" | "sequence" | "timestampReal"> & {
@@ -61,7 +117,13 @@ export class LedgerStore {
     }
 
     this.#entries.set(entry.id, entry);
+    this.#sequenceIndex.push(entry);
     this.#nextSequence++;
+
+    void this.#persist().catch(() => {
+      // Background persistence error logged or captured on flush
+    });
+
     return ok(entry);
   }
 
@@ -70,45 +132,115 @@ export class LedgerStore {
   }
 
   query(filter?: LedgerFilter): readonly LedgerEntry[] {
-    let list = Array.from(this.#entries.values());
+    const paged = this.queryPaged(filter);
+    return paged.entries;
+  }
+
+  queryPaged(filter?: LedgerFilter): PagedLedgerResult {
+    let list = this.#sequenceIndex;
 
     if (!filter) {
-      return Object.freeze(list);
+      return {
+        entries: Object.freeze([...list]),
+        totalCount: list.length,
+        hasMore: false
+      };
     }
+
+    let filtered = list;
 
     if (filter.domainUuid !== undefined) {
-      list = list.filter((e) => e.domainUuid === filter.domainUuid);
+      filtered = filtered.filter((e) => e.domainUuid === filter.domainUuid);
     }
     if (filter.resourceId !== undefined) {
-      list = list.filter((e) => e.resourceId === filter.resourceId);
+      filtered = filtered.filter((e) => e.resourceId === filter.resourceId);
     }
     if (filter.transactionId !== undefined) {
-      list = list.filter((e) => e.transactionId === filter.transactionId);
+      filtered = filtered.filter((e) => e.transactionId === filter.transactionId);
     }
     if (filter.reservationId !== undefined) {
-      list = list.filter((e) => e.reservationId === filter.reservationId);
+      filtered = filtered.filter((e) => e.reservationId === filter.reservationId);
     }
     if (filter.kind !== undefined) {
-      list = list.filter((e) => e.kind === filter.kind);
+      filtered = filtered.filter((e) => e.kind === filter.kind);
+    }
+    if (filter.sourceType !== undefined) {
+      filtered = filtered.filter((e) => e.source.type === filter.sourceType);
     }
     if (filter.sourceRef !== undefined) {
-      list = list.filter((e) => e.source.ref === filter.sourceRef);
+      filtered = filtered.filter((e) => e.source.ref === filter.sourceRef);
     }
     if (filter.fromSequence !== undefined) {
-      list = list.filter((e) => e.sequence >= filter.fromSequence!);
+      filtered = filtered.filter((e) => e.sequence >= filter.fromSequence!);
     }
     if (filter.toSequence !== undefined) {
-      list = list.filter((e) => e.sequence <= filter.toSequence!);
+      filtered = filtered.filter((e) => e.sequence <= filter.toSequence!);
+    }
+    if (filter.afterSequence !== undefined) {
+      filtered = filtered.filter((e) => e.sequence > filter.afterSequence!);
+    }
+    if (filter.beforeSequence !== undefined) {
+      filtered = filtered.filter((e) => e.sequence < filter.beforeSequence!);
+    }
+    if (filter.sinceRealTime !== undefined) {
+      filtered = filtered.filter((e) => e.timestampReal >= filter.sinceRealTime!);
+    }
+    if (filter.untilRealTime !== undefined) {
+      filtered = filtered.filter((e) => e.timestampReal <= filter.untilRealTime!);
+    }
+    if (filter.sinceWorldTime !== undefined) {
+      filtered = filtered.filter((e) => (e.timestampWorld ?? 0) >= filter.sinceWorldTime!);
+    }
+    if (filter.untilWorldTime !== undefined) {
+      filtered = filtered.filter((e) => (e.timestampWorld ?? 0) <= filter.untilWorldTime!);
+    }
+    if (filter.cursor !== undefined) {
+      const cursorSeq = parseInt(filter.cursor, 10);
+      if (Number.isSafeInteger(cursorSeq)) {
+        if (filter.direction === "desc") {
+          filtered = filtered.filter((e) => e.sequence < cursorSeq);
+        } else {
+          filtered = filtered.filter((e) => e.sequence > cursorSeq);
+        }
+      }
     }
 
-    // Default sorting by sequence ascending
-    list.sort((a, b) => a.sequence - b.sequence);
+    const totalCount = filtered.length;
+    const direction = filter.direction ?? (filter.recent ? "desc" : "asc");
 
+    // Sorting
+    const sorted = [...filtered];
+    if (direction === "desc") {
+      sorted.sort((a, b) => b.sequence - a.sequence);
+    } else {
+      sorted.sort((a, b) => a.sequence - b.sequence);
+    }
+
+    let resultEntries = sorted;
+    let hasMore = false;
     if (filter.limit !== undefined && filter.limit > 0) {
-      list = list.slice(0, filter.limit);
+      if (resultEntries.length > filter.limit) {
+        hasMore = true;
+        resultEntries = resultEntries.slice(0, filter.limit);
+      }
     }
 
-    return Object.freeze(list);
+    const nextCursor =
+      hasMore && resultEntries.length > 0
+        ? String(resultEntries[resultEntries.length - 1].sequence)
+        : undefined;
+    const prevCursor =
+      resultEntries.length > 0
+        ? String(resultEntries[0].sequence)
+        : undefined;
+
+    return {
+      entries: Object.freeze(resultEntries),
+      totalCount,
+      hasMore,
+      nextCursor,
+      prevCursor
+    };
   }
 
   createReversal(
@@ -163,7 +295,27 @@ export class LedgerStore {
     });
   }
 
+  isReversed(entryId: string): boolean {
+    return this.#reversedTargetIds.has(entryId);
+  }
+
   get count(): number {
     return this.#entries.size;
+  }
+
+  async flush(): Promise<void> {
+    await this.#persist();
+  }
+
+  async #persist(): Promise<void> {
+    if (!this.#storageAdapter) return;
+    const snapshot: LedgerSnapshot = {
+      schemaVersion: LEDGER_STORAGE_SCHEMA_VERSION,
+      entries: this.#sequenceIndex,
+      reversedTargetIds: Array.from(this.#reversedTargetIds),
+      nextSequence: this.#nextSequence,
+      updatedAt: Date.now()
+    };
+    await this.#storageAdapter.saveSnapshot(snapshot);
   }
 }

@@ -32,17 +32,34 @@
 | Verificação | Resultado |
 |---|---|
 | TypeScript strict (`tsc --noEmit`) | PASS (0 erros) |
-| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 383/383 (0 falhas) |
+| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 398/398 (0 falhas) |
 | Relatório de Aceitação | Gerado (`docs/GATE_G4_ACCEPTANCE_REPORT.md`) |
 | Regressões G0/G1/G2/G3 | 0 (todos os 335 testes anteriores preservados e passando) |
-| Testes novos Gate G4 | 48 testes dedicados (G4.1 a G4.10) |
+| Testes novos Gate G4 | 63 testes dedicados (G4.1 a G4.10 + 6 suítes de auditoria e hardening) |
+| Remediação de Auditoria G4-AUD-001 a G4-AUD-012 | PASS — 100% remediado e verificado |
 | Build do pacote (`node build.mjs`) | PASS (`dist/main.js` gerado) |
 | Empacotamento (`node scripts/package.mjs`) | PASS (`dist/domain-manager-v0.0.3.zip` gerado) |
 | Validação de pacote (`node scripts/validate-package.mjs`) | PASS |
 | Validação de artefato (`node scripts/validate-artifact.mjs`) | PASS |
 
+## Remediação de Auditoria Estrutural (G4-AUD-001 — G4-AUD-012)
+
+1. **G4-AUD-001 (Persistência de Ledger e Reservas)**: Implementados adapters de persistência em memória e JournalEntry com rehidratação automática em boot.
+2. **G4-AUD-002 (Recuperação e Atomicidade em Falhas de Múltiplos Passos)**: Transações com rollback automático do domínio de origem caso o destino falhe no passo 2; conservação estrita de massa.
+3. **G4-AUD-003 (Integridade Cross-Domain em Reservas e Estornos)**: Rejeição com `DM_ECON_RESERVATION_DOMAIN_MISMATCH` ao tentar consumir/liberar reservas de outro domínio.
+4. **G4-AUD-004 (Bypass de Runtime Público)**: Exposição isolada através de `PublicEconomyApi` com DTOs imutáveis; mutadores diretos e stores mutáveis removidos da API pública.
+5. **G4-AUD-005 (Falta do DomainControllerProvider canônico nos Comandos Economy)**: Provedor canônico de controller injetado por padrão no registro de comandos.
+6. **G4-AUD-006 (Contas Provider-Backed / Derivadas e Semântica Fail-Closed)**: `ManualCurrencyProvider`, `NativeResourceProvider` e fail-closed para saldos cacheados desatualizados (`DM_ECON_PROVIDER_STALE_CACHE`).
+7. **G4-AUD-007 (Projeção e Visibilidade Secreta de Contas e Transações)**: Projeção de dados econômicos com sanitização estrita para não-GMs.
+8. **G4-AUD-008 (UI sem Suporte a Decimais e Ações Incompletas)**: Adicionado `parseResourceAmount` com precisão decimal, modal de criação de conta e renderização de reservas.
+9. **G4-AUD-009 (Paginação do Ledger e Ordenação Cronológica Reversa)**: `queryPaged` com suporte a cursores e limites, e ordenação descendente padrão.
+10. **G4-AUD-010 (Suporte a Limiares, Recursos Customizados e Rollup Multi-Domínio)**: `ThresholdService`, `CustomResourceDefinitionStore`, agregação multi-domínio com `hiddenContributors` e no-op em ajustes com delta zero.
+11. **G4-AUD-011 (Encerramento Seguro de Contas / Soft-Close)**: Encerramento de contas bloqueado se houver reservas ativas ou saldo remanescente sem esvaziamento.
+12. **G4-AUD-012 (Concorrência e Locks Lexicais)**: Ordenação determinística de chaves no `LockManager`, eliminando deadlocks em concorrência circular.
+
 ## Próxima ação canônica
 
 - **Aguardar Aceitação Soberana do Usuário para Gate G4 (Economy & Resources)**: Conforme regra mandatória, o Gate G4 (Economy & Resources) permanecerá em `GATE_G4_PENDING_USER_ACCEPTANCE` até que o usuário teste e declare formalmente sua aceitação.
-- Após a aceitação e homologação pelo usuário, o Gate G5 (Governance & Decisions) será liberado.
+- Após a aceitação e homologação pelo usuário, o Gate G5 (Projects / Facilities / Downtime) será liberado.
+
 

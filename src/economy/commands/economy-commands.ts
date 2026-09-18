@@ -15,6 +15,75 @@ export interface RegisterEconomyCommandsOptions {
   readonly controllerProvider?: DomainControllerProvider;
 }
 
+export interface ResourceAdjustCommandPayload {
+  readonly domainUuid: string;
+  readonly resourceId: string;
+  readonly deltaMinor?: number;
+  readonly targetBalanceMinor?: number;
+  readonly reason: string;
+}
+
+export interface ResourceTransferCommandPayload {
+  readonly sourceDomainUuid: string;
+  readonly targetDomainUuid: string;
+  readonly resourceId: string;
+  readonly amountMinor: number;
+  readonly reason?: string;
+}
+
+export interface ResourceConvertCommandPayload {
+  readonly domainUuid: string;
+  readonly fromResourceId: string;
+  readonly toResourceId: string;
+  readonly fromAmountMinor: number;
+  readonly toAmountMinor: number;
+  readonly rateDescription?: string;
+  readonly reason?: string;
+}
+
+export interface ResourceReserveCommandPayload {
+  readonly domainUuid: string;
+  readonly resourceId: string;
+  readonly amountMinor: number;
+  readonly source?: any;
+  readonly expiresAtWorld?: number | null;
+  readonly expiresAtReal?: number | null;
+}
+
+export interface ResourceConsumeReservationCommandPayload {
+  readonly domainUuid: string;
+  readonly reservationId: string;
+  readonly amountMinor: number;
+  readonly reason?: string;
+}
+
+export interface ResourceReleaseReservationCommandPayload {
+  readonly domainUuid: string;
+  readonly reservationId: string;
+  readonly amountMinor?: number;
+}
+
+export interface ResourceCreateAccountCommandPayload {
+  readonly domainUuid: string;
+  readonly resourceId: string;
+  readonly initialBalanceMinor?: number;
+  readonly baseCapacityMinor?: number | null;
+  readonly visibility?: "public" | "restricted" | "secret";
+  readonly reason?: string;
+}
+
+export interface ResourceCloseAccountCommandPayload {
+  readonly domainUuid: string;
+  readonly resourceId: string;
+  readonly reason?: string;
+}
+
+export interface ResourceReversalCommandPayload {
+  readonly domainUuid: string;
+  readonly entryId: string;
+  readonly reason: string;
+}
+
 export function registerEconomyCommands(options: RegisterEconomyCommandsOptions): void {
   const { registry, economyService, domains, controllerProvider } = options;
 

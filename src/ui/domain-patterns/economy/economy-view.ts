@@ -1,4 +1,9 @@
-import type { EconomySubsystemViewModel, ResourceAccountViewModel, LedgerEntryViewModel } from "./economy-presenter.js";
+import type {
+  EconomySubsystemViewModel,
+  ResourceAccountViewModel,
+  ReservationItemViewModel,
+  LedgerEntryViewModel
+} from "./economy-presenter.js";
 
 export function escapeHtml(value: unknown): string {
   if (value === null || value === undefined) return "";
@@ -44,6 +49,11 @@ export function renderEconomySubsystemHtml(vm: EconomySubsystemViewModel): strin
         ${renderResourceCards(vm.accounts)}
       </section>
 
+      <section class="dm-reservations-section">
+        <h4><i class="fas fa-bookmark"></i> Active Reservations</h4>
+        ${renderReservationsTable(vm.reservations)}
+      </section>
+
       <section class="dm-ledger-history-section">
         <h4><i class="fas fa-history"></i> Recent Ledger Activity</h4>
         ${renderLedgerTable(vm.recentLedger)}
@@ -52,8 +62,8 @@ export function renderEconomySubsystemHtml(vm: EconomySubsystemViewModel): strin
   `;
 }
 
-function renderResourceCards(accounts: readonly ResourceAccountViewModel[]): string {
-  if (accounts.length === 0) {
+function renderResourceCards(accounts: readonly ResourceAccountViewModel[] = []): string {
+  if (!accounts || accounts.length === 0) {
     return `<div class="dm-empty-state">No resource accounts configured in this domain.</div>`;
   }
 
@@ -106,8 +116,8 @@ function renderResourceCards(accounts: readonly ResourceAccountViewModel[]): str
   `;
 }
 
-function renderLedgerTable(entries: readonly LedgerEntryViewModel[]): string {
-  if (entries.length === 0) {
+function renderLedgerTable(entries: readonly LedgerEntryViewModel[] = []): string {
+  if (!entries || entries.length === 0) {
     return `<div class="dm-empty-state">No recent ledger transactions recorded.</div>`;
   }
 
@@ -141,6 +151,41 @@ function renderLedgerTable(entries: readonly LedgerEntryViewModel[]): string {
   `;
 }
 
+function renderReservationsTable(reservations: readonly ReservationItemViewModel[] = []): string {
+  if (!reservations || reservations.length === 0) {
+    return `<div class="dm-empty-state">No active reservations recorded.</div>`;
+  }
+
+  return `
+    <table class="dm-reservations-table">
+      <thead>
+        <tr>
+          <th>Resource</th>
+          <th>Reserved Amount</th>
+          <th>Status</th>
+          <th>Reason</th>
+          <th>Expires</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${reservations
+          .map(
+            (r) => `
+          <tr class="dm-reservation-row" data-reservation-id="${escapeAttribute(r.id)}">
+            <td class="dm-col-resource">${escapeHtml(r.resourceLabel)}</td>
+            <td class="dm-col-amount">${escapeHtml(r.amountFormatted)}</td>
+            <td class="dm-col-status"><span class="dm-kind-badge ${escapeAttribute(r.status)}">${escapeHtml(r.status)}</span></td>
+            <td class="dm-col-reason">${escapeHtml(r.reason ?? "—")}</td>
+            <td class="dm-col-expires">${escapeHtml(r.expiresAtFormatted ?? "Never")}</td>
+          </tr>
+        `
+          )
+          .join("")}
+      </tbody>
+    </table>
+  `;
+}
+
 export function renderTransferModalHtml(
   domainUuid: string,
   accounts: readonly ResourceAccountViewModel[]
@@ -153,7 +198,7 @@ export function renderTransferModalHtml(
         <label>
           Resource:
           <select name="resourceId" required>
-            ${accounts.map((a) => `<option value="${escapeAttribute(a.resourceId)}">${escapeHtml(a.label)} (Available: ${escapeHtml(a.availableFormatted)})</option>`).join("")}
+            ${accounts.map((a) => `<option value="${escapeAttribute(a.resourceId)}" data-precision="${escapeAttribute(a.precision)}">${escapeHtml(a.label)} (Available: ${escapeHtml(a.availableFormatted)})</option>`).join("")}
           </select>
         </label>
         <label>
@@ -162,7 +207,7 @@ export function renderTransferModalHtml(
         </label>
         <label>
           Amount:
-          <input type="number" name="amount" min="1" step="1" required />
+          <input type="text" inputmode="decimal" name="amount" required placeholder="Amount (e.g. 10 or 10.50)" />
         </label>
         <label>
           Reason:
@@ -189,12 +234,12 @@ export function renderAdjustModalHtml(
         <label>
           Resource:
           <select name="resourceId" required>
-            ${accounts.map((a) => `<option value="${escapeAttribute(a.resourceId)}">${escapeHtml(a.label)} (Current: ${escapeHtml(a.balanceFormatted)})</option>`).join("")}
+            ${accounts.map((a) => `<option value="${escapeAttribute(a.resourceId)}" data-precision="${escapeAttribute(a.precision)}">${escapeHtml(a.label)} (Current: ${escapeHtml(a.balanceFormatted)})</option>`).join("")}
           </select>
         </label>
         <label>
           Delta Amount (positive or negative):
-          <input type="number" name="delta" step="1" required />
+          <input type="text" inputmode="decimal" name="delta" required placeholder="Delta (e.g. +10.50 or -5)" />
         </label>
         <label>
           Reason (Required):
@@ -203,6 +248,58 @@ export function renderAdjustModalHtml(
         <div class="dm-modal-actions">
           <button type="button" class="dm-btn dm-btn-secondary" data-action="closeModal">Cancel</button>
           <button type="submit" class="dm-btn dm-btn-primary">Apply Adjustment</button>
+        </div>
+      </form>
+    </div>
+  `;
+}
+
+export function renderCreateAccountModalHtml(
+  domainUuid: string,
+  availableDefinitions: readonly { id: string; label: string; precision: number }[] = []
+): string {
+  return `
+    <div class="dm-modal dm-create-account-modal" data-modal-type="createAccount">
+      <h3><i class="fas fa-plus-circle"></i> Create Resource Account</h3>
+      <form data-form-type="createAccount">
+        <input type="hidden" name="domainUuid" value="${escapeAttribute(domainUuid)}" />
+        <label>
+          Resource:
+          ${
+            availableDefinitions.length > 0
+              ? `
+            <select name="resourceId" required>
+              ${availableDefinitions.map((d) => `<option value="${escapeAttribute(d.id)}" data-precision="${escapeAttribute(d.precision)}">${escapeHtml(d.label)} (${escapeHtml(d.id)})</option>`).join("")}
+            </select>
+          `
+              : `
+            <input type="text" name="resourceId" required placeholder="e.g. domain-manager:treasury" />
+          `
+          }
+        </label>
+        <label>
+          Initial Balance:
+          <input type="text" inputmode="decimal" name="initialBalance" placeholder="0" />
+        </label>
+        <label>
+          Base Capacity (leave empty for unlimited):
+          <input type="text" inputmode="decimal" name="baseCapacity" placeholder="Unlimited" />
+        </label>
+        <label>
+          Visibility:
+          <select name="visibility">
+            <option value="public" selected>Public (Visible to all players)</option>
+            <option value="restricted">Restricted (Controller / Authorized)</option>
+            <option value="secret">Secret (GM Only)</option>
+          </select>
+        </label>
+        <label>
+          Reason:
+          <input type="text" name="reason" placeholder="Initial allocation note" />
+        </label>
+        <div class="dm-modal-actions">
+          <button type="button" class="dm-btn dm-btn-secondary" data-action="closeModal">Cancel</button>
+          <button type="submit" class="dm-btn dm-btn-primary">Create Account</button>
         </div>
       </form>
     </div>

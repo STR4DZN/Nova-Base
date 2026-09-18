@@ -105,15 +105,22 @@ test("G4.10: composeDomainManagerRuntime wires economy service, stores, and comm
     assert.ok(runtime.economy, "runtime.economy must be exposed");
     assert.equal(typeof runtime.economy.createAccount, "function");
     assert.equal(typeof runtime.economy.closeAccount, "function");
-    assert.equal(typeof runtime.economy.commitAdjust, "function");
-    assert.equal(typeof runtime.economy.commitTransfer, "function");
-    assert.equal(typeof runtime.economy.commitConvert, "function");
+    assert.equal(typeof runtime.economy.adjust, "function");
+    assert.equal(typeof runtime.economy.transfer, "function");
+    assert.equal(typeof runtime.economy.convert, "function");
     assert.equal(typeof runtime.economy.reserve, "function");
     assert.equal(typeof runtime.economy.consumeReservation, "function");
     assert.equal(typeof runtime.economy.releaseReservation, "function");
-    assert.equal(typeof runtime.economy.reverseLedgerEntry, "function");
+    assert.equal(typeof runtime.economy.reversal, "function");
     assert.equal(typeof runtime.economy.getAccount, "function");
     assert.equal(typeof runtime.economy.getAccountAvailability, "function");
+
+    // Verify mutators (commit*) and raw stores are NOT exposed on public economy API (G4-AUD-004 isolation)
+    assert.equal((runtime.economy as any).commitAdjust, undefined);
+    assert.equal((runtime.economy as any).commitTransfer, undefined);
+    assert.equal((runtime.economy as any).commitConvert, undefined);
+    assert.equal((runtime.economy as any).ledgerStore, undefined);
+    assert.equal((runtime.economy as any).reservationStore, undefined);
 
     assert.ok(runtime.resourceRegistry, "runtime.resourceRegistry must be exposed");
     assert.ok(runtime.resourceRegistry.has("domain-manager:treasury"));
@@ -164,12 +171,13 @@ test("G4.10: composeDomainManagerRuntime wires economy service, stores, and comm
       assert.equal(createReceipt.value.status, "executed");
     }
 
-    // Create an account on Domain Beta
-    await runtime.economy.createAccount({
+    // Create an account on Domain Beta via runtime.economy.createAccount (dispatched via CommandBus)
+    const createBReceipt = await runtime.economy.createAccount({
       domainUuid: docB.uuid,
       resourceId: "domain-manager:treasury",
       initialBalanceMinor: 1000
     });
+    assert.equal(createBReceipt.ok, true);
 
     // Transfer from A to B via CommandBus
     const transferCmd: DomainCommand = {
@@ -204,8 +212,11 @@ test("G4.10: composeDomainManagerRuntime wires economy service, stores, and comm
       domainUuid: docA.uuid,
       commandBus: runtime.commandBus,
       economyService: runtime.economy,
+      resourceRegistry: runtime.resourceRegistry,
+      ledgerStore: runtime.ledgerStore,
+      reservationStore: runtime.reservationStore,
       domains: runtime.domains,
-      viewer: { isGM: true, userId: "user-1" }
+      viewer: { isGm: true, userId: "user-1" }
     });
     assert.ok(app);
     assert.ok(app.controller);

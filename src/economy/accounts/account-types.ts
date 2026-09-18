@@ -5,6 +5,8 @@ import { isNamespacedResourceId } from "../definitions/resource-definition-types
 export type ResourceAccountMode = "native" | "derived" | "provider";
 export type ResourceVisibility = "public" | "restricted" | "secret";
 
+export type AccountStatus = "active" | "closed";
+
 export interface NativeResourceAccount {
   readonly mode: "native";
   readonly domainUuid: string;
@@ -12,6 +14,8 @@ export interface NativeResourceAccount {
   readonly balanceMinor: number;
   readonly baseCapacityMinor: number | null;
   readonly visibility?: ResourceVisibility;
+  readonly status?: AccountStatus;
+  readonly closedAt?: number;
 }
 
 export interface DerivedResourceAccount {
@@ -20,6 +24,8 @@ export interface DerivedResourceAccount {
   readonly resourceId: string;
   readonly resolverId: string;
   readonly visibility?: ResourceVisibility;
+  readonly status?: AccountStatus;
+  readonly closedAt?: number;
 }
 
 export interface ProviderResourceAccount {
@@ -29,6 +35,8 @@ export interface ProviderResourceAccount {
   readonly providerId: string;
   readonly providerRef: string;
   readonly visibility?: ResourceVisibility;
+  readonly status?: AccountStatus;
+  readonly closedAt?: number;
 }
 
 export type ResourceAccount =
@@ -127,13 +135,18 @@ export function validateResourceAccount(raw: unknown): Result<ResourceAccount, P
         baseCapacity = candidate.baseCapacityMinor;
       }
 
+      const status = candidate.status === "closed" ? "closed" : "active";
+      const closedAt = typeof candidate.closedAt === "number" ? candidate.closedAt : undefined;
+
       return ok({
         mode: "native",
         domainUuid: candidate.domainUuid.trim(),
         resourceId: candidate.resourceId,
         balanceMinor: balance,
         baseCapacityMinor: baseCapacity,
-        ...(visibility ? { visibility } : {})
+        ...(visibility ? { visibility } : {}),
+        status,
+        ...(closedAt !== undefined ? { closedAt } : {})
       });
     }
 

@@ -1,0 +1,461 @@
+import { createPublicError, type PublicError } from "../../core/contracts/public-error.js";
+import { err, ok, type Result } from "../../core/contracts/result.js";
+import type { CommandBus } from "../../commands/command-bus.js";
+import type { TransportReceipt, TransportSendOptions } from "../../commands/command-transport.js";
+import {
+  COMMAND_CONTRACT_VERSION_V1,
+  type CommandId,
+  type DomainCommand
+} from "../../commands/command-envelope.js";
+import { createOpaqueId } from "../../core/identity/ids.js";
+import type { DomainReadRepository } from "../../storage/repositories/domain-repository.js";
+import type { ResourceDefinitionRegistry } from "../definitions/resource-registry.js";
+import type { LedgerStore, LedgerFilter } from "../ledger/ledger-store.js";
+import type { ReservationStore, ReservationFilter } from "../reservations/reservation-store.js";
+import type { ProviderRegistry } from "../providers/provider-registry.js";
+import type { ProviderHealth } from "../providers/provider-types.js";
+import {
+  EconomyProjectionService,
+  type EconomyContextDto,
+  type LedgerEntryDto,
+  type ReservationDto,
+  type ResourceAccountDto
+} from "../projection/economy-projection-service.js";
+import {
+  EconomyAggregationProvider,
+  type EconomyAggregateContextDto
+} from "../aggregation/economy-aggregation-provider.js";
+import type { ViewerIdentity } from "../../projection/viewer-identity.js";
+import { tryGetDomainEconomyData } from "../economy-data.js";
+import { resolveEffectiveCapacity } from "../accounts/capacity-resolver.js";
+import type {
+  ResourceAdjustCommandPayload,
+  ResourceCloseAccountCommandPayload,
+  ResourceConsumeReservationCommandPayload,
+  ResourceConvertCommandPayload,
+  ResourceCreateAccountCommandPayload,
+  ResourceReleaseReservationCommandPayload,
+  ResourceReserveCommandPayload,
+  ResourceReversalCommandPayload,
+  ResourceTransferCommandPayload
+} from "../commands/economy-commands.js";
+
+export interface PublicEconomyApi {
+  getContext(domainUuid: string, viewer?: Partial<ViewerIdentity>): Promise<Result<EconomyContextDto, PublicError>>;
+  getResource(domainUuid: string, resourceId: string, viewer?: Partial<ViewerIdentity>): Promise<Result<ResourceAccountDto, PublicError>>;
+  getAccount(domainUuid: string, resourceId: string, viewer?: Partial<ViewerIdentity>): Promise<Result<ResourceAccountDto | undefined, PublicError>>;
+  getAccountAvailability(domainUuid: string, resourceId: string, viewer?: Partial<ViewerIdentity>): Promise<Result<{ balanceMinor: number; availableMinor: number; reservedMinor: number; capacityMinor: number | null } | undefined, PublicError>>;
+  queryLedger(filter: LedgerFilter, viewer?: Partial<ViewerIdentity>): Promise<Result<readonly LedgerEntryDto[], PublicError>>;
+  getReservation(reservationId: string, viewer?: Partial<ViewerIdentity>): Promise<Result<ReservationDto, PublicError>>;
+  queryReservations(filter: ReservationFilter, viewer?: Partial<ViewerIdentity>): Promise<Result<readonly ReservationDto[], PublicError>>;
+  getProviderHealth(providerId?: string): Promise<Result<readonly ProviderHealth[], PublicError>>;
+  getAggregateContext(domainUuids: readonly string[], viewer?: Partial<ViewerIdentity>): Promise<Result<EconomyAggregateContextDto, PublicError>>;
+
+  // Safe semantic mutation helpers (strictly dispatched via CommandBus)
+  adjust(payload: ResourceAdjustCommandPayload, options?: TransportSendOptions): Promise<Result<TransportReceipt, PublicError>>;
+  transfer(payload: ResourceTransferCommandPayload, options?: TransportSendOptions): Promise<Result<TransportReceipt, PublicError>>;
+  convert(payload: ResourceConvertCommandPayload, options?: TransportSendOptions): Promise<Result<TransportReceipt, PublicError>>;
+  reserve(payload: ResourceReserveCommandPayload, options?: TransportSendOptions): Promise<Result<TransportReceipt, PublicError>>;
+  consumeReservation(payload: ResourceConsumeReservationCommandPayload, options?: TransportSendOptions): Promise<Result<TransportReceipt, PublicError>>;
+  releaseReservation(payload: ResourceReleaseReservationCommandPayload, options?: TransportSendOptions): Promise<Result<TransportReceipt, PublicError>>;
+  createAccount(payload: ResourceCreateAccountCommandPayload, options?: TransportSendOptions): Promise<Result<TransportReceipt, PublicError>>;
+  closeAccount(payload: ResourceCloseAccountCommandPayload, options?: TransportSendOptions): Promise<Result<TransportReceipt, PublicError>>;
+  reversal(payload: ResourceReversalCommandPayload, options?: TransportSendOptions): Promise<Result<TransportReceipt, PublicError>>;
+}
+
+export interface DefaultPublicEconomyApiOptions {
+  readonly domains: DomainReadRepository;
+  readonly commandBus: CommandBus;
+  readonly resourceRegistry: ResourceDefinitionRegistry;
+  readonly ledgerStore: LedgerStore;
+  readonly reservationStore: ReservationStore;
+  readonly providerRegistry?: ProviderRegistry;
+  readonly projectionService?: EconomyProjectionService;
+  readonly aggregationProvider?: EconomyAggregationProvider;
+}
+
+export class DefaultPublicEconomyApi implements PublicEconomyApi {
+  readonly #domains: DomainReadRepository;
+  readonly #commandBus: CommandBus;
+  readonly #resourceRegistry: ResourceDefinitionRegistry;
+  readonly #ledgerStore: LedgerStore;
+  readonly #reservationStore: ReservationStore;
+  readonly #providerRegistry?: ProviderRegistry;
+  readonly #projection: EconomyProjectionService;
+  readonly #aggregation: EconomyAggregationProvider;
+
+  constructor(options: DefaultPublicEconomyApiOptions) {
+    this.#domains = options.domains;
+    this.#commandBus = options.commandBus;
+    this.#resourceRegistry = options.resourceRegistry;
+    this.#ledgerStore = options.ledgerStore;
+    this.#reservationStore = options.reservationStore;
+    this.#providerRegistry = options.providerRegistry;
+    this.#projection = options.projectionService ?? new EconomyProjectionService();
+    this.#aggregation =
+      options.aggregationProvider ??
+      new EconomyAggregationProvider({
+        domains: options.domains,
+        resourceRegistry: options.resourceRegistry,
+        reservationStore: options.reservationStore,
+        providerRegistry: options.providerRegistry,
+        projectionService: this.#projection
+      });
+  }
+
+  async getContext(
+    domainUuid: string,
+    callerViewer?: Partial<ViewerIdentity>
+  ): Promise<Result<EconomyContextDto, PublicError>> {
+    const viewer = this.#projection.resolveViewer(callerViewer);
+    const docRes = await this.#domains.read(domainUuid);
+    if (!docRes.ok) return docRes;
+
+    const econRes = tryGetDomainEconomyData(docRes.value.record);
+    if (!econRes.ok) return econRes;
+
+    const accounts: ResourceAccountDto[] = [];
+    const visibleResourceIds = new Set<string>();
+
+    for (const acc of econRes.value.accounts) {
+      if (!this.#projection.isAccountVisible(acc, viewer)) {
+        continue;
+      }
+      visibleResourceIds.add(acc.resourceId);
+
+      const def = this.#resourceRegistry.get(acc.resourceId);
+      const reserved = this.#reservationStore.getReservedTotal(domainUuid, acc.resourceId);
+      let balance = acc.mode === "native" ? acc.balanceMinor : 0;
+      let capacity: number | null = acc.mode === "native" ? acc.baseCapacityMinor : null;
+      let isStale = false;
+      let isUnavailable = false;
+
+      if (acc.mode === "provider" && this.#providerRegistry) {
+        const provider = this.#providerRegistry.get(acc.providerId);
+        if (provider && "readBalance" in provider) {
+          const balRes = await (provider as any).readBalance(domainUuid, acc.resourceId, acc.providerRef);
+          if (balRes?.ok) {
+            balance = balRes.value.balanceMinor;
+            capacity = balRes.value.effectiveCapacityMinor ?? capacity;
+            isStale = Boolean(balRes.value.isStale);
+          } else {
+            isUnavailable = true;
+          }
+        } else {
+          isUnavailable = true;
+        }
+      }
+
+      const projected = this.#projection.projectAccount(acc, def, reserved, viewer, {
+        balanceMinor: balance,
+        capacityMinor: capacity,
+        isStale,
+        isUnavailable
+      });
+
+      if (projected) {
+        accounts.push(projected);
+      }
+    }
+
+    // Project recent ledger entries (newest first)
+    const rawLedger = this.#ledgerStore.query({
+      domainUuid,
+      direction: "desc",
+      limit: 20
+    });
+    const recentLedger: LedgerEntryDto[] = [];
+    for (const entry of rawLedger) {
+      const proj = this.#projection.projectLedgerEntry(entry, visibleResourceIds, viewer);
+      if (proj) recentLedger.push(proj);
+    }
+
+    // Project active reservations
+    const rawReservations = this.#reservationStore.list({ domainUuid, status: "active" });
+    const activeReservations: ReservationDto[] = [];
+    for (const r of rawReservations) {
+      const proj = this.#projection.projectReservation(r, visibleResourceIds, viewer);
+      if (proj) activeReservations.push(proj);
+    }
+
+    return ok({
+      domainUuid,
+      accounts: Object.freeze(accounts),
+      recentLedger: Object.freeze(recentLedger),
+      activeReservations: Object.freeze(activeReservations),
+      isGmView: viewer.isGm,
+      projectedAt: Date.now()
+    });
+  }
+
+  async getResource(
+    domainUuid: string,
+    resourceId: string,
+    callerViewer?: Partial<ViewerIdentity>
+  ): Promise<Result<ResourceAccountDto, PublicError>> {
+    const ctxRes = await this.getContext(domainUuid, callerViewer);
+    if (!ctxRes.ok) return ctxRes;
+
+    const acc = ctxRes.value.accounts.find((a) => a.resourceId === resourceId);
+    if (!acc) {
+      return err(
+        createPublicError({
+          code: "DM_ECON_ACCOUNT_NOT_FOUND",
+          category: "not-found",
+          message: `Resource account '${resourceId}' not found in domain '${domainUuid}'`
+        })
+      );
+    }
+
+    return ok(acc);
+  }
+
+  async getAccount(
+    domainUuid: string,
+    resourceId: string,
+    callerViewer?: Partial<ViewerIdentity>
+  ): Promise<Result<ResourceAccountDto | undefined, PublicError>> {
+    const ctxRes = await this.getContext(domainUuid, callerViewer);
+    if (!ctxRes.ok) return ctxRes;
+    const acc = ctxRes.value.accounts.find((a) => a.resourceId === resourceId);
+    return ok(acc);
+  }
+
+  async getAccountAvailability(
+    domainUuid: string,
+    resourceId: string,
+    callerViewer?: Partial<ViewerIdentity>
+  ): Promise<
+    Result<
+      | {
+          balanceMinor: number;
+          availableMinor: number;
+          reservedMinor: number;
+          capacityMinor: number | null;
+        }
+      | undefined,
+      PublicError
+    >
+  > {
+    const accRes = await this.getAccount(domainUuid, resourceId, callerViewer);
+    if (!accRes.ok) return accRes;
+    if (!accRes.value) return ok(undefined);
+    return ok({
+      balanceMinor: accRes.value.balanceMinor,
+      availableMinor: accRes.value.availableMinor,
+      reservedMinor: accRes.value.reservedMinor,
+      capacityMinor: accRes.value.capacityMinor
+    });
+  }
+
+  async queryLedger(
+    filter: LedgerFilter,
+    callerViewer?: Partial<ViewerIdentity>
+  ): Promise<Result<readonly LedgerEntryDto[], PublicError>> {
+    const viewer = this.#projection.resolveViewer(callerViewer);
+    const raw = this.#ledgerStore.query(filter);
+    const visibleResourceIds = new Set<string>();
+
+    if (filter.domainUuid) {
+      const docRes = await this.#domains.read(filter.domainUuid);
+      if (docRes.ok) {
+        const econRes = tryGetDomainEconomyData(docRes.value.record);
+        if (econRes.ok) {
+          for (const acc of econRes.value.accounts) {
+            if (this.#projection.isAccountVisible(acc, viewer)) {
+              visibleResourceIds.add(acc.resourceId);
+            }
+          }
+        }
+      }
+    }
+
+    const projected: LedgerEntryDto[] = [];
+    for (const entry of raw) {
+      const proj = this.#projection.projectLedgerEntry(entry, visibleResourceIds, viewer);
+      if (proj) projected.push(proj);
+    }
+
+    return ok(Object.freeze(projected));
+  }
+
+  async getReservation(
+    reservationId: string,
+    callerViewer?: Partial<ViewerIdentity>
+  ): Promise<Result<ReservationDto, PublicError>> {
+    const viewer = this.#projection.resolveViewer(callerViewer);
+    const r = this.#reservationStore.get(reservationId);
+    if (!r) {
+      return err(
+        createPublicError({
+          code: "DM_ECON_RESERVATION_NOT_FOUND",
+          category: "not-found",
+          message: `Reservation '${reservationId}' not found`
+        })
+      );
+    }
+
+    const visibleResourceIds = new Set<string>([r.resourceId]);
+    const proj = this.#projection.projectReservation(r, visibleResourceIds, viewer);
+    if (!proj) {
+      return err(
+        createPublicError({
+          code: "DM_ECON_RESERVATION_NOT_FOUND",
+          category: "not-found",
+          message: `Reservation '${reservationId}' not found or clearance insufficient`
+        })
+      );
+    }
+
+    return ok(proj);
+  }
+
+  async queryReservations(
+    filter: ReservationFilter,
+    callerViewer?: Partial<ViewerIdentity>
+  ): Promise<Result<readonly ReservationDto[], PublicError>> {
+    const viewer = this.#projection.resolveViewer(callerViewer);
+    const raw = this.#reservationStore.list(filter);
+    const visibleResourceIds = new Set<string>();
+
+    if (filter.domainUuid) {
+      const docRes = await this.#domains.read(filter.domainUuid);
+      if (docRes.ok) {
+        const econRes = tryGetDomainEconomyData(docRes.value.record);
+        if (econRes.ok) {
+          for (const acc of econRes.value.accounts) {
+            if (this.#projection.isAccountVisible(acc, viewer)) {
+              visibleResourceIds.add(acc.resourceId);
+            }
+          }
+        }
+      }
+    }
+
+    const projected: ReservationDto[] = [];
+    for (const r of raw) {
+      const proj = this.#projection.projectReservation(r, visibleResourceIds, viewer);
+      if (proj) projected.push(proj);
+    }
+
+    return ok(Object.freeze(projected));
+  }
+
+  async getProviderHealth(
+    providerId?: string
+  ): Promise<Result<readonly ProviderHealth[], PublicError>> {
+    if (!this.#providerRegistry) {
+      return ok(Object.freeze([]));
+    }
+
+    if (providerId) {
+      const p = this.#providerRegistry.get(providerId);
+      if (!p) {
+        return err(
+          createPublicError({
+            code: "DM_ECON_PROVIDER_NOT_FOUND",
+            category: "not-found",
+            message: `Provider '${providerId}' is not registered`
+          })
+        );
+      }
+      const h = await p.getHealth();
+      return ok(Object.freeze([h]));
+    }
+
+    const healths: ProviderHealth[] = [];
+    for (const p of this.#providerRegistry.list()) {
+      healths.push(await p.getHealth());
+    }
+    return ok(Object.freeze(healths));
+  }
+
+  async getAggregateContext(
+    domainUuids: readonly string[],
+    callerViewer?: Partial<ViewerIdentity>
+  ): Promise<Result<EconomyAggregateContextDto, PublicError>> {
+    const agg = await this.#aggregation.getAggregateContext(domainUuids, callerViewer);
+    return ok(agg);
+  }
+
+  // --- Safe Command Dispatch Helpers ---
+
+  async adjust(
+    payload: ResourceAdjustCommandPayload,
+    options?: TransportSendOptions
+  ): Promise<Result<TransportReceipt, PublicError>> {
+    return this.#dispatchCommand("economy:adjust", payload, options);
+  }
+
+  async transfer(
+    payload: ResourceTransferCommandPayload,
+    options?: TransportSendOptions
+  ): Promise<Result<TransportReceipt, PublicError>> {
+    return this.#dispatchCommand("economy:transfer", payload, options);
+  }
+
+  async convert(
+    payload: ResourceConvertCommandPayload,
+    options?: TransportSendOptions
+  ): Promise<Result<TransportReceipt, PublicError>> {
+    return this.#dispatchCommand("economy:convert", payload, options);
+  }
+
+  async reserve(
+    payload: ResourceReserveCommandPayload,
+    options?: TransportSendOptions
+  ): Promise<Result<TransportReceipt, PublicError>> {
+    return this.#dispatchCommand("economy:reserve", payload, options);
+  }
+
+  async consumeReservation(
+    payload: ResourceConsumeReservationCommandPayload,
+    options?: TransportSendOptions
+  ): Promise<Result<TransportReceipt, PublicError>> {
+    return this.#dispatchCommand("economy:consume-reservation", payload, options);
+  }
+
+  async releaseReservation(
+    payload: ResourceReleaseReservationCommandPayload,
+    options?: TransportSendOptions
+  ): Promise<Result<TransportReceipt, PublicError>> {
+    return this.#dispatchCommand("economy:release-reservation", payload, options);
+  }
+
+  async createAccount(
+    payload: ResourceCreateAccountCommandPayload,
+    options?: TransportSendOptions
+  ): Promise<Result<TransportReceipt, PublicError>> {
+    return this.#dispatchCommand("economy:create-account", payload, options);
+  }
+
+  async closeAccount(
+    payload: ResourceCloseAccountCommandPayload,
+    options?: TransportSendOptions
+  ): Promise<Result<TransportReceipt, PublicError>> {
+    return this.#dispatchCommand("economy:close-account", payload, options);
+  }
+
+  async reversal(
+    payload: ResourceReversalCommandPayload,
+    options?: TransportSendOptions
+  ): Promise<Result<TransportReceipt, PublicError>> {
+    return this.#dispatchCommand("economy:reversal", payload, options);
+  }
+
+  async #dispatchCommand(
+    commandType: string,
+    payload: unknown,
+    options?: TransportSendOptions
+  ): Promise<Result<TransportReceipt, PublicError>> {
+    const envelope: DomainCommand<unknown> = {
+      contractVersion: COMMAND_CONTRACT_VERSION_V1,
+      commandId: createOpaqueId("cmd") as CommandId,
+      type: commandType,
+      payload,
+      issuedAtReal: Date.now()
+    };
+
+    return this.#commandBus.execute(envelope, options);
+  }
+}

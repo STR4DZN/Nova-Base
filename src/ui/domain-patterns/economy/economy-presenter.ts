@@ -9,11 +9,14 @@ import { resolveEffectiveCapacity } from "../../../economy/accounts/capacity-res
 import { formatResourceAmount } from "../../../economy/math/minor-units.js";
 import type { ResourceDefinition } from "../../../economy/definitions/resource-definition-types.js";
 
+import type { ProviderRegistry } from "../../../economy/providers/provider-registry.js";
+
 export interface EconomyPresenterOptions {
   readonly viewerIsGm: boolean;
   readonly resourceRegistry: ResourceDefinitionRegistry;
   readonly ledgerStore?: LedgerStore;
   readonly reservationStore?: ReservationStore;
+  readonly providerRegistry?: ProviderRegistry;
 }
 
 export interface ResourceAccountViewModel {
@@ -21,6 +24,9 @@ export interface ResourceAccountViewModel {
   readonly label: string;
   readonly icon?: string;
   readonly displayUnit?: string;
+  readonly precision: number;
+  readonly mode: "native" | "derived" | "provider";
+  readonly status: "active" | "closed";
   readonly balanceMinor: number;
   readonly balanceFormatted: string;
   readonly reservedMinor: number;
@@ -31,7 +37,18 @@ export interface ResourceAccountViewModel {
   readonly capacityFormatted: string;
   readonly capacityPercentage: number | null;
   readonly isSecret: boolean;
-  readonly statusBadgeClass: "normal" | "near-capacity" | "over-capacity" | "low-reserve";
+  readonly statusBadgeClass: "normal" | "near-capacity" | "over-capacity" | "low-reserve" | "closed";
+}
+
+export interface ReservationItemViewModel {
+  readonly id: string;
+  readonly resourceId: string;
+  readonly resourceLabel: string;
+  readonly amountMinor: number;
+  readonly amountFormatted: string;
+  readonly status: string;
+  readonly reason?: string;
+  readonly expiresAtFormatted?: string;
 }
 
 export interface LedgerEntryViewModel {
@@ -48,6 +65,7 @@ export interface EconomySubsystemViewModel {
   readonly domainUuid: string;
   readonly viewerIsGm: boolean;
   readonly accounts: readonly ResourceAccountViewModel[];
+  readonly reservations: readonly ReservationItemViewModel[];
   readonly recentLedger: readonly LedgerEntryViewModel[];
 }
 
@@ -77,7 +95,19 @@ export function buildEconomyViewModel(
     const precision = def?.precision ?? 0;
     const unit = def?.displayUnit?.singular ?? def?.displayUnit?.abbreviation ?? "";
 
-    const balanceMinor = acc.mode === "native" ? acc.balanceMinor : 0;
+    const isClosed = acc.status === "closed";
+    let balanceMinor = acc.mode === "native" ? acc.balanceMinor : 0;
+    let providerAvailable = true;
+
+    if (acc.mode === "provider") {
+      if (options.providerRegistry?.has(acc.providerId)) {
+        // Provider registered
+        providerAvailable = true;
+      } else {
+        providerAvailable = false;
+      }
+    }
+
     const reservedMinor = options.reservationStore
       ? options.reservationStore.getReservedTotal(domainUuid, acc.resourceId)
       : 0;
@@ -90,17 +120,21 @@ export function buildEconomyViewModel(
     let capacityPercentage: number | null = null;
     let statusBadgeClass: ResourceAccountViewModel["statusBadgeClass"] = "normal";
 
-    if (effectiveCapacityMinor !== null && effectiveCapacityMinor > 0) {
-      capacityPercentage = Math.min(100, Math.round((balanceMinor / effectiveCapacityMinor) * 100));
-      if (balanceMinor > effectiveCapacityMinor) {
-        statusBadgeClass = "over-capacity";
-      } else if (capacityPercentage >= 85) {
-        statusBadgeClass = "near-capacity";
+    if (isClosed) {
+      statusBadgeClass = "closed";
+    } else {
+      if (effectiveCapacityMinor !== null && effectiveCapacityMinor > 0) {
+        capacityPercentage = Math.min(100, Math.round((balanceMinor / effectiveCapacityMinor) * 100));
+        if (balanceMinor > effectiveCapacityMinor) {
+          statusBadgeClass = "over-capacity";
+        } else if (capacityPercentage >= 85) {
+          statusBadgeClass = "near-capacity";
+        }
       }
-    }
 
-    if (availableMinor < 0) {
-      statusBadgeClass = "low-reserve";
+      if (availableMinor < 0) {
+        statusBadgeClass = "low-reserve";
+      }
     }
 
     const resDef: ResourceDefinition = def ?? {
@@ -120,9 +154,20 @@ export function buildEconomyViewModel(
       lifecycle: "active"
     };
 
-    const balanceFormatted = formatResourceAmount(balanceMinor, resDef, { showUnit: true });
+    let balanceFormatted: string;
+    if (acc.mode === "provider" && !providerAvailable) {
+      balanceFormatted = "Provider Unavailable";
+    } else if (acc.mode === "provider") {
+      balanceFormatted = "External Sync";
+    } else {
+      balanceFormatted = formatResourceAmount(balanceMinor, resDef, { showUnit: true });
+    }
+
     const reservedFormatted = formatResourceAmount(reservedMinor, resDef, { showUnit: true });
-    const availableFormatted = formatResourceAmount(availableMinor, resDef, { showUnit: true });
+    const availableFormatted =
+      acc.mode === "native"
+        ? formatResourceAmount(availableMinor, resDef, { showUnit: true })
+        : balanceFormatted;
     const capacityFormatted =
       effectiveCapacityMinor !== null
         ? formatResourceAmount(effectiveCapacityMinor, resDef, { showUnit: true })
@@ -133,6 +178,9 @@ export function buildEconomyViewModel(
       label,
       ...(def?.icon ? { icon: def.icon } : {}),
       displayUnit: unit,
+      precision,
+      mode: acc.mode,
+      status: acc.status === "closed" ? "closed" : "active",
       balanceMinor,
       balanceFormatted,
       reservedMinor,
@@ -147,11 +195,55 @@ export function buildEconomyViewModel(
     });
   }
 
-  // Ledger history (sanitized)
+  const visibleResourceIds = new Set(accountVMs.map((a) => a.resourceId));
+
+  // Active reservations (sanitized)
+  const reservationVMs: ReservationItemViewModel[] = [];
+  if (options.reservationStore) {
+    const rawReservations = options.reservationStore.list({ domainUuid });
+    for (const r of rawReservations) {
+      if (r.status !== "active" && r.status !== "partially-consumed") {
+        continue;
+      }
+      if (!options.viewerIsGm && !visibleResourceIds.has(r.resourceId)) {
+        continue;
+      }
+
+      const def = options.resourceRegistry.get(r.resourceId);
+      const resDef: ResourceDefinition = def ?? {
+        id: r.resourceId,
+        version: 1,
+        label: r.resourceId,
+        description: "",
+        icon: "",
+        categoryId: "custom",
+        tags: [],
+        precision: 0,
+        displayUnit: { singular: "", plural: "" },
+        minimumMinor: 0,
+        maximumMinor: null,
+        allowNegative: false,
+        defaultCapacityPolicy: "block",
+        lifecycle: "active"
+      };
+
+      reservationVMs.push({
+        id: r.id,
+        resourceId: r.resourceId,
+        resourceLabel: def?.label ?? r.resourceId,
+        amountMinor: r.remainingAmountMinor,
+        amountFormatted: formatResourceAmount(r.remainingAmountMinor, resDef, { showUnit: true }),
+        status: r.status,
+        reason: r.source.reason,
+        expiresAtFormatted: r.expiresAtReal ? new Date(r.expiresAtReal).toLocaleTimeString() : undefined
+      });
+    }
+  }
+
+  // Ledger history (sanitized, descending by default - G4-AUD-009)
   const ledgerVMs: LedgerEntryViewModel[] = [];
   if (options.ledgerStore) {
-    const rawEntries = options.ledgerStore.query({ domainUuid, limit: 20 });
-    const visibleResourceIds = new Set(accountVMs.map((a) => a.resourceId));
+    const rawEntries = options.ledgerStore.query({ domainUuid, direction: "desc", limit: 20 });
 
     for (const entry of rawEntries) {
       // Non-GM viewers only see ledger entries for accounts they can see
@@ -200,6 +292,7 @@ export function buildEconomyViewModel(
     domainUuid,
     viewerIsGm: options.viewerIsGm,
     accounts: Object.freeze(accountVMs),
+    reservations: Object.freeze(reservationVMs),
     recentLedger: Object.freeze(ledgerVMs)
   };
 }

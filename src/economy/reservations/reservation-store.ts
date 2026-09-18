@@ -3,10 +3,17 @@ import { err, ok, type Result } from "../../core/contracts/result.js";
 import { createOpaqueId } from "../../core/identity/ids.js";
 import {
   type Reservation,
+  type ReservationEvent,
+  type ReservationEventType,
   type ReservationSource,
   type ReservationStatus,
   validateReservation
 } from "./reservation-types.js";
+import {
+  RESERVATION_STORAGE_SCHEMA_VERSION,
+  type ReservationSnapshot,
+  type ReservationStorageAdapter
+} from "../storage/reservation-storage-adapter.js";
 
 export interface CreateReservationInput {
   readonly domainUuid: string;
@@ -25,8 +32,33 @@ export interface ReservationFilter {
   readonly sourceRef?: string;
 }
 
+export interface ReservationStoreOptions {
+  readonly storageAdapter?: ReservationStorageAdapter;
+}
+
 export class ReservationStore {
   readonly #reservations = new Map<string, Reservation>();
+  readonly #events: ReservationEvent[] = [];
+  readonly #storageAdapter?: ReservationStorageAdapter;
+
+  constructor(options: ReservationStoreOptions = {}) {
+    this.#storageAdapter = options.storageAdapter;
+  }
+
+  async rehydrate(): Promise<void> {
+    if (!this.#storageAdapter) return;
+    const snapshot = await this.#storageAdapter.loadSnapshot();
+    if (snapshot) {
+      this.#reservations.clear();
+      this.#events.length = 0;
+      for (const res of snapshot.reservations) {
+        this.#reservations.set(res.id, res);
+      }
+      for (const evt of snapshot.events) {
+        this.#events.push(evt);
+      }
+    }
+  }
 
   create(input: CreateReservationInput): Result<Reservation, PublicError> {
     const id = createOpaqueId("resv");
@@ -50,8 +82,23 @@ export class ReservationStore {
       return valRes;
     }
 
-    this.#reservations.set(valRes.value.id, valRes.value);
-    return ok(valRes.value);
+    const res = valRes.value;
+    this.#reservations.set(res.id, res);
+
+    this.#recordEvent({
+      reservationId: res.id,
+      type: "created",
+      deltaMinor: res.originalAmountMinor,
+      remainingAmountMinor: res.remainingAmountMinor,
+      timestampReal: res.createdAtReal,
+      timestampWorld: res.createdAtWorld,
+      reason: res.source.reason,
+      sourceRef: res.source.ref,
+      userId: res.source.userId
+    });
+
+    void this.#persist().catch(() => {});
+    return ok(res);
   }
 
   get(id: string): Reservation | undefined {
@@ -80,6 +127,13 @@ export class ReservationStore {
     return Object.freeze(all);
   }
 
+  listEvents(reservationId?: string): readonly ReservationEvent[] {
+    if (reservationId) {
+      return Object.freeze(this.#events.filter((e) => e.reservationId === reservationId));
+    }
+    return Object.freeze([...this.#events]);
+  }
+
   getReservedTotal(domainUuid: string, resourceId: string): number {
     let total = 0;
     for (const r of this.#reservations.values()) {
@@ -96,7 +150,8 @@ export class ReservationStore {
 
   consume(
     reservationId: string,
-    amountMinor: number
+    amountMinor: number,
+    options?: { readonly reason?: string; readonly worldTime?: number | null; readonly userId?: string }
   ): Result<{ reservation: Reservation; consumedAmount: number }, PublicError> {
     const existing = this.#reservations.get(reservationId);
     if (!existing) {
@@ -150,12 +205,26 @@ export class ReservationStore {
     };
 
     this.#reservations.set(reservationId, updated);
+
+    this.#recordEvent({
+      reservationId,
+      type: newStatus,
+      deltaMinor: -amountMinor,
+      remainingAmountMinor: newRemaining,
+      timestampReal: Date.now(),
+      timestampWorld: options?.worldTime,
+      reason: options?.reason,
+      userId: options?.userId
+    });
+
+    void this.#persist().catch(() => {});
     return ok({ reservation: updated, consumedAmount: amountMinor });
   }
 
   release(
     reservationId: string,
-    amountMinor?: number
+    amountMinor?: number,
+    options?: { readonly reason?: string; readonly worldTime?: number | null; readonly userId?: string }
   ): Result<{ reservation: Reservation; releasedAmount: number }, PublicError> {
     const existing = this.#reservations.get(reservationId);
     if (!existing) {
@@ -211,10 +280,26 @@ export class ReservationStore {
     };
 
     this.#reservations.set(reservationId, updated);
+
+    this.#recordEvent({
+      reservationId,
+      type: "released",
+      deltaMinor: -toRelease,
+      remainingAmountMinor: newRemaining,
+      timestampReal: Date.now(),
+      timestampWorld: options?.worldTime,
+      reason: options?.reason,
+      userId: options?.userId
+    });
+
+    void this.#persist().catch(() => {});
     return ok({ reservation: updated, releasedAmount: toRelease });
   }
 
-  expire(reservationId: string): Result<Reservation, PublicError> {
+  expire(
+    reservationId: string,
+    options?: { readonly reason?: string; readonly worldTime?: number | null }
+  ): Result<Reservation, PublicError> {
     const existing = this.#reservations.get(reservationId);
     if (!existing) {
       return err(
@@ -230,6 +315,7 @@ export class ReservationStore {
       return ok(existing); // already final
     }
 
+    const releasedAmount = existing.remainingAmountMinor;
     const updated: Reservation = {
       ...existing,
       remainingAmountMinor: 0,
@@ -238,6 +324,51 @@ export class ReservationStore {
     };
 
     this.#reservations.set(reservationId, updated);
+
+    this.#recordEvent({
+      reservationId,
+      type: "expired",
+      deltaMinor: -releasedAmount,
+      remainingAmountMinor: 0,
+      timestampReal: Date.now(),
+      timestampWorld: options?.worldTime,
+      reason: options?.reason ?? "Reservation expired"
+    });
+
+    void this.#persist().catch(() => {});
     return ok(updated);
+  }
+
+  async flush(): Promise<void> {
+    await this.#persist();
+  }
+
+  #recordEvent(eventParams: {
+    reservationId: string;
+    type: ReservationEventType;
+    deltaMinor: number;
+    remainingAmountMinor: number;
+    timestampReal: number;
+    timestampWorld?: number | null;
+    reason?: string;
+    sourceRef?: string;
+    userId?: string;
+  }): void {
+    const event: ReservationEvent = {
+      id: createOpaqueId("reve"),
+      ...eventParams
+    };
+    this.#events.push(event);
+  }
+
+  async #persist(): Promise<void> {
+    if (!this.#storageAdapter) return;
+    const snapshot: ReservationSnapshot = {
+      schemaVersion: RESERVATION_STORAGE_SCHEMA_VERSION,
+      reservations: Array.from(this.#reservations.values()),
+      events: this.#events,
+      updatedAt: Date.now()
+    };
+    await this.#storageAdapter.saveSnapshot(snapshot);
   }
 }

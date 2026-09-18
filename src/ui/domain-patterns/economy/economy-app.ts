@@ -8,6 +8,12 @@ import { createPublicError } from "../../../core/contracts/public-error.js";
 import { err, ok, type Result } from "../../../core/contracts/result.js";
 import type { DomainReadRepository } from "../../../storage/repositories/domain-repository.js";
 import type { EconomyService } from "../../../economy/services/economy-service.js";
+import type { PublicEconomyApi } from "../../../economy/services/public-economy-api.js";
+import type { ResourceDefinitionRegistry } from "../../../economy/definitions/resource-registry.js";
+import type { LedgerStore } from "../../../economy/ledger/ledger-store.js";
+import type { ReservationStore } from "../../../economy/reservations/reservation-store.js";
+import type { ProviderRegistry } from "../../../economy/providers/provider-registry.js";
+import { parseResourceAmount } from "../../../economy/math/minor-units.js";
 import type { ViewerIdentity } from "../../../projection/viewer-identity.js";
 import {
   buildEconomyViewModel,
@@ -18,6 +24,7 @@ import {
   escapeAttribute,
   escapeHtml,
   renderAdjustModalHtml,
+  renderCreateAccountModalHtml,
   renderEconomySubsystemHtml,
   renderTransferModalHtml
 } from "./economy-view.js";
@@ -35,7 +42,11 @@ function makeCommand<T>(type: string, payload: T): DomainCommand<T> {
 export interface EconomyAppOptions {
   readonly domainUuid: string;
   readonly commandBus: CommandBus;
-  readonly economyService: EconomyService;
+  readonly economyService?: EconomyService | PublicEconomyApi;
+  readonly resourceRegistry?: ResourceDefinitionRegistry;
+  readonly ledgerStore?: LedgerStore;
+  readonly reservationStore?: ReservationStore;
+  readonly providerRegistry?: ProviderRegistry;
   readonly domains: DomainReadRepository;
   readonly viewer?: Partial<ViewerIdentity>;
 }
@@ -45,7 +56,10 @@ export type EconomyModalType = "transfer" | "adjust" | "createAccount" | null;
 export class EconomyApplicationController {
   readonly #domainUuid: string;
   readonly #commandBus: CommandBus;
-  readonly #economyService: EconomyService;
+  readonly #resourceRegistry?: ResourceDefinitionRegistry;
+  readonly #ledgerStore?: LedgerStore;
+  readonly #reservationStore?: ReservationStore;
+  readonly #providerRegistry?: ProviderRegistry;
   readonly #domains: DomainReadRepository;
   readonly #viewer?: Partial<ViewerIdentity>;
 
@@ -55,7 +69,14 @@ export class EconomyApplicationController {
   constructor(options: EconomyAppOptions) {
     this.#domainUuid = options.domainUuid;
     this.#commandBus = options.commandBus;
-    this.#economyService = options.economyService;
+    this.#resourceRegistry =
+      options.resourceRegistry ?? (options.economyService as any)?.registry;
+    this.#ledgerStore =
+      options.ledgerStore ?? (options.economyService as any)?.ledgerStore;
+    this.#reservationStore =
+      options.reservationStore ?? (options.economyService as any)?.reservationStore;
+    this.#providerRegistry =
+      options.providerRegistry ?? (options.economyService as any)?.providerRegistry;
     this.#domains = options.domains;
     this.#viewer = options.viewer;
   }
@@ -90,9 +111,10 @@ export class EconomyApplicationController {
 
     const presenterOptions: EconomyPresenterOptions = {
       viewerIsGm: isGm,
-      resourceRegistry: this.#economyService.registry,
-      ledgerStore: this.#economyService.ledgerStore,
-      reservationStore: this.#economyService.reservationStore
+      resourceRegistry: this.#resourceRegistry ?? ({ get: () => undefined, list: () => [] } as any),
+      ledgerStore: this.#ledgerStore,
+      reservationStore: this.#reservationStore,
+      providerRegistry: this.#providerRegistry
     };
 
     const vm = buildEconomyViewModel(docRes.value, presenterOptions);
@@ -140,6 +162,24 @@ export class EconomyApplicationController {
     return this.#executeCommand(cmd);
   }
 
+  async dispatchCreateAccount(payload: {
+    readonly resourceId: string;
+    readonly initialBalanceMinor?: number;
+    readonly baseCapacityMinor?: number | null;
+    readonly visibility?: "public" | "restricted" | "secret";
+    readonly reason?: string;
+  }): Promise<Result<unknown>> {
+    const cmd = makeCommand("economy:create-account", {
+      domainUuid: this.#domainUuid,
+      resourceId: payload.resourceId,
+      initialBalanceMinor: payload.initialBalanceMinor,
+      baseCapacityMinor: payload.baseCapacityMinor,
+      visibility: payload.visibility,
+      reason: payload.reason
+    });
+    return this.#executeCommand(cmd);
+  }
+
   async #executeCommand(cmd: DomainCommand<any>): Promise<Result<unknown>> {
     const receiptRes = await this.#commandBus.execute(cmd);
     if (!receiptRes.ok) {
@@ -171,6 +211,9 @@ export class EconomyApplicationController {
       modalHtml = renderTransferModalHtml(this.#domainUuid, vm.accounts);
     } else if (this.#activeModal === "adjust") {
       modalHtml = renderAdjustModalHtml(this.#domainUuid, vm.accounts);
+    } else if (this.#activeModal === "createAccount") {
+      const defs = this.#resourceRegistry ? this.#resourceRegistry.list() : [];
+      modalHtml = renderCreateAccountModalHtml(this.#domainUuid, defs);
     }
 
     return `
@@ -258,6 +301,7 @@ export class EconomyApplication extends BaseApp {
     actions: {
       openTransferModal: EconomyApplication.#onOpenTransferModal,
       openAdjustModal: EconomyApplication.#onOpenAdjustModal,
+      openCreateAccountModal: EconomyApplication.#onOpenCreateAccountModal,
       closeModal: EconomyApplication.#onCloseModal
     }
   };
@@ -320,29 +364,63 @@ export class EconomyApplication extends BaseApp {
           data[key] = String(val).trim();
         });
 
+        const resSelect = form.querySelector?.('select[name="resourceId"]');
+        const opt = resSelect?.selectedOptions?.[0];
+        const precision = opt?.dataset?.precision ? parseInt(opt.dataset.precision, 10) : 0;
+
         if (formType === "transfer") {
-          const amount = parseInt(data.amount, 10);
-          if (!isNaN(amount) && amount > 0) {
+          const parsedAmount = parseResourceAmount(data.amount, precision);
+          if (!parsedAmount.ok) {
+            console.error(parsedAmount.error.message);
+            return;
+          }
+          if (parsedAmount.value > 0) {
             await this.#controller.dispatchTransfer({
               targetDomainUuid: data.targetDomainUuid,
               resourceId: data.resourceId,
-              amountMinor: amount,
+              amountMinor: parsedAmount.value,
               reason: data.reason || undefined
             });
             this.#controller.closeModal();
             this.render();
           }
         } else if (formType === "adjust") {
-          const delta = parseInt(data.delta, 10);
-          if (!isNaN(delta) && data.reason) {
+          const parsedDelta = parseResourceAmount(data.delta, precision);
+          if (!parsedDelta.ok) {
+            console.error(parsedDelta.error.message);
+            return;
+          }
+          if (data.reason) {
             await this.#controller.dispatchAdjust({
               resourceId: data.resourceId,
-              deltaMinor: delta,
+              deltaMinor: parsedDelta.value,
               reason: data.reason
             });
             this.#controller.closeModal();
             this.render();
           }
+        } else if (formType === "createAccount") {
+          let initialBalanceMinor: number | undefined = undefined;
+          if (data.initialBalance) {
+            const parsedInit = parseResourceAmount(data.initialBalance, precision);
+            if (parsedInit.ok) initialBalanceMinor = parsedInit.value;
+          }
+
+          let baseCapacityMinor: number | null | undefined = undefined;
+          if (data.baseCapacity) {
+            const parsedCap = parseResourceAmount(data.baseCapacity, precision);
+            if (parsedCap.ok) baseCapacityMinor = parsedCap.value;
+          }
+
+          await this.#controller.dispatchCreateAccount({
+            resourceId: data.resourceId,
+            initialBalanceMinor,
+            baseCapacityMinor,
+            visibility: (data.visibility as any) || "public",
+            reason: data.reason || undefined
+          });
+          this.#controller.closeModal();
+          this.render();
         }
       });
     });
@@ -355,6 +433,11 @@ export class EconomyApplication extends BaseApp {
 
   static #onOpenAdjustModal(this: EconomyApplication): void {
     this.#controller.openModal("adjust");
+    this.render();
+  }
+
+  static #onOpenCreateAccountModal(this: EconomyApplication): void {
+    this.#controller.openModal("createAccount");
     this.render();
   }
 

@@ -5,6 +5,9 @@ import {
   type ProviderDataFamily,
   isNamespacedProviderId
 } from "./provider-types.js";
+import type { DomainRepositoryContract } from "../../storage/repositories/domain-repository.js";
+import { NativeResourceProvider } from "./native-resource-provider.js";
+import { ManualCurrencyProvider } from "./manual-currency-provider.js";
 
 export class ProviderRegistry {
   readonly #providers = new Map<string, BaseResourceProvider>();
@@ -86,4 +89,15 @@ export class ProviderRegistry {
   isFrozen(): boolean {
     return this.#frozen;
   }
+}
+
+export function createDefaultProviderRegistry(
+  domains?: DomainRepositoryContract
+): ProviderRegistry {
+  const registry = new ProviderRegistry();
+  if (domains) {
+    registry.register(new NativeResourceProvider(domains));
+  }
+  registry.register(new ManualCurrencyProvider());
+  return registry;
 }
