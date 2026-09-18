@@ -5,6 +5,12 @@ import type {
   ProviderHealth,
   ResourceProviderBalanceResult
 } from "./provider-types.js";
+import {
+  type ManualCurrencyStorageAdapter,
+  type ManualCurrencySnapshot,
+  MANUAL_CURRENCY_STORAGE_SCHEMA_VERSION,
+  FoundryJournalManualCurrencyStorageAdapter
+} from "../storage/manual-currency-storage-adapter.js";
 
 export const MANUAL_CURRENCY_PROVIDER_ID = "domain-manager:manual-currency";
 
@@ -16,7 +22,60 @@ export class ManualCurrencyProvider implements CurrencyProvider {
   readonly capabilities = Object.freeze(["read", "write"]);
   readonly isReadOnly = false;
   readonly #balances = new Map<string, number>();
+  readonly #storageAdapter?: ManualCurrencyStorageAdapter;
+  #persistQueue: Promise<void> = Promise.resolve();
+  #lastPersistError: Error | null = null;
   #isHealthy = true;
+
+  constructor(options?: { readonly storageAdapter?: ManualCurrencyStorageAdapter }) {
+    this.#storageAdapter = options?.storageAdapter ?? new FoundryJournalManualCurrencyStorageAdapter();
+  }
+
+  async rehydrate(): Promise<void> {
+    if (!this.#storageAdapter) return;
+    const snapshot = await this.#storageAdapter.loadSnapshot();
+    if (snapshot) {
+      this.#balances.clear();
+      for (const [key, bal] of Object.entries(snapshot.balances)) {
+        this.#balances.set(key, bal);
+      }
+    }
+  }
+
+  #schedulePersist(): void {
+    if (!this.#storageAdapter) return;
+    this.#persistQueue = this.#persistQueue
+      .then(async () => {
+        await this.#persist();
+      })
+      .catch((err: unknown) => {
+        this.#lastPersistError = err instanceof Error ? err : new Error(String(err));
+      });
+  }
+
+  async #persist(): Promise<void> {
+    if (!this.#storageAdapter) return;
+    const balancesObj: Record<string, number> = {};
+    for (const [k, v] of this.#balances.entries()) {
+      balancesObj[k] = v;
+    }
+    const snapshot: ManualCurrencySnapshot = {
+      schemaVersion: MANUAL_CURRENCY_STORAGE_SCHEMA_VERSION,
+      balances: balancesObj,
+      updatedAt: Date.now()
+    };
+    await this.#storageAdapter.saveSnapshot(snapshot);
+  }
+
+  async flush(): Promise<void> {
+    this.#schedulePersist();
+    await this.#persistQueue;
+    if (this.#lastPersistError) {
+      const err = this.#lastPersistError;
+      this.#lastPersistError = null;
+      throw err;
+    }
+  }
 
   getHealth(): ProviderHealth {
     return {
@@ -64,6 +123,7 @@ export class ManualCurrencyProvider implements CurrencyProvider {
     const current = this.#balances.get(targetRef) ?? 0;
     const next = current + deltaMinor;
     this.#balances.set(targetRef, next);
+    this.#schedulePersist();
     return ok({ newBalanceMinor: next });
   }
 
@@ -107,5 +167,6 @@ export class ManualCurrencyProvider implements CurrencyProvider {
 
   setBalance(targetRef: string, balanceMinor: number): void {
     this.#balances.set(targetRef, balanceMinor);
+    this.#schedulePersist();
   }
 }

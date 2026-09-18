@@ -119,6 +119,7 @@ export class EconomyApplicationController {
 
     const presenterOptions: EconomyPresenterOptions = {
       viewerIsGm: isGm,
+      viewer,
       resourceRegistry: this.#resourceRegistry ?? ({ get: () => undefined, list: () => [] } as any),
       ledgerStore: this.#ledgerStore,
       reservationStore: this.#reservationStore,
@@ -162,11 +163,13 @@ export class EconomyApplicationController {
   async dispatchReleaseReservation(payload: {
     readonly reservationId: string;
     readonly amountMinor?: number;
+    readonly reason?: string;
   }): Promise<Result<unknown>> {
     const cmd = makeCommand("economy:release-reservation", {
       domainUuid: this.#domainUuid,
       reservationId: payload.reservationId,
-      amountMinor: payload.amountMinor
+      amountMinor: payload.amountMinor,
+      reason: payload.reason
     });
     return this.#executeCommand(cmd);
   }
@@ -294,6 +297,24 @@ class MockApplicationV2 {
     }
   }
 
+  _setupActions(element: any): void {
+    if (!element || element._dmActionsConfigured) return;
+    element._dmActionsConfigured = true;
+    const actions = (this.constructor as any).DEFAULT_OPTIONS?.actions ?? {};
+    element.addEventListener?.("click", async (event: any) => {
+      let target = event?.target;
+      while (target) {
+        const action = target.getAttribute?.("data-action") ?? target.dataset?.action;
+        if (action && typeof actions[action] === "function") {
+          await actions[action].call(this, event, target);
+          return;
+        }
+        if (target === element) break;
+        target = target.parentElement;
+      }
+    });
+  }
+
   async render(force?: boolean, options?: any): Promise<this> {
     if (!this.element) {
       const classes = ((this.constructor as any).DEFAULT_OPTIONS?.classes ?? ["domain-manager", "dm-economy-app-v2"]).join(" ");
@@ -302,19 +323,25 @@ class MockApplicationV2 {
         el.className = classes;
         this.element = el;
       } else {
+        const listeners: Record<string, ((...args: any[]) => any)[]> = {};
         this.element = {
           className: classes,
           innerHTML: "",
           children: [] as any[],
           querySelectorAll: () => [],
           querySelector: () => null,
-          addEventListener: () => {}
+          addEventListener: (evt: string, cb: any) => {
+            listeners[evt] = listeners[evt] || [];
+            listeners[evt].push(cb);
+          },
+          _listeners: listeners
         };
       }
     }
     const context = await this._prepareContext(options);
     const result = await this._renderHTML(context, options);
     this._replaceHTML(result, this.element, options);
+    this._setupActions(this.element);
     this._onRender(context, options);
     return this;
   }
@@ -400,46 +427,6 @@ export class EconomyApplication extends BaseApp {
   }
 
   attachEventListeners(element: HTMLElement): void {
-    const actionButtons = element.querySelectorAll?.("[data-action]") ?? [];
-    actionButtons.forEach((btn: any) => {
-      if (btn._dmActionBound) return;
-      btn._dmActionBound = true;
-      btn.addEventListener("click", async () => {
-        const action = btn.getAttribute("data-action");
-        if (action === "openResourceDetail") {
-          const resId = btn.getAttribute("data-resource-id");
-          if (resId) {
-            this.#controller.openResourceDetail(resId);
-            this.render();
-          }
-        } else if (action === "releaseReservation") {
-          const resId = btn.getAttribute("data-reservation-id");
-          if (resId) {
-            await this.#controller.dispatchReleaseReservation({ reservationId: resId });
-            this.render();
-          }
-        } else if (action === "nextLedgerPage") {
-          this.#controller.nextLedgerPage();
-          this.render();
-        } else if (action === "prevLedgerPage") {
-          this.#controller.prevLedgerPage();
-          this.render();
-        } else if (action === "closeModal") {
-          this.#controller.closeModal();
-          this.render();
-        } else if (action === "openTransferModal") {
-          this.#controller.openModal("transfer");
-          this.render();
-        } else if (action === "openAdjustModal") {
-          this.#controller.openModal("adjust");
-          this.render();
-        } else if (action === "openCreateAccountModal") {
-          this.#controller.openModal("createAccount");
-          this.render();
-        }
-      });
-    });
-
     // Transfer live impact preview
     const transferForm = element.querySelector?.('form[data-form-type="transfer"]');
     if (transferForm && !(transferForm as any)._dmPreviewBound) {
@@ -608,7 +595,11 @@ export class EconomyApplication extends BaseApp {
   }
 
   static #onOpenResourceDetail(this: EconomyApplication, event: any, target: any): void {
-    const resId = target?.dataset?.resourceId ?? event?.currentTarget?.dataset?.resourceId;
+    const resId =
+      target?.dataset?.resourceId ??
+      target?.getAttribute?.("data-resource-id") ??
+      event?.currentTarget?.dataset?.resourceId ??
+      event?.currentTarget?.getAttribute?.("data-resource-id");
     if (resId) {
       this.#controller.openResourceDetail(resId);
       this.render();
@@ -616,11 +607,48 @@ export class EconomyApplication extends BaseApp {
   }
 
   static async #onReleaseReservation(this: EconomyApplication, event: any, target: any): Promise<void> {
-    const resId = target?.dataset?.reservationId ?? event?.currentTarget?.dataset?.reservationId;
-    if (resId) {
-      await this.#controller.dispatchReleaseReservation({ reservationId: resId });
-      this.render();
+    const resId =
+      target?.dataset?.reservationId ??
+      target?.getAttribute?.("data-reservation-id") ??
+      event?.currentTarget?.dataset?.reservationId ??
+      event?.currentTarget?.getAttribute?.("data-reservation-id");
+    if (!resId) return;
+
+    let confirmed = true;
+    let releaseReason: string | undefined = undefined;
+
+    const foundryDialog = (globalThis as any).foundry?.applications?.api?.DialogV2;
+    if (foundryDialog?.confirm) {
+      confirmed = await foundryDialog.confirm({
+        window: { title: "Release Reservation" },
+        content: "<p>Are you sure you want to release this reservation? This will restore domain availability.</p>",
+        yes: { label: "Release" },
+        no: { label: "Cancel" }
+      });
+    } else if (typeof (globalThis as any).confirm === "function") {
+      try {
+        confirmed = (globalThis as any).confirm("Are you sure you want to release this reservation?");
+      } catch {
+        confirmed = true;
+      }
     }
+
+    if (!confirmed) return;
+
+    if (typeof (globalThis as any).prompt === "function") {
+      try {
+        const inputReason = (globalThis as any).prompt("Optional release reason:");
+        if (inputReason && inputReason.trim()) {
+          releaseReason = inputReason.trim();
+        }
+      } catch {}
+    }
+
+    await this.#controller.dispatchReleaseReservation({
+      reservationId: resId,
+      reason: releaseReason
+    });
+    this.render();
   }
 
   static #onNextLedgerPage(this: EconomyApplication): void {

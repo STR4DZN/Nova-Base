@@ -14,6 +14,13 @@ import { ReservationStore } from "../../src/economy/reservations/reservation-sto
 import { withDomainEconomyData } from "../../src/economy/economy-data.js";
 import { EconomyService } from "../../src/economy/services/economy-service.js";
 import { LedgerStore } from "../../src/economy/ledger/ledger-store.js";
+import { InMemoryThresholdStorageAdapter } from "../../src/economy/storage/threshold-storage-adapter.js";
+import { CommandRegistry } from "../../src/commands/command-registry.js";
+import { CommandBus } from "../../src/commands/command-bus.js";
+import { PrimaryAuthorityService } from "../../src/authority/primary-authority-service.js";
+import { registerEconomyCommands } from "../../src/economy/commands/economy-commands.js";
+import { COMMAND_CONTRACT_VERSION_V1 } from "../../src/commands/command-envelope.js";
+import { createOpaqueId } from "../../src/core/identity/ids.js";
 
 const testRecord: DomainRecord = {
   schemaVersion: 1,
@@ -284,4 +291,349 @@ test("G4-AUD-010: Zero-delta adjustment acts as no-op and creates no ledger entr
   // Balance remains 1000
   const acc = (await economy.getAccount(doc.uuid, "domain-manager:treasury")).value!;
   assert.equal(acc.mode === "native" ? acc.balanceMinor : null, 1000);
+});
+
+test("G4-REVAL3-007: ThresholdService persistence survives reload via InMemoryThresholdStorageAdapter", async () => {
+  const adapter = new InMemoryThresholdStorageAdapter();
+  const service1 = new ThresholdService(adapter);
+
+  const regRes = service1.register({
+    domainUuid: "JournalEntry.dom-persist",
+    resourceId: "domain-manager:treasury",
+    name: "Treasury Low Alert",
+    metric: "balance",
+    operator: "<=",
+    targetValueMinor: 1000,
+    severity: "critical"
+  });
+  assert.equal(regRes.ok, true);
+  const thId = regRes.value.id;
+
+  // Trigger breach transition so crossedStates is true
+  const transitions = service1.evaluateCrossings("JournalEntry.dom-persist", "domain-manager:treasury", {
+    balanceMinor: 500,
+    availableMinor: 500
+  });
+  assert.equal(transitions.length, 1);
+  assert.equal(transitions[0].type, "breach");
+  assert.equal(service1.isCrossed(thId), true);
+
+  // Flush to guarantee persistence
+  await service1.flush();
+
+  // Recreate instance from same storage adapter
+  const service2 = new ThresholdService(adapter);
+  await service2.rehydrate();
+
+  // Verify definition and crossed state were preserved
+  const restoredDef = service2.getThreshold(thId);
+  assert.equal(restoredDef !== undefined, true);
+  assert.equal(restoredDef?.targetValueMinor, 1000);
+  assert.equal(restoredDef?.severity, "critical");
+  assert.equal(service2.isCrossed(thId), true, "Crossed state must be restored after rehydration");
+});
+
+test("G4-REVAL3-007: EconomyService automatically triggers evaluateCrossings on balance mutations", async () => {
+  const doc = createDoc("dom-crossings", "Crossings Domain", [
+    {
+      mode: "native",
+      domainUuid: "JournalEntry.dom-crossings",
+      resourceId: "domain-manager:treasury",
+      balanceMinor: 5000,
+      baseCapacityMinor: 10000,
+      visibility: "public"
+    }
+  ]);
+
+  const repo = new StorageDomainRepository({
+    get: (id: string) => doc,
+    list: () => [doc],
+    create: async () => { throw new Error("not used"); }
+  });
+
+  const resourceRegistry = createDefaultResourceRegistry();
+  const ledgerStore = new LedgerStore();
+  const reservationStore = new ReservationStore();
+  const thresholdService = new ThresholdService();
+
+  const regRes = thresholdService.register({
+    domainUuid: doc.uuid,
+    resourceId: "domain-manager:treasury",
+    name: "Treasury Warning",
+    metric: "balance",
+    operator: "<=",
+    targetValueMinor: 1000,
+    severity: "warning"
+  });
+  assert.equal(regRes.ok, true);
+  const thId = regRes.value.id;
+
+  const economy = new EconomyService({
+    domains: repo,
+    resourceRegistry,
+    ledgerStore,
+    reservationStore,
+    thresholdService
+  });
+
+  // Initially not crossed (balance is 5000 > 1000)
+  assert.equal(thresholdService.isCrossed(thId), false);
+
+  // commitAdjust drops balance to 800 <= 1000
+  const adjustDownRes = await economy.commitAdjust({
+    domainUuid: doc.uuid,
+    resourceId: "domain-manager:treasury",
+    deltaMinor: -4200,
+    reason: "Large expense"
+  });
+  assert.equal(adjustDownRes.ok, true);
+
+  // Automatically evaluated and marked crossed!
+  assert.equal(thresholdService.isCrossed(thId), true, "Threshold crossing must be detected automatically on adjust");
+
+  // commitAdjust restores balance to 2500 > 1000
+  const adjustUpRes = await economy.commitAdjust({
+    domainUuid: doc.uuid,
+    resourceId: "domain-manager:treasury",
+    deltaMinor: 1700,
+    reason: "Deposit"
+  });
+  assert.equal(adjustUpRes.ok, true);
+
+  // Automatically evaluated recovery!
+  assert.equal(thresholdService.isCrossed(thId), false, "Threshold recovery must be detected automatically on adjust");
+});
+
+test("G4-REVAL3-007: Multi-domain economy aggregation tracks incomplete/unknown contributors", async () => {
+  const docValid = createDoc("dom-valid", "Valid Domain", [
+    {
+      mode: "native",
+      domainUuid: "JournalEntry.dom-valid",
+      resourceId: "domain-manager:treasury",
+      balanceMinor: 2000,
+      baseCapacityMinor: 5000,
+      visibility: "public"
+    }
+  ]);
+
+  const docFailedProvider = createDoc("dom-prov-fail", "Provider Fail Domain", [
+    {
+      mode: "provider",
+      domainUuid: "JournalEntry.dom-prov-fail",
+      resourceId: "domain-manager:treasury",
+      providerId: "offline-provider",
+      providerRef: "wallet-test-ref",
+      visibility: "public"
+    }
+  ]);
+
+  const docMap = new Map<string, IdentifiedJournalEntryDocumentLike>([
+    [docValid.id, docValid],
+    [docValid.uuid, docValid],
+    [docFailedProvider.id, docFailedProvider],
+    [docFailedProvider.uuid, docFailedProvider]
+  ]);
+
+  const repo = new StorageDomainRepository({
+    get: (id: string) => docMap.get(id),
+    list: () => [...new Set(docMap.values())],
+    create: async () => { throw new Error("not used"); }
+  });
+
+  const registry = createDefaultResourceRegistry();
+  const reservationStore = new ReservationStore();
+
+  const aggregator = new EconomyAggregationProvider({
+    domains: repo,
+    resourceRegistry: registry,
+    reservationStore
+  });
+
+  // Query with valid domain, missing domain, and domain with failed provider
+  const aggregate = await aggregator.getAggregateContext([
+    docValid.uuid,
+    "JournalEntry.dom-nonexistent",
+    docFailedProvider.uuid
+  ]);
+
+  // isComplete must be false and unknownContributors populated
+  assert.equal(aggregate.isComplete, false);
+  assert.equal(aggregate.unknownContributors.includes("JournalEntry.dom-nonexistent"), true);
+  assert.equal(aggregate.unknownContributors.includes(docFailedProvider.uuid), true);
+
+  const treasuryTotal = aggregate.totals.find((t) => t.resourceId === "domain-manager:treasury");
+  assert.equal(treasuryTotal !== undefined, true);
+  assert.equal(treasuryTotal?.isComplete, false);
+  assert.equal(treasuryTotal?.unknownContributorCount, 1);
+
+  // Querying only healthy valid domain
+  const cleanAggregate = await aggregator.getAggregateContext([docValid.uuid]);
+  assert.equal(cleanAggregate.isComplete, true);
+  assert.equal(cleanAggregate.unknownContributors.length, 0);
+  const cleanTreasury = cleanAggregate.totals.find((t) => t.resourceId === "domain-manager:treasury");
+  assert.equal(cleanTreasury?.isComplete, true);
+  assert.equal(cleanTreasury?.unknownContributorCount, 0);
+});
+
+test("G4-REVAL3-007: Canonical economy commands economy:set-threshold, economy:register-custom-resource, and release reason", async () => {
+  const doc = createDoc("dom-cmd-test", "Command Test Domain", [
+    {
+      mode: "native",
+      domainUuid: "JournalEntry.dom-cmd-test",
+      resourceId: "domain-manager:treasury",
+      balanceMinor: 10000,
+      baseCapacityMinor: 20000,
+      visibility: "public"
+    }
+  ]);
+
+  const repo = new StorageDomainRepository({
+    get: (id: string) => doc,
+    list: () => [doc],
+    create: async () => { throw new Error("not used"); }
+  });
+
+  const resourceRegistry = createDefaultResourceRegistry();
+  const ledgerStore = new LedgerStore();
+  const reservationStore = new ReservationStore();
+  const thresholdService = new ThresholdService();
+  const customResourceStore = new CustomResourceDefinitionStore();
+
+  const economyService = new EconomyService({
+    domains: repo,
+    resourceRegistry,
+    ledgerStore,
+    reservationStore,
+    thresholdService
+  });
+
+  const registry = new CommandRegistry();
+  const authorityService = new PrimaryAuthorityService(
+    {
+      getUsers: () => [
+        { id: "gm-user", isGM: true, active: true },
+        { id: "player-user", isGM: false, active: true }
+      ],
+      getPreferredUserId: () => null,
+      getCurrentUserId: () => "gm-user"
+    },
+    { authorityUserId: "gm-user", authorityEpoch: 1, initialized: true }
+  );
+
+  registerEconomyCommands({
+    registry,
+    economyService,
+    domains: repo,
+    thresholdService,
+    customResourceStore,
+    resourceRegistry
+  });
+
+  const commandBus = new CommandBus({ registry, authorityService });
+
+  // 1. economy:set-threshold: invalid metric rejected
+  const badThCmd = {
+    contractVersion: COMMAND_CONTRACT_VERSION_V1,
+    commandId: createOpaqueId("cmd"),
+    type: "economy:set-threshold",
+    payload: {
+      domainUuid: doc.uuid,
+      resourceId: "domain-manager:treasury",
+      metric: "invalid-metric",
+      targetValueMinor: 500,
+      severity: "warning"
+    },
+    issuedAtReal: Date.now()
+  };
+  const badThReceipt = await commandBus.execute(badThCmd);
+  assert.equal(badThReceipt.ok, true);
+  assert.equal(badThReceipt.value.status, "rejected");
+
+  // 1b. economy:set-threshold: valid command registers threshold
+  const validThCmd = {
+    contractVersion: COMMAND_CONTRACT_VERSION_V1,
+    commandId: createOpaqueId("cmd"),
+    type: "economy:set-threshold",
+    payload: {
+      domainUuid: doc.uuid,
+      resourceId: "domain-manager:treasury",
+      metric: "balance",
+      operator: "<=",
+      targetValueMinor: 2500,
+      severity: "critical",
+      label: "Treasury Critical Low"
+    },
+    issuedAtReal: Date.now()
+  };
+  const validThReceipt = await commandBus.execute(validThCmd);
+  assert.equal(validThReceipt.ok, true);
+  assert.equal(validThReceipt.value.status, "executed");
+  const thList = thresholdService.listThresholds(doc.uuid, "domain-manager:treasury");
+  assert.equal(thList.length, 1);
+  assert.equal(thList[0].targetValueMinor, 2500);
+
+  // 2. economy:register-custom-resource: GM-only command
+  const customDef = {
+    id: "world:mana",
+    version: 1,
+    label: "Arcane Mana",
+    description: "Magical energy",
+    icon: "fas fa-magic",
+    categoryId: "arcana",
+    tags: ["magic"],
+    precision: 0,
+    displayUnit: { singular: "crystal", plural: "crystals" },
+    minimumMinor: 0,
+    maximumMinor: 100000,
+    allowNegative: false,
+    defaultCapacityPolicy: "block" as const,
+    lifecycle: "active" as const
+  };
+
+  const regCustomCmd = {
+    contractVersion: COMMAND_CONTRACT_VERSION_V1,
+    commandId: createOpaqueId("cmd"),
+    type: "economy:register-custom-resource",
+    payload: { definition: customDef },
+    issuedAtReal: Date.now()
+  };
+  const regCustomReceipt = await commandBus.execute(regCustomCmd);
+  assert.equal(regCustomReceipt.ok, true);
+  assert.equal(regCustomReceipt.value.status, "executed");
+
+  // Verifies registered in registry and saved in store
+  assert.equal(resourceRegistry.get("world:mana") !== undefined, true);
+  assert.equal(customResourceStore.get("world:mana") !== undefined, true);
+
+  // 3. economy:release-reservation records reason in reservation store
+  const resCreation = reservationStore.create({
+    domainUuid: doc.uuid,
+    resourceId: "domain-manager:treasury",
+    originalAmountMinor: 1000,
+    source: { type: "command" }
+  });
+  assert.equal(resCreation.ok, true);
+  const resId = resCreation.value.id;
+
+  const releaseCmd = {
+    contractVersion: COMMAND_CONTRACT_VERSION_V1,
+    commandId: createOpaqueId("cmd"),
+    type: "economy:release-reservation",
+    payload: {
+      domainUuid: doc.uuid,
+      reservationId: resId,
+      reason: "Mission cancelled by Domain Council"
+    },
+    issuedAtReal: Date.now()
+  };
+  const releaseReceipt = await commandBus.execute(releaseCmd);
+  assert.equal(releaseReceipt.ok, true);
+  assert.equal(releaseReceipt.value.status, "executed");
+
+  const releasedRes = reservationStore.get(resId);
+  assert.equal(releasedRes?.status, "released");
+  const events = reservationStore.listEvents(resId);
+  const releaseEvent = events.find((e) => e.type === "released");
+  assert.equal(releaseEvent !== undefined, true);
+  assert.equal(releaseEvent?.reason, "Mission cancelled by Domain Council");
 });

@@ -181,6 +181,13 @@ export class RecoveryService {
       );
     }
 
+    // Check if compensator already moved the transaction to a final state (e.g. committed during reconciliation)
+    const currentTx = this.#transactionStore.get(transactionId);
+    if (currentTx && isFinalTransactionState(currentTx.state)) {
+      this.#releaseRecoveryLock(transactionId);
+      return ok(currentTx);
+    }
+
     // Successfully compensated
     const finalTransition = this.#transactionStore.transition(
       transactionId,

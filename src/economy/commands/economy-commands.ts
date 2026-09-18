@@ -6,13 +6,19 @@ import type { DomainRepositoryContract } from "../../storage/repositories/domain
 import type { EconomyService } from "../services/economy-service.js";
 import { validateEconomyCommandPermission } from "./economy-permissions.js";
 import type { DomainControllerProvider } from "../../domains/domain-controller-provider.js";
-import { isNamespacedResourceId } from "../definitions/resource-definition-types.js";
+import { isNamespacedResourceId, validateResourceDefinition, type ResourceDefinition } from "../definitions/resource-definition-types.js";
+import type { ThresholdService, ThresholdMetric, ThresholdComparator, ThresholdSeverity } from "../thresholds/threshold-service.js";
+import type { CustomResourceDefinitionStore } from "../definitions/custom-resource-store.js";
+import type { ResourceDefinitionRegistry } from "../definitions/resource-registry.js";
 
 export interface RegisterEconomyCommandsOptions {
   readonly registry: CommandRegistry;
   readonly economyService: EconomyService;
   readonly domains: DomainRepositoryContract;
   readonly controllerProvider?: DomainControllerProvider;
+  readonly thresholdService?: ThresholdService;
+  readonly customResourceStore?: CustomResourceDefinitionStore;
+  readonly resourceRegistry?: ResourceDefinitionRegistry;
 }
 
 export interface ResourceAdjustCommandPayload {
@@ -61,6 +67,27 @@ export interface ResourceReleaseReservationCommandPayload {
   readonly domainUuid: string;
   readonly reservationId: string;
   readonly amountMinor?: number;
+  readonly reason?: string;
+}
+
+export interface ResourceSetThresholdCommandPayload {
+  readonly domainUuid: string;
+  readonly resourceId: string;
+  readonly id?: string;
+  readonly metric: ThresholdMetric;
+  readonly comparator?: ThresholdComparator;
+  readonly operator?: ThresholdComparator;
+  readonly valueMinor?: number;
+  readonly targetValueMinor?: number;
+  readonly severity: ThresholdSeverity;
+  readonly label?: string;
+  readonly name?: string;
+  readonly autoHoldReservations?: boolean;
+}
+
+export interface ResourceRegisterCustomResourceCommandPayload {
+  readonly definition?: ResourceDefinition;
+  readonly [key: string]: unknown;
 }
 
 export interface ResourceCreateAccountCommandPayload {
@@ -89,7 +116,15 @@ export interface ResourceReversalCommandPayload {
 }
 
 export function registerEconomyCommands(options: RegisterEconomyCommandsOptions): void {
-  const { registry, economyService, domains, controllerProvider } = options;
+  const {
+    registry,
+    economyService,
+    domains,
+    controllerProvider,
+    thresholdService,
+    customResourceStore,
+    resourceRegistry
+  } = options;
 
   // 1. economy:adjust (GM only)
   registry.register({
@@ -151,7 +186,7 @@ export function registerEconomyCommands(options: RegisterEconomyCommandsOptions)
         reason: p.reason,
         userId: ctx.senderUserId ?? undefined,
         commandId: ctx.command.commandId,
-        authorityEpoch: ctx.command.authorityEpoch ?? 1
+        authorityEpoch: ctx.authorityEpoch
       });
     }
   });
@@ -231,7 +266,7 @@ export function registerEconomyCommands(options: RegisterEconomyCommandsOptions)
         reason: p.reason,
         userId: ctx.senderUserId ?? undefined,
         commandId: ctx.command.commandId,
-        authorityEpoch: ctx.command.authorityEpoch ?? 1
+        authorityEpoch: ctx.authorityEpoch
       });
     }
   });
@@ -314,7 +349,7 @@ export function registerEconomyCommands(options: RegisterEconomyCommandsOptions)
         reason: p.reason,
         userId: ctx.senderUserId ?? undefined,
         commandId: ctx.command.commandId,
-        authorityEpoch: ctx.command.authorityEpoch ?? 1
+        authorityEpoch: ctx.authorityEpoch
       });
     }
   });
@@ -447,7 +482,7 @@ export function registerEconomyCommands(options: RegisterEconomyCommandsOptions)
         reason: p.reason,
         userId: ctx.senderUserId ?? undefined,
         commandId: ctx.command.commandId,
-        authorityEpoch: ctx.command.authorityEpoch ?? 1
+        authorityEpoch: ctx.authorityEpoch
       });
     }
   });
@@ -497,7 +532,9 @@ export function registerEconomyCommands(options: RegisterEconomyCommandsOptions)
       return economyService.releaseReservation({
         domainUuid: p.domainUuid,
         reservationId: p.reservationId,
-        amountMinor: p.amountMinor
+        amountMinor: p.amountMinor,
+        reason: p.reason,
+        userId: ctx.senderUserId ?? undefined
       });
     }
   });
@@ -671,6 +708,134 @@ export function registerEconomyCommands(options: RegisterEconomyCommandsOptions)
         reason: p.reason,
         userId: ctx.senderUserId ?? undefined
       });
+    }
+  });
+
+  // 10. economy:set-threshold
+  registry.register({
+    type: "economy:set-threshold",
+    visibility: "public",
+    description: "Sets a resource threshold alert configuration",
+    schemaValidator: (payload: unknown) => {
+      if (!payload || typeof payload !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Payload must be an object"
+          })
+        );
+      }
+      const p = payload as Record<string, unknown>;
+      if (typeof p.domainUuid !== "string" || !p.domainUuid.trim()) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "domainUuid is required"
+          })
+        );
+      }
+      if (!isNamespacedResourceId(p.resourceId)) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "resourceId must be namespaced"
+          })
+        );
+      }
+      if (p.metric !== "balance" && p.metric !== "available") {
+        return err(
+          createPublicError({
+            code: "DM_ECON_THRESHOLD_INVALID",
+            category: "validation",
+            message: "metric must be 'balance' or 'available'"
+          })
+        );
+      }
+      const val = p.targetValueMinor ?? p.valueMinor;
+      if (typeof val !== "number" || !Number.isSafeInteger(val)) {
+        return err(
+          createPublicError({
+            code: "DM_ECON_THRESHOLD_INVALID",
+            category: "validation",
+            message: "valueMinor/targetValueMinor must be a safe integer"
+          })
+        );
+      }
+      const validSeverities = ["info", "warning", "critical"];
+      if (typeof p.severity !== "string" || !validSeverities.includes(p.severity as string)) {
+        return err(
+          createPublicError({
+            code: "DM_ECON_THRESHOLD_INVALID",
+            category: "validation",
+            message: "severity must be 'info', 'warning', or 'critical'"
+          })
+        );
+      }
+      return ok(p as any);
+    },
+    permissionValidator: (ctx: AuthenticatedCommandContext<any>) =>
+      validateEconomyCommandPermission(ctx, domains, [ctx.command.payload.domainUuid], {
+        controllerProvider
+      }),
+    handler: async (ctx: AuthenticatedCommandContext<any>) => {
+      const p = ctx.command.payload as ResourceSetThresholdCommandPayload;
+      const targetThresholdService = thresholdService ?? economyService.thresholdService;
+      if (!targetThresholdService) {
+        return err(
+          createPublicError({
+            code: "DM_ECON_THRESHOLD_SERVICE_UNAVAILABLE",
+            category: "internal",
+            message: "Threshold service is not available"
+          })
+        );
+      }
+      const regRes = targetThresholdService.registerThreshold(p);
+      if (regRes.ok) {
+        await targetThresholdService.flush();
+      }
+      return regRes;
+    }
+  });
+
+  // 11. economy:register-custom-resource (GM only)
+  registry.register({
+    type: "economy:register-custom-resource",
+    visibility: "public",
+    description: "Registers a custom resource definition (GM only)",
+    schemaValidator: (payload: unknown) => {
+      if (!payload || typeof payload !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Payload must be an object"
+          })
+        );
+      }
+      const p = payload as Record<string, unknown>;
+      const candidate = (p.definition && typeof p.definition === "object" ? p.definition : p) as unknown;
+      const valRes = validateResourceDefinition(candidate);
+      if (!valRes.ok) {
+        return valRes;
+      }
+      return ok({ definition: valRes.value });
+    },
+    permissionValidator: (ctx: AuthenticatedCommandContext<any>) =>
+      validateEconomyCommandPermission(ctx, domains, [], { gmOnly: true }),
+    handler: async (ctx: AuthenticatedCommandContext<any>) => {
+      const def = ctx.command.payload.definition as ResourceDefinition;
+      const targetStore = customResourceStore;
+      if (targetStore) {
+        await targetStore.save(def);
+      }
+      const targetRegistry = resourceRegistry ?? economyService.registry;
+      if (targetRegistry) {
+        targetRegistry.register(def);
+      }
+      return ok(def);
     }
   });
 }

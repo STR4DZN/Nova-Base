@@ -40,7 +40,7 @@ export class ReservationStore {
   readonly #reservations = new Map<string, Reservation>();
   readonly #events: ReservationEvent[] = [];
   readonly #storageAdapter?: ReservationStorageAdapter;
-  #pendingPersist: Promise<void> | null = null;
+  #persistQueue: Promise<void> = Promise.resolve();
   #lastPersistError: Error | null = null;
 
   constructor(options: ReservationStoreOptions = {}) {
@@ -134,6 +134,10 @@ export class ReservationStore {
       return Object.freeze(this.#events.filter((e) => e.reservationId === reservationId));
     }
     return Object.freeze([...this.#events]);
+  }
+
+  getEvents(reservationId?: string): readonly ReservationEvent[] {
+    return this.listEvents(reservationId);
   }
 
   getReservedTotal(domainUuid: string, resourceId: string): number {
@@ -408,22 +412,25 @@ export class ReservationStore {
   }
 
   async flush(): Promise<void> {
-    if (this.#pendingPersist) {
-      await this.#pendingPersist;
-    }
+    if (!this.#storageAdapter) return;
+    this.#schedulePersist();
+    await this.#persistQueue;
     if (this.#lastPersistError) {
       const err = this.#lastPersistError;
       this.#lastPersistError = null;
       throw err;
     }
-    await this.#persist();
   }
 
   #schedulePersist(): void {
     if (!this.#storageAdapter) return;
-    this.#pendingPersist = this.#persist().catch((err: unknown) => {
-      this.#lastPersistError = err instanceof Error ? err : new Error(String(err));
-    });
+    this.#persistQueue = this.#persistQueue
+      .then(async () => {
+        await this.#persist();
+      })
+      .catch((err: unknown) => {
+        this.#lastPersistError = err instanceof Error ? err : new Error(String(err));
+      });
   }
 
   #recordEvent(eventParams: {

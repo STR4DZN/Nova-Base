@@ -50,7 +50,7 @@ const VALID_TRANSITIONS: Readonly<Record<TransactionState, ReadonlySet<Transacti
   committing: new Set(["committed", "needs-recovery", "compensating", "failed"]),
   committed: new Set([]), // Final
   "needs-recovery": new Set(["compensating", "committing", "compensated", "failed"]),
-  compensating: new Set(["compensated", "needs-recovery", "failed"]),
+  compensating: new Set(["compensated", "committed", "needs-recovery", "failed"]),
   compensated: new Set([]), // Final
   failed: new Set([]) // Final
 };

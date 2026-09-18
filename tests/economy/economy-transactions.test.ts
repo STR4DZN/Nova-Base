@@ -18,6 +18,8 @@ import { registerEconomyCommands } from "../../src/economy/commands/economy-comm
 import { CommandRegistry } from "../../src/commands/command-registry.js";
 import { CommandBus } from "../../src/commands/command-bus.js";
 import { PrimaryAuthorityService } from "../../src/authority/primary-authority-service.js";
+import { TransactionStore } from "../../src/mutations/transaction-store.js";
+import { RecoveryService } from "../../src/mutations/recovery-service.js";
 import {
   COMMAND_CONTRACT_VERSION_V1,
   createCommandId,
@@ -104,13 +106,17 @@ function setupEconomyHarness() {
   const ledgerStore = new LedgerStore();
   const reservationStore = new ReservationStore();
   const lockManager = new LockManager();
+  const transactionStore = new TransactionStore();
+  const recoveryService = new RecoveryService({ transactionStore, lockManager });
 
   const economyService = new EconomyService({
     domains,
     resourceRegistry,
     ledgerStore,
     reservationStore,
-    lockManager
+    lockManager,
+    transactionStore,
+    recoveryService
   });
 
   return {
@@ -119,6 +125,7 @@ function setupEconomyHarness() {
     ledgerStore,
     reservationStore,
     lockManager,
+    transactionStore,
     economyService,
     domainAUuid: docA.uuid,
     domainBUuid: docB.uuid
@@ -524,3 +531,73 @@ test("G4.7: CommandBus executes economy:transfer end-to-end", async () => {
     assert.equal(accB.value.balanceMinor, 550); // 200 + 350
   }
 });
+
+test("G4-REVAL3-002: Command envelope forged authorityEpoch does not override authenticated ctx.authorityEpoch in TransactionRecord", async () => {
+  const h = setupEconomyHarness();
+
+  await h.economyService.createAccount({
+    domainUuid: h.domainAUuid,
+    resourceId: "domain-manager:treasury",
+    initialBalanceMinor: 1000
+  });
+
+  await h.economyService.createAccount({
+    domainUuid: h.domainBUuid,
+    resourceId: "domain-manager:treasury",
+    initialBalanceMinor: 200
+  });
+
+  const registry = new CommandRegistry();
+  registerEconomyCommands({
+    registry,
+    economyService: h.economyService,
+    domains: h.domains
+  });
+
+  const users = [
+    { id: "gm-1", isGM: true, active: true }
+  ];
+  const authorityService = new PrimaryAuthorityService(
+    {
+      getUsers: () => users,
+      getPreferredUserId: () => null,
+      getCurrentUserId: () => "gm-1"
+    },
+    {
+      authorityUserId: "gm-1",
+      authorityEpoch: 7,
+      initialized: true
+    }
+  );
+
+  const commandBus = new CommandBus({
+    registry,
+    authorityService
+  });
+
+  const forgedEpochCmd: DomainCommand = {
+    contractVersion: COMMAND_CONTRACT_VERSION_V1,
+    commandId: createCommandId(),
+    authorityEpoch: 999999, // Forged epoch in untrusted command envelope!
+    type: "economy:transfer",
+    payload: {
+      sourceDomainUuid: h.domainAUuid,
+      targetDomainUuid: h.domainBUuid,
+      resourceId: "domain-manager:treasury",
+      amountMinor: 100,
+      reason: "Forged epoch adversarial transfer"
+    },
+    issuedAtReal: Date.now()
+  };
+
+  const receiptRes = await commandBus.execute(forgedEpochCmd);
+  assert.equal(receiptRes.ok, true);
+  if (receiptRes.ok) {
+    assert.equal(receiptRes.value.status, "executed");
+    const txId = receiptRes.value.result.transactionId;
+    const tx = h.transactionStore.get(txId);
+    assert.ok(tx, "TransactionRecord must exist");
+    assert.equal(tx.authorityEpoch, 7, "TransactionRecord must reflect authenticated ctx.authorityEpoch (7), NOT forged command.authorityEpoch (999999)");
+  }
+});
+

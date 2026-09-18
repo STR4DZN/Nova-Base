@@ -158,3 +158,71 @@ test("G4 Persistence: ReservationStore survives reload and retains active reserv
   assert.equal(releaseRes.value.reservation.remainingAmountMinor, 0);
   assert.equal(releaseRes.value.reservation.status, "released");
 });
+
+test("G4-REVAL3-003: Persistence queue serializes concurrent writes with inverted delays and flush guarantees latest snapshot", async () => {
+  const savedSnapshots: any[] = [];
+  let saveCount = 0;
+
+  // Custom adapter simulating inverted delays: 1st write takes 40ms, 2nd write takes 5ms
+  const delayedAdapter: any = {
+    loadSnapshot: async () => null,
+    saveSnapshot: async (snapshot: any) => {
+      saveCount++;
+      const currentCall = saveCount;
+      const delayMs = currentCall === 1 ? 40 : 5;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      savedSnapshots.push(JSON.parse(JSON.stringify(snapshot)));
+    }
+  };
+
+  const store = new LedgerStore({ storageAdapter: delayedAdapter });
+
+  // Append entry 1 (queued first with 40ms delay)
+  store.append({
+    domainUuid: "dom-race",
+    resourceId: "domain-manager:treasury",
+    deltaMinor: 100,
+    kind: "adjustment",
+    source: { type: "manual" }
+  });
+
+  // Append entry 2 immediately (queued second with 5ms delay)
+  store.append({
+    domainUuid: "dom-race",
+    resourceId: "domain-manager:treasury",
+    deltaMinor: 200,
+    kind: "adjustment",
+    source: { type: "manual" }
+  });
+
+  // Append entry 3 immediately
+  store.append({
+    domainUuid: "dom-race",
+    resourceId: "domain-manager:treasury",
+    deltaMinor: 300,
+    kind: "adjustment",
+    source: { type: "manual" }
+  });
+
+  // Flush ensures all writes are finished and latest snapshot is saved
+  await store.flush();
+
+  // With strict promise queue serialization, save 1 completed before save 2 started,
+  // and save 2 completed before save 3 started.
+  // The final saved snapshot MUST contain all 3 entries (entries.length === 3),
+  // and the older snapshot with 1 entry NEVER overwrote the newer snapshot!
+  assert.ok(savedSnapshots.length >= 1, "At least one snapshot must be saved");
+  const lastSnapshot = savedSnapshots[savedSnapshots.length - 1];
+  assert.equal(lastSnapshot.entries.length, 3, "Final snapshot must contain all 3 entries");
+  assert.equal(lastSnapshot.entries[2].deltaMinor, 300);
+
+  // Reload from fresh store using the final state saved
+  const reloadAdapter: any = {
+    loadSnapshot: async () => lastSnapshot,
+    saveSnapshot: async () => {}
+  };
+  const reloadedStore = new LedgerStore({ storageAdapter: reloadAdapter });
+  await reloadedStore.rehydrate();
+  assert.equal(reloadedStore.count, 3);
+});
+

@@ -10,9 +10,12 @@ import { formatResourceAmount } from "../../../economy/math/minor-units.js";
 import type { ResourceDefinition } from "../../../economy/definitions/resource-definition-types.js";
 
 import type { ProviderRegistry } from "../../../economy/providers/provider-registry.js";
+import { EconomyProjectionService } from "../../../economy/projection/economy-projection-service.js";
+import type { ViewerIdentity } from "../../../projection/viewer-identity.js";
 
 export interface EconomyPresenterOptions {
-  readonly viewerIsGm: boolean;
+  readonly viewerIsGm?: boolean;
+  readonly viewer?: Partial<ViewerIdentity>;
   readonly resourceRegistry: ResourceDefinitionRegistry;
   readonly ledgerStore?: LedgerStore;
   readonly reservationStore?: ReservationStore;
@@ -94,11 +97,16 @@ export function buildEconomyViewModel(
   const domainUuid = "uuid" in domainInput ? domainInput.uuid : "unknown";
   const economyData: DomainEconomyData = getDomainEconomyData(record);
 
+  const projectionService = new EconomyProjectionService();
+  const viewer: ViewerIdentity = options.viewer
+    ? projectionService.resolveViewer(options.viewer)
+    : projectionService.resolveViewer({ isGm: options.viewerIsGm ?? false });
+
   const accountVMs: ResourceAccountViewModel[] = [];
 
   for (const acc of economyData.accounts) {
-    // Viewer sanitization: Non-GM viewers cannot see secret accounts (DEC-16888–16894)
-    if (!options.viewerIsGm && acc.visibility === "secret") {
+    // Canonical projection: Evaluates public, secret, and restricted clearance
+    if (!projectionService.isAccountVisible(acc, viewer)) {
       continue;
     }
 
@@ -222,7 +230,7 @@ export function buildEconomyViewModel(
       if (r.status !== "active" && r.status !== "partially-consumed") {
         continue;
       }
-      if (!options.viewerIsGm && !visibleResourceIds.has(r.resourceId)) {
+      if (!viewer.isGm && !visibleResourceIds.has(r.resourceId)) {
         continue;
       }
 
@@ -251,7 +259,7 @@ export function buildEconomyViewModel(
         amountMinor: r.remainingAmountMinor,
         amountFormatted: formatResourceAmount(r.remainingAmountMinor, resDef, { showUnit: true }),
         status: r.status,
-        reason: r.source.reason,
+        reason: viewer.isGm ? r.source.reason : undefined,
         expiresAtFormatted: r.expiresAtReal ? new Date(r.expiresAtReal).toLocaleTimeString() : undefined,
         canRelease: true
       });
@@ -269,7 +277,7 @@ export function buildEconomyViewModel(
   if (options.ledgerStore) {
     const allEntries = options.ledgerStore.query({ domainUuid, direction: "desc" });
     const filteredEntries = allEntries.filter((entry) =>
-      options.viewerIsGm || visibleResourceIds.has(entry.resourceId)
+      viewer.isGm || visibleResourceIds.has(entry.resourceId)
     );
 
     ledgerTotalCount = filteredEntries.length;
@@ -313,7 +321,7 @@ export function buildEconomyViewModel(
         kind: entry.kind,
         deltaFormatted,
         deltaClass: entry.deltaMinor >= 0 ? "positive" : "negative",
-        reason: entry.source?.reason,
+        reason: viewer.isGm ? entry.source?.reason : undefined,
         resourceLabel: def?.label ?? entry.resourceId
       });
     }
@@ -321,7 +329,7 @@ export function buildEconomyViewModel(
 
   return {
     domainUuid,
-    viewerIsGm: options.viewerIsGm,
+    viewerIsGm: viewer.isGm,
     accounts: Object.freeze(accountVMs),
     reservations: Object.freeze(reservationVMs),
     recentLedger: Object.freeze(ledgerVMs),

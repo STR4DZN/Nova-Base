@@ -25,7 +25,7 @@ export class TransactionStore {
   readonly #records = new Map<string, TransactionRecord>();
   readonly #byCommandId = new Map<CommandId, string>();
   readonly #storageAdapter?: TransactionStorageAdapter;
-  #pendingPersist: Promise<void> | null = null;
+  #persistQueue: Promise<void> = Promise.resolve();
   #lastPersistError: Error | null = null;
 
   constructor(options: TransactionStoreOptions = {}) {
@@ -113,9 +113,9 @@ export class TransactionStore {
   }
 
   async flush(): Promise<void> {
-    if (this.#pendingPersist) {
-      await this.#pendingPersist;
-    }
+    if (!this.#storageAdapter) return;
+    this.#schedulePersist();
+    await this.#persistQueue;
     if (this.#lastPersistError) {
       const err = this.#lastPersistError;
       this.#lastPersistError = null;
@@ -131,9 +131,13 @@ export class TransactionStore {
 
   #schedulePersist(): void {
     if (!this.#storageAdapter) return;
-    this.#pendingPersist = this.#persist().catch((err: unknown) => {
-      this.#lastPersistError = err instanceof Error ? err : new Error(String(err));
-    });
+    this.#persistQueue = this.#persistQueue
+      .then(async () => {
+        await this.#persist();
+      })
+      .catch((err: unknown) => {
+        this.#lastPersistError = err instanceof Error ? err : new Error(String(err));
+      });
   }
 
   async #persist(): Promise<void> {

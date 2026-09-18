@@ -73,7 +73,12 @@ import {
   ProviderRegistry,
   createDefaultProviderRegistry
 } from "../economy/providers/provider-registry.js";
+import { MANUAL_CURRENCY_PROVIDER_ID } from "../economy/providers/manual-currency-provider.js";
 import { ThresholdService } from "../economy/thresholds/threshold-service.js";
+import {
+  FoundryJournalThresholdStorageAdapter,
+  type ThresholdStorageAdapter
+} from "../economy/storage/threshold-storage-adapter.js";
 import { EconomyApplication, EconomyApplicationController } from "../ui/domain-patterns/economy/economy-app.js";
 
 /**
@@ -144,6 +149,7 @@ export interface DomainManagerRuntimeOptions {
   readonly customResourceStore?: CustomResourceDefinitionStore;
   readonly customResourceStorageAdapter?: CustomResourceStorageAdapter;
   readonly thresholdService?: ThresholdService;
+  readonly thresholdStorageAdapter?: ThresholdStorageAdapter;
 }
 
 /**
@@ -187,7 +193,11 @@ export function composeDomainManagerRuntime(
   const providerRegistry =
     options.providerRegistry ?? createDefaultProviderRegistry(mutableDomainRepo);
 
-  const thresholdService = options.thresholdService ?? new ThresholdService();
+  const thresholdService =
+    options.thresholdService ??
+    new ThresholdService(
+      options.thresholdStorageAdapter ?? new FoundryJournalThresholdStorageAdapter()
+    );
 
   const economyService = new EconomyService({
     domains: mutableDomainRepo,
@@ -216,7 +226,10 @@ export function composeDomainManagerRuntime(
     registry,
     economyService,
     domains: mutableDomainRepo,
-    controllerProvider
+    controllerProvider,
+    thresholdService,
+    customResourceStore,
+    resourceRegistry
   });
   registry.freeze();
 
@@ -320,11 +333,16 @@ export function composeDomainManagerRuntime(
       await transactionStore.rehydrate();
       await ledgerStore.rehydrate();
       await reservationStore.rehydrate();
+      await thresholdService.rehydrate();
       const customDefs = await customResourceStore.rehydrate();
       for (const def of customDefs) {
         if (!resourceRegistry.get(def.id)) {
           resourceRegistry.register(def);
         }
+      }
+      const manualCurrency = providerRegistry.get(MANUAL_CURRENCY_PROVIDER_ID);
+      if (manualCurrency && "rehydrate" in manualCurrency && typeof (manualCurrency as any).rehydrate === "function") {
+        await (manualCurrency as any).rehydrate();
       }
     },
     destroy: () => {

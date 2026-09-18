@@ -5,7 +5,7 @@
 **Normative Authorities:** `Documentos/99_DOMAIN_MANAGER_MASTER_SPECIFICATION_V1.md` (§14, §11–12, §42, DEC-1416 to DEC-2305), `Documentos/GATES/14_G4_ECONOMY_RESOURCES.md`  
 **Status:** **SUBMITTED_FOR_USER_ACCEPTANCE (Aguardando Aceitação Soberana do Usuário — Nunca aceito sem confirmação explícita)**  
 **Date:** 2026-09-18  
-**Test Suite:** 405/405 passing (0 failures, 0 regressions against G3 baseline of 335; +70 dedicated G4 tests)  
+**Test Suite:** 416/416 passing (0 failures, 0 regressions against G3 baseline of 335; +81 dedicated G4 tests)  
 **TypeScript Conformance:** Strict, 0 errors via `tsc --noEmit`  
 **Package & Artifact Validation:** PASS (`dist/domain-manager-v0.0.3.zip`, validation scripts verified)
 
@@ -99,12 +99,47 @@ All 12 findings identified during the architecture audit have been fully remedia
 
 ---
 
-## 6. Verification Summary
+## 6. Remediação da Revalidação Final de Código (3ª Rodada) — G4-REVAL3-001 a G4-REVAL3-007
+
+Todos os 7 resíduos e apontamentos da 3ª rodada de revalidação de código foram completamente implementados, blindados e verificados:
+
+1. **G4-REVAL3-001 (CRÍTICO — Matriz de Reconciliação de Recuperação de Transferências e Teste de Queda em 6 Pontos)**:
+   - Implementada matriz de reconciliação de estado no compensador de recuperação de `economy:transfer` e `economy:convert` em `EconomyService`.
+   - Reconciliação avalia o estado real de `srcAccount`, `tgtAccount` e as entradas gravadas no `LedgerStore`.
+   - Compensação estrita e simétrica: se a transferência falhou antes de debitar a origem, marca `failed`; se debitou a origem mas falhou antes de creditar o destino, restaura a conta de origem sem criar lançamentos fantasmas; se debitou e creditou antes da falha no commit do record, finaliza com transição para `committed`.
+   - Adicionada permissão de transição de estado `compensating -> committed` no `TransactionRecord`.
+   - Adicionada suíte de testes de estresse em `tests/economy/fault-recovery.test.ts` simulando quedas abruptas nos 6 pontos discretos do pipeline de transferência (`tx_crash_point_1` a `tx_crash_point_6`), comprovando conservação exata de massa monetária, coerência estrita de saldo e idempotência de recuperação repetida.
+2. **G4-REVAL3-002 (ALTO/SEGURANÇA — Proveniência de `authorityEpoch` Autenticado)**:
+   - Handlers de comando em `src/economy/commands/economy-commands.ts` obtêm `authorityEpoch` exclusivamente de `ctx.authorityEpoch` (autenticado pelo `CommandBus`), prevenindo falsificação de epoch via payload.
+   - Verificado adversariamente em `tests/economy/economy-transactions.test.ts`.
+3. **G4-REVAL3-003 (ALTO — Fila de Persistência Serializada em Stores)**:
+   - `LedgerStore`, `ReservationStore` e `TransactionStore` equipados com `#persistQueue: Promise<void> = Promise.resolve();` para serializar gravações concorrentes em ordem estrita FIFO.
+   - Elimina race conditions onde snapshots lentos de operações anteriores poderiam sobrescrever snapshots posteriores.
+   - Validado com teste de atrasos invertidos em `tests/economy/storage-persistence.test.ts`.
+4. **G4-REVAL3-004 (ALTO — Transações e Compensação para Provedores / Persistência de ManualCurrency)**:
+   - Implementado `ManualCurrencyStorageAdapter` (`InMemoryManualCurrencyStorageAdapter`, `FoundryJournalManualCurrencyStorageAdapter`) com fila serializada e rehidratação no boot (`DomainManagerRuntime.initialize()`).
+   - Mutações de contas de provedor (`mode === "provider"`) em `EconomyService.commitAdjust` agora participam do pipeline de transação durável (`TransactionRecord`) e registram compensador de recuperação `"economy:provider-adjust"`.
+5. **G4-REVAL3-005 (ALTO/SEGURANÇA — Projeção Canônica na UI com Clearance e Mascaramento de Razão)**:
+   - `buildEconomyViewModel` utiliza `EconomyProjectionService.isAccountVisible(acc, viewer)` verificando permissões públicas, secretas e de clearance restrito (`viewer.allowedRestrictedRefs`).
+   - Razões (`reason`) de reservas e do ledger são estritamente mascaradas para usuários não-GM (`viewer.isGm ? reason : undefined`).
+   - Teste de segurança dedicado em `tests/economy/economy-ui.test.ts`.
+6. **G4-REVAL3-006 (ALTO — Pipeline Único de Ações na UI ApplicationV2)**:
+   - Removidos listeners manuais redundantes em `EconomyApplication`, preservando `DEFAULT_OPTIONS.actions` do Foundry ApplicationV2 como canal único de despacho.
+   - Teste automatizado confirma exatamente 1 execução por clique.
+7. **G4-REVAL3-007 (MÉDIO/ALTO — Comandos Canônicos, Auto-Avaliação de Limiares e Metadados de Agregação)**:
+   - Criado `ThresholdStorageAdapter` (`InMemoryThresholdStorageAdapter`, `FoundryJournalThresholdStorageAdapter`) com rehidratação automática no boot e serialização em `ThresholdService`.
+   - Auto-avaliação de limiares (`#evaluateThresholds`) integrada a todas as operações de mutação de saldo em `EconomyService`.
+   - Comandos canônicos `economy:set-threshold` e `economy:register-custom-resource` (GM-only) registrados no `CommandRegistry`, além de suporte a `reason` e `userId` em `economy:release-reservation`.
+   - `EconomyAggregationProvider` rastreia integridade (`isComplete: boolean`) e lista explicitamente `unknownContributors` caso domínios ou provedores falhem.
+
+---
+
+## 7. Verification Summary
 
 ```
 Total Test Files: 84
-Total Unit & Integration Tests: 405
-Passing: 405 (100%)
+Total Unit & Integration Tests: 416
+Passing: 416 (100%)
 Failing: 0
 Cancelled: 0
 Skipped: 0
@@ -116,7 +151,7 @@ Artifact Validation: PASS
 
 ---
 
-## 7. Handoff & Governance
+## 8. Handoff & Governance
 
 In strict adherence to user instructions (**"Nunca coloque um Gate como aceito até que EU ACEITE"**):
 - This report represents the complete, verified technical submission of Gate G4.

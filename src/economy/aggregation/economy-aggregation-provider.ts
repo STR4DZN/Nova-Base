@@ -16,6 +16,8 @@ export interface AggregateResourceTotalDto {
   readonly totalAvailableMinor: number;
   readonly contributingDomainCount: number;
   readonly hiddenDomainCount: number;
+  readonly isComplete: boolean;
+  readonly unknownContributorCount: number;
 }
 
 export interface EconomyAggregateContextDto {
@@ -23,6 +25,7 @@ export interface EconomyAggregateContextDto {
   readonly totalDomainsEvaluated: number;
   readonly hiddenContributors: readonly string[];
   readonly unknownContributors: readonly string[];
+  readonly isComplete: boolean;
   readonly evaluatedAt: number;
 }
 
@@ -62,6 +65,8 @@ export class EconomyAggregationProvider {
         totalAvailable: number;
         contributingCount: number;
         hiddenCount: number;
+        isComplete: boolean;
+        unknownContributorCount: number;
       }
     >();
 
@@ -71,13 +76,17 @@ export class EconomyAggregationProvider {
     for (const uuid of domainUuids) {
       const docRes = await this.#domains.read(uuid);
       if (!docRes.ok) {
-        unknownContributors.push(uuid);
+        if (!unknownContributors.includes(uuid)) {
+          unknownContributors.push(uuid);
+        }
         continue;
       }
 
       const econRes = tryGetDomainEconomyData(docRes.value.record);
       if (!econRes.ok) {
-        unknownContributors.push(uuid);
+        if (!unknownContributors.includes(uuid)) {
+          unknownContributors.push(uuid);
+        }
         continue;
       }
 
@@ -95,7 +104,9 @@ export class EconomyAggregationProvider {
               totalReserved: 0,
               totalAvailable: 0,
               contributingCount: 0,
-              hiddenCount: 0
+              hiddenCount: 0,
+              isComplete: true,
+              unknownContributorCount: 0
             };
             totalsByResource.set(account.resourceId, resourceStats);
           }
@@ -111,18 +122,33 @@ export class EconomyAggregationProvider {
             totalReserved: 0,
             totalAvailable: 0,
             contributingCount: 0,
-            hiddenCount: 0
+            hiddenCount: 0,
+            isComplete: true,
+            unknownContributorCount: 0
           };
           totalsByResource.set(account.resourceId, resourceStats);
         }
 
         let balance = account.mode === "native" ? account.balanceMinor : 0;
-        if (account.mode === "provider" && this.#providerRegistry) {
-          const provider = this.#providerRegistry.get(account.providerId);
-          if (provider && "readBalance" in provider) {
-            const balRes = await (provider as any).readBalance(uuid, account.resourceId, account.providerRef);
-            if (balRes?.ok) {
-              balance = balRes.value.balanceMinor;
+        if (account.mode === "provider") {
+          let readSuccess = false;
+          if (this.#providerRegistry) {
+            const provider = this.#providerRegistry.get(account.providerId);
+            if (provider && "readBalance" in provider) {
+              try {
+                const balRes = await (provider as any).readBalance(uuid, account.resourceId, account.providerRef);
+                if (balRes?.ok) {
+                  balance = balRes.value.balanceMinor;
+                  readSuccess = true;
+                }
+              } catch {}
+            }
+          }
+          if (!readSuccess) {
+            resourceStats.isComplete = false;
+            resourceStats.unknownContributorCount++;
+            if (!unknownContributors.includes(uuid)) {
+              unknownContributors.push(uuid);
             }
           }
         }
@@ -151,7 +177,9 @@ export class EconomyAggregationProvider {
         totalReservedMinor: stats.totalReserved,
         totalAvailableMinor: stats.totalAvailable,
         contributingDomainCount: stats.contributingCount,
-        hiddenDomainCount: stats.hiddenCount
+        hiddenDomainCount: stats.hiddenCount,
+        isComplete: stats.isComplete && stats.unknownContributorCount === 0,
+        unknownContributorCount: stats.unknownContributorCount
       });
     }
 
@@ -160,6 +188,7 @@ export class EconomyAggregationProvider {
       totalDomainsEvaluated: domainUuids.length,
       hiddenContributors: Object.freeze(hiddenContributors),
       unknownContributors: Object.freeze(unknownContributors),
+      isComplete: unknownContributors.length === 0,
       evaluatedAt: Date.now()
     };
   }

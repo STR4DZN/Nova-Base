@@ -442,9 +442,23 @@ test("G4-AUD-002: Durable TransactionStore survives crash restart and repeated r
       accounts: Object.freeze(updatedSrcAccounts)
     })
   });
+  const txId = "tx_uncommitted_transfer";
+  ledgerStore.append({
+    domainUuid: docSource.uuid,
+    resourceId: "domain-manager:treasury",
+    deltaMinor: -3_000,
+    kind: "transfer-debit",
+    transactionId: txId,
+    source: {
+      type: "transfer",
+      ref: `transfer_to:${docDest.uuid}`,
+      reason: "Initial transfer debit before crash"
+    }
+  });
 
   // Save transaction in committing state and flush to adapter
   const tx = createTransactionRecord({
+    transactionId: txId,
     commandId: "cmd_uncommitted_transfer" as any,
     authorityEpoch: 1,
     lockKeys: [docSource.uuid, docDest.uuid],
@@ -502,10 +516,14 @@ test("G4-AUD-002: Durable TransactionStore survives crash restart and repeated r
   assert.equal(restoredBalance, 10_000, "Source balance must be restored by compensator");
 
   // Verify compensating ledger entry was appended
-  const recoveryLedgerEntries = ledgerStore.query({ domainUuid: docSource.uuid })
+  const allTxLedgerEntries = ledgerStore.query({ domainUuid: docSource.uuid })
     .filter((e) => e.transactionId === tx.transactionId);
-  assert.equal(recoveryLedgerEntries.length, 1);
-  assert.equal(recoveryLedgerEntries[0].deltaMinor, 3_000);
+  assert.equal(allTxLedgerEntries.length, 2, "Should have 1 transfer-debit and 1 compensating adjustment");
+  const compEntries = allTxLedgerEntries.filter((e) => e.source?.type === "recovery");
+  assert.equal(compEntries.length, 1);
+  assert.equal(compEntries[0].deltaMinor, 3_000);
+  const netDelta = allTxLedgerEntries.reduce((sum, e) => sum + e.deltaMinor, 0);
+  assert.equal(netDelta, 0, "Net ledger delta must be zero (debit canceled by reversal)");
 
   // Repeated recovery execution must be strictly idempotent
   const repeatedResults = await recoveryService2.recoverAll(1);
@@ -517,7 +535,7 @@ test("G4-AUD-002: Durable TransactionStore survives crash restart and repeated r
   assert.equal((srcEconSecond.accounts[0] as any).balanceMinor, 10_000);
   assert.equal(
     ledgerStore.query({ domainUuid: docSource.uuid }).filter((e) => e.transactionId === tx.transactionId).length,
-    1
+    2
   );
 });
 
@@ -604,11 +622,373 @@ test("G4-AUD-002: Conversion recovery compensation restores from and to balances
   assert.equal((treasuryAcc as any).balanceMinor, 1_000, "Treasury balance must be restored to 1,000");
   assert.equal((suppliesAcc as any).balanceMinor, 500, "Supplies balance must be restored to 500");
 
-  // Compensating ledger entries
+  // Compensating ledger entries: since crash occurred before ledger append, no phantom entries are appended
   const compEntries = ledgerStore.query({ domainUuid: doc.uuid }).filter((e) => e.transactionId === tx.transactionId);
-  assert.equal(compEntries.length, 2);
-  assert.equal(compEntries.find((e) => e.resourceId === "domain-manager:treasury")?.deltaMinor, 300);
-  assert.equal(compEntries.find((e) => e.resourceId === "domain-manager:supplies")?.deltaMinor, -150);
+  assert.equal(compEntries.length, 0, "No phantom ledger entries should be appended when interrupted before ledger append");
+});
+
+test("G4-REVAL3-001: 6-point crash fault recovery matrix verifies mass conservation, ledger consistency, and idempotency", async () => {
+  // Helper to construct a fresh test environment
+  const createEnv = async () => {
+    const docSource = createFaultInjectableDoc("dom-matrix-src", "Matrix Source", { shouldFail: false });
+    const docDest = createFaultInjectableDoc("dom-matrix-dst", "Matrix Destination", { shouldFail: false });
+
+    const docMap = new Map<string, IdentifiedJournalEntryDocumentLike>([
+      [docSource.id, docSource],
+      [docSource.uuid, docSource],
+      [docDest.id, docDest],
+      [docDest.uuid, docDest]
+    ]);
+
+    const store: DomainDocumentStore = {
+      get: (idOrUuid: string) => {
+        const clean = idOrUuid.startsWith("JournalEntry.") ? idOrUuid.slice("JournalEntry.".length) : idOrUuid;
+        return docMap.get(idOrUuid) ?? docMap.get(clean);
+      },
+      list: () => [...docMap.values()],
+      create: async () => { throw new Error("not used"); }
+    };
+
+    const domains = new StorageDomainRepository(store);
+    const resourceRegistry = createDefaultResourceRegistry();
+    const ledgerStore = new LedgerStore();
+    const reservationStore = new ReservationStore();
+    const lockManager = new LockManager();
+    const transactionStore = new TransactionStore();
+    const recoveryService = new RecoveryService(transactionStore, lockManager);
+
+    new EconomyService({
+      domains,
+      resourceRegistry,
+      ledgerStore,
+      reservationStore,
+      lockManager,
+      transactionStore,
+      recoveryService
+    });
+
+    const setBalances = async (srcBal: number, dstBal: number) => {
+      const srcDoc = (await domains.read(docSource.uuid)).value!;
+      const srcEcon: DomainEconomyData = {
+        schemaVersion: 1,
+        accounts: Object.freeze([
+          { mode: "native", domainUuid: docSource.uuid, resourceId: "domain-manager:treasury", balanceMinor: srcBal, baseCapacityMinor: null, visibility: "public", status: "active" }
+        ])
+      };
+      await domains.update({ ...srcDoc, record: withDomainEconomyData(srcDoc.record, srcEcon) });
+
+      const dstDoc = (await domains.read(docDest.uuid)).value!;
+      const dstEcon: DomainEconomyData = {
+        schemaVersion: 1,
+        accounts: Object.freeze([
+          { mode: "native", domainUuid: docDest.uuid, resourceId: "domain-manager:treasury", balanceMinor: dstBal, baseCapacityMinor: null, visibility: "public", status: "active" }
+        ])
+      };
+      await domains.update({ ...dstDoc, record: withDomainEconomyData(dstDoc.record, dstEcon) });
+    };
+
+    return { docSource, docDest, domains, ledgerStore, transactionStore, recoveryService, setBalances };
+  };
+
+  const initialTotalMass = 12_000;
+  const transferAmount = 3_000;
+
+  // === CRASH POINT 1: Pre-write crash (crash before source domain update) ===
+  {
+    const env = await createEnv();
+    await env.setBalances(10_000, 2_000);
+
+    const tx = createTransactionRecord({
+      transactionId: "tx_crash_point_1",
+      commandId: "cmd_p1" as any,
+      authorityEpoch: 1,
+      lockKeys: [env.docSource.uuid, env.docDest.uuid],
+      safeAutoRecovery: true,
+      recoveryData: {
+        type: "economy:transfer",
+        sourceDomainUuid: env.docSource.uuid,
+        targetDomainUuid: env.docDest.uuid,
+        resourceId: "domain-manager:treasury",
+        amountMinor: transferAmount,
+        sourceInitialBalance: 10_000,
+        targetInitialBalance: 2_000
+      }
+    });
+    env.transactionStore.save(tx);
+    env.transactionStore.transition(tx.transactionId, "claimed", 1);
+    env.transactionStore.transition(tx.transactionId, "prepared", 1);
+    env.transactionStore.transition(tx.transactionId, "committing", 1);
+
+    const recRes = await env.recoveryService.recoverAll(1);
+    assert.equal(recRes.length, 1);
+    assert.equal(recRes[0].ok, true);
+    assert.equal(recRes[0].value.state, "compensated");
+
+    const srcAcc = (await env.domains.read(env.docSource.uuid)).value!;
+    const dstAcc = (await env.domains.read(env.docDest.uuid)).value!;
+    const srcBal = (getDomainEconomyData(srcAcc.record).accounts[0] as any).balanceMinor;
+    const dstBal = (getDomainEconomyData(dstAcc.record).accounts[0] as any).balanceMinor;
+
+    assert.equal(srcBal, 10_000, "Point 1: Source balance remains 10,000");
+    assert.equal(dstBal, 2_000, "Point 1: Target balance remains 2,000");
+    assert.equal(srcBal + dstBal, initialTotalMass, "Point 1: Total mass strictly conserved");
+    assert.equal(env.ledgerStore.count, 0, "Point 1: Zero phantom ledger entries");
+  }
+
+  // === CRASH POINT 2: Crash between source write and target write ===
+  {
+    const env = await createEnv();
+    // Source was debited, target was NOT credited
+    await env.setBalances(7_000, 2_000);
+
+    const tx = createTransactionRecord({
+      transactionId: "tx_crash_point_2",
+      commandId: "cmd_p2" as any,
+      authorityEpoch: 1,
+      lockKeys: [env.docSource.uuid, env.docDest.uuid],
+      safeAutoRecovery: true,
+      recoveryData: {
+        type: "economy:transfer",
+        sourceDomainUuid: env.docSource.uuid,
+        targetDomainUuid: env.docDest.uuid,
+        resourceId: "domain-manager:treasury",
+        amountMinor: transferAmount,
+        sourceInitialBalance: 10_000,
+        targetInitialBalance: 2_000
+      }
+    });
+    env.transactionStore.save(tx);
+    env.transactionStore.transition(tx.transactionId, "claimed", 1);
+    env.transactionStore.transition(tx.transactionId, "prepared", 1);
+    env.transactionStore.transition(tx.transactionId, "committing", 1);
+
+    const recRes = await env.recoveryService.recoverAll(1);
+    assert.equal(recRes.length, 1);
+    assert.equal(recRes[0].ok, true);
+    assert.equal(recRes[0].value.state, "compensated");
+
+    const srcAcc = (await env.domains.read(env.docSource.uuid)).value!;
+    const dstAcc = (await env.domains.read(env.docDest.uuid)).value!;
+    const srcBal = (getDomainEconomyData(srcAcc.record).accounts[0] as any).balanceMinor;
+    const dstBal = (getDomainEconomyData(dstAcc.record).accounts[0] as any).balanceMinor;
+
+    assert.equal(srcBal, 10_000, "Point 2: Source balance restored to 10,000");
+    assert.equal(dstBal, 2_000, "Point 2: Target balance remains 2,000 (no duplication)");
+    assert.equal(srcBal + dstBal, initialTotalMass, "Point 2: Total mass strictly conserved");
+    assert.equal(env.ledgerStore.count, 0, "Point 2: Zero phantom ledger entries");
+  }
+
+  // === CRASH POINT 3: Crash between target write and debit ledger append ===
+  {
+    const env = await createEnv();
+    // Both domains were updated, but crash happened before any ledger entry
+    await env.setBalances(7_000, 5_000);
+
+    const tx = createTransactionRecord({
+      transactionId: "tx_crash_point_3",
+      commandId: "cmd_p3" as any,
+      authorityEpoch: 1,
+      lockKeys: [env.docSource.uuid, env.docDest.uuid],
+      safeAutoRecovery: true,
+      recoveryData: {
+        type: "economy:transfer",
+        sourceDomainUuid: env.docSource.uuid,
+        targetDomainUuid: env.docDest.uuid,
+        resourceId: "domain-manager:treasury",
+        amountMinor: transferAmount,
+        sourceInitialBalance: 10_000,
+        targetInitialBalance: 2_000
+      }
+    });
+    env.transactionStore.save(tx);
+    env.transactionStore.transition(tx.transactionId, "claimed", 1);
+    env.transactionStore.transition(tx.transactionId, "prepared", 1);
+    env.transactionStore.transition(tx.transactionId, "committing", 1);
+
+    const recRes = await env.recoveryService.recoverAll(1);
+    assert.equal(recRes.length, 1);
+    assert.equal(recRes[0].ok, true);
+    assert.equal(recRes[0].value.state, "compensated");
+
+    const srcAcc = (await env.domains.read(env.docSource.uuid)).value!;
+    const dstAcc = (await env.domains.read(env.docDest.uuid)).value!;
+    const srcBal = (getDomainEconomyData(srcAcc.record).accounts[0] as any).balanceMinor;
+    const dstBal = (getDomainEconomyData(dstAcc.record).accounts[0] as any).balanceMinor;
+
+    assert.equal(srcBal, 10_000, "Point 3: Source balance restored to 10,000");
+    assert.equal(dstBal, 2_000, "Point 3: Target balance restored to 2,000 (no duplication)");
+    assert.equal(srcBal + dstBal, initialTotalMass, "Point 3: Total mass strictly conserved");
+    assert.equal(env.ledgerStore.count, 0, "Point 3: Zero phantom ledger entries");
+  }
+
+  // === CRASH POINT 4: Crash between debit ledger and credit ledger append ===
+  {
+    const env = await createEnv();
+    await env.setBalances(7_000, 5_000);
+
+    const txId = "tx_crash_point_4";
+    // Debit ledger entry was appended before crash
+    env.ledgerStore.append({
+      domainUuid: env.docSource.uuid,
+      resourceId: "domain-manager:treasury",
+      deltaMinor: -transferAmount,
+      kind: "transfer-debit",
+      transactionId: txId,
+      source: { type: "transfer", ref: `transfer_to:${env.docDest.uuid}`, reason: "Debit before crash" }
+    });
+
+    const tx = createTransactionRecord({
+      transactionId: txId,
+      commandId: "cmd_p4" as any,
+      authorityEpoch: 1,
+      lockKeys: [env.docSource.uuid, env.docDest.uuid],
+      safeAutoRecovery: true,
+      recoveryData: {
+        type: "economy:transfer",
+        sourceDomainUuid: env.docSource.uuid,
+        targetDomainUuid: env.docDest.uuid,
+        resourceId: "domain-manager:treasury",
+        amountMinor: transferAmount,
+        sourceInitialBalance: 10_000,
+        targetInitialBalance: 2_000
+      }
+    });
+    env.transactionStore.save(tx);
+    env.transactionStore.transition(tx.transactionId, "claimed", 1);
+    env.transactionStore.transition(tx.transactionId, "prepared", 1);
+    env.transactionStore.transition(tx.transactionId, "committing", 1);
+
+    const recRes = await env.recoveryService.recoverAll(1);
+    assert.equal(recRes.length, 1);
+    assert.equal(recRes[0].ok, true);
+    assert.equal(recRes[0].value.state, "compensated");
+
+    const srcAcc = (await env.domains.read(env.docSource.uuid)).value!;
+    const dstAcc = (await env.domains.read(env.docDest.uuid)).value!;
+    const srcBal = (getDomainEconomyData(srcAcc.record).accounts[0] as any).balanceMinor;
+    const dstBal = (getDomainEconomyData(dstAcc.record).accounts[0] as any).balanceMinor;
+
+    assert.equal(srcBal, 10_000, "Point 4: Source balance restored to 10,000");
+    assert.equal(dstBal, 2_000, "Point 4: Target balance restored to 2,000");
+    assert.equal(srcBal + dstBal, initialTotalMass, "Point 4: Total mass strictly conserved");
+
+    // Compensating reversal was appended to cancel the debit entry
+    const entries = env.ledgerStore.query({ domainUuid: env.docSource.uuid });
+    assert.equal(entries.length, 2, "Point 4: Debit entry + compensating adjustment entry");
+    const compEntry = entries.find((e) => e.source?.type === "recovery")!;
+    assert.equal(compEntry.deltaMinor, transferAmount, "Point 4: Compensating entry restores +3,000");
+    const netLedger = entries.reduce((s, e) => s + e.deltaMinor, 0);
+    assert.equal(netLedger, 0, "Point 4: Net ledger delta is exactly 0");
+  }
+
+  // === CRASH POINT 5: Crash after credit ledger append before tx committed status persisted ===
+  {
+    const env = await createEnv();
+    await env.setBalances(7_000, 5_000);
+
+    const txId = "tx_crash_point_5";
+    // Both ledger entries were appended before crash
+    env.ledgerStore.append({
+      domainUuid: env.docSource.uuid,
+      resourceId: "domain-manager:treasury",
+      deltaMinor: -transferAmount,
+      kind: "transfer-debit",
+      transactionId: txId,
+      source: { type: "transfer", ref: `transfer_to:${env.docDest.uuid}`, reason: "Clean debit" }
+    });
+    env.ledgerStore.append({
+      domainUuid: env.docDest.uuid,
+      resourceId: "domain-manager:treasury",
+      deltaMinor: transferAmount,
+      kind: "transfer-credit",
+      transactionId: txId,
+      source: { type: "transfer", ref: `transfer_from:${env.docSource.uuid}`, reason: "Clean credit" }
+    });
+
+    const tx = createTransactionRecord({
+      transactionId: txId,
+      commandId: "cmd_p5" as any,
+      authorityEpoch: 1,
+      lockKeys: [env.docSource.uuid, env.docDest.uuid],
+      safeAutoRecovery: true,
+      recoveryData: {
+        type: "economy:transfer",
+        sourceDomainUuid: env.docSource.uuid,
+        targetDomainUuid: env.docDest.uuid,
+        resourceId: "domain-manager:treasury",
+        amountMinor: transferAmount,
+        sourceInitialBalance: 10_000,
+        targetInitialBalance: 2_000
+      }
+    });
+    env.transactionStore.save(tx);
+    env.transactionStore.transition(tx.transactionId, "claimed", 1);
+    env.transactionStore.transition(tx.transactionId, "prepared", 1);
+    env.transactionStore.transition(tx.transactionId, "committing", 1);
+
+    const recRes = await env.recoveryService.recoverAll(1);
+    assert.equal(recRes.length, 1);
+    assert.equal(recRes[0].ok, true);
+    // Case A: completed during reconciliation!
+    assert.equal(recRes[0].value.state, "committed", "Point 5: Transaction transitioned to committed");
+
+    const srcAcc = (await env.domains.read(env.docSource.uuid)).value!;
+    const dstAcc = (await env.domains.read(env.docDest.uuid)).value!;
+    const srcBal = (getDomainEconomyData(srcAcc.record).accounts[0] as any).balanceMinor;
+    const dstBal = (getDomainEconomyData(dstAcc.record).accounts[0] as any).balanceMinor;
+
+    assert.equal(srcBal, 7_000, "Point 5: Source balance remains 7,000 (transfer honored)");
+    assert.equal(dstBal, 5_000, "Point 5: Target balance remains 5,000 (transfer honored)");
+    assert.equal(srcBal + dstBal, initialTotalMass, "Point 5: Total mass strictly conserved");
+    assert.equal(env.ledgerStore.count, 2, "Point 5: Exactly 2 ledger entries (no extraneous adjustments)");
+  }
+
+  // === CRASH POINT 6: Idempotent repeated recovery execution ===
+  {
+    const env = await createEnv();
+    await env.setBalances(7_000, 2_000);
+
+    const tx = createTransactionRecord({
+      transactionId: "tx_crash_point_6",
+      commandId: "cmd_p6" as any,
+      authorityEpoch: 1,
+      lockKeys: [env.docSource.uuid, env.docDest.uuid],
+      safeAutoRecovery: true,
+      recoveryData: {
+        type: "economy:transfer",
+        sourceDomainUuid: env.docSource.uuid,
+        targetDomainUuid: env.docDest.uuid,
+        resourceId: "domain-manager:treasury",
+        amountMinor: transferAmount,
+        sourceInitialBalance: 10_000,
+        targetInitialBalance: 2_000
+      }
+    });
+    env.transactionStore.save(tx);
+    env.transactionStore.transition(tx.transactionId, "claimed", 1);
+    env.transactionStore.transition(tx.transactionId, "prepared", 1);
+    env.transactionStore.transition(tx.transactionId, "committing", 1);
+
+    // Pass 1
+    const firstRun = await env.recoveryService.recoverAll(1);
+    assert.equal(firstRun.length, 1);
+    assert.equal(firstRun[0].value.state, "compensated");
+
+    // Pass 2 (Repeated execution)
+    const secondRun = await env.recoveryService.recoverAll(1);
+    assert.equal(secondRun.length, 0, "Point 6: Repeated recoverAll finds 0 pending transactions");
+
+    // Re-verify balances and ledger
+    const srcAcc = (await env.domains.read(env.docSource.uuid)).value!;
+    const dstAcc = (await env.domains.read(env.docDest.uuid)).value!;
+    const srcBal = (getDomainEconomyData(srcAcc.record).accounts[0] as any).balanceMinor;
+    const dstBal = (getDomainEconomyData(dstAcc.record).accounts[0] as any).balanceMinor;
+
+    assert.equal(srcBal, 10_000, "Point 6: Source balance is 10,000");
+    assert.equal(dstBal, 2_000, "Point 6: Target balance is 2,000");
+    assert.equal(srcBal + dstBal, initialTotalMass, "Point 6: Total mass strictly conserved");
+    assert.equal(env.ledgerStore.count, 0, "Point 6: Zero phantom ledger entries");
+  }
 });
 
 

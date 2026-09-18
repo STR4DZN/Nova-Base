@@ -6239,7 +6239,7 @@ var VALID_TRANSITIONS = {
   committed: /* @__PURE__ */ new Set([]),
   // Final
   "needs-recovery": /* @__PURE__ */ new Set(["compensating", "committing", "compensated", "failed"]),
-  compensating: /* @__PURE__ */ new Set(["compensated", "needs-recovery", "failed"]),
+  compensating: /* @__PURE__ */ new Set(["compensated", "committed", "needs-recovery", "failed"]),
   compensated: /* @__PURE__ */ new Set([]),
   // Final
   failed: /* @__PURE__ */ new Set([])
@@ -6368,7 +6368,7 @@ var TransactionStore = class {
   #records = /* @__PURE__ */ new Map();
   #byCommandId = /* @__PURE__ */ new Map();
   #storageAdapter;
-  #pendingPersist = null;
+  #persistQueue = Promise.resolve();
   #lastPersistError = null;
   constructor(options = {}) {
     this.#storageAdapter = options.storageAdapter;
@@ -6437,9 +6437,9 @@ var TransactionStore = class {
     return transitionRes;
   }
   async flush() {
-    if (this.#pendingPersist) {
-      await this.#pendingPersist;
-    }
+    if (!this.#storageAdapter) return;
+    this.#schedulePersist();
+    await this.#persistQueue;
     if (this.#lastPersistError) {
       const err3 = this.#lastPersistError;
       this.#lastPersistError = null;
@@ -6453,7 +6453,9 @@ var TransactionStore = class {
   }
   #schedulePersist() {
     if (!this.#storageAdapter) return;
-    this.#pendingPersist = this.#persist().catch((err3) => {
+    this.#persistQueue = this.#persistQueue.then(async () => {
+      await this.#persist();
+    }).catch((err3) => {
       this.#lastPersistError = err3 instanceof Error ? err3 : new Error(String(err3));
     });
   }
@@ -6594,6 +6596,11 @@ var RecoveryService = class {
           message: `Compensation threw exception: ${error instanceof Error ? error.message : "Unknown error"}`
         })
       );
+    }
+    const currentTx = this.#transactionStore.get(transactionId);
+    if (currentTx && isFinalTransactionState(currentTx.state)) {
+      this.#releaseRecoveryLock(transactionId);
+      return ok(currentTx);
     }
     const finalTransition = this.#transactionStore.transition(
       transactionId,
@@ -12657,7 +12664,7 @@ var LedgerStore = class {
   #sequenceIndex = [];
   #nextSequence = 1;
   #storageAdapter;
-  #pendingPersist = null;
+  #persistQueue = Promise.resolve();
   #lastPersistError = null;
   constructor(options = {}) {
     this.#storageAdapter = options.storageAdapter;
@@ -12859,19 +12866,20 @@ var LedgerStore = class {
     return this.#entries.size;
   }
   async flush() {
-    if (this.#pendingPersist) {
-      await this.#pendingPersist;
-    }
+    if (!this.#storageAdapter) return;
+    this.#schedulePersist();
+    await this.#persistQueue;
     if (this.#lastPersistError) {
       const err3 = this.#lastPersistError;
       this.#lastPersistError = null;
       throw err3;
     }
-    await this.#persist();
   }
   #schedulePersist() {
     if (!this.#storageAdapter) return;
-    this.#pendingPersist = this.#persist().catch((err3) => {
+    this.#persistQueue = this.#persistQueue.then(async () => {
+      await this.#persist();
+    }).catch((err3) => {
       this.#lastPersistError = err3 instanceof Error ? err3 : new Error(String(err3));
     });
   }
@@ -13103,7 +13111,7 @@ var ReservationStore = class {
   #reservations = /* @__PURE__ */ new Map();
   #events = [];
   #storageAdapter;
-  #pendingPersist = null;
+  #persistQueue = Promise.resolve();
   #lastPersistError = null;
   constructor(options = {}) {
     this.#storageAdapter = options.storageAdapter;
@@ -13185,6 +13193,9 @@ var ReservationStore = class {
       return Object.freeze(this.#events.filter((e) => e.reservationId === reservationId));
     }
     return Object.freeze([...this.#events]);
+  }
+  getEvents(reservationId) {
+    return this.listEvents(reservationId);
   }
   getReservedTotal(domainUuid, resourceId) {
     let total = 0;
@@ -13400,19 +13411,20 @@ var ReservationStore = class {
     return ok(restored);
   }
   async flush() {
-    if (this.#pendingPersist) {
-      await this.#pendingPersist;
-    }
+    if (!this.#storageAdapter) return;
+    this.#schedulePersist();
+    await this.#persistQueue;
     if (this.#lastPersistError) {
       const err3 = this.#lastPersistError;
       this.#lastPersistError = null;
       throw err3;
     }
-    await this.#persist();
   }
   #schedulePersist() {
     if (!this.#storageAdapter) return;
-    this.#pendingPersist = this.#persist().catch((err3) => {
+    this.#persistQueue = this.#persistQueue.then(async () => {
+      await this.#persist();
+    }).catch((err3) => {
       this.#lastPersistError = err3 instanceof Error ? err3 : new Error(String(err3));
     });
   }
@@ -14485,6 +14497,31 @@ var EconomyService = class {
             isNoop: true
           });
         }
+        const transactionId = createOpaqueId("tx");
+        const cmdId = params.commandId ?? createOpaqueId("cmd");
+        const epoch = params.authorityEpoch ?? 1;
+        const txRecord = createTransactionRecord({
+          transactionId,
+          commandId: cmdId,
+          authorityEpoch: epoch,
+          lockKeys: [lockKey],
+          safeAutoRecovery: true,
+          recoveryData: {
+            type: "economy:provider-adjust",
+            domainUuid: params.domainUuid,
+            resourceId: params.resourceId,
+            providerId: providerAccount.providerId,
+            providerRef: providerAccount.providerRef,
+            deltaMinor: delta,
+            reason: params.reason,
+            userId: params.userId
+          }
+        });
+        this.#transactionStore?.save(txRecord);
+        this.#transactionStore?.transition(transactionId, "claimed", epoch);
+        this.#transactionStore?.transition(transactionId, "prepared", epoch);
+        this.#transactionStore?.transition(transactionId, "committing", epoch);
+        await this.#transactionStore?.flush();
         const mutRes = await provider.mutateBalance(
           params.domainUuid,
           params.resourceId,
@@ -14492,12 +14529,17 @@ var EconomyService = class {
           delta,
           params.reason
         );
-        if (!mutRes.ok) return mutRes;
+        if (!mutRes.ok) {
+          this.#transactionStore?.transition(transactionId, "failed", epoch, mutRes.error.message);
+          await this.#transactionStore?.flush();
+          return mutRes;
+        }
         const entryRes2 = this.#ledgerStore.append({
           domainUuid: params.domainUuid,
           resourceId: params.resourceId,
           deltaMinor: delta,
           kind: "adjustment",
+          transactionId,
           source: {
             type: "adjustment",
             ref: providerAccount.providerRef,
@@ -14505,11 +14547,35 @@ var EconomyService = class {
             userId: params.userId
           }
         });
+        if (!entryRes2.ok) {
+          this.#transactionStore?.transition(
+            transactionId,
+            "needs-recovery",
+            epoch,
+            "Failed to append ledger entry after provider mutation"
+          );
+          await this.#transactionStore?.flush();
+          return entryRes2;
+        }
         await this.#ledgerStore.flush();
+        this.#transactionStore?.transition(
+          transactionId,
+          "committed",
+          epoch,
+          "Provider adjust completed cleanly"
+        );
+        await this.#transactionStore?.flush();
+        this.#evaluateThresholds(
+          params.domainUuid,
+          params.resourceId,
+          mutRes.value.balanceMinor,
+          null
+        );
         return ok({
           account: providerAccount,
-          entry: entryRes2.ok ? entryRes2.value : void 0,
-          isNoop: false
+          entry: entryRes2.value,
+          isNoop: false,
+          transactionId
         });
       }
       const nativeAccount = existingAccount;
@@ -14567,6 +14633,12 @@ var EconomyService = class {
         return entryRes;
       }
       await this.#ledgerStore.flush();
+      this.#evaluateThresholds(
+        params.domainUuid,
+        params.resourceId,
+        updatedAccount.balanceMinor,
+        updatedAccount.baseCapacityMinor
+      );
       return ok({
         account: updatedAccount,
         entry: entryRes.value
@@ -14829,6 +14901,18 @@ var EconomyService = class {
         "Transfer completed cleanly"
       );
       await this.#transactionStore?.flush();
+      this.#evaluateThresholds(
+        params.sourceDomainUuid,
+        params.resourceId,
+        updatedSrcAccount.balanceMinor,
+        updatedSrcAccount.baseCapacityMinor
+      );
+      this.#evaluateThresholds(
+        params.targetDomainUuid,
+        params.resourceId,
+        updatedTgtAccount.balanceMinor,
+        updatedTgtAccount.baseCapacityMinor
+      );
       return ok({
         sourceAccount: updatedSrcAccount,
         targetAccount: updatedTgtAccount,
@@ -15060,6 +15144,18 @@ var EconomyService = class {
       await this.#ledgerStore.flush();
       this.#transactionStore?.transition(transactionId, "committed", epoch, "Conversion completed cleanly");
       await this.#transactionStore?.flush();
+      this.#evaluateThresholds(
+        params.domainUuid,
+        params.fromResourceId,
+        updatedFromAccount.balanceMinor,
+        updatedFromAccount.baseCapacityMinor
+      );
+      this.#evaluateThresholds(
+        params.domainUuid,
+        params.toResourceId,
+        updatedToAccount.balanceMinor,
+        updatedToAccount.baseCapacityMinor
+      );
       return ok({
         fromAccount: updatedFromAccount,
         toAccount: updatedToAccount,
@@ -15116,6 +15212,12 @@ var EconomyService = class {
       });
       if (res.ok) {
         await this.#reservationStore.flush();
+        this.#evaluateThresholds(
+          params.domainUuid,
+          params.resourceId,
+          acc.balanceMinor,
+          acc.baseCapacityMinor
+        );
       }
       return res;
     } finally {
@@ -15248,6 +15350,12 @@ var EconomyService = class {
       }
       await this.#ledgerStore.flush();
       await this.#reservationStore.flush();
+      this.#evaluateThresholds(
+        params.domainUuid,
+        reservation.resourceId,
+        updatedAccount.balanceMinor,
+        updatedAccount.baseCapacityMinor
+      );
       return ok({
         reservation,
         entry: entryRes.value,
@@ -15310,6 +15418,15 @@ var EconomyService = class {
       });
       if (relRes.ok) {
         await this.#reservationStore.flush();
+        const accRes = await this.getAccount(params.domainUuid, lockedRes.resourceId);
+        if (accRes.ok && accRes.value?.mode === "native") {
+          this.#evaluateThresholds(
+            params.domainUuid,
+            lockedRes.resourceId,
+            accRes.value.balanceMinor,
+            accRes.value.baseCapacityMinor
+          );
+        }
       }
       return relRes;
     } finally {
@@ -15401,6 +15518,12 @@ var EconomyService = class {
         return reversalRes;
       }
       await this.#ledgerStore.flush();
+      this.#evaluateThresholds(
+        params.domainUuid,
+        originalEntry.resourceId,
+        updatedAccount.balanceMinor,
+        updatedAccount.baseCapacityMinor
+      );
       return ok({
         reversalEntry: reversalRes.value,
         account: updatedAccount
@@ -15412,36 +15535,102 @@ var EconomyService = class {
   #cleanUuid(domainUuid) {
     return domainUuid.trim();
   }
+  #evaluateThresholds(domainUuid, resourceId, balanceMinor, capacityMinor) {
+    if (!this.#thresholdService) return;
+    const reservedMinor = this.#reservationStore.getReservedTotal(domainUuid, resourceId);
+    const availableMinor = balanceMinor - reservedMinor;
+    this.#thresholdService.evaluateCrossings(domainUuid, resourceId, {
+      balanceMinor,
+      reservedMinor,
+      availableMinor,
+      capacityMinor
+    });
+  }
   #registerRecoveryCompensators(recoveryService) {
     recoveryService.registerCompensator("economy:transfer", async (record) => {
       const data = record.recoveryData;
-      if (!data || !data.sourceDomainUuid || !data.resourceId || !data.amountMinor) {
+      if (!data || !data.sourceDomainUuid || !data.targetDomainUuid || !data.resourceId || !data.amountMinor) {
         return ok(void 0);
       }
-      const srcRes = await this.#domains.read(this.#cleanUuid(data.sourceDomainUuid));
+      const srcCleanUuid = this.#cleanUuid(data.sourceDomainUuid);
+      const tgtCleanUuid = this.#cleanUuid(data.targetDomainUuid);
+      const srcRes = await this.#domains.read(srcCleanUuid);
       if (!srcRes.ok) return srcRes;
       const srcDoc = srcRes.value;
+      const tgtRes = await this.#domains.read(tgtCleanUuid);
+      if (!tgtRes.ok) return tgtRes;
+      const tgtDoc = tgtRes.value;
       const srcEcon = getDomainEconomyData(srcDoc.record);
+      const tgtEcon = getDomainEconomyData(tgtDoc.record);
       const srcAccIndex = srcEcon.accounts.findIndex((a) => a.resourceId === data.resourceId);
-      if (srcAccIndex < 0) return ok(void 0);
+      const tgtAccIndex = tgtEcon.accounts.findIndex((a) => a.resourceId === data.resourceId);
+      if (srcAccIndex < 0 || tgtAccIndex < 0) return ok(void 0);
       const srcAccount = srcEcon.accounts[srcAccIndex];
-      if (typeof data.sourceInitialBalance === "number" && srcAccount.balanceMinor === data.sourceInitialBalance - data.amountMinor) {
-        const restoredAccount = {
+      const tgtAccount = tgtEcon.accounts[tgtAccIndex];
+      const txEntries = this.#ledgerStore.query({ transactionId: record.transactionId });
+      const hasDebitEntry = txEntries.some(
+        (e) => e.kind === "transfer-debit" && e.domainUuid === data.sourceDomainUuid
+      );
+      const hasCreditEntry = txEntries.some(
+        (e) => e.kind === "transfer-credit" && e.domainUuid === data.targetDomainUuid
+      );
+      const hasCompensatingDebitReversal = txEntries.some(
+        (e) => e.source?.type === "recovery" && e.domainUuid === data.sourceDomainUuid
+      );
+      const hasCompensatingCreditReversal = txEntries.some(
+        (e) => e.source?.type === "recovery" && e.domainUuid === data.targetDomainUuid
+      );
+      const sourceInitialBalance = typeof data.sourceInitialBalance === "number" ? data.sourceInitialBalance : srcAccount.balanceMinor;
+      const targetInitialBalance = typeof data.targetInitialBalance === "number" ? data.targetInitialBalance : tgtAccount.balanceMinor;
+      const amountMinor = data.amountMinor;
+      const srcIsDebited = srcAccount.balanceMinor === sourceInitialBalance - amountMinor;
+      const tgtIsCredited = tgtAccount.balanceMinor === targetInitialBalance + amountMinor;
+      if (hasDebitEntry && hasCreditEntry && srcIsDebited && tgtIsCredited) {
+        if (this.#transactionStore) {
+          this.#transactionStore.transition(
+            record.transactionId,
+            "committed",
+            record.authorityEpoch,
+            "Reconciliation confirmed both domain writes and ledger entries completed"
+          );
+          await this.#transactionStore.flush();
+        }
+        return ok(void 0);
+      }
+      if (srcIsDebited) {
+        const restoredSrcAccount = {
           ...srcAccount,
-          balanceMinor: data.sourceInitialBalance
+          balanceMinor: sourceInitialBalance
         };
         const updatedAccounts = [...srcEcon.accounts];
-        updatedAccounts[srcAccIndex] = restoredAccount;
+        updatedAccounts[srcAccIndex] = restoredSrcAccount;
         const updatedRecord = withDomainEconomyData(srcDoc.record, {
           ...srcEcon,
           accounts: Object.freeze(updatedAccounts)
         });
         const updateRes = await this.#domains.update({ ...srcDoc, record: updatedRecord });
         if (!updateRes.ok) return updateRes;
+      }
+      if (tgtIsCredited) {
+        const restoredTgtAccount = {
+          ...tgtAccount,
+          balanceMinor: targetInitialBalance
+        };
+        const updatedAccounts = [...tgtEcon.accounts];
+        updatedAccounts[tgtAccIndex] = restoredTgtAccount;
+        const updatedRecord = withDomainEconomyData(tgtDoc.record, {
+          ...tgtEcon,
+          accounts: Object.freeze(updatedAccounts)
+        });
+        const updateRes = await this.#domains.update({ ...tgtDoc, record: updatedRecord });
+        if (!updateRes.ok) return updateRes;
+      }
+      let ledgerMutated = false;
+      if (hasDebitEntry && !hasCompensatingDebitReversal) {
         this.#ledgerStore.append({
           domainUuid: data.sourceDomainUuid,
           resourceId: data.resourceId,
-          deltaMinor: data.amountMinor,
+          deltaMinor: amountMinor,
           kind: "adjustment",
           transactionId: record.transactionId,
           source: {
@@ -15449,6 +15638,23 @@ var EconomyService = class {
             reason: `Recovery compensation for failed transfer ${record.transactionId}`
           }
         });
+        ledgerMutated = true;
+      }
+      if (hasCreditEntry && !hasCompensatingCreditReversal) {
+        this.#ledgerStore.append({
+          domainUuid: data.targetDomainUuid,
+          resourceId: data.resourceId,
+          deltaMinor: -amountMinor,
+          kind: "adjustment",
+          transactionId: record.transactionId,
+          source: {
+            type: "recovery",
+            reason: `Recovery compensation for failed transfer ${record.transactionId}`
+          }
+        });
+        ledgerMutated = true;
+      }
+      if (ledgerMutated) {
         await this.#ledgerStore.flush();
       }
       return ok(void 0);
@@ -15458,7 +15664,8 @@ var EconomyService = class {
       if (!data || !data.domainUuid || !data.fromResourceId || !data.toResourceId || !data.fromAmountMinor || !data.toAmountMinor) {
         return ok(void 0);
       }
-      const docRes = await this.#domains.read(this.#cleanUuid(data.domainUuid));
+      const cleanUuid = this.#cleanUuid(data.domainUuid);
+      const docRes = await this.#domains.read(cleanUuid);
       if (!docRes.ok) return docRes;
       const doc = docRes.value;
       const econ = getDomainEconomyData(doc.record);
@@ -15467,19 +15674,46 @@ var EconomyService = class {
       if (fromIndex < 0 || toIndex < 0) return ok(void 0);
       const fromAcc = econ.accounts[fromIndex];
       const toAcc = econ.accounts[toIndex];
+      const txEntries = this.#ledgerStore.query({ transactionId: record.transactionId, domainUuid: data.domainUuid });
+      const hasFromDebitEntry = txEntries.some((e) => e.kind === "conversion-debit" && e.resourceId === data.fromResourceId);
+      const hasToCreditEntry = txEntries.some((e) => e.kind === "conversion-credit" && e.resourceId === data.toResourceId);
+      const hasCompensatingFromReversal = txEntries.some(
+        (e) => e.source?.type === "recovery" && e.resourceId === data.fromResourceId
+      );
+      const hasCompensatingToReversal = txEntries.some(
+        (e) => e.source?.type === "recovery" && e.resourceId === data.toResourceId
+      );
+      const fromInitialBalance = typeof data.fromInitialBalance === "number" ? data.fromInitialBalance : fromAcc.balanceMinor;
+      const toInitialBalance = typeof data.toInitialBalance === "number" ? data.toInitialBalance : toAcc.balanceMinor;
+      const fromAmountMinor = data.fromAmountMinor;
+      const toAmountMinor = data.toAmountMinor;
+      const fromIsDebited = fromAcc.balanceMinor === fromInitialBalance - fromAmountMinor;
+      const toIsCredited = toAcc.balanceMinor === toInitialBalance + toAmountMinor;
+      if (hasFromDebitEntry && hasToCreditEntry && fromIsDebited && toIsCredited) {
+        if (this.#transactionStore) {
+          this.#transactionStore.transition(
+            record.transactionId,
+            "committed",
+            record.authorityEpoch,
+            "Reconciliation confirmed conversion completed cleanly"
+          );
+          await this.#transactionStore.flush();
+        }
+        return ok(void 0);
+      }
       let needsDomainUpdate = false;
       const updatedAccounts = [...econ.accounts];
-      if (typeof data.fromInitialBalance === "number" && fromAcc.balanceMinor === data.fromInitialBalance - data.fromAmountMinor) {
+      if (fromIsDebited) {
         updatedAccounts[fromIndex] = {
           ...fromAcc,
-          balanceMinor: data.fromInitialBalance
+          balanceMinor: fromInitialBalance
         };
         needsDomainUpdate = true;
       }
-      if (typeof data.toInitialBalance === "number" && toAcc.balanceMinor === data.toInitialBalance + data.toAmountMinor) {
+      if (toIsCredited) {
         updatedAccounts[toIndex] = {
           ...toAcc,
-          balanceMinor: data.toInitialBalance
+          balanceMinor: toInitialBalance
         };
         needsDomainUpdate = true;
       }
@@ -15490,10 +15724,13 @@ var EconomyService = class {
         });
         const updateRes = await this.#domains.update({ ...doc, record: updatedRecord });
         if (!updateRes.ok) return updateRes;
+      }
+      let ledgerMutated = false;
+      if (hasFromDebitEntry && !hasCompensatingFromReversal) {
         this.#ledgerStore.append({
           domainUuid: data.domainUuid,
           resourceId: data.fromResourceId,
-          deltaMinor: data.fromAmountMinor,
+          deltaMinor: fromAmountMinor,
           kind: "adjustment",
           transactionId: record.transactionId,
           source: {
@@ -15501,10 +15738,13 @@ var EconomyService = class {
             reason: `Recovery compensation for failed conversion ${record.transactionId}`
           }
         });
+        ledgerMutated = true;
+      }
+      if (hasToCreditEntry && !hasCompensatingToReversal) {
         this.#ledgerStore.append({
           domainUuid: data.domainUuid,
           resourceId: data.toResourceId,
-          deltaMinor: -data.toAmountMinor,
+          deltaMinor: -toAmountMinor,
           kind: "adjustment",
           transactionId: record.transactionId,
           source: {
@@ -15512,7 +15752,43 @@ var EconomyService = class {
             reason: `Recovery compensation for failed conversion ${record.transactionId}`
           }
         });
+        ledgerMutated = true;
+      }
+      if (ledgerMutated) {
         await this.#ledgerStore.flush();
+      }
+      return ok(void 0);
+    });
+    recoveryService.registerCompensator("economy:provider-adjust", async (record) => {
+      const data = record.recoveryData;
+      if (!data || !data.domainUuid || !data.resourceId || !data.deltaMinor) {
+        return ok(void 0);
+      }
+      const txEntries = this.#ledgerStore.query({ transactionId: record.transactionId });
+      const hasLedgerEntry = txEntries.length > 0;
+      if (hasLedgerEntry) {
+        if (this.#transactionStore) {
+          this.#transactionStore.transition(
+            record.transactionId,
+            "committed",
+            record.authorityEpoch,
+            "Reconciliation confirmed provider adjustment completed cleanly"
+          );
+          await this.#transactionStore.flush();
+        }
+        return ok(void 0);
+      }
+      if (this.#providerRegistry && data.providerId) {
+        const provider = this.#providerRegistry.get(data.providerId);
+        if (provider && "mutateBalance" in provider && typeof provider.mutateBalance === "function") {
+          await provider.mutateBalance(
+            data.domainUuid,
+            data.resourceId,
+            data.providerRef ?? "",
+            -data.deltaMinor,
+            `Recovery compensation for aborted adjustment ${record.transactionId}`
+          );
+        }
       }
       return ok(void 0);
     });
@@ -15630,12 +15906,16 @@ var EconomyAggregationProvider = class {
     for (const uuid of domainUuids) {
       const docRes = await this.#domains.read(uuid);
       if (!docRes.ok) {
-        unknownContributors.push(uuid);
+        if (!unknownContributors.includes(uuid)) {
+          unknownContributors.push(uuid);
+        }
         continue;
       }
       const econRes = tryGetDomainEconomyData(docRes.value.record);
       if (!econRes.ok) {
-        unknownContributors.push(uuid);
+        if (!unknownContributors.includes(uuid)) {
+          unknownContributors.push(uuid);
+        }
         continue;
       }
       let domainContributed = false;
@@ -15651,7 +15931,9 @@ var EconomyAggregationProvider = class {
               totalReserved: 0,
               totalAvailable: 0,
               contributingCount: 0,
-              hiddenCount: 0
+              hiddenCount: 0,
+              isComplete: true,
+              unknownContributorCount: 0
             };
             totalsByResource.set(account.resourceId, resourceStats2);
           }
@@ -15666,17 +15948,33 @@ var EconomyAggregationProvider = class {
             totalReserved: 0,
             totalAvailable: 0,
             contributingCount: 0,
-            hiddenCount: 0
+            hiddenCount: 0,
+            isComplete: true,
+            unknownContributorCount: 0
           };
           totalsByResource.set(account.resourceId, resourceStats);
         }
         let balance = account.mode === "native" ? account.balanceMinor : 0;
-        if (account.mode === "provider" && this.#providerRegistry) {
-          const provider = this.#providerRegistry.get(account.providerId);
-          if (provider && "readBalance" in provider) {
-            const balRes = await provider.readBalance(uuid, account.resourceId, account.providerRef);
-            if (balRes?.ok) {
-              balance = balRes.value.balanceMinor;
+        if (account.mode === "provider") {
+          let readSuccess = false;
+          if (this.#providerRegistry) {
+            const provider = this.#providerRegistry.get(account.providerId);
+            if (provider && "readBalance" in provider) {
+              try {
+                const balRes = await provider.readBalance(uuid, account.resourceId, account.providerRef);
+                if (balRes?.ok) {
+                  balance = balRes.value.balanceMinor;
+                  readSuccess = true;
+                }
+              } catch {
+              }
+            }
+          }
+          if (!readSuccess) {
+            resourceStats.isComplete = false;
+            resourceStats.unknownContributorCount++;
+            if (!unknownContributors.includes(uuid)) {
+              unknownContributors.push(uuid);
             }
           }
         }
@@ -15699,7 +15997,9 @@ var EconomyAggregationProvider = class {
         totalReservedMinor: stats.totalReserved,
         totalAvailableMinor: stats.totalAvailable,
         contributingDomainCount: stats.contributingCount,
-        hiddenDomainCount: stats.hiddenCount
+        hiddenDomainCount: stats.hiddenCount,
+        isComplete: stats.isComplete && stats.unknownContributorCount === 0,
+        unknownContributorCount: stats.unknownContributorCount
       });
     }
     return {
@@ -15707,6 +16007,7 @@ var EconomyAggregationProvider = class {
       totalDomainsEvaluated: domainUuids.length,
       hiddenContributors: Object.freeze(hiddenContributors),
       unknownContributors: Object.freeze(unknownContributors),
+      isComplete: unknownContributors.length === 0,
       evaluatedAt: Date.now()
     };
   }
@@ -16151,7 +16452,15 @@ async function validateEconomyCommandPermission(ctx, domains, domainUuids, optio
 
 // src/economy/commands/economy-commands.ts
 function registerEconomyCommands(options) {
-  const { registry, economyService, domains, controllerProvider } = options;
+  const {
+    registry,
+    economyService,
+    domains,
+    controllerProvider,
+    thresholdService,
+    customResourceStore,
+    resourceRegistry
+  } = options;
   registry.register({
     type: "economy:adjust",
     visibility: "public",
@@ -16210,7 +16519,7 @@ function registerEconomyCommands(options) {
         reason: p.reason,
         userId: ctx.senderUserId ?? void 0,
         commandId: ctx.command.commandId,
-        authorityEpoch: ctx.command.authorityEpoch ?? 1
+        authorityEpoch: ctx.authorityEpoch
       });
     }
   });
@@ -16283,7 +16592,7 @@ function registerEconomyCommands(options) {
         reason: p.reason,
         userId: ctx.senderUserId ?? void 0,
         commandId: ctx.command.commandId,
-        authorityEpoch: ctx.command.authorityEpoch ?? 1
+        authorityEpoch: ctx.authorityEpoch
       });
     }
   });
@@ -16355,7 +16664,7 @@ function registerEconomyCommands(options) {
         reason: p.reason,
         userId: ctx.senderUserId ?? void 0,
         commandId: ctx.command.commandId,
-        authorityEpoch: ctx.command.authorityEpoch ?? 1
+        authorityEpoch: ctx.authorityEpoch
       });
     }
   });
@@ -16474,7 +16783,7 @@ function registerEconomyCommands(options) {
         reason: p.reason,
         userId: ctx.senderUserId ?? void 0,
         commandId: ctx.command.commandId,
-        authorityEpoch: ctx.command.authorityEpoch ?? 1
+        authorityEpoch: ctx.authorityEpoch
       });
     }
   });
@@ -16521,7 +16830,9 @@ function registerEconomyCommands(options) {
       return economyService.releaseReservation({
         domainUuid: p.domainUuid,
         reservationId: p.reservationId,
-        amountMinor: p.amountMinor
+        amountMinor: p.amountMinor,
+        reason: p.reason,
+        userId: ctx.senderUserId ?? void 0
       });
     }
   });
@@ -16688,6 +16999,128 @@ function registerEconomyCommands(options) {
       });
     }
   });
+  registry.register({
+    type: "economy:set-threshold",
+    visibility: "public",
+    description: "Sets a resource threshold alert configuration",
+    schemaValidator: (payload) => {
+      if (!payload || typeof payload !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Payload must be an object"
+          })
+        );
+      }
+      const p = payload;
+      if (typeof p.domainUuid !== "string" || !p.domainUuid.trim()) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "domainUuid is required"
+          })
+        );
+      }
+      if (!isNamespacedResourceId(p.resourceId)) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "resourceId must be namespaced"
+          })
+        );
+      }
+      if (p.metric !== "balance" && p.metric !== "available") {
+        return err(
+          createPublicError({
+            code: "DM_ECON_THRESHOLD_INVALID",
+            category: "validation",
+            message: "metric must be 'balance' or 'available'"
+          })
+        );
+      }
+      const val = p.targetValueMinor ?? p.valueMinor;
+      if (typeof val !== "number" || !Number.isSafeInteger(val)) {
+        return err(
+          createPublicError({
+            code: "DM_ECON_THRESHOLD_INVALID",
+            category: "validation",
+            message: "valueMinor/targetValueMinor must be a safe integer"
+          })
+        );
+      }
+      const validSeverities = ["info", "warning", "critical"];
+      if (typeof p.severity !== "string" || !validSeverities.includes(p.severity)) {
+        return err(
+          createPublicError({
+            code: "DM_ECON_THRESHOLD_INVALID",
+            category: "validation",
+            message: "severity must be 'info', 'warning', or 'critical'"
+          })
+        );
+      }
+      return ok(p);
+    },
+    permissionValidator: (ctx) => validateEconomyCommandPermission(ctx, domains, [ctx.command.payload.domainUuid], {
+      controllerProvider
+    }),
+    handler: async (ctx) => {
+      const p = ctx.command.payload;
+      const targetThresholdService = thresholdService ?? economyService.thresholdService;
+      if (!targetThresholdService) {
+        return err(
+          createPublicError({
+            code: "DM_ECON_THRESHOLD_SERVICE_UNAVAILABLE",
+            category: "internal",
+            message: "Threshold service is not available"
+          })
+        );
+      }
+      const regRes = targetThresholdService.registerThreshold(p);
+      if (regRes.ok) {
+        await targetThresholdService.flush();
+      }
+      return regRes;
+    }
+  });
+  registry.register({
+    type: "economy:register-custom-resource",
+    visibility: "public",
+    description: "Registers a custom resource definition (GM only)",
+    schemaValidator: (payload) => {
+      if (!payload || typeof payload !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Payload must be an object"
+          })
+        );
+      }
+      const p = payload;
+      const candidate = p.definition && typeof p.definition === "object" ? p.definition : p;
+      const valRes = validateResourceDefinition(candidate);
+      if (!valRes.ok) {
+        return valRes;
+      }
+      return ok({ definition: valRes.value });
+    },
+    permissionValidator: (ctx) => validateEconomyCommandPermission(ctx, domains, [], { gmOnly: true }),
+    handler: async (ctx) => {
+      const def = ctx.command.payload.definition;
+      const targetStore = customResourceStore;
+      if (targetStore) {
+        await targetStore.save(def);
+      }
+      const targetRegistry = resourceRegistry ?? economyService.registry;
+      if (targetRegistry) {
+        targetRegistry.register(def);
+      }
+      return ok(def);
+    }
+  });
 }
 
 // src/economy/providers/provider-types.ts
@@ -16743,6 +17176,81 @@ var NativeResourceProvider = class {
   }
 };
 
+// src/economy/storage/manual-currency-storage-adapter.ts
+var MANUAL_CURRENCY_STORAGE_SCHEMA_VERSION = 1;
+var MANUAL_CURRENCY_DOCUMENT_NAME = "[Domain Manager] Manual Currency Store";
+var MANUAL_CURRENCY_FLAG_NAMESPACE = "domain-manager-manual-currency";
+function runtimeFromGlobals7() {
+  const globals = globalThis;
+  const journal = globals.game?.journal;
+  const JournalEntry = globals.JournalEntry;
+  if (!journal || !JournalEntry || typeof JournalEntry.create !== "function") {
+    return void 0;
+  }
+  return {
+    journal,
+    createJournalEntry: (data) => JournalEntry.create(data)
+  };
+}
+var FoundryJournalManualCurrencyStorageAdapter = class {
+  #runtime;
+  #documentId;
+  constructor(runtime2) {
+    this.#runtime = runtime2 ?? runtimeFromGlobals7();
+  }
+  async loadSnapshot() {
+    if (!this.#runtime) {
+      return null;
+    }
+    const doc = this.#findDocument();
+    if (!doc) {
+      return null;
+    }
+    this.#documentId = doc.id;
+    const rawFlag = doc.flags?.[MANUAL_CURRENCY_FLAG_NAMESPACE];
+    if (!rawFlag || typeof rawFlag !== "object") {
+      return null;
+    }
+    return rawFlag;
+  }
+  async saveSnapshot(snapshot) {
+    if (!this.#runtime) {
+      return;
+    }
+    let doc = this.#findDocument();
+    if (doc) {
+      this.#documentId = doc.id;
+      if (typeof doc.update === "function") {
+        await doc.update({
+          flags: {
+            [MANUAL_CURRENCY_FLAG_NAMESPACE]: snapshot
+          }
+        });
+      }
+    } else {
+      const created = await this.#runtime.createJournalEntry({
+        name: MANUAL_CURRENCY_DOCUMENT_NAME,
+        flags: {
+          [MANUAL_CURRENCY_FLAG_NAMESPACE]: snapshot
+        }
+      });
+      if (created) {
+        this.#documentId = created.id;
+      }
+    }
+  }
+  #findDocument() {
+    if (!this.#runtime) return void 0;
+    if (this.#documentId) {
+      const found = this.#runtime.journal.get(this.#documentId);
+      if (found) return found;
+    }
+    return this.#runtime.journal.contents.find(
+      (d) => d.name === MANUAL_CURRENCY_DOCUMENT_NAME || Boolean(d.flags?.[MANUAL_CURRENCY_FLAG_NAMESPACE])
+    );
+  }
+};
+
 // src/economy/providers/manual-currency-provider.ts
 var MANUAL_CURRENCY_PROVIDER_ID = "domain-manager:manual-currency";
 var ManualCurrencyProvider = class {
@@ -16753,7 +17261,53 @@ var ManualCurrencyProvider = class {
   capabilities = Object.freeze(["read", "write"]);
   isReadOnly = false;
   #balances = /* @__PURE__ */ new Map();
+  #storageAdapter;
+  #persistQueue = Promise.resolve();
+  #lastPersistError = null;
   #isHealthy = true;
+  constructor(options) {
+    this.#storageAdapter = options?.storageAdapter ?? new FoundryJournalManualCurrencyStorageAdapter();
+  }
+  async rehydrate() {
+    if (!this.#storageAdapter) return;
+    const snapshot = await this.#storageAdapter.loadSnapshot();
+    if (snapshot) {
+      this.#balances.clear();
+      for (const [key, bal] of Object.entries(snapshot.balances)) {
+        this.#balances.set(key, bal);
+      }
+    }
+  }
+  #schedulePersist() {
+    if (!this.#storageAdapter) return;
+    this.#persistQueue = this.#persistQueue.then(async () => {
+      await this.#persist();
+    }).catch((err3) => {
+      this.#lastPersistError = err3 instanceof Error ? err3 : new Error(String(err3));
+    });
+  }
+  async #persist() {
+    if (!this.#storageAdapter) return;
+    const balancesObj = {};
+    for (const [k, v] of this.#balances.entries()) {
+      balancesObj[k] = v;
+    }
+    const snapshot = {
+      schemaVersion: MANUAL_CURRENCY_STORAGE_SCHEMA_VERSION,
+      balances: balancesObj,
+      updatedAt: Date.now()
+    };
+    await this.#storageAdapter.saveSnapshot(snapshot);
+  }
+  async flush() {
+    this.#schedulePersist();
+    await this.#persistQueue;
+    if (this.#lastPersistError) {
+      const err3 = this.#lastPersistError;
+      this.#lastPersistError = null;
+      throw err3;
+    }
+  }
   getHealth() {
     return {
       status: this.#isHealthy ? "healthy" : "unavailable",
@@ -16792,6 +17346,7 @@ var ManualCurrencyProvider = class {
     const current = this.#balances.get(targetRef) ?? 0;
     const next = current + deltaMinor;
     this.#balances.set(targetRef, next);
+    this.#schedulePersist();
     return ok({ newBalanceMinor: next });
   }
   async readBalance(domainUuid, resourceId, providerRef) {
@@ -16815,6 +17370,7 @@ var ManualCurrencyProvider = class {
   }
   setBalance(targetRef, balanceMinor) {
     this.#balances.set(targetRef, balanceMinor);
+    this.#schedulePersist();
   }
 };
 
@@ -16896,10 +17452,133 @@ function createDefaultProviderRegistry(domains) {
   return registry;
 }
 
+// src/economy/storage/threshold-storage-adapter.ts
+var THRESHOLD_STORAGE_SCHEMA_VERSION = 1;
+var THRESHOLD_DOCUMENT_NAME = "[Domain Manager] Threshold Store";
+var THRESHOLD_FLAG_NAMESPACE = "domain-manager-thresholds";
+function runtimeFromGlobals8() {
+  const globals = globalThis;
+  const journal = globals.game?.journal;
+  const JournalEntry = globals.JournalEntry;
+  if (!journal || !JournalEntry || typeof JournalEntry.create !== "function") {
+    return void 0;
+  }
+  return {
+    journal,
+    createJournalEntry: (data) => JournalEntry.create(data)
+  };
+}
+var FoundryJournalThresholdStorageAdapter = class {
+  #runtime;
+  #documentId;
+  constructor(runtime2) {
+    this.#runtime = runtime2 ?? runtimeFromGlobals8();
+  }
+  async loadSnapshot() {
+    if (!this.#runtime) {
+      return null;
+    }
+    const doc = this.#findDocument();
+    if (!doc) {
+      return null;
+    }
+    this.#documentId = doc.id;
+    const rawFlag = doc.flags?.[THRESHOLD_FLAG_NAMESPACE];
+    if (!rawFlag || typeof rawFlag !== "object") {
+      return null;
+    }
+    const snap = rawFlag;
+    if (snap.schemaVersion !== THRESHOLD_STORAGE_SCHEMA_VERSION || !Array.isArray(snap.thresholds)) {
+      return null;
+    }
+    return {
+      schemaVersion: snap.schemaVersion,
+      thresholds: snap.thresholds,
+      crossedStates: snap.crossedStates ?? {},
+      updatedAt: snap.updatedAt ?? Date.now()
+    };
+  }
+  async saveSnapshot(snapshot) {
+    if (!this.#runtime) {
+      return;
+    }
+    const doc = this.#findDocument();
+    if (doc) {
+      this.#documentId = doc.id;
+      await doc.update({
+        [`flags.${THRESHOLD_FLAG_NAMESPACE}`]: snapshot
+      });
+    } else {
+      const created = await this.#runtime.createJournalEntry({
+        name: THRESHOLD_DOCUMENT_NAME,
+        flags: {
+          [THRESHOLD_FLAG_NAMESPACE]: snapshot
+        }
+      });
+      if (created) {
+        this.#documentId = created.id;
+      }
+    }
+  }
+  #findDocument() {
+    if (!this.#runtime) return void 0;
+    if (this.#documentId) {
+      const found = this.#runtime.journal.get(this.#documentId);
+      if (found) return found;
+    }
+    return this.#runtime.journal.contents.find(
+      (d) => d.name === THRESHOLD_DOCUMENT_NAME || Boolean(d.flags?.[THRESHOLD_FLAG_NAMESPACE])
+    );
+  }
+};
+
 // src/economy/thresholds/threshold-service.ts
 var ThresholdService = class {
   #thresholds = /* @__PURE__ */ new Map();
   #crossedStates = /* @__PURE__ */ new Map();
+  #storageAdapter;
+  #persistQueue = Promise.resolve();
+  constructor(options) {
+    if (options && "loadSnapshot" in options) {
+      this.#storageAdapter = options;
+    } else if (options && typeof options === "object") {
+      this.#storageAdapter = options.storageAdapter;
+    }
+  }
+  async rehydrate() {
+    if (!this.#storageAdapter) return this.listThresholds();
+    const snapshot = await this.#storageAdapter.loadSnapshot();
+    if (snapshot) {
+      this.#thresholds.clear();
+      this.#crossedStates.clear();
+      for (const th of snapshot.thresholds) {
+        this.#thresholds.set(th.id, th);
+      }
+      if (snapshot.crossedStates) {
+        for (const [id, state] of Object.entries(snapshot.crossedStates)) {
+          this.#crossedStates.set(id, Boolean(state));
+        }
+      }
+    }
+    return this.listThresholds();
+  }
+  #schedulePersist() {
+    if (!this.#storageAdapter) return;
+    const snapshot = {
+      schemaVersion: THRESHOLD_STORAGE_SCHEMA_VERSION,
+      thresholds: Array.from(this.#thresholds.values()),
+      crossedStates: Object.fromEntries(this.#crossedStates.entries()),
+      updatedAt: Date.now()
+    };
+    this.#persistQueue = this.#persistQueue.then(async () => {
+      await this.#storageAdapter.saveSnapshot(snapshot);
+    }).catch((err3) => {
+      console.error("Failed to persist thresholds:", err3);
+    });
+  }
+  async flush() {
+    await this.#persistQueue;
+  }
   register(input) {
     return this.registerThreshold(input);
   }
@@ -16932,7 +17611,16 @@ var ThresholdService = class {
       autoHoldReservations: Boolean(input.autoHoldReservations)
     };
     this.#thresholds.set(id, definition);
+    this.#schedulePersist();
     return ok(definition);
+  }
+  removeThreshold(id) {
+    const deleted = this.#thresholds.delete(id);
+    if (deleted) {
+      this.#crossedStates.delete(id);
+      this.#schedulePersist();
+    }
+    return deleted;
   }
   getThreshold(id) {
     return this.#thresholds.get(id);
@@ -16990,6 +17678,7 @@ var ThresholdService = class {
     } else {
       this.#crossedStates.clear();
     }
+    this.#schedulePersist();
   }
   getCrossedStates() {
     return new Map(this.#crossedStates);
@@ -17029,6 +17718,9 @@ var ThresholdService = class {
           currentState: isBreached
         });
       }
+    }
+    if (transitions.length > 0) {
+      this.#schedulePersist();
     }
     return Object.freeze(transitions);
   }
@@ -17164,9 +17856,11 @@ function buildEconomyViewModel(domainInput, options) {
   const record = "record" in domainInput ? domainInput.record : "flags" in domainInput && domainInput.flags?.["domain-manager"] ? domainInput.flags["domain-manager"] : domainInput;
   const domainUuid = "uuid" in domainInput ? domainInput.uuid : "unknown";
   const economyData = getDomainEconomyData(record);
+  const projectionService = new EconomyProjectionService();
+  const viewer = options.viewer ? projectionService.resolveViewer(options.viewer) : projectionService.resolveViewer({ isGm: options.viewerIsGm ?? false });
   const accountVMs = [];
   for (const acc of economyData.accounts) {
-    if (!options.viewerIsGm && acc.visibility === "secret") {
+    if (!projectionService.isAccountVisible(acc, viewer)) {
       continue;
     }
     const def = options.resourceRegistry.get(acc.resourceId);
@@ -17266,7 +17960,7 @@ function buildEconomyViewModel(domainInput, options) {
       if (r.status !== "active" && r.status !== "partially-consumed") {
         continue;
       }
-      if (!options.viewerIsGm && !visibleResourceIds.has(r.resourceId)) {
+      if (!viewer.isGm && !visibleResourceIds.has(r.resourceId)) {
         continue;
       }
       const def = options.resourceRegistry.get(r.resourceId);
@@ -17293,7 +17987,7 @@ function buildEconomyViewModel(domainInput, options) {
         amountMinor: r.remainingAmountMinor,
         amountFormatted: formatResourceAmount(r.remainingAmountMinor, resDef, { showUnit: true }),
         status: r.status,
-        reason: r.source.reason,
+        reason: viewer.isGm ? r.source.reason : void 0,
         expiresAtFormatted: r.expiresAtReal ? new Date(r.expiresAtReal).toLocaleTimeString() : void 0,
         canRelease: true
       });
@@ -17308,7 +18002,7 @@ function buildEconomyViewModel(domainInput, options) {
   if (options.ledgerStore) {
     const allEntries = options.ledgerStore.query({ domainUuid, direction: "desc" });
     const filteredEntries = allEntries.filter(
-      (entry) => options.viewerIsGm || visibleResourceIds.has(entry.resourceId)
+      (entry) => viewer.isGm || visibleResourceIds.has(entry.resourceId)
     );
     ledgerTotalCount = filteredEntries.length;
     ledgerHasMore = (ledgerPage + 1) * ledgerPageSize < ledgerTotalCount;
@@ -17345,14 +18039,14 @@ function buildEconomyViewModel(domainInput, options) {
         kind: entry.kind,
         deltaFormatted,
         deltaClass: entry.deltaMinor >= 0 ? "positive" : "negative",
-        reason: entry.source?.reason,
+        reason: viewer.isGm ? entry.source?.reason : void 0,
         resourceLabel: def?.label ?? entry.resourceId
       });
     }
   }
   return {
     domainUuid,
-    viewerIsGm: options.viewerIsGm,
+    viewerIsGm: viewer.isGm,
     accounts: Object.freeze(accountVMs),
     reservations: Object.freeze(reservationVMs),
     recentLedger: Object.freeze(ledgerVMs),
@@ -17745,6 +18439,7 @@ var EconomyApplicationController = class {
     const isGm = viewer.isGm;
     const presenterOptions = {
       viewerIsGm: isGm,
+      viewer,
       resourceRegistry: this.#resourceRegistry ?? { get: () => void 0, list: () => [] },
       ledgerStore: this.#ledgerStore,
       reservationStore: this.#reservationStore,
@@ -17782,7 +18477,8 @@ var EconomyApplicationController = class {
     const cmd = makeCommand2("economy:release-reservation", {
       domainUuid: this.#domainUuid,
       reservationId: payload.reservationId,
-      amountMinor: payload.amountMinor
+      amountMinor: payload.amountMinor,
+      reason: payload.reason
     });
     return this.#executeCommand(cmd);
   }
@@ -17878,6 +18574,23 @@ var MockApplicationV22 = class {
       content.innerHTML = result;
     }
   }
+  _setupActions(element) {
+    if (!element || element._dmActionsConfigured) return;
+    element._dmActionsConfigured = true;
+    const actions = this.constructor.DEFAULT_OPTIONS?.actions ?? {};
+    element.addEventListener?.("click", async (event) => {
+      let target = event?.target;
+      while (target) {
+        const action = target.getAttribute?.("data-action") ?? target.dataset?.action;
+        if (action && typeof actions[action] === "function") {
+          await actions[action].call(this, event, target);
+          return;
+        }
+        if (target === element) break;
+        target = target.parentElement;
+      }
+    });
+  }
   async render(force, options) {
     if (!this.element) {
       const classes = (this.constructor.DEFAULT_OPTIONS?.classes ?? ["domain-manager", "dm-economy-app-v2"]).join(" ");
@@ -17886,20 +18599,25 @@ var MockApplicationV22 = class {
         el.className = classes;
         this.element = el;
       } else {
+        const listeners = {};
         this.element = {
           className: classes,
           innerHTML: "",
           children: [],
           querySelectorAll: () => [],
           querySelector: () => null,
-          addEventListener: () => {
-          }
+          addEventListener: (evt, cb) => {
+            listeners[evt] = listeners[evt] || [];
+            listeners[evt].push(cb);
+          },
+          _listeners: listeners
         };
       }
     }
     const context = await this._prepareContext(options);
     const result = await this._renderHTML(context, options);
     this._replaceHTML(result, this.element, options);
+    this._setupActions(this.element);
     this._onRender(context, options);
     return this;
   }
@@ -17973,45 +18691,6 @@ var EconomyApplication = class _EconomyApplication extends BaseApp2 {
     }
   }
   attachEventListeners(element) {
-    const actionButtons = element.querySelectorAll?.("[data-action]") ?? [];
-    actionButtons.forEach((btn) => {
-      if (btn._dmActionBound) return;
-      btn._dmActionBound = true;
-      btn.addEventListener("click", async () => {
-        const action = btn.getAttribute("data-action");
-        if (action === "openResourceDetail") {
-          const resId = btn.getAttribute("data-resource-id");
-          if (resId) {
-            this.#controller.openResourceDetail(resId);
-            this.render();
-          }
-        } else if (action === "releaseReservation") {
-          const resId = btn.getAttribute("data-reservation-id");
-          if (resId) {
-            await this.#controller.dispatchReleaseReservation({ reservationId: resId });
-            this.render();
-          }
-        } else if (action === "nextLedgerPage") {
-          this.#controller.nextLedgerPage();
-          this.render();
-        } else if (action === "prevLedgerPage") {
-          this.#controller.prevLedgerPage();
-          this.render();
-        } else if (action === "closeModal") {
-          this.#controller.closeModal();
-          this.render();
-        } else if (action === "openTransferModal") {
-          this.#controller.openModal("transfer");
-          this.render();
-        } else if (action === "openAdjustModal") {
-          this.#controller.openModal("adjust");
-          this.render();
-        } else if (action === "openCreateAccountModal") {
-          this.#controller.openModal("createAccount");
-          this.render();
-        }
-      });
-    });
     const transferForm = element.querySelector?.('form[data-form-type="transfer"]');
     if (transferForm && !transferForm._dmPreviewBound) {
       transferForm._dmPreviewBound = true;
@@ -18163,18 +18842,47 @@ var EconomyApplication = class _EconomyApplication extends BaseApp2 {
     this.render();
   }
   static #onOpenResourceDetail(event, target) {
-    const resId = target?.dataset?.resourceId ?? event?.currentTarget?.dataset?.resourceId;
+    const resId = target?.dataset?.resourceId ?? target?.getAttribute?.("data-resource-id") ?? event?.currentTarget?.dataset?.resourceId ?? event?.currentTarget?.getAttribute?.("data-resource-id");
     if (resId) {
       this.#controller.openResourceDetail(resId);
       this.render();
     }
   }
   static async #onReleaseReservation(event, target) {
-    const resId = target?.dataset?.reservationId ?? event?.currentTarget?.dataset?.reservationId;
-    if (resId) {
-      await this.#controller.dispatchReleaseReservation({ reservationId: resId });
-      this.render();
+    const resId = target?.dataset?.reservationId ?? target?.getAttribute?.("data-reservation-id") ?? event?.currentTarget?.dataset?.reservationId ?? event?.currentTarget?.getAttribute?.("data-reservation-id");
+    if (!resId) return;
+    let confirmed = true;
+    let releaseReason = void 0;
+    const foundryDialog = globalThis.foundry?.applications?.api?.DialogV2;
+    if (foundryDialog?.confirm) {
+      confirmed = await foundryDialog.confirm({
+        window: { title: "Release Reservation" },
+        content: "<p>Are you sure you want to release this reservation? This will restore domain availability.</p>",
+        yes: { label: "Release" },
+        no: { label: "Cancel" }
+      });
+    } else if (typeof globalThis.confirm === "function") {
+      try {
+        confirmed = globalThis.confirm("Are you sure you want to release this reservation?");
+      } catch {
+        confirmed = true;
+      }
     }
+    if (!confirmed) return;
+    if (typeof globalThis.prompt === "function") {
+      try {
+        const inputReason = globalThis.prompt("Optional release reason:");
+        if (inputReason && inputReason.trim()) {
+          releaseReason = inputReason.trim();
+        }
+      } catch {
+      }
+    }
+    await this.#controller.dispatchReleaseReservation({
+      reservationId: resId,
+      reason: releaseReason
+    });
+    this.render();
   }
   static #onNextLedgerPage() {
     this.#controller.nextLedgerPage();
@@ -18212,7 +18920,9 @@ function composeDomainManagerRuntime(options = {}) {
     options.customResourceStorageAdapter ?? new FoundryJournalCustomResourceStorageAdapter()
   );
   const providerRegistry = options.providerRegistry ?? createDefaultProviderRegistry(mutableDomainRepo);
-  const thresholdService = options.thresholdService ?? new ThresholdService();
+  const thresholdService = options.thresholdService ?? new ThresholdService(
+    options.thresholdStorageAdapter ?? new FoundryJournalThresholdStorageAdapter()
+  );
   const economyService = new EconomyService({
     domains: mutableDomainRepo,
     resourceRegistry,
@@ -18237,7 +18947,10 @@ function composeDomainManagerRuntime(options = {}) {
     registry,
     economyService,
     domains: mutableDomainRepo,
-    controllerProvider
+    controllerProvider,
+    thresholdService,
+    customResourceStore,
+    resourceRegistry
   });
   registry.freeze();
   const commandQueue = options.commandQueue ?? new CommandQueue({ maxConcurrency: 10 });
@@ -18326,11 +19039,16 @@ function composeDomainManagerRuntime(options = {}) {
       await transactionStore.rehydrate();
       await ledgerStore.rehydrate();
       await reservationStore.rehydrate();
+      await thresholdService.rehydrate();
       const customDefs = await customResourceStore.rehydrate();
       for (const def of customDefs) {
         if (!resourceRegistry.get(def.id)) {
           resourceRegistry.register(def);
         }
+      }
+      const manualCurrency = providerRegistry.get(MANUAL_CURRENCY_PROVIDER_ID);
+      if (manualCurrency && "rehydrate" in manualCurrency && typeof manualCurrency.rehydrate === "function") {
+        await manualCurrency.rehydrate();
       }
     },
     destroy: () => {

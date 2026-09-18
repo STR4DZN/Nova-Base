@@ -718,6 +718,35 @@ export class EconomyService {
             isNoop: true
           });
         }
+
+        const transactionId = createOpaqueId("tx");
+        const cmdId = params.commandId ?? (createOpaqueId("cmd") as any);
+        const epoch = params.authorityEpoch ?? 1;
+
+        const txRecord = createTransactionRecord({
+          transactionId,
+          commandId: cmdId,
+          authorityEpoch: epoch,
+          lockKeys: [lockKey],
+          safeAutoRecovery: true,
+          recoveryData: {
+            type: "economy:provider-adjust",
+            domainUuid: params.domainUuid,
+            resourceId: params.resourceId,
+            providerId: providerAccount.providerId,
+            providerRef: providerAccount.providerRef,
+            deltaMinor: delta,
+            reason: params.reason,
+            userId: params.userId
+          }
+        });
+
+        this.#transactionStore?.save(txRecord);
+        this.#transactionStore?.transition(transactionId, "claimed", epoch);
+        this.#transactionStore?.transition(transactionId, "prepared", epoch);
+        this.#transactionStore?.transition(transactionId, "committing", epoch);
+        await this.#transactionStore?.flush();
+
         const mutRes = await (provider as any).mutateBalance(
           params.domainUuid,
           params.resourceId,
@@ -725,13 +754,18 @@ export class EconomyService {
           delta,
           params.reason
         );
-        if (!mutRes.ok) return mutRes;
+        if (!mutRes.ok) {
+          this.#transactionStore?.transition(transactionId, "failed", epoch, mutRes.error.message);
+          await this.#transactionStore?.flush();
+          return mutRes;
+        }
 
         const entryRes = this.#ledgerStore.append({
           domainUuid: params.domainUuid,
           resourceId: params.resourceId,
           deltaMinor: delta,
           kind: "adjustment",
+          transactionId,
           source: {
             type: "adjustment",
             ref: providerAccount.providerRef,
@@ -739,12 +773,40 @@ export class EconomyService {
             userId: params.userId
           }
         });
+
+        if (!entryRes.ok) {
+          this.#transactionStore?.transition(
+            transactionId,
+            "needs-recovery",
+            epoch,
+            "Failed to append ledger entry after provider mutation"
+          );
+          await this.#transactionStore?.flush();
+          return entryRes;
+        }
+
         await this.#ledgerStore.flush();
+
+        this.#transactionStore?.transition(
+          transactionId,
+          "committed",
+          epoch,
+          "Provider adjust completed cleanly"
+        );
+        await this.#transactionStore?.flush();
+
+        this.#evaluateThresholds(
+          params.domainUuid,
+          params.resourceId,
+          mutRes.value.balanceMinor,
+          null
+        );
 
         return ok({
           account: providerAccount,
-          entry: entryRes.ok ? entryRes.value : undefined,
-          isNoop: false
+          entry: entryRes.value,
+          isNoop: false,
+          transactionId
         });
       }
 
@@ -817,6 +879,14 @@ export class EconomyService {
       }
 
       await this.#ledgerStore.flush();
+
+      this.#evaluateThresholds(
+        params.domainUuid,
+        params.resourceId,
+        updatedAccount.balanceMinor,
+        updatedAccount.baseCapacityMinor
+      );
+
       return ok({
         account: updatedAccount,
         entry: entryRes.value
@@ -1131,6 +1201,19 @@ export class EconomyService {
       );
       await this.#transactionStore?.flush();
 
+      this.#evaluateThresholds(
+        params.sourceDomainUuid,
+        params.resourceId,
+        updatedSrcAccount.balanceMinor,
+        updatedSrcAccount.baseCapacityMinor
+      );
+      this.#evaluateThresholds(
+        params.targetDomainUuid,
+        params.resourceId,
+        updatedTgtAccount.balanceMinor,
+        updatedTgtAccount.baseCapacityMinor
+      );
+
       return ok({
         sourceAccount: updatedSrcAccount,
         targetAccount: updatedTgtAccount,
@@ -1406,6 +1489,19 @@ export class EconomyService {
       this.#transactionStore?.transition(transactionId, "committed", epoch, "Conversion completed cleanly");
       await this.#transactionStore?.flush();
 
+      this.#evaluateThresholds(
+        params.domainUuid,
+        params.fromResourceId,
+        updatedFromAccount.balanceMinor,
+        updatedFromAccount.baseCapacityMinor
+      );
+      this.#evaluateThresholds(
+        params.domainUuid,
+        params.toResourceId,
+        updatedToAccount.balanceMinor,
+        updatedToAccount.baseCapacityMinor
+      );
+
       return ok({
         fromAccount: updatedFromAccount,
         toAccount: updatedToAccount,
@@ -1468,6 +1564,12 @@ export class EconomyService {
       });
       if (res.ok) {
         await this.#reservationStore.flush();
+        this.#evaluateThresholds(
+          params.domainUuid,
+          params.resourceId,
+          acc.balanceMinor,
+          acc.baseCapacityMinor
+        );
       }
       return res;
     } finally {
@@ -1634,6 +1736,13 @@ export class EconomyService {
       await this.#ledgerStore.flush();
       await this.#reservationStore.flush();
 
+      this.#evaluateThresholds(
+        params.domainUuid,
+        reservation.resourceId,
+        updatedAccount.balanceMinor,
+        updatedAccount.baseCapacityMinor
+      );
+
       return ok({
         reservation,
         entry: entryRes.value,
@@ -1707,6 +1816,15 @@ export class EconomyService {
       });
       if (relRes.ok) {
         await this.#reservationStore.flush();
+        const accRes = await this.getAccount(params.domainUuid, lockedRes.resourceId);
+        if (accRes.ok && accRes.value?.mode === "native") {
+          this.#evaluateThresholds(
+            params.domainUuid,
+            lockedRes.resourceId,
+            accRes.value.balanceMinor,
+            accRes.value.baseCapacityMinor
+          );
+        }
       }
       return relRes;
     } finally {
@@ -1815,6 +1933,14 @@ export class EconomyService {
       }
 
       await this.#ledgerStore.flush();
+
+      this.#evaluateThresholds(
+        params.domainUuid,
+        originalEntry.resourceId,
+        updatedAccount.balanceMinor,
+        updatedAccount.baseCapacityMinor
+      );
+
       return ok({
         reversalEntry: reversalRes.value,
         account: updatedAccount
@@ -1828,44 +1954,132 @@ export class EconomyService {
     return domainUuid.trim();
   }
 
+  #evaluateThresholds(
+    domainUuid: string,
+    resourceId: string,
+    balanceMinor: number,
+    capacityMinor?: number | null
+  ): void {
+    if (!this.#thresholdService) return;
+    const reservedMinor = this.#reservationStore.getReservedTotal(domainUuid, resourceId);
+    const availableMinor = balanceMinor - reservedMinor;
+    this.#thresholdService.evaluateCrossings(domainUuid, resourceId, {
+      balanceMinor,
+      reservedMinor,
+      availableMinor,
+      capacityMinor
+    });
+  }
+
   #registerRecoveryCompensators(recoveryService: RecoveryService): void {
     recoveryService.registerCompensator("economy:transfer", async (record) => {
       const data = record.recoveryData as Record<string, any> | undefined;
-      if (!data || !data.sourceDomainUuid || !data.resourceId || !data.amountMinor) {
+      if (!data || !data.sourceDomainUuid || !data.targetDomainUuid || !data.resourceId || !data.amountMinor) {
         return ok(undefined);
       }
 
-      const srcRes = await this.#domains.read(this.#cleanUuid(data.sourceDomainUuid));
+      const srcCleanUuid = this.#cleanUuid(data.sourceDomainUuid);
+      const tgtCleanUuid = this.#cleanUuid(data.targetDomainUuid);
+
+      const srcRes = await this.#domains.read(srcCleanUuid);
       if (!srcRes.ok) return srcRes;
       const srcDoc = srcRes.value;
+
+      const tgtRes = await this.#domains.read(tgtCleanUuid);
+      if (!tgtRes.ok) return tgtRes;
+      const tgtDoc = tgtRes.value;
+
       const srcEcon = getDomainEconomyData(srcDoc.record);
+      const tgtEcon = getDomainEconomyData(tgtDoc.record);
+
       const srcAccIndex = srcEcon.accounts.findIndex((a) => a.resourceId === data.resourceId);
-      if (srcAccIndex < 0) return ok(undefined);
+      const tgtAccIndex = tgtEcon.accounts.findIndex((a) => a.resourceId === data.resourceId);
+      if (srcAccIndex < 0 || tgtAccIndex < 0) return ok(undefined);
 
       const srcAccount = srcEcon.accounts[srcAccIndex] as NativeResourceAccount;
+      const tgtAccount = tgtEcon.accounts[tgtAccIndex] as NativeResourceAccount;
 
-      // If source was debited but target was not credited: restore source balance!
-      if (
-        typeof data.sourceInitialBalance === "number" &&
-        srcAccount.balanceMinor === data.sourceInitialBalance - data.amountMinor
-      ) {
-        const restoredAccount: NativeResourceAccount = {
+      // 1. Inspect ledger entries associated with this transaction
+      const txEntries = this.#ledgerStore.query({ transactionId: record.transactionId });
+      const hasDebitEntry = txEntries.some(
+        (e) => e.kind === "transfer-debit" && e.domainUuid === data.sourceDomainUuid
+      );
+      const hasCreditEntry = txEntries.some(
+        (e) => e.kind === "transfer-credit" && e.domainUuid === data.targetDomainUuid
+      );
+      const hasCompensatingDebitReversal = txEntries.some(
+        (e) => e.source?.type === "recovery" && e.domainUuid === data.sourceDomainUuid
+      );
+      const hasCompensatingCreditReversal = txEntries.some(
+        (e) => e.source?.type === "recovery" && e.domainUuid === data.targetDomainUuid
+      );
+
+      // 2. Inspect balance states relative to initial balances stored in recoveryData
+      const sourceInitialBalance: number =
+        typeof data.sourceInitialBalance === "number" ? data.sourceInitialBalance : srcAccount.balanceMinor;
+      const targetInitialBalance: number =
+        typeof data.targetInitialBalance === "number" ? data.targetInitialBalance : tgtAccount.balanceMinor;
+      const amountMinor: number = data.amountMinor;
+
+      const srcIsDebited = srcAccount.balanceMinor === sourceInitialBalance - amountMinor;
+      const tgtIsCredited = tgtAccount.balanceMinor === targetInitialBalance + amountMinor;
+
+      // Decision Matrix:
+      // Case A: Both ledger entries exist AND both balances were updated -> Clean completion before crash!
+      if (hasDebitEntry && hasCreditEntry && srcIsDebited && tgtIsCredited) {
+        if (this.#transactionStore) {
+          this.#transactionStore.transition(
+            record.transactionId,
+            "committed",
+            record.authorityEpoch,
+            "Reconciliation confirmed both domain writes and ledger entries completed"
+          );
+          await this.#transactionStore.flush();
+        }
+        return ok(undefined);
+      }
+
+      // Case B / C / D: Needs compensation to restore invariant mass and ledger consistency
+      // If source balance is debited, restore it to initial
+      if (srcIsDebited) {
+        const restoredSrcAccount: NativeResourceAccount = {
           ...srcAccount,
-          balanceMinor: data.sourceInitialBalance
+          balanceMinor: sourceInitialBalance
         };
         const updatedAccounts = [...srcEcon.accounts];
-        updatedAccounts[srcAccIndex] = restoredAccount;
+        updatedAccounts[srcAccIndex] = restoredSrcAccount;
         const updatedRecord = withDomainEconomyData(srcDoc.record, {
           ...srcEcon,
           accounts: Object.freeze(updatedAccounts)
         });
         const updateRes = await this.#domains.update({ ...srcDoc, record: updatedRecord });
         if (!updateRes.ok) return updateRes;
+      }
 
+      // If target balance is credited, restore it to initial
+      if (tgtIsCredited) {
+        const restoredTgtAccount: NativeResourceAccount = {
+          ...tgtAccount,
+          balanceMinor: targetInitialBalance
+        };
+        const updatedAccounts = [...tgtEcon.accounts];
+        updatedAccounts[tgtAccIndex] = restoredTgtAccount;
+        const updatedRecord = withDomainEconomyData(tgtDoc.record, {
+          ...tgtEcon,
+          accounts: Object.freeze(updatedAccounts)
+        });
+        const updateRes = await this.#domains.update({ ...tgtDoc, record: updatedRecord });
+        if (!updateRes.ok) return updateRes;
+      }
+
+      // Ledger Reversals:
+      // Only append a compensating ledger entry if the debit/credit entry actually existed in the ledger!
+      let ledgerMutated = false;
+      if (hasDebitEntry && !hasCompensatingDebitReversal) {
         this.#ledgerStore.append({
           domainUuid: data.sourceDomainUuid,
           resourceId: data.resourceId,
-          deltaMinor: data.amountMinor,
+          deltaMinor: amountMinor,
           kind: "adjustment",
           transactionId: record.transactionId,
           source: {
@@ -1873,6 +2087,25 @@ export class EconomyService {
             reason: `Recovery compensation for failed transfer ${record.transactionId}`
           }
         });
+        ledgerMutated = true;
+      }
+
+      if (hasCreditEntry && !hasCompensatingCreditReversal) {
+        this.#ledgerStore.append({
+          domainUuid: data.targetDomainUuid,
+          resourceId: data.resourceId,
+          deltaMinor: -amountMinor,
+          kind: "adjustment",
+          transactionId: record.transactionId,
+          source: {
+            type: "recovery",
+            reason: `Recovery compensation for failed transfer ${record.transactionId}`
+          }
+        });
+        ledgerMutated = true;
+      }
+
+      if (ledgerMutated) {
         await this.#ledgerStore.flush();
       }
 
@@ -1892,7 +2125,8 @@ export class EconomyService {
         return ok(undefined);
       }
 
-      const docRes = await this.#domains.read(this.#cleanUuid(data.domainUuid));
+      const cleanUuid = this.#cleanUuid(data.domainUuid);
+      const docRes = await this.#domains.read(cleanUuid);
       if (!docRes.ok) return docRes;
       const doc = docRes.value;
       const econ = getDomainEconomyData(doc.record);
@@ -1904,27 +2138,58 @@ export class EconomyService {
       const fromAcc = econ.accounts[fromIndex] as NativeResourceAccount;
       const toAcc = econ.accounts[toIndex] as NativeResourceAccount;
 
+      // 1. Inspect ledger entries
+      const txEntries = this.#ledgerStore.query({ transactionId: record.transactionId, domainUuid: data.domainUuid });
+      const hasFromDebitEntry = txEntries.some((e) => e.kind === "conversion-debit" && e.resourceId === data.fromResourceId);
+      const hasToCreditEntry = txEntries.some((e) => e.kind === "conversion-credit" && e.resourceId === data.toResourceId);
+      const hasCompensatingFromReversal = txEntries.some(
+        (e) => e.source?.type === "recovery" && e.resourceId === data.fromResourceId
+      );
+      const hasCompensatingToReversal = txEntries.some(
+        (e) => e.source?.type === "recovery" && e.resourceId === data.toResourceId
+      );
+
+      // 2. Inspect balance states
+      const fromInitialBalance: number =
+        typeof data.fromInitialBalance === "number" ? data.fromInitialBalance : fromAcc.balanceMinor;
+      const toInitialBalance: number =
+        typeof data.toInitialBalance === "number" ? data.toInitialBalance : toAcc.balanceMinor;
+      const fromAmountMinor: number = data.fromAmountMinor;
+      const toAmountMinor: number = data.toAmountMinor;
+
+      const fromIsDebited = fromAcc.balanceMinor === fromInitialBalance - fromAmountMinor;
+      const toIsCredited = toAcc.balanceMinor === toInitialBalance + toAmountMinor;
+
+      // Case A: Complete
+      if (hasFromDebitEntry && hasToCreditEntry && fromIsDebited && toIsCredited) {
+        if (this.#transactionStore) {
+          this.#transactionStore.transition(
+            record.transactionId,
+            "committed",
+            record.authorityEpoch,
+            "Reconciliation confirmed conversion completed cleanly"
+          );
+          await this.#transactionStore.flush();
+        }
+        return ok(undefined);
+      }
+
+      // Compensate balances
       let needsDomainUpdate = false;
       const updatedAccounts = [...econ.accounts];
 
-      if (
-        typeof data.fromInitialBalance === "number" &&
-        fromAcc.balanceMinor === data.fromInitialBalance - data.fromAmountMinor
-      ) {
+      if (fromIsDebited) {
         updatedAccounts[fromIndex] = {
           ...fromAcc,
-          balanceMinor: data.fromInitialBalance
+          balanceMinor: fromInitialBalance
         };
         needsDomainUpdate = true;
       }
 
-      if (
-        typeof data.toInitialBalance === "number" &&
-        toAcc.balanceMinor === data.toInitialBalance + data.toAmountMinor
-      ) {
+      if (toIsCredited) {
         updatedAccounts[toIndex] = {
           ...toAcc,
-          balanceMinor: data.toInitialBalance
+          balanceMinor: toInitialBalance
         };
         needsDomainUpdate = true;
       }
@@ -1936,11 +2201,15 @@ export class EconomyService {
         });
         const updateRes = await this.#domains.update({ ...doc, record: updatedRecord });
         if (!updateRes.ok) return updateRes;
+      }
 
+      // Reconcile ledger: only compensate entries that were actually written
+      let ledgerMutated = false;
+      if (hasFromDebitEntry && !hasCompensatingFromReversal) {
         this.#ledgerStore.append({
           domainUuid: data.domainUuid,
           resourceId: data.fromResourceId,
-          deltaMinor: data.fromAmountMinor,
+          deltaMinor: fromAmountMinor,
           kind: "adjustment",
           transactionId: record.transactionId,
           source: {
@@ -1948,11 +2217,14 @@ export class EconomyService {
             reason: `Recovery compensation for failed conversion ${record.transactionId}`
           }
         });
+        ledgerMutated = true;
+      }
 
+      if (hasToCreditEntry && !hasCompensatingToReversal) {
         this.#ledgerStore.append({
           domainUuid: data.domainUuid,
           resourceId: data.toResourceId,
-          deltaMinor: -data.toAmountMinor,
+          deltaMinor: -toAmountMinor,
           kind: "adjustment",
           transactionId: record.transactionId,
           source: {
@@ -1960,8 +2232,50 @@ export class EconomyService {
             reason: `Recovery compensation for failed conversion ${record.transactionId}`
           }
         });
+        ledgerMutated = true;
+      }
 
+      if (ledgerMutated) {
         await this.#ledgerStore.flush();
+      }
+
+      return ok(undefined);
+    });
+
+    recoveryService.registerCompensator("economy:provider-adjust", async (record) => {
+      const data = record.recoveryData as Record<string, any> | undefined;
+      if (!data || !data.domainUuid || !data.resourceId || !data.deltaMinor) {
+        return ok(undefined);
+      }
+
+      const txEntries = this.#ledgerStore.query({ transactionId: record.transactionId });
+      const hasLedgerEntry = txEntries.length > 0;
+
+      if (hasLedgerEntry) {
+        if (this.#transactionStore) {
+          this.#transactionStore.transition(
+            record.transactionId,
+            "committed",
+            record.authorityEpoch,
+            "Reconciliation confirmed provider adjustment completed cleanly"
+          );
+          await this.#transactionStore.flush();
+        }
+        return ok(undefined);
+      }
+
+      // Revert provider balance mutation
+      if (this.#providerRegistry && data.providerId) {
+        const provider = this.#providerRegistry.get(data.providerId);
+        if (provider && "mutateBalance" in provider && typeof (provider as any).mutateBalance === "function") {
+          await (provider as any).mutateBalance(
+            data.domainUuid,
+            data.resourceId,
+            data.providerRef ?? "",
+            -data.deltaMinor,
+            `Recovery compensation for aborted adjustment ${record.transactionId}`
+          );
+        }
       }
 
       return ok(undefined);

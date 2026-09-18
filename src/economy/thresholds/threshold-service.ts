@@ -1,6 +1,11 @@
 import { createPublicError, type PublicError } from "../../core/contracts/public-error.js";
 import { err, ok, type Result } from "../../core/contracts/result.js";
 import { createOpaqueId } from "../../core/identity/ids.js";
+import type {
+  ThresholdStorageAdapter,
+  ThresholdSnapshot
+} from "../storage/threshold-storage-adapter.js";
+import { THRESHOLD_STORAGE_SCHEMA_VERSION } from "../storage/threshold-storage-adapter.js";
 
 export type ThresholdMetric = "balance" | "available";
 export type ThresholdComparator = "<" | "<=" | ">" | ">=" | "lt" | "lte" | "gt" | "gte";
@@ -62,9 +67,62 @@ export interface ThresholdTransitionEvent {
   readonly currentState: boolean;
 }
 
+export interface ThresholdServiceOptions {
+  readonly storageAdapter?: ThresholdStorageAdapter;
+}
+
 export class ThresholdService {
   readonly #thresholds = new Map<string, ThresholdDefinition>();
   readonly #crossedStates = new Map<string, boolean>();
+  readonly #storageAdapter?: ThresholdStorageAdapter;
+  #persistQueue: Promise<void> = Promise.resolve();
+
+  constructor(options?: ThresholdServiceOptions | ThresholdStorageAdapter) {
+    if (options && "loadSnapshot" in options) {
+      this.#storageAdapter = options;
+    } else if (options && typeof options === "object") {
+      this.#storageAdapter = options.storageAdapter;
+    }
+  }
+
+  async rehydrate(): Promise<readonly ThresholdDefinition[]> {
+    if (!this.#storageAdapter) return this.listThresholds();
+    const snapshot = await this.#storageAdapter.loadSnapshot();
+    if (snapshot) {
+      this.#thresholds.clear();
+      this.#crossedStates.clear();
+      for (const th of snapshot.thresholds) {
+        this.#thresholds.set(th.id, th);
+      }
+      if (snapshot.crossedStates) {
+        for (const [id, state] of Object.entries(snapshot.crossedStates)) {
+          this.#crossedStates.set(id, Boolean(state));
+        }
+      }
+    }
+    return this.listThresholds();
+  }
+
+  #schedulePersist(): void {
+    if (!this.#storageAdapter) return;
+    const snapshot: ThresholdSnapshot = {
+      schemaVersion: THRESHOLD_STORAGE_SCHEMA_VERSION,
+      thresholds: Array.from(this.#thresholds.values()),
+      crossedStates: Object.fromEntries(this.#crossedStates.entries()),
+      updatedAt: Date.now()
+    };
+    this.#persistQueue = this.#persistQueue
+      .then(async () => {
+        await this.#storageAdapter!.saveSnapshot(snapshot);
+      })
+      .catch((err) => {
+        console.error("Failed to persist thresholds:", err);
+      });
+  }
+
+  async flush(): Promise<void> {
+    await this.#persistQueue;
+  }
 
   register(input: ThresholdInput): Result<ThresholdDefinition, PublicError> {
     return this.registerThreshold(input);
@@ -102,7 +160,17 @@ export class ThresholdService {
     };
 
     this.#thresholds.set(id, definition);
+    this.#schedulePersist();
     return ok(definition);
+  }
+
+  removeThreshold(id: string): boolean {
+    const deleted = this.#thresholds.delete(id);
+    if (deleted) {
+      this.#crossedStates.delete(id);
+      this.#schedulePersist();
+    }
+    return deleted;
   }
 
   getThreshold(id: string): ThresholdDefinition | undefined {
@@ -173,6 +241,7 @@ export class ThresholdService {
     } else {
       this.#crossedStates.clear();
     }
+    this.#schedulePersist();
   }
 
   getCrossedStates(): ReadonlyMap<string, boolean> {
@@ -221,6 +290,10 @@ export class ThresholdService {
           currentState: isBreached
         });
       }
+    }
+
+    if (transitions.length > 0) {
+      this.#schedulePersist();
     }
 
     return Object.freeze(transitions);
