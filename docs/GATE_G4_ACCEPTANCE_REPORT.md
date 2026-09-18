@@ -94,8 +94,8 @@ All 12 findings identified during the architecture audit have been fully remedia
 8. **G4-AUD-008 (Thresholds with Edge Detection & Complete UI)**: `ThresholdService` maintains `#crossedStates` and emits events only on state edge transitions (`evaluateCrossings`), preventing notification spam; UI includes Resource Detail modal, before/after live impact previews, and reservation release buttons.
 9. **G4-AUD-009 (Ledger Pagination & 10k Scale)**: `queryPaged` with cursor pagination, descending sort, and pagination UI controls (Previous/Next); stress tested at 10,000+ entries running under 100ms.
 10. **G4-AUD-010 (Thresholds, Custom Resources & Aggregation Privacy)**: `CustomResourceDefinitionStore` with durable JournalEntry persistence; multi-domain rollup with non-GM confidentiality; zero-delta adjustments behave as atomic no-ops.
-11. **G4-AUD-011 (Encerramento Seguro de Contas / Soft-Close)**: Encerramento de contas bloqueado se houver reservas ativas ou saldo remanescente sem esvaziamento prévio.
-12. **G4-AUD-012 (Canonical Next Gate Designation)**: Canonical next gate strictly designated as **G5 — Projects / Facilities / Downtime**.
+11. **G4-AUD-011 (Fault, Cross-Domain Security, Restart & Idempotent Recovery Test Matrix)**: Comprehensive fault-injection test suite covering transfer step-2 rollback, restart survival with adapter rehydration, repeated recovery idempotency, and partial/full reservation consume rollbacks (`tests/economy/fault-recovery.test.ts`, `tests/economy/cross-domain-security.test.ts`).
+12. **G4-AUD-012 (Canonical Next Gate Designation)**: Canonical next gate strictly designated as **Gate G5 — Projects / Facilities / Downtime**, governed by `GATE_G4_PENDING_USER_ACCEPTANCE` until explicit user acceptance.
 
 ---
 
