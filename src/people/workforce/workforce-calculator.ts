@@ -87,9 +87,9 @@ export function calculateWorkforce(
   // 2. Contributions from PopulationGroups (if configured with workforce contributions)
   const popGroups = people.populationGroups ?? [];
   for (const pg of popGroups) {
-    const rawContributions = (pg as any).workforceContributions;
-    if (Array.isArray(rawContributions)) {
-      for (const c of rawContributions) {
+    const contributions = pg.workforceContributions;
+    if (contributions && Array.isArray(contributions)) {
+      for (const c of contributions) {
         if (typeof c.workforceTypeId === "string" && typeof c.amount === "number" && c.amount > 0) {
           const entry = ensureType(c.workforceTypeId);
           // Check if part of this group is already counted via linked operational groups

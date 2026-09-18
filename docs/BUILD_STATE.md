@@ -30,17 +30,25 @@
   - **G3.7 (Assignments & Reservations Shell)**: modelos e comandos para atribuição e reserva de força de trabalho com bloqueio contra overcommit (`DM_WORKFORCE_OVERCOMMIT`) e override do GM.
   - **G3.8 (Capability Grants & People Aggregation)**: resolução dinâmica de concessões de capacidades (`resolvePeopleEffectiveCapabilities`) por papéis preenchidos e grupos operacionais ativos com rastreamento de proveniência e zero efeitos colaterais de persistência.
   - **G3.9 (People UI Presentation & Views)**: presenter com sanitização de visão GM vs Jogador (ocultação de notáveis/papéis/grupos secretos) e templates HTML semânticos.
-  - **G3.10 (Scale & Subsystem Integrity)**: ativação por capability (`domain-manager:people`), fixture de escala com 14 Notables, >75.000 de população, múltiplos grupos operacionais, papéis e integridade 100% verificada.
+  - **G3 Remediação & Hardening (Fases A–G)**:
+    - **Runtime & Production Bundle**: 18 comandos `people:*` conectados ao `CommandRegistry` transacional, facade `runtime.people` exposta, bundle `dist/main.js` compilado e verificado.
+    - **Viewer Projection Security**: `PeopleProjectionService` isola estritamente dados secretos antes de computar totais de população, força de trabalho, concessões e atribuições.
+    - **Hierarchy Aggregation**: `PeopleAggregationService` com suporte a `own`, `descendant` e `aggregate`, cycle guard defensivo e propagação de precisão `unknown`/`estimated`.
+    - **Capability Grant Resolver**: arquitetura extensível com `CapabilityResolver` e suporte a `RoleGrantPolicy` (`exists`, `occupied`, `requirementsSatisfied`, `keepGrantWhenInactive`).
+    - **Workforce Roundtrip**: `workforceContributions` persistidas e validadas em `PopulationGroup`.
+    - **Source-Specific Overcommit**: bloqueio de sobrealocação por fonte (`DM_WORKFORCE_OVERCOMMIT`, DEC-1145) com override administrativo.
+    - **UI Security**: sanitização contra injeção de HTML/XSS via `escapeHtml` e `escapeAttribute`.
+    - **Integrity Diagnostics**: varredura fail-closed de schema corrompido e detecção de referências órfãs (`DM_PEOPLE_DANGLING_NOTABLE_REF`, `DM_PEOPLE_DANGLING_GROUP_REF`, etc.).
 
 ## Evidência local Gate G3
 
 | Verificação | Resultado |
 |---|---|
 | TypeScript strict (`node ./node_modules/typescript/bin/tsc --noEmit`) | PASS (0 erros) |
-| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 282/282 (0 falhas) |
+| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 298/298 (0 falhas) |
 | Relatório de Aceitação | Concluído (`docs/GATE_G3_ACCEPTANCE_REPORT.md`) |
 | Regressões G2 | 0 (todos os 233 testes de base preservados e passando) |
 
 ## Próxima ação canônica
-
-- **Gate G4 (Projects & Construction)**: Com a conclusão, aceitação e testes 100% verdes do Gate G3 (People), o Gate G4 está formalmente liberado para especificação e implementação.
+ 
+- **Gate G4 (Economy & Resources)**: Com a conclusão, aceitação e testes 100% verdes do Gate G3 (People), o Gate G4 (Economy / Resources) está formalmente liberado para especificação e implementação após a homologação e aceitação do G3.

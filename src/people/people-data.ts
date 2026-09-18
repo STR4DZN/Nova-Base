@@ -10,7 +10,7 @@ import { validateOperationalGroup } from "./operational-groups/operational-group
 import type { Assignment, Reservation } from "./assignments/assignment-types.js";
 import { validateAssignment, validateReservation } from "./assignments/assignment-types.js";
 import { err, ok, type Result } from "../core/contracts/result.js";
-import { createPublicError } from "../core/contracts/public-error.js";
+import { createPublicError, type PublicError } from "../core/contracts/public-error.js";
 
 export const PEOPLE_CAPABILITY_ID = "domain-manager:people" as const;
 export const PEOPLE_CAPABILITY_ALIAS = "domain:people" as const;
@@ -180,20 +180,6 @@ export function validateDomainPeopleData(raw: unknown): Result<DomainPeopleData>
       );
     }
     roleIds.add(val.id);
-
-    // Verify all occupants reference valid notables in this domain (DEC-0996)
-    for (const occupantId of val.occupants) {
-      if (!notableIds.has(occupantId)) {
-        return err(
-          createPublicError({
-            code: "DM_NOTABLE_NOT_FOUND",
-            category: "not-found",
-            message: `Role occupant notable '${occupantId}' does not exist in domain`
-          })
-        );
-      }
-    }
-
     validatedRoles.push(val);
   }
 
@@ -227,31 +213,6 @@ export function validateDomainPeopleData(raw: unknown): Result<DomainPeopleData>
       );
     }
     opgIds.add(val.id);
-
-    // Verify all members reference valid notables in this domain (DEC-1069)
-    for (const memberId of val.members) {
-      if (!notableIds.has(memberId)) {
-        return err(
-          createPublicError({
-            code: "DM_NOTABLE_NOT_FOUND",
-            category: "not-found",
-            message: `OperationalGroup member notable '${memberId}' does not exist in domain`
-          })
-        );
-      }
-    }
-
-    // Verify populationGroupId references valid populationGroup in this domain if specified (DEC-1062)
-    if (val.populationGroupId !== undefined && !groupIds.has(val.populationGroupId)) {
-      return err(
-        createPublicError({
-          code: "DM_POPULATION_GROUP_NOT_FOUND",
-          category: "not-found",
-          message: `Linked population group '${val.populationGroupId}' does not exist in domain`
-        })
-      );
-    }
-
     validatedOperationalGroups.push(val);
   }
 
@@ -333,19 +294,23 @@ export function validateDomainPeopleData(raw: unknown): Result<DomainPeopleData>
   });
 }
 
-export function getDomainPeopleData(domain: DomainRecord | { record: DomainRecord }): DomainPeopleData {
+export function tryGetDomainPeopleData(domain: DomainRecord | { record: DomainRecord }): Result<DomainPeopleData, PublicError> {
   const record = "record" in domain ? domain.record : domain;
   const config = record?.definition?.capabilities?.config ?? {};
   const rawPeople = config[PEOPLE_CAPABILITY_ID];
   if (!rawPeople) {
-    return createDefaultDomainPeopleData();
+    return ok(createDefaultDomainPeopleData());
   }
 
-  const validated = validateDomainPeopleData(rawPeople);
-  if (!validated.ok) {
-    return createDefaultDomainPeopleData();
+  return validateDomainPeopleData(rawPeople);
+}
+
+export function getDomainPeopleData(domain: DomainRecord | { record: DomainRecord }): DomainPeopleData {
+  const res = tryGetDomainPeopleData(domain);
+  if (!res.ok) {
+    throw new Error(`Domain people data corruption: [${res.error.code}] ${res.error.message}`);
   }
-  return validated.value;
+  return res.value;
 }
 
 export function withDomainPeopleData(domain: DomainRecord, peopleData: DomainPeopleData): DomainRecord {

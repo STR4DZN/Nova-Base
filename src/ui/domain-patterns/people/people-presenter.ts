@@ -51,6 +51,8 @@ export interface PeopleSubsystemViewModel {
   readonly capabilities: DomainEffectiveCapabilitiesReport;
 }
 
+import { PeopleProjectionService } from "../../../projection/people/people-projection-service.js";
+
 export function buildPeopleViewModel(
   domainInput: DomainDocument | DomainRecord,
   options: PeoplePresenterOptions
@@ -59,21 +61,31 @@ export function buildPeopleViewModel(
   const domainUuid = "uuid" in domainInput ? domainInput.uuid : "unknown";
   const people: DomainPeopleData = getDomainPeopleData(record);
 
-  // 1. Population resolution
-  const popResolution = calculatePopulation(people.population, people.populationGroups);
+  const projectionService = new PeopleProjectionService({
+    roleDefinitions: options.customRoleDefinitions
+  });
+  const context = projectionService.project(
+    domainUuid,
+    people,
+    { userId: "viewer", isGm: options.viewerIsGm },
+    {
+      nowReal: options.nowReal,
+      domainCapabilities: record.definition?.capabilities?.enabled
+    }
+  );
+
+  // 1. Population formatting
   let formattedTotal: string;
-  if (popResolution.total === null) {
+  if (context.population.resolution.total === null) {
     formattedTotal = "Unknown";
   } else {
-    formattedTotal = `${popResolution.total.toLocaleString("en-US")}${popResolution.precision === "estimated" ? " (est.)" : ""}`;
+    formattedTotal = `${context.population.resolution.total.toLocaleString("en-US")}${
+      context.population.resolution.precision === "estimated" ? " (est.)" : ""
+    }`;
   }
 
-  // 2. Notables (filtered by visibility)
-  const rawNotables = options.viewerIsGm
-    ? people.notables
-    : people.notables.filter((n) => n.visibility !== "secret");
-
-  const notableVMs: NotableViewModel[] = rawNotables.map((n) => {
+  // 2. Notables ViewModels
+  const notableVMs: NotableViewModel[] = context.notables.map((n) => {
     const status = resolveNotableStatus(n, options.actorResolver);
     let badgeClass = "healthy";
     if (status.isBrokenRef) badgeClass = "broken";
@@ -86,14 +98,10 @@ export function buildPeopleViewModel(
     };
   });
 
-  // 3. Roles (filtered by visibility and evaluated)
-  const rawRoles = options.viewerIsGm
-    ? people.roles
-    : people.roles.filter((r) => r.visibility !== "secret");
-
+  // 3. Roles ViewModels
   const roleDefs = options.customRoleDefinitions ?? DEFAULT_ROLE_DEFINITIONS;
-  const roleVMs: RoleViewModel[] = rawRoles.map((r) => {
-    const evaluation = evaluateRole(r, roleDefs);
+  const roleVMs: RoleViewModel[] = context.roles.map((r) => {
+    const evaluation = evaluateRole(r, roleDefs, context.operationalGroups);
     let statusClass: "vacant" | "understaffed" | "filled" = "filled";
     if (evaluation.isVacant) statusClass = "vacant";
     else if (evaluation.isUnderstaffed) statusClass = "understaffed";
@@ -105,35 +113,25 @@ export function buildPeopleViewModel(
     };
   });
 
-  // 4. Operational Groups (filtered by visibility)
-  const rawGroups = options.viewerIsGm
-    ? people.operationalGroups
-    : people.operationalGroups.filter((g) => g.visibility !== "secret");
-
-  const opgVMs: OperationalGroupViewModel[] = rawGroups.map((g) => ({
+  // 4. Operational Groups ViewModels
+  const opgVMs: OperationalGroupViewModel[] = context.operationalGroups.map((g) => ({
     group: g,
     isSecret: g.visibility === "secret",
     statusClass: g.lifecycle
   }));
 
-  // 5. Workforce report
-  const workforce = calculateWorkforce(people, options.nowReal);
-
-  // 6. Capability grants
-  const capabilities = resolvePeopleEffectiveCapabilities(domainInput, roleDefs);
-
   return {
     domainUuid,
     viewerIsGm: options.viewerIsGm,
     population: {
-      state: people.population,
-      resolution: popResolution,
+      state: context.population.state,
+      resolution: context.population.resolution,
       formattedTotal
     },
     notables: Object.freeze(notableVMs),
     roles: Object.freeze(roleVMs),
     operationalGroups: Object.freeze(opgVMs),
-    workforce,
-    capabilities
+    workforce: context.workforce,
+    capabilities: context.capabilities
   };
 }

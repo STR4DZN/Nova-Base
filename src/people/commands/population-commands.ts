@@ -45,7 +45,10 @@ export interface CreatePopulationGroupPayload {
   readonly group: {
     readonly name: string;
     readonly count: number | null;
+    readonly precision?: "exact" | "estimated" | "unknown";
     readonly includedInTotal: boolean;
+    readonly visibility?: "public" | "secret";
+    readonly workforceContributions?: readonly { readonly workforceTypeId: string; readonly amount: number }[];
     readonly tags?: readonly string[];
     readonly notes?: string;
   };
@@ -58,7 +61,10 @@ export interface UpdatePopulationGroupPayload {
   readonly patch: {
     readonly name?: string;
     readonly count?: number | null;
+    readonly precision?: "exact" | "estimated" | "unknown";
     readonly includedInTotal?: boolean;
+    readonly visibility?: "public" | "secret";
+    readonly workforceContributions?: readonly { readonly workforceTypeId: string; readonly amount: number }[];
     readonly tags?: readonly string[];
     readonly notes?: string;
   };
@@ -212,7 +218,10 @@ export function registerPopulationCommandHandlers(
         id: newGroupId,
         name: groupInput.name,
         count: groupInput.count,
+        precision: groupInput.precision,
         includedInTotal: groupInput.includedInTotal,
+        visibility: groupInput.visibility,
+        workforceContributions: groupInput.workforceContributions,
         tags: groupInput.tags ?? [],
         notes: groupInput.notes
       };
@@ -355,7 +364,10 @@ export function registerPopulationCommandHandlers(
         id: existing.id,
         name: patch.name !== undefined ? patch.name : existing.name,
         count: patch.count !== undefined ? patch.count : existing.count,
+        precision: patch.precision !== undefined ? patch.precision : existing.precision,
         includedInTotal: patch.includedInTotal !== undefined ? patch.includedInTotal : existing.includedInTotal,
+        visibility: patch.visibility !== undefined ? patch.visibility : existing.visibility,
+        workforceContributions: patch.workforceContributions !== undefined ? patch.workforceContributions : existing.workforceContributions,
         tags: patch.tags !== undefined ? patch.tags : existing.tags,
         notes: patch.notes !== undefined ? patch.notes : existing.notes
       };

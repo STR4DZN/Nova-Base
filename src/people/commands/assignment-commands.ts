@@ -28,8 +28,79 @@ import {
   type Assignment,
   type Reservation
 } from "../assignments/assignment-types.js";
-import { calculateWorkforce } from "../workforce/workforce-calculator.js";
+import {
+  calculateWorkforce,
+  resolveOperationalGroupWorkforceType
+} from "../workforce/workforce-calculator.js";
 import { createOpaqueId, isOpaqueId } from "../../core/identity/ids.js";
+
+export interface SourceCapacityReport {
+  readonly capacity: number;
+  readonly committed: number;
+  readonly reserved: number;
+  readonly available: number;
+}
+
+export function getSourceCapacity(
+  people: DomainPeopleData,
+  sourceRef: string,
+  workforceTypeId: string,
+  nowReal: number = Date.now()
+): SourceCapacityReport | null {
+  // 1. Check if sourceRef is an OperationalGroup
+  const opGroup = people.operationalGroups?.find((og) => og.id === sourceRef);
+  if (opGroup) {
+    const baseType = resolveOperationalGroupWorkforceType(opGroup.definitionId);
+    const capacity = (opGroup.lifecycle === "active" && baseType === workforceTypeId) ? opGroup.size : 0;
+
+    const committed = (people.assignments ?? [])
+      .filter((a) => a.sourceRef === sourceRef && a.workforceTypeId === workforceTypeId && a.status === "active")
+      .reduce((sum, a) => sum + a.amount, 0);
+
+    const reserved = (people.reservations ?? [])
+      .filter((r) => r.sourceRef === sourceRef && r.workforceTypeId === workforceTypeId && r.status === "active" && (r.expiresAtReal === undefined || r.expiresAtReal >= nowReal))
+      .reduce((sum, r) => sum + r.amount, 0);
+
+    return {
+      capacity,
+      committed,
+      reserved,
+      available: capacity - committed - reserved
+    };
+  }
+
+  // 2. Check if sourceRef is a PopulationGroup
+  const popGroup = people.populationGroups?.find((pg) => pg.id === sourceRef);
+  if (popGroup) {
+    const contr = (popGroup.workforceContributions ?? [])
+      .filter((c) => c.workforceTypeId === workforceTypeId)
+      .reduce((sum, c) => sum + c.amount, 0);
+
+    // Subtract deductions from linked active operational groups
+    const linkedDeduction = (people.operationalGroups ?? [])
+      .filter((og) => og.populationGroupId === popGroup.id && og.lifecycle === "active" && resolveOperationalGroupWorkforceType(og.definitionId) === workforceTypeId)
+      .reduce((sum, og) => sum + og.size, 0);
+
+    const capacity = Math.max(0, contr - linkedDeduction);
+
+    const committed = (people.assignments ?? [])
+      .filter((a) => a.sourceRef === sourceRef && a.workforceTypeId === workforceTypeId && a.status === "active")
+      .reduce((sum, a) => sum + a.amount, 0);
+
+    const reserved = (people.reservations ?? [])
+      .filter((r) => r.sourceRef === sourceRef && r.workforceTypeId === workforceTypeId && r.status === "active" && (r.expiresAtReal === undefined || r.expiresAtReal >= nowReal))
+      .reduce((sum, r) => sum + r.amount, 0);
+
+    return {
+      capacity,
+      committed,
+      reserved,
+      available: capacity - committed - reserved
+    };
+  }
+
+  return null;
+}
 
 export interface CreateAssignmentPayload {
   readonly domainUuid: string;
@@ -129,8 +200,20 @@ export function registerAssignmentCommandHandlers(
       }
       const newAsg = asgValidation.value;
 
-      // Check for overcommit unless GM override allowed (DEC-1033)
+      // Check for overcommit unless GM override allowed (DEC-1033, DEC-1145)
       if (!ctx.command.payload.allowOvercommit) {
+        // DEC-1145: Source-specific capacity check
+        const sourceCap = getSourceCapacity(currentPeople, newAsg.sourceRef, newAsg.workforceTypeId);
+        if (sourceCap !== null && sourceCap.available < newAsg.amount) {
+          return err(
+            createPublicError({
+              code: "DM_WORKFORCE_OVERCOMMIT",
+              category: "validation",
+              message: `Source '${newAsg.sourceRef}' does not have enough available '${newAsg.workforceTypeId}' workforce: available ${sourceCap.available} < requested ${newAsg.amount}`
+            })
+          );
+        }
+
         const candidatePeople: DomainPeopleData = {
           ...currentPeople,
           assignments: Object.freeze([...currentPeople.assignments, newAsg])
@@ -403,17 +486,31 @@ export function registerAssignmentCommandHandlers(
         reservations: updatedReservations
       };
 
-      // Overcommit check
-      const report = calculateWorkforce(provisionalPeople);
-      const typeRes = report.types[newResv.workforceTypeId];
-      if (typeRes && typeRes.available < 0 && !ctx.command.payload.allowOvercommit) {
-        return err(
-          createPublicError({
-            code: "DM_WORKFORCE_OVERCOMMIT",
-            category: "conflict",
-            message: `Reservation requires ${newResv.amount} of '${newResv.workforceTypeId}', but only ${typeRes.capacity - typeRes.committed - (typeRes.reserved - newResv.amount)} is available`
-          })
-        );
+      // Overcommit check (DEC-1125, DEC-1145)
+      if (!ctx.command.payload.allowOvercommit) {
+        // DEC-1145: Source-specific capacity check
+        const sourceCap = getSourceCapacity(currentPeople, newResv.sourceRef, newResv.workforceTypeId, newResv.expiresAtReal);
+        if (sourceCap !== null && sourceCap.available < newResv.amount) {
+          return err(
+            createPublicError({
+              code: "DM_WORKFORCE_OVERCOMMIT",
+              category: "conflict",
+              message: `Source '${newResv.sourceRef}' does not have enough available '${newResv.workforceTypeId}' workforce: available ${sourceCap.available} < requested ${newResv.amount}`
+            })
+          );
+        }
+
+        const report = calculateWorkforce(provisionalPeople);
+        const typeRes = report.types[newResv.workforceTypeId];
+        if (typeRes && typeRes.available < 0) {
+          return err(
+            createPublicError({
+              code: "DM_WORKFORCE_OVERCOMMIT",
+              category: "conflict",
+              message: `Reservation requires ${newResv.amount} of '${newResv.workforceTypeId}', but only ${typeRes.capacity - typeRes.committed - (typeRes.reserved - newResv.amount)} is available`
+            })
+          );
+        }
       }
 
       const updatedRecord = withDomainPeopleData(domainDoc.record, provisionalPeople);

@@ -20,6 +20,9 @@ export interface Assignment {
   readonly workforceTypeId: string;
   readonly amount: number; // >= 1
   readonly status: AssignmentStatus;
+  readonly visibility?: "public" | "secret";
+  readonly startedAtWorld?: number;
+  readonly endsAtWorld?: number;
   readonly notes?: string;
 }
 
@@ -42,7 +45,10 @@ export interface Reservation {
   readonly workforceTypeId: string;
   readonly amount: number; // >= 1
   readonly status: ReservationStatus;
+  readonly correlationId?: string;
+  readonly visibility?: "public" | "secret";
   readonly expiresAtReal?: number;
+  readonly expiresAtWorld?: number;
   readonly notes?: string;
 }
 
@@ -126,6 +132,46 @@ export function validateAssignment(candidate: unknown): Result<Assignment> {
     );
   }
 
+  if (raw.visibility !== undefined && raw.visibility !== null) {
+    if (raw.visibility !== "public" && raw.visibility !== "secret") {
+      return err(
+        createPublicError({
+          code: "DM_ASSIGNMENT_INVALID_VISIBILITY",
+          category: "validation",
+          message: "Assignment visibility must be 'public' or 'secret'"
+        })
+      );
+    }
+  }
+
+  let startedAtWorld: number | undefined;
+  if (raw.startedAtWorld !== undefined && raw.startedAtWorld !== null) {
+    if (typeof raw.startedAtWorld !== "number" || !Number.isFinite(raw.startedAtWorld)) {
+      return err(
+        createPublicError({
+          code: "DM_ASSIGNMENT_INVALID_TIME",
+          category: "validation",
+          message: "startedAtWorld must be a finite number"
+        })
+      );
+    }
+    startedAtWorld = raw.startedAtWorld;
+  }
+
+  let endsAtWorld: number | undefined;
+  if (raw.endsAtWorld !== undefined && raw.endsAtWorld !== null) {
+    if (typeof raw.endsAtWorld !== "number" || !Number.isFinite(raw.endsAtWorld)) {
+      return err(
+        createPublicError({
+          code: "DM_ASSIGNMENT_INVALID_TIME",
+          category: "validation",
+          message: "endsAtWorld must be a finite number"
+        })
+      );
+    }
+    endsAtWorld = raw.endsAtWorld;
+  }
+
   if (raw.notes !== undefined && raw.notes !== null) {
     if (typeof raw.notes !== "string") {
       return err(
@@ -145,6 +191,9 @@ export function validateAssignment(candidate: unknown): Result<Assignment> {
     workforceTypeId: raw.workforceTypeId.trim(),
     amount: raw.amount,
     status,
+    visibility: raw.visibility === "secret" ? "secret" : "public",
+    startedAtWorld,
+    endsAtWorld,
     notes: typeof raw.notes === "string" ? raw.notes.trim() : undefined
   });
 }
@@ -243,6 +292,36 @@ export function validateReservation(candidate: unknown): Result<Reservation> {
     expiresAtReal = raw.expiresAtReal;
   }
 
+  let expiresAtWorld: number | undefined = undefined;
+  if (raw.expiresAtWorld !== undefined && raw.expiresAtWorld !== null) {
+    if (typeof raw.expiresAtWorld !== "number" || !Number.isFinite(raw.expiresAtWorld)) {
+      return err(
+        createPublicError({
+          code: "DM_RESERVATION_INVALID_EXPIRY",
+          category: "validation",
+          message: "expiresAtWorld must be a finite number"
+        })
+      );
+    }
+    expiresAtWorld = raw.expiresAtWorld;
+  }
+
+  if (raw.visibility !== undefined && raw.visibility !== null) {
+    if (raw.visibility !== "public" && raw.visibility !== "secret") {
+      return err(
+        createPublicError({
+          code: "DM_RESERVATION_INVALID_VISIBILITY",
+          category: "validation",
+          message: "Reservation visibility must be 'public' or 'secret'"
+        })
+      );
+    }
+  }
+
+  const correlationId = typeof raw.correlationId === "string" && raw.correlationId.trim().length > 0
+    ? raw.correlationId.trim()
+    : undefined;
+
   if (raw.notes !== undefined && raw.notes !== null) {
     if (typeof raw.notes !== "string") {
       return err(
@@ -262,7 +341,10 @@ export function validateReservation(candidate: unknown): Result<Reservation> {
     workforceTypeId: raw.workforceTypeId.trim(),
     amount: raw.amount,
     status,
+    correlationId,
+    visibility: raw.visibility === "secret" ? "secret" : "public",
     expiresAtReal,
+    expiresAtWorld,
     notes: typeof raw.notes === "string" ? raw.notes.trim() : undefined
   });
 }

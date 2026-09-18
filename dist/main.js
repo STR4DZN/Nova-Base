@@ -508,10 +508,71 @@ var FoundryDomainDocumentStore = class {
 };
 
 // src/core/identity/ids.ts
+function createOpaqueId(prefix) {
+  return `${prefix}_${crypto.randomUUID()}`;
+}
 function isOpaqueId(value, prefix) {
   if (typeof value !== "string") return false;
   const pattern = prefix === void 0 ? /^(cmd|tx|prj|rel|rep|led|resv|req|role|pop|not|opg|asg)_[0-9a-f-]{36}$/ : new RegExp(`^${prefix}_[0-9a-f-]{36}$`);
   return pattern.test(value);
+}
+
+// src/people/workforce/workforce-types.ts
+var DEFAULT_WORKFORCE_TYPES = Object.freeze([
+  {
+    id: "general",
+    label: "General Labor",
+    description: "Unspecialized physical, maintenance, and civil labor"
+  },
+  {
+    id: "military",
+    label: "Military Forces",
+    description: "Trained garrison guards, levies, and defense personnel"
+  },
+  {
+    id: "craftsmen",
+    label: "Craftsmen & Builders",
+    description: "Skilled artisans, construction workers, and technicians"
+  },
+  {
+    id: "scholars",
+    label: "Scholars & Administrators",
+    description: "Clerks, researchers, scribes, and administrative staff"
+  }
+]);
+function validateWorkforceContribution(candidate) {
+  if (!candidate || typeof candidate !== "object") {
+    return err(
+      createPublicError({
+        code: "DM_WORKFORCE_INVALID_CONTRIBUTION",
+        category: "validation",
+        message: "WorkforceContribution must be an object"
+      })
+    );
+  }
+  const raw = candidate;
+  if (typeof raw.workforceTypeId !== "string" || raw.workforceTypeId.trim().length === 0) {
+    return err(
+      createPublicError({
+        code: "DM_WORKFORCE_INVALID_TYPE",
+        category: "validation",
+        message: "workforceTypeId must be a non-empty string"
+      })
+    );
+  }
+  if (typeof raw.amount !== "number" || !Number.isSafeInteger(raw.amount) || raw.amount < 0) {
+    return err(
+      createPublicError({
+        code: "DM_WORKFORCE_INVALID_AMOUNT",
+        category: "validation",
+        message: "amount must be a non-negative safe integer"
+      })
+    );
+  }
+  return ok({
+    workforceTypeId: raw.workforceTypeId.trim(),
+    amount: raw.amount
+  });
 }
 
 // src/people/population/population-types.ts
@@ -568,10 +629,22 @@ function validatePopulationState(state) {
   if (total === null && precision !== "unknown") {
     precision = "unknown";
   }
+  if (candidate.visibility !== void 0 && candidate.visibility !== null) {
+    if (candidate.visibility !== "public" && candidate.visibility !== "secret") {
+      return err(
+        createPublicError({
+          code: "DM_POPULATION_INVALID_VISIBILITY",
+          category: "validation",
+          message: "PopulationState visibility must be 'public' or 'secret'"
+        })
+      );
+    }
+  }
   return ok({
     mode: candidate.mode,
     total,
-    precision
+    precision,
+    visibility: candidate.visibility === "secret" ? "secret" : "public"
   });
 }
 function validatePopulationGroup(group) {
@@ -663,12 +736,43 @@ function validatePopulationGroup(group) {
       );
     }
   }
+  if (candidate.visibility !== void 0 && candidate.visibility !== null) {
+    if (candidate.visibility !== "public" && candidate.visibility !== "secret") {
+      return err(
+        createPublicError({
+          code: "DM_POPULATION_GROUP_INVALID_VISIBILITY",
+          category: "validation",
+          message: "PopulationGroup visibility must be 'public' or 'secret'"
+        })
+      );
+    }
+  }
+  let validatedContributions;
+  if (candidate.workforceContributions !== void 0 && candidate.workforceContributions !== null) {
+    if (!Array.isArray(candidate.workforceContributions)) {
+      return err(
+        createPublicError({
+          code: "DM_POPULATION_GROUP_INVALID_CONTRIBUTIONS",
+          category: "validation",
+          message: "PopulationGroup workforceContributions must be an array"
+        })
+      );
+    }
+    validatedContributions = [];
+    for (const rawC of candidate.workforceContributions) {
+      const cRes = validateWorkforceContribution(rawC);
+      if (!cRes.ok) return cRes;
+      validatedContributions.push(cRes.value);
+    }
+  }
   return ok({
     id: candidate.id,
     name: candidate.name.trim(),
     count: candidate.count === void 0 ? null : candidate.count,
     precision: candidate.precision === void 0 || candidate.precision === null ? void 0 : candidate.precision,
     includedInTotal: candidate.includedInTotal,
+    visibility: candidate.visibility === "secret" ? "secret" : "public",
+    workforceContributions: validatedContributions ? Object.freeze([...validatedContributions]) : void 0,
     tags: Object.freeze([...candidate.tags]),
     notes: candidate.notes === void 0 || candidate.notes === null ? void 0 : candidate.notes
   });
@@ -803,6 +907,31 @@ function validateNotable(candidate) {
     })
   );
 }
+function resolveNotableStatus(notable, actorResolver) {
+  if (notable.type === "inline") {
+    return {
+      notable,
+      isBrokenRef: false,
+      resolvedName: notable.name,
+      resolvedImg: notable.portrait
+    };
+  }
+  const resolved = actorResolver ? actorResolver(notable.actorUuid) : null;
+  if (!resolved) {
+    return {
+      notable,
+      isBrokenRef: true,
+      resolvedName: notable.name ?? "Unknown Actor (Missing Reference)",
+      resolvedImg: void 0
+    };
+  }
+  return {
+    notable,
+    isBrokenRef: false,
+    resolvedName: resolved.name,
+    resolvedImg: resolved.img
+  };
+}
 
 // src/people/roles/role-types.ts
 var ROLE_VISIBILITIES = Object.freeze([
@@ -813,6 +942,15 @@ var ROLE_VISIBILITIES = Object.freeze([
 function isRoleVisibility(value) {
   return typeof value === "string" && ROLE_VISIBILITIES.includes(value);
 }
+var ROLE_SCOPES = Object.freeze(["domain", "operational-group"]);
+function isRoleScope(value) {
+  return typeof value === "string" && ROLE_SCOPES.includes(value);
+}
+var ROLE_GRANT_POLICIES = Object.freeze([
+  "exists",
+  "occupied",
+  "requirementsSatisfied"
+]);
 var DEFAULT_ROLE_DEFINITIONS = Object.freeze([
   {
     id: "domain-manager:leader",
@@ -930,6 +1068,46 @@ function validateDomainRole(candidate, definitions = DEFAULT_ROLE_DEFINITIONS) {
       })
     );
   }
+  const scope = raw.scope === void 0 ? "domain" : raw.scope;
+  if (!isRoleScope(scope)) {
+    return err(
+      createPublicError({
+        code: "DM_ROLE_INVALID_SCOPE",
+        category: "validation",
+        message: `Invalid role scope: '${String(raw.scope)}'. Must be one of: ${ROLE_SCOPES.join(", ")}`
+      })
+    );
+  }
+  let operationalGroupId;
+  if (scope === "operational-group") {
+    if (typeof raw.operationalGroupId !== "string" || !isOpaqueId(raw.operationalGroupId, "opg")) {
+      return err(
+        createPublicError({
+          code: "DM_ROLE_INVALID_OPERATIONAL_GROUP_ID",
+          category: "validation",
+          message: "Group role requires a valid operationalGroupId with prefix 'opg_'"
+        })
+      );
+    }
+    operationalGroupId = raw.operationalGroupId;
+  } else if (raw.operationalGroupId !== void 0 && raw.operationalGroupId !== null) {
+    return err(
+      createPublicError({
+        code: "DM_ROLE_INVALID_OPERATIONAL_GROUP_ID",
+        category: "validation",
+        message: "Domain-scoped role cannot have operationalGroupId"
+      })
+    );
+  }
+  if (definition && definition.allowedScopes && !definition.allowedScopes.includes(scope)) {
+    return err(
+      createPublicError({
+        code: "DM_ROLE_SCOPE_NOT_ALLOWED",
+        category: "validation",
+        message: `Scope '${scope}' is not allowed for role definition '${definition.id}'. Allowed scopes: ${definition.allowedScopes.join(", ")}`
+      })
+    );
+  }
   if (raw.notes !== void 0 && raw.notes !== null) {
     if (typeof raw.notes !== "string") {
       return err(
@@ -967,9 +1145,49 @@ function validateDomainRole(candidate, definitions = DEFAULT_ROLE_DEFINITIONS) {
     customLabel,
     occupants: Object.freeze([...raw.occupants]),
     visibility,
+    scope,
+    operationalGroupId,
     notes,
     tags
   });
+}
+function evaluateRole(role, definitions = DEFAULT_ROLE_DEFINITIONS, operationalGroups) {
+  const definition = definitions.find((d) => d.id === role.definitionId);
+  const effectiveLabel = role.customLabel ?? definition?.label ?? role.definitionId;
+  const occupantsCount = role.occupants.length;
+  const isVacant = occupantsCount === 0;
+  const isFilled = occupantsCount > 0;
+  const minOccupancy = definition?.occupancy.min ?? 0;
+  const isUnderstaffed = occupantsCount < minOccupancy;
+  let isRequirementSatisfied = !isUnderstaffed;
+  let isValidGroupRole = true;
+  if (role.scope === "operational-group") {
+    if (operationalGroups) {
+      const group = operationalGroups.find((g) => g.id === role.operationalGroupId);
+      if (!group || group.lifecycle === "disbanded") {
+        isValidGroupRole = false;
+        isRequirementSatisfied = false;
+      } else if (group.members && group.members.length > 0) {
+        const nonMembers = role.occupants.filter((occ) => !group.members.includes(occ));
+        if (nonMembers.length > 0) {
+          isValidGroupRole = false;
+          isRequirementSatisfied = false;
+        }
+      }
+    }
+  }
+  const missingCount = Math.max(0, minOccupancy - occupantsCount);
+  return {
+    role,
+    definition,
+    effectiveLabel,
+    isVacant,
+    isFilled,
+    isUnderstaffed,
+    isRequirementSatisfied,
+    missingCount,
+    isValidGroupRole
+  };
 }
 
 // src/people/operational-groups/operational-group-types.ts
@@ -1286,6 +1504,43 @@ function validateAssignment(candidate) {
       })
     );
   }
+  if (raw.visibility !== void 0 && raw.visibility !== null) {
+    if (raw.visibility !== "public" && raw.visibility !== "secret") {
+      return err(
+        createPublicError({
+          code: "DM_ASSIGNMENT_INVALID_VISIBILITY",
+          category: "validation",
+          message: "Assignment visibility must be 'public' or 'secret'"
+        })
+      );
+    }
+  }
+  let startedAtWorld;
+  if (raw.startedAtWorld !== void 0 && raw.startedAtWorld !== null) {
+    if (typeof raw.startedAtWorld !== "number" || !Number.isFinite(raw.startedAtWorld)) {
+      return err(
+        createPublicError({
+          code: "DM_ASSIGNMENT_INVALID_TIME",
+          category: "validation",
+          message: "startedAtWorld must be a finite number"
+        })
+      );
+    }
+    startedAtWorld = raw.startedAtWorld;
+  }
+  let endsAtWorld;
+  if (raw.endsAtWorld !== void 0 && raw.endsAtWorld !== null) {
+    if (typeof raw.endsAtWorld !== "number" || !Number.isFinite(raw.endsAtWorld)) {
+      return err(
+        createPublicError({
+          code: "DM_ASSIGNMENT_INVALID_TIME",
+          category: "validation",
+          message: "endsAtWorld must be a finite number"
+        })
+      );
+    }
+    endsAtWorld = raw.endsAtWorld;
+  }
   if (raw.notes !== void 0 && raw.notes !== null) {
     if (typeof raw.notes !== "string") {
       return err(
@@ -1304,6 +1559,9 @@ function validateAssignment(candidate) {
     workforceTypeId: raw.workforceTypeId.trim(),
     amount: raw.amount,
     status,
+    visibility: raw.visibility === "secret" ? "secret" : "public",
+    startedAtWorld,
+    endsAtWorld,
     notes: typeof raw.notes === "string" ? raw.notes.trim() : void 0
   });
 }
@@ -1386,6 +1644,31 @@ function validateReservation(candidate) {
     }
     expiresAtReal = raw.expiresAtReal;
   }
+  let expiresAtWorld = void 0;
+  if (raw.expiresAtWorld !== void 0 && raw.expiresAtWorld !== null) {
+    if (typeof raw.expiresAtWorld !== "number" || !Number.isFinite(raw.expiresAtWorld)) {
+      return err(
+        createPublicError({
+          code: "DM_RESERVATION_INVALID_EXPIRY",
+          category: "validation",
+          message: "expiresAtWorld must be a finite number"
+        })
+      );
+    }
+    expiresAtWorld = raw.expiresAtWorld;
+  }
+  if (raw.visibility !== void 0 && raw.visibility !== null) {
+    if (raw.visibility !== "public" && raw.visibility !== "secret") {
+      return err(
+        createPublicError({
+          code: "DM_RESERVATION_INVALID_VISIBILITY",
+          category: "validation",
+          message: "Reservation visibility must be 'public' or 'secret'"
+        })
+      );
+    }
+  }
+  const correlationId = typeof raw.correlationId === "string" && raw.correlationId.trim().length > 0 ? raw.correlationId.trim() : void 0;
   if (raw.notes !== void 0 && raw.notes !== null) {
     if (typeof raw.notes !== "string") {
       return err(
@@ -1404,13 +1687,33 @@ function validateReservation(candidate) {
     workforceTypeId: raw.workforceTypeId.trim(),
     amount: raw.amount,
     status,
+    correlationId,
+    visibility: raw.visibility === "secret" ? "secret" : "public",
     expiresAtReal,
+    expiresAtWorld,
     notes: typeof raw.notes === "string" ? raw.notes.trim() : void 0
   });
 }
 
 // src/people/people-data.ts
+var PEOPLE_CAPABILITY_ID = "domain-manager:people";
 var PEOPLE_SCHEMA_VERSION = 1;
+function createDefaultDomainPeopleData() {
+  return {
+    schemaVersion: PEOPLE_SCHEMA_VERSION,
+    population: {
+      mode: "manual",
+      total: null,
+      precision: "unknown"
+    },
+    populationGroups: Object.freeze([]),
+    notables: Object.freeze([]),
+    roles: Object.freeze([]),
+    operationalGroups: Object.freeze([]),
+    assignments: Object.freeze([]),
+    reservations: Object.freeze([])
+  };
+}
 function validateDomainPeopleData(raw) {
   if (!raw || typeof raw !== "object") {
     return err(
@@ -1534,17 +1837,6 @@ function validateDomainPeopleData(raw) {
       );
     }
     roleIds.add(val.id);
-    for (const occupantId of val.occupants) {
-      if (!notableIds.has(occupantId)) {
-        return err(
-          createPublicError({
-            code: "DM_NOTABLE_NOT_FOUND",
-            category: "not-found",
-            message: `Role occupant notable '${occupantId}' does not exist in domain`
-          })
-        );
-      }
-    }
     validatedRoles.push(val);
   }
   if (candidate.operationalGroups !== void 0 && !Array.isArray(candidate.operationalGroups)) {
@@ -1575,26 +1867,6 @@ function validateDomainPeopleData(raw) {
       );
     }
     opgIds.add(val.id);
-    for (const memberId of val.members) {
-      if (!notableIds.has(memberId)) {
-        return err(
-          createPublicError({
-            code: "DM_NOTABLE_NOT_FOUND",
-            category: "not-found",
-            message: `OperationalGroup member notable '${memberId}' does not exist in domain`
-          })
-        );
-      }
-    }
-    if (val.populationGroupId !== void 0 && !groupIds.has(val.populationGroupId)) {
-      return err(
-        createPublicError({
-          code: "DM_POPULATION_GROUP_NOT_FOUND",
-          category: "not-found",
-          message: `Linked population group '${val.populationGroupId}' does not exist in domain`
-        })
-      );
-    }
     validatedOperationalGroups.push(val);
   }
   if (candidate.assignments !== void 0 && !Array.isArray(candidate.assignments)) {
@@ -1667,6 +1939,40 @@ function validateDomainPeopleData(raw) {
     assignments: Object.freeze(validatedAssignments),
     reservations: Object.freeze(validatedReservations)
   });
+}
+function tryGetDomainPeopleData(domain) {
+  const record = "record" in domain ? domain.record : domain;
+  const config = record?.definition?.capabilities?.config ?? {};
+  const rawPeople = config[PEOPLE_CAPABILITY_ID];
+  if (!rawPeople) {
+    return ok(createDefaultDomainPeopleData());
+  }
+  return validateDomainPeopleData(rawPeople);
+}
+function getDomainPeopleData(domain) {
+  const res = tryGetDomainPeopleData(domain);
+  if (!res.ok) {
+    throw new Error(`Domain people data corruption: [${res.error.code}] ${res.error.message}`);
+  }
+  return res.value;
+}
+function withDomainPeopleData(domain, peopleData) {
+  const currentEnabled = domain.definition.capabilities.enabled;
+  const newEnabled = currentEnabled.includes(PEOPLE_CAPABILITY_ID) ? currentEnabled : Object.freeze([...currentEnabled, PEOPLE_CAPABILITY_ID]);
+  const newConfig = Object.freeze({
+    ...domain.definition.capabilities.config,
+    [PEOPLE_CAPABILITY_ID]: peopleData
+  });
+  return {
+    ...domain,
+    definition: {
+      ...domain.definition,
+      capabilities: {
+        enabled: newEnabled,
+        config: newConfig
+      }
+    }
+  };
 }
 
 // src/domains/domain-capabilities.ts
@@ -2174,6 +2480,124 @@ function addCapabilityIssues(record, domainId, registry, issues) {
     ));
   }
 }
+function addPeopleIntegrityIssues(record, domainId, issues) {
+  const config = record.definition?.capabilities?.config;
+  if (!config || typeof config !== "object") return;
+  const rawPeople = config["domain-manager:people"];
+  if (rawPeople === void 0 || rawPeople === null) return;
+  const validation = validateDomainPeopleData(rawPeople);
+  if (!validation.ok) {
+    issues.push(issue(
+      validation.error.code,
+      "error",
+      `People subsystem data corruption: ${validation.error.message}`,
+      domainId,
+      validation.error.details
+    ));
+    return;
+  }
+  const people = validation.value;
+  const notableIds = new Set(people.notables.map((n) => n.id));
+  const groupIds = new Set(people.operationalGroups.map((g) => g.id));
+  const popGroupIds = new Set(people.populationGroups.map((pg) => pg.id));
+  for (const n of people.notables) {
+    if (n.type === "actor") {
+      if (typeof n.actorUuid !== "string" || !n.actorUuid.startsWith("Actor.")) {
+        issues.push(issue(
+          "DM_PEOPLE_INVALID_ACTOR_REF",
+          "error",
+          `Notable '${n.id}' has invalid Actor reference '${n.actorUuid}'`,
+          domainId,
+          { notableId: n.id, actorUuid: n.actorUuid }
+        ));
+      }
+    }
+  }
+  for (const r of people.roles) {
+    for (const occupantId of r.occupants) {
+      if (!notableIds.has(occupantId)) {
+        issues.push(issue(
+          "DM_PEOPLE_DANGLING_NOTABLE_REF",
+          "error",
+          `Role '${r.id}' references non-existent notable '${occupantId}'`,
+          domainId,
+          { roleId: r.id, notableId: occupantId }
+        ));
+      }
+    }
+    if (r.scope === "operational-group" && r.operationalGroupId) {
+      if (!groupIds.has(r.operationalGroupId)) {
+        issues.push(issue(
+          "DM_PEOPLE_DANGLING_GROUP_REF",
+          "error",
+          `Group role '${r.id}' references non-existent operational group '${r.operationalGroupId}'`,
+          domainId,
+          { roleId: r.id, operationalGroupId: r.operationalGroupId }
+        ));
+      }
+    }
+  }
+  for (const g of people.operationalGroups) {
+    for (const memberId of g.members) {
+      if (!notableIds.has(memberId)) {
+        issues.push(issue(
+          "DM_PEOPLE_DANGLING_NOTABLE_REF",
+          "error",
+          `Operational group '${g.id}' references non-existent notable '${memberId}'`,
+          domainId,
+          { groupId: g.id, notableId: memberId }
+        ));
+      }
+    }
+    if (g.populationGroupId && !popGroupIds.has(g.populationGroupId)) {
+      issues.push(issue(
+        "DM_PEOPLE_DANGLING_POPULATION_GROUP_REF",
+        "error",
+        `Operational group '${g.id}' references non-existent population group '${g.populationGroupId}'`,
+        domainId,
+        { groupId: g.id, populationGroupId: g.populationGroupId }
+      ));
+    }
+  }
+  for (const a of people.assignments) {
+    if (a.sourceRef.startsWith("opg_") && !groupIds.has(a.sourceRef)) {
+      issues.push(issue(
+        "DM_PEOPLE_DANGLING_SOURCE_REF",
+        "warning",
+        `Assignment '${a.id}' references non-existent operational group '${a.sourceRef}'`,
+        domainId,
+        { assignmentId: a.id, sourceRef: a.sourceRef }
+      ));
+    } else if (a.sourceRef.startsWith("pop_") && !popGroupIds.has(a.sourceRef)) {
+      issues.push(issue(
+        "DM_PEOPLE_DANGLING_SOURCE_REF",
+        "warning",
+        `Assignment '${a.id}' references non-existent population group '${a.sourceRef}'`,
+        domainId,
+        { assignmentId: a.id, sourceRef: a.sourceRef }
+      ));
+    }
+  }
+  for (const resv of people.reservations) {
+    if (resv.sourceRef.startsWith("opg_") && !groupIds.has(resv.sourceRef)) {
+      issues.push(issue(
+        "DM_PEOPLE_DANGLING_SOURCE_REF",
+        "warning",
+        `Reservation '${resv.id}' references non-existent operational group '${resv.sourceRef}'`,
+        domainId,
+        { reservationId: resv.id, sourceRef: resv.sourceRef }
+      ));
+    } else if (resv.sourceRef.startsWith("pop_") && !popGroupIds.has(resv.sourceRef)) {
+      issues.push(issue(
+        "DM_PEOPLE_DANGLING_SOURCE_REF",
+        "warning",
+        `Reservation '${resv.id}' references non-existent population group '${resv.sourceRef}'`,
+        domainId,
+        { reservationId: resv.id, sourceRef: resv.sourceRef }
+      ));
+    }
+  }
+}
 function addSchemaIssues(document, expectedSchemaVersion, capabilityRegistry, issues, hierarchyNodes) {
   if (document.decodeError !== void 0) {
     issues.push(issue(
@@ -2227,6 +2651,7 @@ function addSchemaIssues(document, expectedSchemaVersion, capabilityRegistry, is
   }
   addLifecycleIssues(record, document.id, issues);
   addCapabilityIssues(record, document.id, capabilityRegistry, issues);
+  addPeopleIntegrityIssues(record, document.id, issues);
   hierarchyNodes.push({
     uuid: document.uuid,
     parentDomainUuid: record.definition.hierarchy.parentDomainUuid
@@ -2927,6 +3352,25 @@ function validateCommandEnvelope(input) {
 }
 
 // src/commands/command-registry.ts
+function createTransactionalHandler(coordinator, definition) {
+  const handler = async (context) => {
+    const coordRes = await coordinator.execute(context, definition);
+    if (!coordRes.ok) return err(coordRes.error);
+    const receipt = coordRes.value;
+    if (receipt.status === "rejected") {
+      return err(
+        receipt.error ?? {
+          code: "DM_TRANSACTION_REJECTED",
+          category: "internal",
+          message: "Transaction execution rejected"
+        }
+      );
+    }
+    return ok(receipt.result);
+  };
+  handler.__isTransactionalWrapped = true;
+  return handler;
+}
 var CommandRegistryCollisionError = class extends Error {
   constructor(commandType) {
     super(`Command handler for '${commandType}' is already registered`);
@@ -4005,14 +4449,14 @@ var CommandBus = class {
           };
         }
       }
-    } catch (err2) {
+    } catch (err3) {
       finalReceipt = {
         commandId: command.commandId,
         status: "rejected",
         error: createPublicError({
           code: "DM_COMMAND_EXECUTION_FAILED",
           category: "internal",
-          message: err2 instanceof Error ? err2.message : "Unexpected command execution error"
+          message: err3 instanceof Error ? err3.message : "Unexpected command execution error"
         }),
         transportTimestamp: now
       };
@@ -5591,6 +6035,3617 @@ function registerDomainCommandHandlers(registry, coordinator, domains) {
   });
 }
 
+// src/people/commands/population-commands.ts
+function resolveDomainId(domainUuid) {
+  return domainUuid.startsWith("JournalEntry.") ? domainUuid.slice("JournalEntry.".length) : domainUuid;
+}
+function requireGmPermission(ctx) {
+  if (ctx.senderUserId !== null && ctx.senderUserId !== ctx.authorityUserId) {
+    return err(
+      createPublicError({
+        code: "DM_SECURITY_PERMISSION_DENIED",
+        category: "permission",
+        message: "Only GM can execute population commands"
+      })
+    );
+  }
+  return ok(true);
+}
+function registerPopulationCommandHandlers(registry, coordinator, domains) {
+  const setPopulationMutation = {
+    getLockKeys: (ctx) => [`domain:${resolveDomainId(ctx.command.payload?.domainUuid)}`],
+    freshRead: async (ctx) => {
+      const readRes = await domains.read(resolveDomainId(ctx.command.payload.domainUuid));
+      if (!readRes.ok) return readRes;
+      return ok({
+        revision: readRes.value.record.revision,
+        state: readRes.value
+      });
+    },
+    buildPlan: async (ctx, freshState) => {
+      const domainDoc = freshState.state;
+      const currentPeople = getDomainPeopleData(domainDoc.record);
+      const popValidation = validatePopulationState(ctx.command.payload.population);
+      if (!popValidation.ok) {
+        return popValidation;
+      }
+      const updatedPeople = {
+        ...currentPeople,
+        population: popValidation.value
+      };
+      const updatedRecord = withDomainPeopleData(domainDoc.record, updatedPeople);
+      const plan = createMutationPlan({
+        commandId: ctx.command.commandId,
+        lockKeys: [`domain:${domainDoc.uuid}`],
+        writeSet: [
+          {
+            targetRef: `domain:${domainDoc.uuid}`,
+            operationType: "update",
+            payload: {
+              ...domainDoc,
+              record: updatedRecord
+            }
+          }
+        ],
+        summary: `Set population on domain '${domainDoc.name}' (${domainDoc.uuid}) to mode '${popValidation.value.mode}'`
+      });
+      return ok(plan);
+    },
+    commit: async (plan) => {
+      const targetDoc = plan.writeSet[0]?.payload;
+      if (!targetDoc) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_MUTATION_PLAN",
+            category: "validation",
+            message: "Missing document in mutation plan writeSet"
+          })
+        );
+      }
+      const updateRes = await domains.update(targetDoc);
+      if (!updateRes.ok) return err(updateRes.error);
+      return ok({
+        result: targetDoc,
+        resultingRevisions: { [targetDoc.uuid]: updateRes.value.revision },
+        changed: true,
+        summary: `Updated population for domain '${targetDoc.name}'`
+      });
+    }
+  };
+  registry.register({
+    type: "people:set-population",
+    visibility: "public",
+    transactional: true,
+    description: "Authoritatively updates population state for a domain",
+    mutationDefinition: setPopulationMutation,
+    handler: createTransactionalHandler(coordinator, setPopulationMutation),
+    schemaValidator: (payload) => {
+      if (!payload || typeof payload !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Payload must be an object"
+          })
+        );
+      }
+      const p = payload;
+      if (typeof p.domainUuid !== "string" || !p.domainUuid) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "domainUuid is required"
+          })
+        );
+      }
+      const val = validatePopulationState(p.population);
+      if (!val.ok) return val;
+      return ok(payload);
+    },
+    permissionValidator: requireGmPermission
+  });
+  const createGroupMutation = {
+    getLockKeys: (ctx) => [`domain:${resolveDomainId(ctx.command.payload?.domainUuid)}`],
+    freshRead: async (ctx) => {
+      const readRes = await domains.read(resolveDomainId(ctx.command.payload.domainUuid));
+      if (!readRes.ok) return readRes;
+      return ok({
+        revision: readRes.value.record.revision,
+        state: readRes.value
+      });
+    },
+    buildPlan: async (ctx, freshState) => {
+      const domainDoc = freshState.state;
+      const currentPeople = getDomainPeopleData(domainDoc.record);
+      const groupInput = ctx.command.payload.group;
+      const newGroupId = createOpaqueId("pop");
+      const groupCandidate = {
+        id: newGroupId,
+        name: groupInput.name,
+        count: groupInput.count,
+        precision: groupInput.precision,
+        includedInTotal: groupInput.includedInTotal,
+        visibility: groupInput.visibility,
+        workforceContributions: groupInput.workforceContributions,
+        tags: groupInput.tags ?? [],
+        notes: groupInput.notes
+      };
+      const groupValidation = validatePopulationGroup(groupCandidate);
+      if (!groupValidation.ok) {
+        return groupValidation;
+      }
+      const updatedGroups = Object.freeze([...currentPeople.populationGroups, groupValidation.value]);
+      const updatedPeople = {
+        ...currentPeople,
+        populationGroups: updatedGroups
+      };
+      const updatedRecord = withDomainPeopleData(domainDoc.record, updatedPeople);
+      const plan = createMutationPlan({
+        commandId: ctx.command.commandId,
+        lockKeys: [`domain:${domainDoc.uuid}`],
+        writeSet: [
+          {
+            targetRef: `domain:${domainDoc.uuid}`,
+            operationType: "update",
+            payload: {
+              ...domainDoc,
+              record: updatedRecord
+            }
+          }
+        ],
+        summary: `Create population group '${groupValidation.value.name}' in domain '${domainDoc.name}'`
+      });
+      return ok(plan);
+    },
+    commit: async (plan) => {
+      const targetDoc = plan.writeSet[0]?.payload;
+      if (!targetDoc) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_MUTATION_PLAN",
+            category: "validation",
+            message: "Missing document in mutation plan writeSet"
+          })
+        );
+      }
+      const updateRes = await domains.update(targetDoc);
+      if (!updateRes.ok) return err(updateRes.error);
+      const people = getDomainPeopleData(targetDoc.record);
+      const createdGroup = people.populationGroups[people.populationGroups.length - 1];
+      return ok({
+        result: createdGroup,
+        resultingRevisions: { [targetDoc.uuid]: updateRes.value.revision },
+        changed: true,
+        summary: `Created population group '${createdGroup.name}' (${createdGroup.id})`
+      });
+    }
+  };
+  registry.register({
+    type: "people:create-population-group",
+    visibility: "public",
+    transactional: true,
+    description: "Authoritatively creates a population group in a domain",
+    mutationDefinition: createGroupMutation,
+    handler: createTransactionalHandler(coordinator, createGroupMutation),
+    schemaValidator: (payload) => {
+      if (!payload || typeof payload !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Payload must be an object"
+          })
+        );
+      }
+      const p = payload;
+      if (typeof p.domainUuid !== "string" || !p.domainUuid) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "domainUuid is required"
+          })
+        );
+      }
+      if (!p.group || typeof p.group !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "group is required"
+          })
+        );
+      }
+      const g = p.group;
+      if (typeof g.name !== "string" || g.name.trim().length === 0) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "group.name must be a non-empty string"
+          })
+        );
+      }
+      return ok(payload);
+    },
+    permissionValidator: requireGmPermission
+  });
+  const updateGroupMutation = {
+    getLockKeys: (ctx) => [`domain:${resolveDomainId(ctx.command.payload?.domainUuid)}`],
+    freshRead: async (ctx) => {
+      const readRes = await domains.read(resolveDomainId(ctx.command.payload.domainUuid));
+      if (!readRes.ok) return readRes;
+      return ok({
+        revision: readRes.value.record.revision,
+        state: readRes.value
+      });
+    },
+    buildPlan: async (ctx, freshState) => {
+      const domainDoc = freshState.state;
+      const currentPeople = getDomainPeopleData(domainDoc.record);
+      const { groupId, patch } = ctx.command.payload;
+      const existingIndex = currentPeople.populationGroups.findIndex((g) => g.id === groupId);
+      if (existingIndex === -1) {
+        return err(
+          createPublicError({
+            code: "DM_POPULATION_GROUP_NOT_FOUND",
+            category: "not-found",
+            message: `PopulationGroup '${groupId}' not found`
+          })
+        );
+      }
+      const existing = currentPeople.populationGroups[existingIndex];
+      const mergedCandidate = {
+        id: existing.id,
+        name: patch.name !== void 0 ? patch.name : existing.name,
+        count: patch.count !== void 0 ? patch.count : existing.count,
+        precision: patch.precision !== void 0 ? patch.precision : existing.precision,
+        includedInTotal: patch.includedInTotal !== void 0 ? patch.includedInTotal : existing.includedInTotal,
+        visibility: patch.visibility !== void 0 ? patch.visibility : existing.visibility,
+        workforceContributions: patch.workforceContributions !== void 0 ? patch.workforceContributions : existing.workforceContributions,
+        tags: patch.tags !== void 0 ? patch.tags : existing.tags,
+        notes: patch.notes !== void 0 ? patch.notes : existing.notes
+      };
+      const groupValidation = validatePopulationGroup(mergedCandidate);
+      if (!groupValidation.ok) {
+        return groupValidation;
+      }
+      const updatedGroups = [...currentPeople.populationGroups];
+      updatedGroups[existingIndex] = groupValidation.value;
+      const updatedPeople = {
+        ...currentPeople,
+        populationGroups: Object.freeze(updatedGroups)
+      };
+      const updatedRecord = withDomainPeopleData(domainDoc.record, updatedPeople);
+      const plan = createMutationPlan({
+        commandId: ctx.command.commandId,
+        lockKeys: [`domain:${domainDoc.uuid}`],
+        customData: { groupId },
+        writeSet: [
+          {
+            targetRef: `domain:${domainDoc.uuid}`,
+            operationType: "update",
+            payload: {
+              ...domainDoc,
+              record: updatedRecord
+            }
+          }
+        ],
+        summary: `Update population group '${groupValidation.value.name}' (${groupId}) in domain '${domainDoc.name}'`
+      });
+      return ok(plan);
+    },
+    commit: async (plan) => {
+      const targetDoc = plan.writeSet[0]?.payload;
+      if (!targetDoc) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_MUTATION_PLAN",
+            category: "validation",
+            message: "Missing document in mutation plan writeSet"
+          })
+        );
+      }
+      const updateRes = await domains.update(targetDoc);
+      if (!updateRes.ok) return err(updateRes.error);
+      const people = getDomainPeopleData(targetDoc.record);
+      const targetGroupId = plan.customData?.groupId;
+      const updatedGroup = people.populationGroups.find((g) => g.id === targetGroupId) ?? people.populationGroups[0];
+      return ok({
+        result: updatedGroup,
+        resultingRevisions: { [targetDoc.uuid]: updateRes.value.revision },
+        changed: true,
+        summary: `Updated population group in domain '${targetDoc.name}'`
+      });
+    }
+  };
+  registry.register({
+    type: "people:update-population-group",
+    visibility: "public",
+    transactional: true,
+    description: "Authoritatively updates a population group in a domain",
+    mutationDefinition: updateGroupMutation,
+    handler: createTransactionalHandler(coordinator, updateGroupMutation),
+    schemaValidator: (payload) => {
+      if (!payload || typeof payload !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Payload must be an object"
+          })
+        );
+      }
+      const p = payload;
+      if (typeof p.domainUuid !== "string" || !p.domainUuid) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "domainUuid is required"
+          })
+        );
+      }
+      if (!isOpaqueId(p.groupId, "pop")) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Valid groupId (pop_*) is required"
+          })
+        );
+      }
+      return ok(payload);
+    },
+    permissionValidator: requireGmPermission
+  });
+  const deleteGroupMutation = {
+    getLockKeys: (ctx) => [`domain:${resolveDomainId(ctx.command.payload?.domainUuid)}`],
+    freshRead: async (ctx) => {
+      const readRes = await domains.read(resolveDomainId(ctx.command.payload.domainUuid));
+      if (!readRes.ok) return readRes;
+      return ok({
+        revision: readRes.value.record.revision,
+        state: readRes.value
+      });
+    },
+    buildPlan: async (ctx, freshState) => {
+      const domainDoc = freshState.state;
+      const currentPeople = getDomainPeopleData(domainDoc.record);
+      const { groupId } = ctx.command.payload;
+      const existing = currentPeople.populationGroups.find((g) => g.id === groupId);
+      if (!existing) {
+        return err(
+          createPublicError({
+            code: "DM_POPULATION_GROUP_NOT_FOUND",
+            category: "not-found",
+            message: `PopulationGroup '${groupId}' not found`
+          })
+        );
+      }
+      const updatedGroups = currentPeople.populationGroups.filter((g) => g.id !== groupId);
+      const updatedPeople = {
+        ...currentPeople,
+        populationGroups: Object.freeze(updatedGroups)
+      };
+      const updatedRecord = withDomainPeopleData(domainDoc.record, updatedPeople);
+      const plan = createMutationPlan({
+        commandId: ctx.command.commandId,
+        lockKeys: [`domain:${domainDoc.uuid}`],
+        writeSet: [
+          {
+            targetRef: `domain:${domainDoc.uuid}`,
+            operationType: "update",
+            payload: {
+              ...domainDoc,
+              record: updatedRecord
+            }
+          }
+        ],
+        summary: `Delete population group '${existing.name}' (${groupId}) in domain '${domainDoc.name}'`
+      });
+      return ok(plan);
+    },
+    commit: async (plan) => {
+      const targetDoc = plan.writeSet[0]?.payload;
+      if (!targetDoc) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_MUTATION_PLAN",
+            category: "validation",
+            message: "Missing document in mutation plan writeSet"
+          })
+        );
+      }
+      const updateRes = await domains.update(targetDoc);
+      if (!updateRes.ok) return err(updateRes.error);
+      return ok({
+        result: { deletedGroupId: plan.commandId },
+        resultingRevisions: { [targetDoc.uuid]: updateRes.value.revision },
+        changed: true,
+        summary: `Deleted population group in domain '${targetDoc.name}'`
+      });
+    }
+  };
+  registry.register({
+    type: "people:delete-population-group",
+    visibility: "public",
+    transactional: true,
+    description: "Authoritatively deletes a population group in a domain",
+    mutationDefinition: deleteGroupMutation,
+    handler: createTransactionalHandler(coordinator, deleteGroupMutation),
+    schemaValidator: (payload) => {
+      if (!payload || typeof payload !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Payload must be an object"
+          })
+        );
+      }
+      const p = payload;
+      if (typeof p.domainUuid !== "string" || !p.domainUuid) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "domainUuid is required"
+          })
+        );
+      }
+      if (!isOpaqueId(p.groupId, "pop")) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Valid groupId (pop_*) is required"
+          })
+        );
+      }
+      return ok(payload);
+    },
+    permissionValidator: requireGmPermission
+  });
+}
+
+// src/people/commands/notable-commands.ts
+function resolveDomainId2(domainUuid) {
+  return domainUuid.startsWith("JournalEntry.") ? domainUuid.slice("JournalEntry.".length) : domainUuid;
+}
+function requireGmPermission2(ctx) {
+  if (ctx.senderUserId !== null && ctx.senderUserId !== ctx.authorityUserId) {
+    return err(
+      createPublicError({
+        code: "DM_SECURITY_PERMISSION_DENIED",
+        category: "permission",
+        message: "Only GM can execute notable commands"
+      })
+    );
+  }
+  return ok(true);
+}
+function registerNotableCommandHandlers(registry, coordinator, domains) {
+  const createNotableMutation = {
+    getLockKeys: (ctx) => [`domain:${resolveDomainId2(ctx.command.payload?.domainUuid)}`],
+    freshRead: async (ctx) => {
+      const readRes = await domains.read(resolveDomainId2(ctx.command.payload.domainUuid));
+      if (!readRes.ok) return readRes;
+      return ok({
+        revision: readRes.value.record.revision,
+        state: readRes.value
+      });
+    },
+    buildPlan: async (ctx, freshState) => {
+      const domainDoc = freshState.state;
+      const currentPeople = getDomainPeopleData(domainDoc.record);
+      const notableInput = ctx.command.payload.notable;
+      const newNotableId = createOpaqueId("not");
+      const candidate = {
+        id: newNotableId,
+        ...notableInput
+      };
+      const notableValidation = validateNotable(candidate);
+      if (!notableValidation.ok) {
+        return notableValidation;
+      }
+      const newNotable = notableValidation.value;
+      if (newNotable.type === "actor") {
+        const alreadyExists = currentPeople.notables.some(
+          (n) => n.type === "actor" && n.actorUuid === newNotable.actorUuid
+        );
+        if (alreadyExists) {
+          return err(
+            createPublicError({
+              code: "DM_NOTABLE_DUPLICATE_ACTOR",
+              category: "validation",
+              message: `Actor '${newNotable.actorUuid}' is already linked to a Notable in domain '${domainDoc.name}'`
+            })
+          );
+        }
+      }
+      const updatedNotables = Object.freeze([...currentPeople.notables, newNotable]);
+      const updatedPeople = {
+        ...currentPeople,
+        notables: updatedNotables
+      };
+      const updatedRecord = withDomainPeopleData(domainDoc.record, updatedPeople);
+      const plan = createMutationPlan({
+        commandId: ctx.command.commandId,
+        lockKeys: [`domain:${domainDoc.uuid}`],
+        writeSet: [
+          {
+            targetRef: `domain:${domainDoc.uuid}`,
+            operationType: "update",
+            payload: {
+              ...domainDoc,
+              record: updatedRecord
+            }
+          }
+        ],
+        summary: `Create notable '${newNotable.type === "inline" ? newNotable.name : newNotable.name ?? newNotable.actorUuid}' in domain '${domainDoc.name}'`
+      });
+      return ok(plan);
+    },
+    commit: async (plan) => {
+      const targetDoc = plan.writeSet[0]?.payload;
+      if (!targetDoc) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_MUTATION_PLAN",
+            category: "validation",
+            message: "Missing document in mutation plan writeSet"
+          })
+        );
+      }
+      const updateRes = await domains.update(targetDoc);
+      if (!updateRes.ok) return err(updateRes.error);
+      const people = getDomainPeopleData(targetDoc.record);
+      const createdNotable = people.notables[people.notables.length - 1];
+      return ok({
+        result: createdNotable,
+        resultingRevisions: { [targetDoc.uuid]: updateRes.value.revision },
+        changed: true,
+        summary: `Created notable in domain '${targetDoc.name}'`
+      });
+    }
+  };
+  registry.register({
+    type: "people:create-notable",
+    visibility: "public",
+    transactional: true,
+    description: "Authoritatively creates a notable in a domain",
+    mutationDefinition: createNotableMutation,
+    handler: createTransactionalHandler(coordinator, createNotableMutation),
+    schemaValidator: (payload) => {
+      if (!payload || typeof payload !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Payload must be an object"
+          })
+        );
+      }
+      const p = payload;
+      if (typeof p.domainUuid !== "string" || !p.domainUuid) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "domainUuid is required"
+          })
+        );
+      }
+      if (!p.notable || typeof p.notable !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "notable is required"
+          })
+        );
+      }
+      return ok(payload);
+    },
+    permissionValidator: requireGmPermission2
+  });
+  const updateNotableMutation = {
+    getLockKeys: (ctx) => [`domain:${resolveDomainId2(ctx.command.payload?.domainUuid)}`],
+    freshRead: async (ctx) => {
+      const readRes = await domains.read(resolveDomainId2(ctx.command.payload.domainUuid));
+      if (!readRes.ok) return readRes;
+      return ok({
+        revision: readRes.value.record.revision,
+        state: readRes.value
+      });
+    },
+    buildPlan: async (ctx, freshState) => {
+      const domainDoc = freshState.state;
+      const currentPeople = getDomainPeopleData(domainDoc.record);
+      const { notableId, patch } = ctx.command.payload;
+      const existingIndex = currentPeople.notables.findIndex((n) => n.id === notableId);
+      if (existingIndex === -1) {
+        return err(
+          createPublicError({
+            code: "DM_NOTABLE_NOT_FOUND",
+            category: "not-found",
+            message: `Notable '${notableId}' not found in domain '${domainDoc.name}'`
+          })
+        );
+      }
+      const existing = currentPeople.notables[existingIndex];
+      let candidate;
+      if (patch.convertToActorUuid) {
+        if (!isActorUuid(patch.convertToActorUuid)) {
+          return err(
+            createPublicError({
+              code: "DM_NOTABLE_INVALID_ACTOR",
+              category: "validation",
+              message: `Invalid Foundry Actor UUID: '${patch.convertToActorUuid}'`
+            })
+          );
+        }
+        const alreadyLinked = currentPeople.notables.some(
+          (n) => n.id !== notableId && n.type === "actor" && n.actorUuid === patch.convertToActorUuid
+        );
+        if (alreadyLinked) {
+          return err(
+            createPublicError({
+              code: "DM_NOTABLE_DUPLICATE_ACTOR",
+              category: "validation",
+              message: `Actor '${patch.convertToActorUuid}' is already linked to another Notable in this domain`
+            })
+          );
+        }
+        candidate = {
+          id: existing.id,
+          type: "actor",
+          actorUuid: patch.convertToActorUuid,
+          name: patch.name !== void 0 ? patch.name : existing.name,
+          description: patch.description !== void 0 ? patch.description : existing.description,
+          tags: patch.tags !== void 0 ? patch.tags : existing.tags,
+          visibility: patch.visibility !== void 0 ? patch.visibility : existing.visibility
+        };
+      } else if (existing.type === "actor") {
+        candidate = {
+          id: existing.id,
+          type: "actor",
+          actorUuid: existing.actorUuid,
+          name: patch.name !== void 0 ? patch.name : existing.name,
+          description: patch.description !== void 0 ? patch.description : existing.description,
+          tags: patch.tags !== void 0 ? patch.tags : existing.tags,
+          visibility: patch.visibility !== void 0 ? patch.visibility : existing.visibility
+        };
+      } else {
+        candidate = {
+          id: existing.id,
+          type: "inline",
+          name: patch.name !== void 0 ? patch.name : existing.name,
+          portrait: patch.portrait !== void 0 ? patch.portrait : existing.portrait,
+          description: patch.description !== void 0 ? patch.description : existing.description,
+          tags: patch.tags !== void 0 ? patch.tags : existing.tags,
+          visibility: patch.visibility !== void 0 ? patch.visibility : existing.visibility
+        };
+      }
+      const notableValidation = validateNotable(candidate);
+      if (!notableValidation.ok) {
+        return notableValidation;
+      }
+      const updatedNotables = [...currentPeople.notables];
+      updatedNotables[existingIndex] = notableValidation.value;
+      const updatedPeople = {
+        ...currentPeople,
+        notables: Object.freeze(updatedNotables)
+      };
+      const updatedRecord = withDomainPeopleData(domainDoc.record, updatedPeople);
+      const plan = createMutationPlan({
+        commandId: ctx.command.commandId,
+        lockKeys: [`domain:${domainDoc.uuid}`],
+        customData: { notableId },
+        writeSet: [
+          {
+            targetRef: `domain:${domainDoc.uuid}`,
+            operationType: "update",
+            payload: {
+              ...domainDoc,
+              record: updatedRecord
+            }
+          }
+        ],
+        summary: `Update notable '${notableId}' in domain '${domainDoc.name}'`
+      });
+      return ok(plan);
+    },
+    commit: async (plan) => {
+      const targetDoc = plan.writeSet[0]?.payload;
+      if (!targetDoc) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_MUTATION_PLAN",
+            category: "validation",
+            message: "Missing document in mutation plan writeSet"
+          })
+        );
+      }
+      const updateRes = await domains.update(targetDoc);
+      if (!updateRes.ok) return err(updateRes.error);
+      const people = getDomainPeopleData(targetDoc.record);
+      const targetNotableId = plan.customData?.notableId;
+      const updatedNotable = people.notables.find((n) => n.id === targetNotableId) ?? people.notables[0];
+      return ok({
+        result: updatedNotable,
+        resultingRevisions: { [targetDoc.uuid]: updateRes.value.revision },
+        changed: true,
+        summary: `Updated notable in domain '${targetDoc.name}'`
+      });
+    }
+  };
+  registry.register({
+    type: "people:update-notable",
+    visibility: "public",
+    transactional: true,
+    description: "Authoritatively updates a notable in a domain",
+    mutationDefinition: updateNotableMutation,
+    handler: createTransactionalHandler(coordinator, updateNotableMutation),
+    schemaValidator: (payload) => {
+      if (!payload || typeof payload !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Payload must be an object"
+          })
+        );
+      }
+      const p = payload;
+      if (typeof p.domainUuid !== "string" || !p.domainUuid) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "domainUuid is required"
+          })
+        );
+      }
+      if (!isOpaqueId(p.notableId, "not")) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Valid notableId (not_*) is required"
+          })
+        );
+      }
+      if (!p.patch || typeof p.patch !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "patch is required"
+          })
+        );
+      }
+      return ok(payload);
+    },
+    permissionValidator: requireGmPermission2
+  });
+  const deleteNotableMutation = {
+    getLockKeys: (ctx) => [`domain:${resolveDomainId2(ctx.command.payload?.domainUuid)}`],
+    freshRead: async (ctx) => {
+      const readRes = await domains.read(resolveDomainId2(ctx.command.payload.domainUuid));
+      if (!readRes.ok) return readRes;
+      return ok({
+        revision: readRes.value.record.revision,
+        state: readRes.value
+      });
+    },
+    buildPlan: async (ctx, freshState) => {
+      const domainDoc = freshState.state;
+      const currentPeople = getDomainPeopleData(domainDoc.record);
+      const { notableId } = ctx.command.payload;
+      const existing = currentPeople.notables.find((n) => n.id === notableId);
+      if (!existing) {
+        return err(
+          createPublicError({
+            code: "DM_NOTABLE_NOT_FOUND",
+            category: "not-found",
+            message: `Notable '${notableId}' not found in domain '${domainDoc.name}'`
+          })
+        );
+      }
+      const assignedRole = currentPeople.roles.find((r) => r.occupants.includes(notableId));
+      if (assignedRole) {
+        return err(
+          createPublicError({
+            code: "DM_NOTABLE_ASSIGNED_TO_ROLE",
+            category: "conflict",
+            message: `Cannot delete notable '${notableId}': currently assigned to role '${assignedRole.customLabel ?? assignedRole.definitionId}' (${assignedRole.id})`
+          })
+        );
+      }
+      const updatedNotables = currentPeople.notables.filter((n) => n.id !== notableId);
+      const updatedPeople = {
+        ...currentPeople,
+        notables: Object.freeze(updatedNotables)
+      };
+      const updatedRecord = withDomainPeopleData(domainDoc.record, updatedPeople);
+      const plan = createMutationPlan({
+        commandId: ctx.command.commandId,
+        lockKeys: [`domain:${domainDoc.uuid}`],
+        writeSet: [
+          {
+            targetRef: `domain:${domainDoc.uuid}`,
+            operationType: "update",
+            payload: {
+              ...domainDoc,
+              record: updatedRecord
+            }
+          }
+        ],
+        summary: `Delete notable '${notableId}' in domain '${domainDoc.name}'`
+      });
+      return ok(plan);
+    },
+    commit: async (plan) => {
+      const targetDoc = plan.writeSet[0]?.payload;
+      if (!targetDoc) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_MUTATION_PLAN",
+            category: "validation",
+            message: "Missing document in mutation plan writeSet"
+          })
+        );
+      }
+      const updateRes = await domains.update(targetDoc);
+      if (!updateRes.ok) return err(updateRes.error);
+      return ok({
+        result: { deletedNotableId: plan.commandId },
+        resultingRevisions: { [targetDoc.uuid]: updateRes.value.revision },
+        changed: true,
+        summary: `Deleted notable in domain '${targetDoc.name}'`
+      });
+    }
+  };
+  registry.register({
+    type: "people:delete-notable",
+    visibility: "public",
+    transactional: true,
+    description: "Authoritatively deletes a notable in a domain",
+    mutationDefinition: deleteNotableMutation,
+    handler: createTransactionalHandler(coordinator, deleteNotableMutation),
+    schemaValidator: (payload) => {
+      if (!payload || typeof payload !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Payload must be an object"
+          })
+        );
+      }
+      const p = payload;
+      if (typeof p.domainUuid !== "string" || !p.domainUuid) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "domainUuid is required"
+          })
+        );
+      }
+      if (!isOpaqueId(p.notableId, "not")) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Valid notableId (not_*) is required"
+          })
+        );
+      }
+      return ok(payload);
+    },
+    permissionValidator: requireGmPermission2
+  });
+}
+
+// src/people/commands/role-commands.ts
+function resolveDomainId3(domainUuid) {
+  return domainUuid.startsWith("JournalEntry.") ? domainUuid.slice("JournalEntry.".length) : domainUuid;
+}
+function requireGmPermission3(ctx) {
+  if (ctx.senderUserId !== null && ctx.senderUserId !== ctx.authorityUserId) {
+    return err(
+      createPublicError({
+        code: "DM_SECURITY_PERMISSION_DENIED",
+        category: "permission",
+        message: "Only GM can execute role commands"
+      })
+    );
+  }
+  return ok(true);
+}
+function registerRoleCommandHandlers(registry, coordinator, domains) {
+  const createRoleMutation = {
+    getLockKeys: (ctx) => [`domain:${resolveDomainId3(ctx.command.payload?.domainUuid)}`],
+    freshRead: async (ctx) => {
+      const readRes = await domains.read(resolveDomainId3(ctx.command.payload.domainUuid));
+      if (!readRes.ok) return readRes;
+      return ok({
+        revision: readRes.value.record.revision,
+        state: readRes.value
+      });
+    },
+    buildPlan: async (ctx, freshState) => {
+      const domainDoc = freshState.state;
+      const currentPeople = getDomainPeopleData(domainDoc.record);
+      const roleInput = ctx.command.payload.role;
+      const newRoleId = createOpaqueId("role");
+      const candidate = {
+        id: newRoleId,
+        definitionId: roleInput.definitionId,
+        customLabel: roleInput.customLabel,
+        occupants: roleInput.occupants ?? [],
+        visibility: roleInput.visibility ?? "public",
+        scope: roleInput.scope,
+        operationalGroupId: roleInput.operationalGroupId,
+        notes: roleInput.notes,
+        tags: roleInput.tags ?? []
+      };
+      const roleValidation = validateDomainRole(candidate, DEFAULT_ROLE_DEFINITIONS);
+      if (!roleValidation.ok) {
+        return roleValidation;
+      }
+      const newRole = roleValidation.value;
+      if (newRole.scope === "operational-group" && newRole.operationalGroupId) {
+        const opGroup = currentPeople.operationalGroups.find((g) => g.id === newRole.operationalGroupId);
+        if (!opGroup) {
+          return err(
+            createPublicError({
+              code: "DM_OPERATIONAL_GROUP_NOT_FOUND",
+              category: "not-found",
+              message: `OperationalGroup '${newRole.operationalGroupId}' not found in domain '${domainDoc.name}'`
+            })
+          );
+        }
+        if (opGroup.lifecycle === "disbanded") {
+          return err(
+            createPublicError({
+              code: "DM_ROLE_GROUP_DISBANDED",
+              category: "validation",
+              message: `Cannot create role for disbanded operational group '${opGroup.name}'`
+            })
+          );
+        }
+        if (opGroup.members && opGroup.members.length > 0) {
+          for (const occupantId of newRole.occupants) {
+            if (!opGroup.members.includes(occupantId)) {
+              return err(
+                createPublicError({
+                  code: "DM_ROLE_GROUP_MEMBER_REQUIRED",
+                  category: "validation",
+                  message: `Occupant notable '${occupantId}' is not a member of operational group '${opGroup.name}'`
+                })
+              );
+            }
+          }
+        }
+      }
+      for (const occupantId of newRole.occupants) {
+        const notableExists = currentPeople.notables.some((n) => n.id === occupantId);
+        if (!notableExists) {
+          return err(
+            createPublicError({
+              code: "DM_NOTABLE_NOT_FOUND",
+              category: "not-found",
+              message: `Occupant notable '${occupantId}' does not exist in domain '${domainDoc.name}'`
+            })
+          );
+        }
+      }
+      const updatedRoles = Object.freeze([...currentPeople.roles, newRole]);
+      const updatedPeople = {
+        ...currentPeople,
+        roles: updatedRoles
+      };
+      const updatedRecord = withDomainPeopleData(domainDoc.record, updatedPeople);
+      const plan = createMutationPlan({
+        commandId: ctx.command.commandId,
+        lockKeys: [`domain:${domainDoc.uuid}`],
+        writeSet: [
+          {
+            targetRef: `domain:${domainDoc.uuid}`,
+            operationType: "update",
+            payload: {
+              ...domainDoc,
+              record: updatedRecord
+            }
+          }
+        ],
+        summary: `Create role '${newRole.customLabel ?? newRole.definitionId}' in domain '${domainDoc.name}'`
+      });
+      return ok(plan);
+    },
+    commit: async (plan) => {
+      const targetDoc = plan.writeSet[0]?.payload;
+      if (!targetDoc) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_MUTATION_PLAN",
+            category: "validation",
+            message: "Missing document in mutation plan writeSet"
+          })
+        );
+      }
+      const updateRes = await domains.update(targetDoc);
+      if (!updateRes.ok) return err(updateRes.error);
+      const people = getDomainPeopleData(targetDoc.record);
+      const createdRole = people.roles[people.roles.length - 1];
+      return ok({
+        result: createdRole,
+        resultingRevisions: { [targetDoc.uuid]: updateRes.value.revision },
+        changed: true,
+        summary: `Created role in domain '${targetDoc.name}'`
+      });
+    }
+  };
+  registry.register({
+    type: "people:create-role",
+    visibility: "public",
+    transactional: true,
+    description: "Authoritatively creates a role in a domain",
+    mutationDefinition: createRoleMutation,
+    handler: createTransactionalHandler(coordinator, createRoleMutation),
+    schemaValidator: (payload) => {
+      if (!payload || typeof payload !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Payload must be an object"
+          })
+        );
+      }
+      const p = payload;
+      if (typeof p.domainUuid !== "string" || !p.domainUuid) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "domainUuid is required"
+          })
+        );
+      }
+      if (!p.role || typeof p.role !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "role is required"
+          })
+        );
+      }
+      return ok(payload);
+    },
+    permissionValidator: requireGmPermission3
+  });
+  const assignRoleMutation = {
+    getLockKeys: (ctx) => [`domain:${resolveDomainId3(ctx.command.payload?.domainUuid)}`],
+    freshRead: async (ctx) => {
+      const readRes = await domains.read(resolveDomainId3(ctx.command.payload.domainUuid));
+      if (!readRes.ok) return readRes;
+      return ok({
+        revision: readRes.value.record.revision,
+        state: readRes.value
+      });
+    },
+    buildPlan: async (ctx, freshState) => {
+      const domainDoc = freshState.state;
+      const currentPeople = getDomainPeopleData(domainDoc.record);
+      const { roleId, notableId } = ctx.command.payload;
+      const roleIndex = currentPeople.roles.findIndex((r) => r.id === roleId);
+      if (roleIndex === -1) {
+        return err(
+          createPublicError({
+            code: "DM_ROLE_NOT_FOUND",
+            category: "not-found",
+            message: `Role '${roleId}' not found in domain '${domainDoc.name}'`
+          })
+        );
+      }
+      const notable = currentPeople.notables.find((n) => n.id === notableId);
+      if (!notable) {
+        return err(
+          createPublicError({
+            code: "DM_NOTABLE_NOT_FOUND",
+            category: "not-found",
+            message: `Notable '${notableId}' not found in domain '${domainDoc.name}'`
+          })
+        );
+      }
+      const currentRole = currentPeople.roles[roleIndex];
+      if (currentRole.scope === "operational-group" && currentRole.operationalGroupId) {
+        const opGroup = currentPeople.operationalGroups.find((g) => g.id === currentRole.operationalGroupId);
+        if (opGroup) {
+          if (opGroup.lifecycle === "disbanded") {
+            return err(
+              createPublicError({
+                code: "DM_ROLE_GROUP_DISBANDED",
+                category: "validation",
+                message: `Cannot assign notable to role of disbanded operational group '${opGroup.name}'`
+              })
+            );
+          }
+          if (opGroup.members && opGroup.members.length > 0 && !opGroup.members.includes(notableId)) {
+            return err(
+              createPublicError({
+                code: "DM_ROLE_GROUP_MEMBER_REQUIRED",
+                category: "validation",
+                message: `Notable '${notableId}' is not a member of operational group '${opGroup.name}'`
+              })
+            );
+          }
+        }
+      }
+      if (currentRole.occupants.includes(notableId)) {
+        return err(
+          createPublicError({
+            code: "DM_ROLE_DUPLICATE_OCCUPANT",
+            category: "validation",
+            message: `Notable '${notableId}' is already assigned to role '${currentRole.id}'`
+          })
+        );
+      }
+      const definition = DEFAULT_ROLE_DEFINITIONS.find((d) => d.id === currentRole.definitionId);
+      if (definition && definition.occupancy.max !== null && currentRole.occupants.length >= definition.occupancy.max) {
+        return err(
+          createPublicError({
+            code: "DM_ROLE_OCCUPANCY_EXCEEDED",
+            category: "validation",
+            message: `Role '${currentRole.id}' is already at maximum capacity (${definition.occupancy.max})`
+          })
+        );
+      }
+      const updatedOccupants = Object.freeze([...currentRole.occupants, notableId]);
+      const updatedRole = {
+        ...currentRole,
+        occupants: updatedOccupants
+      };
+      const updatedRoles = [...currentPeople.roles];
+      updatedRoles[roleIndex] = updatedRole;
+      const updatedPeople = {
+        ...currentPeople,
+        roles: Object.freeze(updatedRoles)
+      };
+      const updatedRecord = withDomainPeopleData(domainDoc.record, updatedPeople);
+      const plan = createMutationPlan({
+        commandId: ctx.command.commandId,
+        lockKeys: [`domain:${domainDoc.uuid}`],
+        customData: { roleId },
+        writeSet: [
+          {
+            targetRef: `domain:${domainDoc.uuid}`,
+            operationType: "update",
+            payload: {
+              ...domainDoc,
+              record: updatedRecord
+            }
+          }
+        ],
+        summary: `Assign notable '${notableId}' to role '${currentRole.id}' in domain '${domainDoc.name}'`
+      });
+      return ok(plan);
+    },
+    commit: async (plan) => {
+      const targetDoc = plan.writeSet[0]?.payload;
+      if (!targetDoc) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_MUTATION_PLAN",
+            category: "validation",
+            message: "Missing document in mutation plan writeSet"
+          })
+        );
+      }
+      const updateRes = await domains.update(targetDoc);
+      if (!updateRes.ok) return err(updateRes.error);
+      const people = getDomainPeopleData(targetDoc.record);
+      const targetRoleId = plan.customData?.roleId;
+      const updatedRole = people.roles.find((r) => r.id === targetRoleId) ?? people.roles[0];
+      return ok({
+        result: updatedRole,
+        resultingRevisions: { [targetDoc.uuid]: updateRes.value.revision },
+        changed: true,
+        summary: `Assigned occupant to role in domain '${targetDoc.name}'`
+      });
+    }
+  };
+  registry.register({
+    type: "people:assign-role",
+    visibility: "public",
+    transactional: true,
+    description: "Authoritatively assigns a notable to a role in a domain",
+    mutationDefinition: assignRoleMutation,
+    handler: createTransactionalHandler(coordinator, assignRoleMutation),
+    schemaValidator: (payload) => {
+      if (!payload || typeof payload !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Payload must be an object"
+          })
+        );
+      }
+      const p = payload;
+      if (typeof p.domainUuid !== "string" || !p.domainUuid) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "domainUuid is required"
+          })
+        );
+      }
+      if (!isOpaqueId(p.roleId, "role")) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Valid roleId (role_*) is required"
+          })
+        );
+      }
+      if (!isOpaqueId(p.notableId, "not")) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Valid notableId (not_*) is required"
+          })
+        );
+      }
+      return ok(payload);
+    },
+    permissionValidator: requireGmPermission3
+  });
+  const unassignRoleMutation = {
+    getLockKeys: (ctx) => [`domain:${resolveDomainId3(ctx.command.payload?.domainUuid)}`],
+    freshRead: async (ctx) => {
+      const readRes = await domains.read(resolveDomainId3(ctx.command.payload.domainUuid));
+      if (!readRes.ok) return readRes;
+      return ok({
+        revision: readRes.value.record.revision,
+        state: readRes.value
+      });
+    },
+    buildPlan: async (ctx, freshState) => {
+      const domainDoc = freshState.state;
+      const currentPeople = getDomainPeopleData(domainDoc.record);
+      const { roleId, notableId } = ctx.command.payload;
+      const roleIndex = currentPeople.roles.findIndex((r) => r.id === roleId);
+      if (roleIndex === -1) {
+        return err(
+          createPublicError({
+            code: "DM_ROLE_NOT_FOUND",
+            category: "not-found",
+            message: `Role '${roleId}' not found in domain '${domainDoc.name}'`
+          })
+        );
+      }
+      const currentRole = currentPeople.roles[roleIndex];
+      if (!currentRole.occupants.includes(notableId)) {
+        return err(
+          createPublicError({
+            code: "DM_ROLE_OCCUPANT_NOT_FOUND",
+            category: "not-found",
+            message: `Notable '${notableId}' is not an occupant of role '${currentRole.id}'`
+          })
+        );
+      }
+      const updatedOccupants = Object.freeze(currentRole.occupants.filter((id) => id !== notableId));
+      const updatedRole = {
+        ...currentRole,
+        occupants: updatedOccupants
+      };
+      const updatedRoles = [...currentPeople.roles];
+      updatedRoles[roleIndex] = updatedRole;
+      const updatedPeople = {
+        ...currentPeople,
+        roles: Object.freeze(updatedRoles)
+      };
+      const updatedRecord = withDomainPeopleData(domainDoc.record, updatedPeople);
+      const plan = createMutationPlan({
+        commandId: ctx.command.commandId,
+        lockKeys: [`domain:${domainDoc.uuid}`],
+        customData: { roleId },
+        writeSet: [
+          {
+            targetRef: `domain:${domainDoc.uuid}`,
+            operationType: "update",
+            payload: {
+              ...domainDoc,
+              record: updatedRecord
+            }
+          }
+        ],
+        summary: `Unassign notable '${notableId}' from role '${currentRole.id}' in domain '${domainDoc.name}'`
+      });
+      return ok(plan);
+    },
+    commit: async (plan) => {
+      const targetDoc = plan.writeSet[0]?.payload;
+      if (!targetDoc) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_MUTATION_PLAN",
+            category: "validation",
+            message: "Missing document in mutation plan writeSet"
+          })
+        );
+      }
+      const updateRes = await domains.update(targetDoc);
+      if (!updateRes.ok) return err(updateRes.error);
+      const people = getDomainPeopleData(targetDoc.record);
+      const targetRoleId = plan.customData?.roleId;
+      const updatedRole = people.roles.find((r) => r.id === targetRoleId) ?? people.roles[0];
+      return ok({
+        result: updatedRole,
+        resultingRevisions: { [targetDoc.uuid]: updateRes.value.revision },
+        changed: true,
+        summary: `Unassigned occupant from role in domain '${targetDoc.name}'`
+      });
+    }
+  };
+  registry.register({
+    type: "people:unassign-role",
+    visibility: "public",
+    transactional: true,
+    description: "Authoritatively unassigns a notable from a role in a domain",
+    mutationDefinition: unassignRoleMutation,
+    handler: createTransactionalHandler(coordinator, unassignRoleMutation),
+    schemaValidator: (payload) => {
+      if (!payload || typeof payload !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Payload must be an object"
+          })
+        );
+      }
+      const p = payload;
+      if (typeof p.domainUuid !== "string" || !p.domainUuid) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "domainUuid is required"
+          })
+        );
+      }
+      if (!isOpaqueId(p.roleId, "role")) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Valid roleId (role_*) is required"
+          })
+        );
+      }
+      if (!isOpaqueId(p.notableId, "not")) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Valid notableId (not_*) is required"
+          })
+        );
+      }
+      return ok(payload);
+    },
+    permissionValidator: requireGmPermission3
+  });
+  const deleteRoleMutation = {
+    getLockKeys: (ctx) => [`domain:${resolveDomainId3(ctx.command.payload?.domainUuid)}`],
+    freshRead: async (ctx) => {
+      const readRes = await domains.read(resolveDomainId3(ctx.command.payload.domainUuid));
+      if (!readRes.ok) return readRes;
+      return ok({
+        revision: readRes.value.record.revision,
+        state: readRes.value
+      });
+    },
+    buildPlan: async (ctx, freshState) => {
+      const domainDoc = freshState.state;
+      const currentPeople = getDomainPeopleData(domainDoc.record);
+      const { roleId } = ctx.command.payload;
+      const existing = currentPeople.roles.find((r) => r.id === roleId);
+      if (!existing) {
+        return err(
+          createPublicError({
+            code: "DM_ROLE_NOT_FOUND",
+            category: "not-found",
+            message: `Role '${roleId}' not found in domain '${domainDoc.name}'`
+          })
+        );
+      }
+      const updatedRoles = currentPeople.roles.filter((r) => r.id !== roleId);
+      const updatedPeople = {
+        ...currentPeople,
+        roles: Object.freeze(updatedRoles)
+      };
+      const updatedRecord = withDomainPeopleData(domainDoc.record, updatedPeople);
+      const plan = createMutationPlan({
+        commandId: ctx.command.commandId,
+        lockKeys: [`domain:${domainDoc.uuid}`],
+        writeSet: [
+          {
+            targetRef: `domain:${domainDoc.uuid}`,
+            operationType: "update",
+            payload: {
+              ...domainDoc,
+              record: updatedRecord
+            }
+          }
+        ],
+        summary: `Delete role '${existing.customLabel ?? existing.definitionId}' (${roleId}) in domain '${domainDoc.name}'`
+      });
+      return ok(plan);
+    },
+    commit: async (plan) => {
+      const targetDoc = plan.writeSet[0]?.payload;
+      if (!targetDoc) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_MUTATION_PLAN",
+            category: "validation",
+            message: "Missing document in mutation plan writeSet"
+          })
+        );
+      }
+      const updateRes = await domains.update(targetDoc);
+      if (!updateRes.ok) return err(updateRes.error);
+      return ok({
+        result: { deletedRoleId: plan.commandId },
+        resultingRevisions: { [targetDoc.uuid]: updateRes.value.revision },
+        changed: true,
+        summary: `Deleted role in domain '${targetDoc.name}'`
+      });
+    }
+  };
+  registry.register({
+    type: "people:delete-role",
+    visibility: "public",
+    transactional: true,
+    description: "Authoritatively deletes a role in a domain",
+    mutationDefinition: deleteRoleMutation,
+    handler: createTransactionalHandler(coordinator, deleteRoleMutation),
+    schemaValidator: (payload) => {
+      if (!payload || typeof payload !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Payload must be an object"
+          })
+        );
+      }
+      const p = payload;
+      if (typeof p.domainUuid !== "string" || !p.domainUuid) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "domainUuid is required"
+          })
+        );
+      }
+      if (!isOpaqueId(p.roleId, "role")) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Valid roleId (role_*) is required"
+          })
+        );
+      }
+      return ok(payload);
+    },
+    permissionValidator: requireGmPermission3
+  });
+}
+
+// src/people/commands/operational-group-commands.ts
+function resolveDomainId4(domainUuid) {
+  return domainUuid.startsWith("JournalEntry.") ? domainUuid.slice("JournalEntry.".length) : domainUuid;
+}
+function requireGmPermission4(ctx) {
+  if (ctx.senderUserId !== null && ctx.senderUserId !== ctx.authorityUserId) {
+    return err(
+      createPublicError({
+        code: "DM_SECURITY_PERMISSION_DENIED",
+        category: "permission",
+        message: "Only GM can execute operational group commands"
+      })
+    );
+  }
+  return ok(true);
+}
+function registerOperationalGroupCommandHandlers(registry, coordinator, domains) {
+  const createOperationalGroupMutation = {
+    getLockKeys: (ctx) => [`domain:${resolveDomainId4(ctx.command.payload?.domainUuid)}`],
+    freshRead: async (ctx) => {
+      const readRes = await domains.read(resolveDomainId4(ctx.command.payload.domainUuid));
+      if (!readRes.ok) return readRes;
+      return ok({
+        revision: readRes.value.record.revision,
+        state: readRes.value
+      });
+    },
+    buildPlan: async (ctx, freshState) => {
+      const domainDoc = freshState.state;
+      const currentPeople = getDomainPeopleData(domainDoc.record);
+      const groupInput = ctx.command.payload.group;
+      const newGroupId = createOpaqueId("opg");
+      const candidate = {
+        id: newGroupId,
+        name: groupInput.name,
+        definitionId: groupInput.definitionId,
+        membershipMode: groupInput.membershipMode,
+        size: groupInput.size,
+        members: groupInput.members,
+        lifecycle: groupInput.lifecycle,
+        visibility: groupInput.visibility,
+        populationGroupId: groupInput.populationGroupId,
+        notes: groupInput.notes,
+        tags: groupInput.tags
+      };
+      const groupValidation = validateOperationalGroup(candidate);
+      if (!groupValidation.ok) {
+        return groupValidation;
+      }
+      const newGroup = groupValidation.value;
+      for (const memberId of newGroup.members) {
+        const notableExists = currentPeople.notables.some((n) => n.id === memberId);
+        if (!notableExists) {
+          return err(
+            createPublicError({
+              code: "DM_NOTABLE_NOT_FOUND",
+              category: "not-found",
+              message: `Member notable '${memberId}' does not exist in domain '${domainDoc.name}'`
+            })
+          );
+        }
+      }
+      if (newGroup.populationGroupId !== void 0) {
+        const popGroupExists = currentPeople.populationGroups.some(
+          (pg) => pg.id === newGroup.populationGroupId
+        );
+        if (!popGroupExists) {
+          return err(
+            createPublicError({
+              code: "DM_POPULATION_GROUP_NOT_FOUND",
+              category: "not-found",
+              message: `Linked population group '${newGroup.populationGroupId}' does not exist in domain '${domainDoc.name}'`
+            })
+          );
+        }
+      }
+      const updatedGroups = Object.freeze([...currentPeople.operationalGroups, newGroup]);
+      const updatedPeople = {
+        ...currentPeople,
+        operationalGroups: updatedGroups
+      };
+      const updatedRecord = withDomainPeopleData(domainDoc.record, updatedPeople);
+      const plan = createMutationPlan({
+        commandId: ctx.command.commandId,
+        lockKeys: [`domain:${domainDoc.uuid}`],
+        writeSet: [
+          {
+            targetRef: `domain:${domainDoc.uuid}`,
+            operationType: "update",
+            payload: {
+              ...domainDoc,
+              record: updatedRecord
+            }
+          }
+        ],
+        summary: `Create operational group '${newGroup.name}' in domain '${domainDoc.name}'`
+      });
+      return ok(plan);
+    },
+    commit: async (plan) => {
+      const targetDoc = plan.writeSet[0]?.payload;
+      if (!targetDoc) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_MUTATION_PLAN",
+            category: "validation",
+            message: "Missing document in mutation plan writeSet"
+          })
+        );
+      }
+      const updateRes = await domains.update(targetDoc);
+      if (!updateRes.ok) return err(updateRes.error);
+      const people = getDomainPeopleData(targetDoc.record);
+      const createdGroup = people.operationalGroups[people.operationalGroups.length - 1];
+      return ok({
+        result: createdGroup,
+        resultingRevisions: { [targetDoc.uuid]: updateRes.value.revision },
+        changed: true,
+        summary: `Created operational group in domain '${targetDoc.name}'`
+      });
+    }
+  };
+  registry.register({
+    type: "people:create-operational-group",
+    visibility: "public",
+    transactional: true,
+    description: "Authoritatively creates an operational group in a domain",
+    mutationDefinition: createOperationalGroupMutation,
+    handler: createTransactionalHandler(coordinator, createOperationalGroupMutation),
+    schemaValidator: (payload) => {
+      if (!payload || typeof payload !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Payload must be an object"
+          })
+        );
+      }
+      const p = payload;
+      if (typeof p.domainUuid !== "string" || !p.domainUuid) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "domainUuid is required"
+          })
+        );
+      }
+      if (!p.group || typeof p.group !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "group is required"
+          })
+        );
+      }
+      return ok(payload);
+    },
+    permissionValidator: requireGmPermission4
+  });
+  const updateOperationalGroupMutation = {
+    getLockKeys: (ctx) => [`domain:${resolveDomainId4(ctx.command.payload?.domainUuid)}`],
+    freshRead: async (ctx) => {
+      const readRes = await domains.read(resolveDomainId4(ctx.command.payload.domainUuid));
+      if (!readRes.ok) return readRes;
+      return ok({
+        revision: readRes.value.record.revision,
+        state: readRes.value
+      });
+    },
+    buildPlan: async (ctx, freshState) => {
+      const domainDoc = freshState.state;
+      const currentPeople = getDomainPeopleData(domainDoc.record);
+      const { groupId, update } = ctx.command.payload;
+      const groupIndex = currentPeople.operationalGroups.findIndex((g) => g.id === groupId);
+      if (groupIndex === -1) {
+        return err(
+          createPublicError({
+            code: "DM_OPERATIONAL_GROUP_NOT_FOUND",
+            category: "not-found",
+            message: `OperationalGroup '${groupId}' not found in domain '${domainDoc.name}'`
+          })
+        );
+      }
+      const existing = currentPeople.operationalGroups[groupIndex];
+      const mergedCandidate = {
+        id: existing.id,
+        name: update.name !== void 0 ? update.name : existing.name,
+        definitionId: existing.definitionId,
+        membershipMode: update.membershipMode !== void 0 ? update.membershipMode : existing.membershipMode,
+        size: update.size !== void 0 ? update.size : existing.size,
+        members: update.members !== void 0 ? update.members : existing.members,
+        lifecycle: update.lifecycle !== void 0 ? update.lifecycle : existing.lifecycle,
+        visibility: update.visibility !== void 0 ? update.visibility : existing.visibility,
+        populationGroupId: update.populationGroupId === null ? void 0 : update.populationGroupId !== void 0 ? update.populationGroupId : existing.populationGroupId,
+        notes: update.notes === null ? void 0 : update.notes !== void 0 ? update.notes : existing.notes,
+        tags: update.tags !== void 0 ? update.tags : existing.tags
+      };
+      const groupValidation = validateOperationalGroup(mergedCandidate);
+      if (!groupValidation.ok) {
+        return groupValidation;
+      }
+      const updatedGroup = groupValidation.value;
+      if (updatedGroup.membershipMode !== "abstract" && updatedGroup.members.length > 0) {
+        for (const notableId of updatedGroup.members) {
+          const notableExists = currentPeople.notables.some((n) => n.id === notableId);
+          if (!notableExists) {
+            return err(
+              createPublicError({
+                code: "DM_OPERATIONAL_GROUP_NOTABLE_NOT_FOUND",
+                category: "not-found",
+                message: `Member notable '${notableId}' not found in domain '${domainDoc.name}'`
+              })
+            );
+          }
+        }
+      }
+      if (updatedGroup.populationGroupId) {
+        const popGroupExists = currentPeople.populationGroups.some((g) => g.id === updatedGroup.populationGroupId);
+        if (!popGroupExists) {
+          return err(
+            createPublicError({
+              code: "DM_OPERATIONAL_GROUP_POP_NOT_FOUND",
+              category: "not-found",
+              message: `Linked PopulationGroup '${updatedGroup.populationGroupId}' not found in domain '${domainDoc.name}'`
+            })
+          );
+        }
+      }
+      const updatedGroups = [...currentPeople.operationalGroups];
+      updatedGroups[groupIndex] = updatedGroup;
+      const updatedPeople = {
+        ...currentPeople,
+        operationalGroups: Object.freeze(updatedGroups)
+      };
+      const updatedRecord = withDomainPeopleData(domainDoc.record, updatedPeople);
+      const plan = createMutationPlan({
+        commandId: ctx.command.commandId,
+        lockKeys: [`domain:${domainDoc.uuid}`],
+        customData: { groupId },
+        writeSet: [
+          {
+            targetRef: `domain:${domainDoc.uuid}`,
+            operationType: "update",
+            payload: {
+              ...domainDoc,
+              record: updatedRecord
+            }
+          }
+        ],
+        summary: `Update operational group '${updatedGroup.name}' in domain '${domainDoc.name}'`
+      });
+      return ok(plan);
+    },
+    commit: async (plan) => {
+      const targetDoc = plan.writeSet[0]?.payload;
+      if (!targetDoc) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_MUTATION_PLAN",
+            category: "validation",
+            message: "Missing document in mutation plan writeSet"
+          })
+        );
+      }
+      const updateRes = await domains.update(targetDoc);
+      if (!updateRes.ok) return err(updateRes.error);
+      const people = getDomainPeopleData(targetDoc.record);
+      const targetGroupId = plan.customData?.groupId;
+      const updatedGroup = people.operationalGroups.find((g) => g.id === targetGroupId) ?? people.operationalGroups[0];
+      return ok({
+        result: updatedGroup,
+        resultingRevisions: { [targetDoc.uuid]: updateRes.value.revision },
+        changed: true,
+        summary: `Updated operational group in domain '${targetDoc.name}'`
+      });
+    }
+  };
+  registry.register({
+    type: "people:update-operational-group",
+    visibility: "public",
+    transactional: true,
+    description: "Authoritatively updates an operational group in a domain",
+    mutationDefinition: updateOperationalGroupMutation,
+    handler: createTransactionalHandler(coordinator, updateOperationalGroupMutation),
+    schemaValidator: (payload) => {
+      if (!payload || typeof payload !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Payload must be an object"
+          })
+        );
+      }
+      const p = payload;
+      if (typeof p.domainUuid !== "string" || !p.domainUuid) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "domainUuid is required"
+          })
+        );
+      }
+      if (!isOpaqueId(p.groupId, "opg")) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Valid groupId (opg_*) is required"
+          })
+        );
+      }
+      if (!p.update || typeof p.update !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "update is required"
+          })
+        );
+      }
+      return ok(payload);
+    },
+    permissionValidator: requireGmPermission4
+  });
+  const deleteOperationalGroupMutation = {
+    getLockKeys: (ctx) => [`domain:${resolveDomainId4(ctx.command.payload?.domainUuid)}`],
+    freshRead: async (ctx) => {
+      const readRes = await domains.read(resolveDomainId4(ctx.command.payload.domainUuid));
+      if (!readRes.ok) return readRes;
+      return ok({
+        revision: readRes.value.record.revision,
+        state: readRes.value
+      });
+    },
+    buildPlan: async (ctx, freshState) => {
+      const domainDoc = freshState.state;
+      const currentPeople = getDomainPeopleData(domainDoc.record);
+      const { groupId } = ctx.command.payload;
+      const existing = currentPeople.operationalGroups.find((g) => g.id === groupId);
+      if (!existing) {
+        return err(
+          createPublicError({
+            code: "DM_OPERATIONAL_GROUP_NOT_FOUND",
+            category: "not-found",
+            message: `OperationalGroup '${groupId}' not found in domain '${domainDoc.name}'`
+          })
+        );
+      }
+      const updatedGroups = currentPeople.operationalGroups.filter((g) => g.id !== groupId);
+      const updatedPeople = {
+        ...currentPeople,
+        operationalGroups: Object.freeze(updatedGroups)
+      };
+      const updatedRecord = withDomainPeopleData(domainDoc.record, updatedPeople);
+      const plan = createMutationPlan({
+        commandId: ctx.command.commandId,
+        lockKeys: [`domain:${domainDoc.uuid}`],
+        writeSet: [
+          {
+            targetRef: `domain:${domainDoc.uuid}`,
+            operationType: "update",
+            payload: {
+              ...domainDoc,
+              record: updatedRecord
+            }
+          }
+        ],
+        summary: `Delete operational group '${existing.name}' (${groupId}) in domain '${domainDoc.name}'`
+      });
+      return ok(plan);
+    },
+    commit: async (plan) => {
+      const targetDoc = plan.writeSet[0]?.payload;
+      if (!targetDoc) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_MUTATION_PLAN",
+            category: "validation",
+            message: "Missing document in mutation plan writeSet"
+          })
+        );
+      }
+      const updateRes = await domains.update(targetDoc);
+      if (!updateRes.ok) return err(updateRes.error);
+      return ok({
+        result: { deletedGroupId: plan.commandId },
+        resultingRevisions: { [targetDoc.uuid]: updateRes.value.revision },
+        changed: true,
+        summary: `Deleted operational group in domain '${targetDoc.name}'`
+      });
+    }
+  };
+  registry.register({
+    type: "people:delete-operational-group",
+    visibility: "public",
+    transactional: true,
+    description: "Authoritatively deletes an operational group in a domain",
+    mutationDefinition: deleteOperationalGroupMutation,
+    handler: createTransactionalHandler(coordinator, deleteOperationalGroupMutation),
+    schemaValidator: (payload) => {
+      if (!payload || typeof payload !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Payload must be an object"
+          })
+        );
+      }
+      const p = payload;
+      if (typeof p.domainUuid !== "string" || !p.domainUuid) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "domainUuid is required"
+          })
+        );
+      }
+      if (!isOpaqueId(p.groupId, "opg")) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Valid groupId (opg_*) is required"
+          })
+        );
+      }
+      return ok(payload);
+    },
+    permissionValidator: requireGmPermission4
+  });
+}
+
+// src/people/workforce/workforce-calculator.ts
+function resolveOperationalGroupWorkforceType(definitionId) {
+  switch (definitionId) {
+    case "domain-manager:labor-squad":
+      return "general";
+    case "domain-manager:militia":
+    case "domain-manager:scout-patrol":
+      return "military";
+    default:
+      return "general";
+  }
+}
+function calculateWorkforce(people, nowReal = Date.now(), availableTypes = DEFAULT_WORKFORCE_TYPES) {
+  const typeMap = /* @__PURE__ */ new Map();
+  for (const t of availableTypes) {
+    typeMap.set(t.id, {
+      capacity: 0,
+      committed: 0,
+      reserved: 0,
+      contributions: []
+    });
+  }
+  function ensureType(typeId) {
+    let entry = typeMap.get(typeId);
+    if (!entry) {
+      entry = {
+        capacity: 0,
+        committed: 0,
+        reserved: 0,
+        contributions: []
+      };
+      typeMap.set(typeId, entry);
+    }
+    return entry;
+  }
+  const warnings = [];
+  const populationGroupLinkedDeductions = /* @__PURE__ */ new Map();
+  const opGroups = people.operationalGroups ?? [];
+  for (const og of opGroups) {
+    if (og.lifecycle !== "active") {
+      continue;
+    }
+    const typeId = resolveOperationalGroupWorkforceType(og.definitionId);
+    const entry = ensureType(typeId);
+    entry.capacity += og.size;
+    entry.contributions.push({
+      sourceId: og.id,
+      sourceType: "operational-group",
+      sourceName: og.name,
+      amount: og.size
+    });
+    if (og.populationGroupId) {
+      const prev = populationGroupLinkedDeductions.get(og.populationGroupId) ?? 0;
+      populationGroupLinkedDeductions.set(og.populationGroupId, prev + og.size);
+    }
+  }
+  const popGroups = people.populationGroups ?? [];
+  for (const pg of popGroups) {
+    const contributions = pg.workforceContributions;
+    if (contributions && Array.isArray(contributions)) {
+      for (const c of contributions) {
+        if (typeof c.workforceTypeId === "string" && typeof c.amount === "number" && c.amount > 0) {
+          const entry = ensureType(c.workforceTypeId);
+          const linkedDeduction = populationGroupLinkedDeductions.get(pg.id) ?? 0;
+          const netContribution = Math.max(0, c.amount - linkedDeduction);
+          if (netContribution < c.amount) {
+            warnings.push(
+              `PopulationGroup '${pg.name}' workforce contribution of ${c.amount} reduced to ${netContribution} to prevent double-counting linked operational groups.`
+            );
+          }
+          if (netContribution > 0) {
+            entry.capacity += netContribution;
+            entry.contributions.push({
+              sourceId: pg.id,
+              sourceType: "population-group",
+              sourceName: pg.name,
+              amount: netContribution,
+              deductedFromLinked: netContribution < c.amount
+            });
+          }
+        }
+      }
+    }
+  }
+  const assignments = people.assignments ?? [];
+  for (const asg of assignments) {
+    if (asg.status === "active") {
+      const entry = ensureType(asg.workforceTypeId);
+      entry.committed += asg.amount;
+    }
+  }
+  const reservations = people.reservations ?? [];
+  for (const resv of reservations) {
+    if (resv.status === "active") {
+      if (resv.expiresAtReal !== void 0 && resv.expiresAtReal < nowReal) {
+        continue;
+      }
+      const entry = ensureType(resv.workforceTypeId);
+      entry.reserved += resv.amount;
+    }
+  }
+  const typesRecord = {};
+  let totalCapacity = 0;
+  let totalCommitted = 0;
+  let totalReserved = 0;
+  let totalAvailable = 0;
+  let isAnyOvercommitted = false;
+  for (const [typeId, data] of typeMap.entries()) {
+    const available = data.capacity - data.committed - data.reserved;
+    const isOvercommitted = available < 0;
+    if (isOvercommitted) {
+      isAnyOvercommitted = true;
+      warnings.push(
+        `Workforce type '${typeId}' is overcommitted: capacity=${data.capacity}, committed=${data.committed}, reserved=${data.reserved}, available=${available}`
+      );
+    }
+    typesRecord[typeId] = {
+      workforceTypeId: typeId,
+      capacity: data.capacity,
+      committed: data.committed,
+      reserved: data.reserved,
+      available,
+      isOvercommitted,
+      contributions: Object.freeze([...data.contributions])
+    };
+    totalCapacity += data.capacity;
+    totalCommitted += data.committed;
+    totalReserved += data.reserved;
+    totalAvailable += available;
+  }
+  return {
+    types: Object.freeze(typesRecord),
+    totalCapacity,
+    totalCommitted,
+    totalReserved,
+    totalAvailable,
+    isAnyOvercommitted,
+    warnings: Object.freeze(warnings)
+  };
+}
+
+// src/people/commands/assignment-commands.ts
+function getSourceCapacity(people, sourceRef, workforceTypeId, nowReal = Date.now()) {
+  const opGroup = people.operationalGroups?.find((og) => og.id === sourceRef);
+  if (opGroup) {
+    const baseType = resolveOperationalGroupWorkforceType(opGroup.definitionId);
+    const capacity = opGroup.lifecycle === "active" && baseType === workforceTypeId ? opGroup.size : 0;
+    const committed = (people.assignments ?? []).filter((a) => a.sourceRef === sourceRef && a.workforceTypeId === workforceTypeId && a.status === "active").reduce((sum, a) => sum + a.amount, 0);
+    const reserved = (people.reservations ?? []).filter((r) => r.sourceRef === sourceRef && r.workforceTypeId === workforceTypeId && r.status === "active" && (r.expiresAtReal === void 0 || r.expiresAtReal >= nowReal)).reduce((sum, r) => sum + r.amount, 0);
+    return {
+      capacity,
+      committed,
+      reserved,
+      available: capacity - committed - reserved
+    };
+  }
+  const popGroup = people.populationGroups?.find((pg) => pg.id === sourceRef);
+  if (popGroup) {
+    const contr = (popGroup.workforceContributions ?? []).filter((c) => c.workforceTypeId === workforceTypeId).reduce((sum, c) => sum + c.amount, 0);
+    const linkedDeduction = (people.operationalGroups ?? []).filter((og) => og.populationGroupId === popGroup.id && og.lifecycle === "active" && resolveOperationalGroupWorkforceType(og.definitionId) === workforceTypeId).reduce((sum, og) => sum + og.size, 0);
+    const capacity = Math.max(0, contr - linkedDeduction);
+    const committed = (people.assignments ?? []).filter((a) => a.sourceRef === sourceRef && a.workforceTypeId === workforceTypeId && a.status === "active").reduce((sum, a) => sum + a.amount, 0);
+    const reserved = (people.reservations ?? []).filter((r) => r.sourceRef === sourceRef && r.workforceTypeId === workforceTypeId && r.status === "active" && (r.expiresAtReal === void 0 || r.expiresAtReal >= nowReal)).reduce((sum, r) => sum + r.amount, 0);
+    return {
+      capacity,
+      committed,
+      reserved,
+      available: capacity - committed - reserved
+    };
+  }
+  return null;
+}
+function resolveDomainId5(domainUuid) {
+  return domainUuid.startsWith("JournalEntry.") ? domainUuid.slice("JournalEntry.".length) : domainUuid;
+}
+function requireGmPermission5(ctx) {
+  if (ctx.senderUserId !== null && ctx.senderUserId !== ctx.authorityUserId) {
+    return err(
+      createPublicError({
+        code: "DM_SECURITY_PERMISSION_DENIED",
+        category: "permission",
+        message: "Only GM can execute workforce assignment commands"
+      })
+    );
+  }
+  return ok(true);
+}
+function registerAssignmentCommandHandlers(registry, coordinator, domains) {
+  const createAssignmentMutation = {
+    getLockKeys: (ctx) => [`domain:${resolveDomainId5(ctx.command.payload?.domainUuid)}`],
+    freshRead: async (ctx) => {
+      const readRes = await domains.read(resolveDomainId5(ctx.command.payload.domainUuid));
+      if (!readRes.ok) return readRes;
+      return ok({
+        revision: readRes.value.record.revision,
+        state: readRes.value
+      });
+    },
+    buildPlan: async (ctx, freshState) => {
+      const domainDoc = freshState.state;
+      const currentPeople = getDomainPeopleData(domainDoc.record);
+      const input = ctx.command.payload.assignment;
+      const newId = createOpaqueId("asg");
+      const candidate = {
+        id: newId,
+        sourceRef: input.sourceRef,
+        targetRef: input.targetRef,
+        workforceTypeId: input.workforceTypeId,
+        amount: input.amount,
+        createdAtReal: Date.now(),
+        notes: input.notes
+      };
+      const asgValidation = validateAssignment(candidate);
+      if (!asgValidation.ok) {
+        return asgValidation;
+      }
+      const newAsg = asgValidation.value;
+      if (!ctx.command.payload.allowOvercommit) {
+        const sourceCap = getSourceCapacity(currentPeople, newAsg.sourceRef, newAsg.workforceTypeId);
+        if (sourceCap !== null && sourceCap.available < newAsg.amount) {
+          return err(
+            createPublicError({
+              code: "DM_WORKFORCE_OVERCOMMIT",
+              category: "validation",
+              message: `Source '${newAsg.sourceRef}' does not have enough available '${newAsg.workforceTypeId}' workforce: available ${sourceCap.available} < requested ${newAsg.amount}`
+            })
+          );
+        }
+        const candidatePeople = {
+          ...currentPeople,
+          assignments: Object.freeze([...currentPeople.assignments, newAsg])
+        };
+        const wfReport = calculateWorkforce(candidatePeople);
+        const wfTypeStat = wfReport.types[newAsg.workforceTypeId];
+        if (wfTypeStat && wfTypeStat.isOvercommitted) {
+          return err(
+            createPublicError({
+              code: "DM_WORKFORCE_OVERCOMMIT",
+              category: "validation",
+              message: `Workforce type '${newAsg.workforceTypeId}' would be overcommitted: available ${wfTypeStat.available} < 0`
+            })
+          );
+        }
+      }
+      const updatedAssignments = Object.freeze([...currentPeople.assignments, newAsg]);
+      const updatedPeople = {
+        ...currentPeople,
+        assignments: updatedAssignments
+      };
+      const updatedRecord = withDomainPeopleData(domainDoc.record, updatedPeople);
+      const plan = createMutationPlan({
+        commandId: ctx.command.commandId,
+        lockKeys: [`domain:${domainDoc.uuid}`],
+        writeSet: [
+          {
+            targetRef: `domain:${domainDoc.uuid}`,
+            operationType: "update",
+            payload: {
+              ...domainDoc,
+              record: updatedRecord
+            }
+          }
+        ],
+        summary: `Assign ${newAsg.amount} of '${newAsg.workforceTypeId}' from '${newAsg.sourceRef}' to '${newAsg.targetRef}' in domain '${domainDoc.name}'`
+      });
+      return ok(plan);
+    },
+    commit: async (plan) => {
+      const targetDoc = plan.writeSet[0]?.payload;
+      if (!targetDoc) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_MUTATION_PLAN",
+            category: "validation",
+            message: "Missing document in mutation plan writeSet"
+          })
+        );
+      }
+      const updateRes = await domains.update(targetDoc);
+      if (!updateRes.ok) return err(updateRes.error);
+      const people = getDomainPeopleData(targetDoc.record);
+      const createdAsg = people.assignments[people.assignments.length - 1];
+      return ok({
+        result: createdAsg,
+        resultingRevisions: { [targetDoc.uuid]: updateRes.value.revision },
+        changed: true,
+        summary: `Assigned workforce in domain '${targetDoc.name}'`
+      });
+    }
+  };
+  registry.register({
+    type: "people:create-assignment",
+    visibility: "public",
+    transactional: true,
+    description: "Authoritatively creates an active workforce assignment",
+    mutationDefinition: createAssignmentMutation,
+    handler: createTransactionalHandler(coordinator, createAssignmentMutation),
+    schemaValidator: (payload) => {
+      if (!payload || typeof payload !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Payload must be an object"
+          })
+        );
+      }
+      const p = payload;
+      if (typeof p.domainUuid !== "string" || !p.domainUuid) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "domainUuid is required"
+          })
+        );
+      }
+      if (!p.assignment || typeof p.assignment !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "assignment object is required"
+          })
+        );
+      }
+      return ok(payload);
+    },
+    permissionValidator: requireGmPermission5
+  });
+  const cancelAssignmentMutation = {
+    getLockKeys: (ctx) => [`domain:${resolveDomainId5(ctx.command.payload?.domainUuid)}`],
+    freshRead: async (ctx) => {
+      const readRes = await domains.read(resolveDomainId5(ctx.command.payload.domainUuid));
+      if (!readRes.ok) return readRes;
+      return ok({
+        revision: readRes.value.record.revision,
+        state: readRes.value
+      });
+    },
+    buildPlan: async (ctx, freshState) => {
+      const domainDoc = freshState.state;
+      const currentPeople = getDomainPeopleData(domainDoc.record);
+      const { assignmentId } = ctx.command.payload;
+      const asgIndex = currentPeople.assignments.findIndex((a) => a.id === assignmentId);
+      if (asgIndex === -1) {
+        return err(
+          createPublicError({
+            code: "DM_ASSIGNMENT_NOT_FOUND",
+            category: "not-found",
+            message: `Assignment '${assignmentId}' not found in domain '${domainDoc.name}'`
+          })
+        );
+      }
+      const updatedAssignments = currentPeople.assignments.filter((a) => a.id !== assignmentId);
+      const updatedPeople = {
+        ...currentPeople,
+        assignments: Object.freeze(updatedAssignments)
+      };
+      const updatedRecord = withDomainPeopleData(domainDoc.record, updatedPeople);
+      const plan = createMutationPlan({
+        commandId: ctx.command.commandId,
+        lockKeys: [`domain:${domainDoc.uuid}`],
+        writeSet: [
+          {
+            targetRef: `domain:${domainDoc.uuid}`,
+            operationType: "update",
+            payload: {
+              ...domainDoc,
+              record: updatedRecord
+            }
+          }
+        ],
+        summary: `Cancel assignment '${assignmentId}' in domain '${domainDoc.name}'`
+      });
+      return ok(plan);
+    },
+    commit: async (plan) => {
+      const targetDoc = plan.writeSet[0]?.payload;
+      if (!targetDoc) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_MUTATION_PLAN",
+            category: "validation",
+            message: "Missing document in mutation plan writeSet"
+          })
+        );
+      }
+      const updateRes = await domains.update(targetDoc);
+      if (!updateRes.ok) return err(updateRes.error);
+      return ok({
+        result: { cancelledAssignmentId: plan.commandId },
+        resultingRevisions: { [targetDoc.uuid]: updateRes.value.revision },
+        changed: true,
+        summary: `Cancelled assignment in domain '${targetDoc.name}'`
+      });
+    }
+  };
+  registry.register({
+    type: "people:cancel-assignment",
+    visibility: "public",
+    transactional: true,
+    description: "Authoritatively cancels an assignment and frees committed workforce",
+    mutationDefinition: cancelAssignmentMutation,
+    handler: createTransactionalHandler(coordinator, cancelAssignmentMutation),
+    schemaValidator: (payload) => {
+      if (!payload || typeof payload !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Payload must be an object"
+          })
+        );
+      }
+      const p = payload;
+      if (typeof p.domainUuid !== "string" || !p.domainUuid) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "domainUuid is required"
+          })
+        );
+      }
+      if (!isOpaqueId(p.assignmentId, "asg")) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Valid assignmentId (asg_*) is required"
+          })
+        );
+      }
+      return ok(payload);
+    },
+    permissionValidator: requireGmPermission5
+  });
+  const createReservationMutation = {
+    getLockKeys: (ctx) => [`domain:${resolveDomainId5(ctx.command.payload?.domainUuid)}`],
+    freshRead: async (ctx) => {
+      const readRes = await domains.read(resolveDomainId5(ctx.command.payload.domainUuid));
+      if (!readRes.ok) return readRes;
+      return ok({
+        revision: readRes.value.record.revision,
+        state: readRes.value
+      });
+    },
+    buildPlan: async (ctx, freshState) => {
+      const domainDoc = freshState.state;
+      const currentPeople = getDomainPeopleData(domainDoc.record);
+      const input = ctx.command.payload.reservation;
+      const newId = createOpaqueId("resv");
+      const candidate = {
+        id: newId,
+        sourceRef: input.sourceRef,
+        targetRef: input.targetRef,
+        workforceTypeId: input.workforceTypeId,
+        amount: input.amount,
+        status: "active",
+        expiresAtReal: input.expiresAtReal,
+        notes: input.notes
+      };
+      const resvValidation = validateReservation(candidate);
+      if (!resvValidation.ok) {
+        return resvValidation;
+      }
+      const newResv = resvValidation.value;
+      const updatedReservations = Object.freeze([...currentPeople.reservations ?? [], newResv]);
+      const provisionalPeople = {
+        ...currentPeople,
+        reservations: updatedReservations
+      };
+      if (!ctx.command.payload.allowOvercommit) {
+        const sourceCap = getSourceCapacity(currentPeople, newResv.sourceRef, newResv.workforceTypeId, newResv.expiresAtReal);
+        if (sourceCap !== null && sourceCap.available < newResv.amount) {
+          return err(
+            createPublicError({
+              code: "DM_WORKFORCE_OVERCOMMIT",
+              category: "conflict",
+              message: `Source '${newResv.sourceRef}' does not have enough available '${newResv.workforceTypeId}' workforce: available ${sourceCap.available} < requested ${newResv.amount}`
+            })
+          );
+        }
+        const report = calculateWorkforce(provisionalPeople);
+        const typeRes = report.types[newResv.workforceTypeId];
+        if (typeRes && typeRes.available < 0) {
+          return err(
+            createPublicError({
+              code: "DM_WORKFORCE_OVERCOMMIT",
+              category: "conflict",
+              message: `Reservation requires ${newResv.amount} of '${newResv.workforceTypeId}', but only ${typeRes.capacity - typeRes.committed - (typeRes.reserved - newResv.amount)} is available`
+            })
+          );
+        }
+      }
+      const updatedRecord = withDomainPeopleData(domainDoc.record, provisionalPeople);
+      const plan = createMutationPlan({
+        commandId: ctx.command.commandId,
+        lockKeys: [`domain:${domainDoc.uuid}`],
+        writeSet: [
+          {
+            targetRef: `domain:${domainDoc.uuid}`,
+            operationType: "update",
+            payload: {
+              ...domainDoc,
+              record: updatedRecord
+            }
+          }
+        ],
+        summary: `Reserve ${newResv.amount} workforce (${newResv.workforceTypeId}) for '${newResv.targetRef}' in domain '${domainDoc.name}'`
+      });
+      return ok(plan);
+    },
+    commit: async (plan) => {
+      const targetDoc = plan.writeSet[0]?.payload;
+      if (!targetDoc) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_MUTATION_PLAN",
+            category: "validation",
+            message: "Missing document in mutation plan writeSet"
+          })
+        );
+      }
+      const updateRes = await domains.update(targetDoc);
+      if (!updateRes.ok) return err(updateRes.error);
+      const people = getDomainPeopleData(targetDoc.record);
+      const createdResv = people.reservations[people.reservations.length - 1];
+      return ok({
+        result: createdResv,
+        resultingRevisions: { [targetDoc.uuid]: updateRes.value.revision },
+        changed: true,
+        summary: `Created workforce reservation in domain '${targetDoc.name}'`
+      });
+    }
+  };
+  registry.register({
+    type: "people:create-reservation",
+    visibility: "public",
+    transactional: true,
+    description: "Authoritatively creates a workforce reservation",
+    mutationDefinition: createReservationMutation,
+    handler: createTransactionalHandler(coordinator, createReservationMutation),
+    schemaValidator: (payload) => {
+      if (!payload || typeof payload !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Payload must be an object"
+          })
+        );
+      }
+      const p = payload;
+      if (typeof p.domainUuid !== "string" || !p.domainUuid) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "domainUuid is required"
+          })
+        );
+      }
+      if (!p.reservation || typeof p.reservation !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "reservation is required"
+          })
+        );
+      }
+      return ok(payload);
+    },
+    permissionValidator: requireGmPermission5
+  });
+  const releaseReservationMutation = {
+    getLockKeys: (ctx) => [`domain:${resolveDomainId5(ctx.command.payload?.domainUuid)}`],
+    freshRead: async (ctx) => {
+      const readRes = await domains.read(resolveDomainId5(ctx.command.payload.domainUuid));
+      if (!readRes.ok) return readRes;
+      return ok({
+        revision: readRes.value.record.revision,
+        state: readRes.value
+      });
+    },
+    buildPlan: async (ctx, freshState) => {
+      const domainDoc = freshState.state;
+      const currentPeople = getDomainPeopleData(domainDoc.record);
+      const { reservationId } = ctx.command.payload;
+      const resvIndex = currentPeople.reservations.findIndex((r) => r.id === reservationId);
+      if (resvIndex === -1) {
+        return err(
+          createPublicError({
+            code: "DM_RESERVATION_NOT_FOUND",
+            category: "not-found",
+            message: `Reservation '${reservationId}' not found in domain '${domainDoc.name}'`
+          })
+        );
+      }
+      const updatedReservations = currentPeople.reservations.filter((r) => r.id !== reservationId);
+      const updatedPeople = {
+        ...currentPeople,
+        reservations: Object.freeze(updatedReservations)
+      };
+      const updatedRecord = withDomainPeopleData(domainDoc.record, updatedPeople);
+      const plan = createMutationPlan({
+        commandId: ctx.command.commandId,
+        lockKeys: [`domain:${domainDoc.uuid}`],
+        writeSet: [
+          {
+            targetRef: `domain:${domainDoc.uuid}`,
+            operationType: "update",
+            payload: {
+              ...domainDoc,
+              record: updatedRecord
+            }
+          }
+        ],
+        summary: `Release reservation '${reservationId}' in domain '${domainDoc.name}'`
+      });
+      return ok(plan);
+    },
+    commit: async (plan) => {
+      const targetDoc = plan.writeSet[0]?.payload;
+      if (!targetDoc) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_MUTATION_PLAN",
+            category: "validation",
+            message: "Missing document in mutation plan writeSet"
+          })
+        );
+      }
+      const updateRes = await domains.update(targetDoc);
+      if (!updateRes.ok) return err(updateRes.error);
+      return ok({
+        result: { releasedReservationId: plan.commandId },
+        resultingRevisions: { [targetDoc.uuid]: updateRes.value.revision },
+        changed: true,
+        summary: `Released reservation in domain '${targetDoc.name}'`
+      });
+    }
+  };
+  registry.register({
+    type: "people:release-reservation",
+    visibility: "public",
+    transactional: true,
+    description: "Authoritatively releases a reservation and frees reserved workforce",
+    mutationDefinition: releaseReservationMutation,
+    handler: createTransactionalHandler(coordinator, releaseReservationMutation),
+    schemaValidator: (payload) => {
+      if (!payload || typeof payload !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Payload must be an object"
+          })
+        );
+      }
+      const p = payload;
+      if (typeof p.domainUuid !== "string" || !p.domainUuid) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "domainUuid is required"
+          })
+        );
+      }
+      if (!isOpaqueId(p.reservationId, "resv")) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Valid reservationId (resv_*) is required"
+          })
+        );
+      }
+      return ok(payload);
+    },
+    permissionValidator: requireGmPermission5
+  });
+}
+
+// src/people/population/population-calculator.ts
+function calculatePopulation(state, groups) {
+  const warnings = [];
+  switch (state.mode) {
+    case "manual": {
+      return {
+        total: state.total,
+        precision: state.total === null ? "unknown" : state.precision,
+        warnings: Object.freeze(warnings)
+      };
+    }
+    case "sumGroups": {
+      const includedGroups = groups.filter((g) => g.includedInTotal);
+      if (includedGroups.length === 0) {
+        return {
+          total: 0,
+          precision: "exact",
+          warnings: Object.freeze(warnings)
+        };
+      }
+      let hasNull = false;
+      let hasNumber = false;
+      let sum = 0;
+      for (const g of includedGroups) {
+        if (g.count === null) {
+          hasNull = true;
+        } else {
+          hasNumber = true;
+          sum += g.count;
+          if (!Number.isSafeInteger(sum)) {
+            warnings.push("DM_POPULATION_SUM_OVERFLOW: Population group sum exceeds maximum safe integer");
+          }
+        }
+      }
+      if (hasNull && !hasNumber) {
+        return {
+          total: null,
+          precision: "unknown",
+          warnings: Object.freeze(warnings)
+        };
+      }
+      if (hasNull) {
+        warnings.push("DM_POPULATION_PARTIAL_UNKNOWN: Some included population groups have unknown counts");
+        return {
+          total: sum,
+          precision: "estimated",
+          warnings: Object.freeze(warnings)
+        };
+      }
+      const anyEstimated = includedGroups.some((g) => g.precision === "estimated");
+      if (anyEstimated) {
+        return {
+          total: sum,
+          precision: "estimated",
+          warnings: Object.freeze(warnings)
+        };
+      }
+      return {
+        total: sum,
+        precision: "exact",
+        warnings: Object.freeze(warnings)
+      };
+    }
+    case "hybrid": {
+      const includedGroups = groups.filter((g) => g.includedInTotal);
+      let groupsSum = 0;
+      let hasNullGroup = false;
+      for (const g of includedGroups) {
+        if (g.count === null) {
+          hasNullGroup = true;
+        } else {
+          groupsSum += g.count;
+        }
+      }
+      if (hasNullGroup) {
+        warnings.push("DM_POPULATION_HYBRID_PARTIAL_UNKNOWN: Some subset groups have unknown counts");
+      }
+      if (state.total !== null && groupsSum > state.total) {
+        warnings.push(
+          `DM_POPULATION_GROUPS_EXCEED_TOTAL: Total of included population groups (${groupsSum}) exceeds declared domain population (${state.total})`
+        );
+      }
+      return {
+        total: state.total,
+        precision: state.total === null ? "unknown" : state.precision,
+        warnings: Object.freeze(warnings)
+      };
+    }
+  }
+}
+
+// src/people/repositories/people-repository.ts
+var PeopleRepository = class {
+  #domainRepository;
+  constructor(domainRepository) {
+    this.#domainRepository = domainRepository;
+  }
+  async getPeopleData(domainUuid) {
+    const id = domainUuid.startsWith("JournalEntry.") ? domainUuid.slice("JournalEntry.".length) : domainUuid;
+    const domainRes = await this.#domainRepository.read(id);
+    if (!domainRes.ok) {
+      return domainRes;
+    }
+    return tryGetDomainPeopleData(domainRes.value.record);
+  }
+  async getPopulation(domainUuid) {
+    const peopleRes = await this.getPeopleData(domainUuid);
+    if (!peopleRes.ok) {
+      return peopleRes;
+    }
+    const { population, populationGroups } = peopleRes.value;
+    const resolution = calculatePopulation(population, populationGroups);
+    return ok({
+      state: population,
+      resolution
+    });
+  }
+  async getPopulationGroups(domainUuid) {
+    const peopleRes = await this.getPeopleData(domainUuid);
+    if (!peopleRes.ok) {
+      return peopleRes;
+    }
+    return ok(peopleRes.value.populationGroups);
+  }
+  async getPopulationGroup(domainUuid, groupId) {
+    const groupsRes = await this.getPopulationGroups(domainUuid);
+    if (!groupsRes.ok) {
+      return groupsRes;
+    }
+    const found = groupsRes.value.find((g) => g.id === groupId);
+    if (!found) {
+      return err(
+        createPublicError({
+          code: "DM_POPULATION_GROUP_NOT_FOUND",
+          category: "not-found",
+          message: `PopulationGroup '${groupId}' not found in domain '${domainUuid}'`
+        })
+      );
+    }
+    return ok(found);
+  }
+  async getNotables(domainUuid, options = {}) {
+    const peopleRes = await this.getPeopleData(domainUuid);
+    if (!peopleRes.ok) {
+      return peopleRes;
+    }
+    const notables = peopleRes.value.notables;
+    if (options.viewerIsGm) {
+      return ok(notables);
+    }
+    return ok(notables.filter((n) => n.visibility !== "secret"));
+  }
+  async getNotable(domainUuid, notableId, options = {}) {
+    const notablesRes = await this.getNotables(domainUuid, options);
+    if (!notablesRes.ok) {
+      return notablesRes;
+    }
+    const found = notablesRes.value.find((n) => n.id === notableId);
+    if (!found) {
+      return err(
+        createPublicError({
+          code: "DM_NOTABLE_NOT_FOUND",
+          category: "not-found",
+          message: `Notable '${notableId}' not found in domain '${domainUuid}'`
+        })
+      );
+    }
+    return ok(found);
+  }
+  async getNotableStatus(domainUuid, notableId, actorResolver, options = {}) {
+    const notableRes = await this.getNotable(domainUuid, notableId, options);
+    if (!notableRes.ok) {
+      return notableRes;
+    }
+    return ok(resolveNotableStatus(notableRes.value, actorResolver));
+  }
+  async getRoles(domainUuid, options = {}) {
+    const peopleRes = await this.getPeopleData(domainUuid);
+    if (!peopleRes.ok) {
+      return peopleRes;
+    }
+    const roles = peopleRes.value.roles;
+    if (options.viewerIsGm) {
+      return ok(roles);
+    }
+    return ok(roles.filter((r) => r.visibility !== "secret"));
+  }
+  async getRole(domainUuid, roleId, options = {}) {
+    const rolesRes = await this.getRoles(domainUuid, options);
+    if (!rolesRes.ok) {
+      return rolesRes;
+    }
+    const found = rolesRes.value.find((r) => r.id === roleId);
+    if (!found) {
+      return err(
+        createPublicError({
+          code: "DM_ROLE_NOT_FOUND",
+          category: "not-found",
+          message: `Role '${roleId}' not found in domain '${domainUuid}'`
+        })
+      );
+    }
+    return ok(found);
+  }
+  async getOperationalGroups(domainUuid, options = {}) {
+    const peopleRes = await this.getPeopleData(domainUuid);
+    if (!peopleRes.ok) {
+      return peopleRes;
+    }
+    const groups = peopleRes.value.operationalGroups;
+    if (options.viewerIsGm) {
+      return ok(groups);
+    }
+    return ok(groups.filter((g) => g.visibility !== "secret"));
+  }
+  async getOperationalGroup(domainUuid, groupId, options = {}) {
+    const groupsRes = await this.getOperationalGroups(domainUuid, options);
+    if (!groupsRes.ok) {
+      return groupsRes;
+    }
+    const found = groupsRes.value.find((g) => g.id === groupId);
+    if (!found) {
+      return err(
+        createPublicError({
+          code: "DM_OPERATIONAL_GROUP_NOT_FOUND",
+          category: "not-found",
+          message: `OperationalGroup '${groupId}' not found in domain '${domainUuid}'`
+        })
+      );
+    }
+    return ok(found);
+  }
+  async getWorkforce(domainUuid, nowReal) {
+    const peopleRes = await this.getPeopleData(domainUuid);
+    if (!peopleRes.ok) {
+      return peopleRes;
+    }
+    return ok(calculateWorkforce(peopleRes.value, nowReal));
+  }
+  async getAssignments(domainUuid) {
+    const peopleRes = await this.getPeopleData(domainUuid);
+    if (!peopleRes.ok) {
+      return peopleRes;
+    }
+    return ok(peopleRes.value.assignments ?? []);
+  }
+  async getReservations(domainUuid) {
+    const peopleRes = await this.getPeopleData(domainUuid);
+    if (!peopleRes.ok) {
+      return peopleRes;
+    }
+    return ok(peopleRes.value.reservations ?? []);
+  }
+};
+
+// src/aggregation/capability-resolver.ts
+var ExplicitDomainCapabilityProvider = class {
+  id = "domain-explicit";
+  resolveGrants(context) {
+    const record = context.domainRecord ?? context.domainDoc?.record;
+    if (!record) return [];
+    const explicitEnabled = record.definition?.capabilities?.enabled ?? [];
+    return explicitEnabled.map((capId) => ({
+      capabilityId: capId,
+      sourceType: "domain-explicit",
+      sourceId: context.domainUuid,
+      sourceLabel: "Domain Configuration"
+    }));
+  }
+};
+var PeopleRoleCapabilityProvider = class {
+  id = "people-role";
+  resolveGrants(context) {
+    const record = context.domainRecord ?? context.domainDoc?.record;
+    const people = context.peopleData ?? (record ? getDomainPeopleData(record) : void 0);
+    if (!people) return [];
+    const roleDefs = context.roleDefinitions ?? DEFAULT_ROLE_DEFINITIONS;
+    const grants = [];
+    for (const role of people.roles ?? []) {
+      const def = roleDefs.find((d) => d.id === role.definitionId);
+      if (!def || !Array.isArray(def.grants) || def.grants.length === 0) {
+        continue;
+      }
+      if (role.scope === "operational-group" && role.operationalGroupId) {
+        const group = (people.operationalGroups ?? []).find((g) => g.id === role.operationalGroupId);
+        if (!group || group.lifecycle === "disbanded") {
+          continue;
+        }
+      }
+      const policy = def.grantPolicy ?? "occupied";
+      let isGranted = false;
+      switch (policy) {
+        case "exists":
+          isGranted = true;
+          break;
+        case "occupied":
+          isGranted = role.occupants.length > 0;
+          break;
+        case "requirementsSatisfied": {
+          const evalResult = evaluateRole(role, roleDefs, people.operationalGroups);
+          isGranted = evalResult.isRequirementSatisfied && evalResult.isValidGroupRole !== false;
+          break;
+        }
+      }
+      if (isGranted) {
+        for (const capId of def.grants) {
+          grants.push({
+            capabilityId: capId,
+            sourceType: "role",
+            sourceId: role.id,
+            sourceLabel: role.customLabel ?? def.label
+          });
+        }
+      }
+    }
+    return grants;
+  }
+};
+var PeopleOperationalGroupCapabilityProvider = class {
+  id = "people-operational-group";
+  resolveGrants(context) {
+    const record = context.domainRecord ?? context.domainDoc?.record;
+    const people = context.peopleData ?? (record ? getDomainPeopleData(record) : void 0);
+    if (!people) return [];
+    const groupDefs = context.operationalGroupDefinitions ?? DEFAULT_OPERATIONAL_GROUP_DEFINITIONS;
+    const grants = [];
+    for (const group of people.operationalGroups ?? []) {
+      if (group.lifecycle === "disbanded") {
+        continue;
+      }
+      const def = groupDefs.find((d) => d.id === group.definitionId);
+      if (!def || !Array.isArray(def.grants) || def.grants.length === 0) {
+        continue;
+      }
+      if (group.lifecycle === "inactive" && !def.keepGrantWhenInactive) {
+        continue;
+      }
+      for (const capId of def.grants) {
+        grants.push({
+          capabilityId: capId,
+          sourceType: "operational-group",
+          sourceId: group.id,
+          sourceLabel: group.name
+        });
+      }
+    }
+    return grants;
+  }
+};
+var CapabilityResolver = class {
+  #providers = [];
+  constructor(providers) {
+    if (providers) {
+      for (const p of providers) {
+        this.registerProvider(p);
+      }
+    }
+  }
+  registerProvider(provider) {
+    if (this.#providers.some((p) => p.id === provider.id)) {
+      throw new Error(`Duplicate capability grant provider '${provider.id}'`);
+    }
+    this.#providers.push(provider);
+  }
+  resolveEffectiveCapabilities(context) {
+    const grantsMap = /* @__PURE__ */ new Map();
+    const explicitSet = /* @__PURE__ */ new Set();
+    const record = context.domainRecord ?? context.domainDoc?.record;
+    if (record?.definition?.capabilities?.enabled) {
+      for (const cap of record.definition.capabilities.enabled) {
+        explicitSet.add(cap);
+      }
+    }
+    for (const provider of this.#providers) {
+      const providerGrants = provider.resolveGrants(context);
+      for (const grant of providerGrants) {
+        let list = grantsMap.get(grant.capabilityId);
+        if (!list) {
+          list = [];
+          grantsMap.set(grant.capabilityId, list);
+        }
+        list.push(grant);
+      }
+    }
+    const effectiveCapabilities = [];
+    const grantsByCapability = {};
+    const enabledCapabilityIds = [];
+    for (const [capId, sources] of grantsMap.entries()) {
+      const isExplicit = explicitSet.has(capId);
+      const frozenSources = Object.freeze([...sources]);
+      effectiveCapabilities.push({
+        capabilityId: capId,
+        isExplicit,
+        sources: frozenSources
+      });
+      grantsByCapability[capId] = frozenSources;
+      enabledCapabilityIds.push(capId);
+    }
+    return {
+      domainUuid: context.domainUuid,
+      effectiveCapabilities: Object.freeze(effectiveCapabilities),
+      enabledCapabilityIds: Object.freeze(enabledCapabilityIds),
+      grantsByCapability: Object.freeze(grantsByCapability)
+    };
+  }
+};
+function createDefaultCapabilityResolver() {
+  return new CapabilityResolver([
+    new ExplicitDomainCapabilityProvider(),
+    new PeopleRoleCapabilityProvider(),
+    new PeopleOperationalGroupCapabilityProvider()
+  ]);
+}
+
+// src/projection/people/people-projection-service.ts
+var PeopleProjectionService = class {
+  #roleDefinitions;
+  #groupDefinitions;
+  constructor(options = {}) {
+    this.#roleDefinitions = options.roleDefinitions ?? DEFAULT_ROLE_DEFINITIONS;
+    this.#groupDefinitions = options.groupDefinitions ?? DEFAULT_OPERATIONAL_GROUP_DEFINITIONS;
+  }
+  project(domainUuid, rawPeople, viewer, options = {}) {
+    if (viewer.isGm) {
+      return this.#projectAdministrative(domainUuid, rawPeople, viewer, options);
+    }
+    return this.#projectViewer(domainUuid, rawPeople, viewer, options);
+  }
+  #projectAdministrative(domainUuid, rawPeople, viewer, options) {
+    const popRes = calculatePopulation(rawPeople.population, rawPeople.populationGroups);
+    const workforce = calculateWorkforce(rawPeople, options.nowReal);
+    const resolver = createDefaultCapabilityResolver();
+    const capabilities = resolver.resolveEffectiveCapabilities({
+      domainUuid,
+      domainRecord: options.domainCapabilities ? {
+        schemaVersion: 1,
+        definition: {
+          name: "Administrative View",
+          capabilities: { enabled: [...options.domainCapabilities] }
+        }
+      } : void 0,
+      peopleData: rawPeople,
+      roleDefinitions: this.#roleDefinitions,
+      operationalGroupDefinitions: this.#groupDefinitions
+    });
+    const hiddenSecretCounts = {
+      populationGroups: rawPeople.populationGroups.filter((g) => g.visibility === "secret").length,
+      notables: rawPeople.notables.filter((n) => n.visibility === "secret").length,
+      roles: rawPeople.roles.filter((r) => r.visibility === "secret").length,
+      operationalGroups: rawPeople.operationalGroups.filter((g) => g.visibility === "secret").length,
+      assignments: (rawPeople.assignments ?? []).filter((a) => a.visibility === "secret").length,
+      reservations: (rawPeople.reservations ?? []).filter((r) => r.visibility === "secret").length
+    };
+    return Object.freeze({
+      domainUuid,
+      viewer,
+      population: Object.freeze({
+        state: rawPeople.population,
+        resolution: popRes
+      }),
+      populationGroups: rawPeople.populationGroups,
+      notables: rawPeople.notables,
+      roles: rawPeople.roles,
+      operationalGroups: rawPeople.operationalGroups,
+      assignments: Object.freeze(rawPeople.assignments ?? []),
+      reservations: Object.freeze(rawPeople.reservations ?? []),
+      workforce,
+      capabilities,
+      rawPeopleData: rawPeople,
+      hiddenSecretCounts
+    });
+  }
+  #projectViewer(domainUuid, rawPeople, viewer, options) {
+    const visiblePopGroups = rawPeople.populationGroups.filter((g) => g.visibility !== "secret");
+    const secretGroupIds = new Set(
+      rawPeople.populationGroups.filter((g) => g.visibility === "secret").map((g) => g.id)
+    );
+    const visibleNotables = rawPeople.notables.filter((n) => n.visibility !== "secret");
+    const secretNotableIds = new Set(
+      rawPeople.notables.filter((n) => n.visibility === "secret").map((n) => n.id)
+    );
+    const visibleRoles = rawPeople.roles.filter((r) => r.visibility !== "secret").map((r) => {
+      const visibleOccupants = r.occupants.filter((occId) => !secretNotableIds.has(occId));
+      if (visibleOccupants.length === r.occupants.length) return r;
+      return {
+        ...r,
+        occupants: Object.freeze(visibleOccupants)
+      };
+    });
+    const visibleOpGroups = rawPeople.operationalGroups.filter((g) => g.visibility !== "secret").map((g) => {
+      const visibleMembers = g.members.filter((mId) => !secretNotableIds.has(mId));
+      if (visibleMembers.length === g.members.length) return g;
+      return {
+        ...g,
+        members: Object.freeze(visibleMembers)
+      };
+    });
+    const secretOpGroupIds = new Set(
+      rawPeople.operationalGroups.filter((g) => g.visibility === "secret").map((g) => g.id)
+    );
+    const visibleAssignments = (rawPeople.assignments ?? []).filter((a) => {
+      if (a.visibility === "secret") return false;
+      if (secretGroupIds.has(a.sourceRef)) return false;
+      if (secretOpGroupIds.has(a.sourceRef)) return false;
+      if (secretNotableIds.has(a.sourceRef)) return false;
+      return true;
+    });
+    const visibleReservations = (rawPeople.reservations ?? []).filter((r) => {
+      if (r.visibility === "secret") return false;
+      if (secretGroupIds.has(r.sourceRef)) return false;
+      if (secretOpGroupIds.has(r.sourceRef)) return false;
+      if (secretNotableIds.has(r.sourceRef)) return false;
+      return true;
+    });
+    let projectedPopState = rawPeople.population;
+    if (rawPeople.population.visibility === "secret") {
+      projectedPopState = {
+        mode: "manual",
+        total: null,
+        precision: "unknown",
+        visibility: "secret"
+      };
+    }
+    const popRes = calculatePopulation(projectedPopState, visiblePopGroups);
+    const projectedPeopleData = {
+      schemaVersion: rawPeople.schemaVersion,
+      population: projectedPopState,
+      populationGroups: Object.freeze(visiblePopGroups),
+      notables: Object.freeze(visibleNotables),
+      roles: Object.freeze(visibleRoles),
+      operationalGroups: Object.freeze(visibleOpGroups),
+      assignments: Object.freeze(visibleAssignments),
+      reservations: Object.freeze(visibleReservations)
+    };
+    const workforce = calculateWorkforce(projectedPeopleData, options.nowReal);
+    const resolver = createDefaultCapabilityResolver();
+    const capabilities = resolver.resolveEffectiveCapabilities({
+      domainUuid,
+      domainRecord: options.domainCapabilities ? {
+        schemaVersion: 1,
+        definition: {
+          name: "Viewer View",
+          capabilities: { enabled: [...options.domainCapabilities] }
+        }
+      } : void 0,
+      peopleData: projectedPeopleData,
+      roleDefinitions: this.#roleDefinitions,
+      operationalGroupDefinitions: this.#groupDefinitions
+    });
+    return Object.freeze({
+      domainUuid,
+      viewer,
+      population: Object.freeze({
+        state: projectedPopState,
+        resolution: popRes
+      }),
+      populationGroups: Object.freeze(visiblePopGroups),
+      notables: Object.freeze(visibleNotables),
+      roles: Object.freeze(visibleRoles),
+      operationalGroups: Object.freeze(visibleOpGroups),
+      assignments: Object.freeze(visibleAssignments),
+      reservations: Object.freeze(visibleReservations),
+      workforce,
+      capabilities
+    });
+  }
+};
+
+// src/aggregation/people-aggregation.ts
+var PeopleAggregationService = class {
+  #domains;
+  constructor(domains) {
+    this.#domains = domains;
+  }
+  queryPeopleAggregate(rootDomainUuid, options = {}) {
+    const rootId = rootDomainUuid.startsWith("JournalEntry.") ? rootDomainUuid.slice("JournalEntry.".length) : rootDomainUuid;
+    const rootDocRes = this.#domains.read(rootId);
+    if (!rootDocRes.ok) {
+      return rootDocRes;
+    }
+    const recursive = options.recursive ?? true;
+    const viewer = options.viewer ?? { userId: "system-authority", isGm: true };
+    const projectionService = new PeopleProjectionService({
+      roleDefinitions: options.roleDefinitions,
+      groupDefinitions: options.groupDefinitions
+    });
+    const warnings = [];
+    const visitedUuids = /* @__PURE__ */ new Set();
+    const domainBreakdown = [];
+    let hasEstimated = false;
+    let hasUnknown = false;
+    let hasNull = false;
+    let cycleDetected = false;
+    const queue = [
+      { doc: rootDocRes.value, depth: 0 }
+    ];
+    visitedUuids.add(rootDocRes.value.uuid);
+    while (queue.length > 0) {
+      const current = queue.shift();
+      const isRoot = current.depth === 0;
+      const people = getDomainPeopleData(current.doc.record);
+      const projected = projectionService.project(
+        current.doc.uuid,
+        people,
+        viewer,
+        { nowReal: options.nowReal }
+      );
+      const popRes = projected.population.resolution;
+      if (popRes.precision === "estimated") hasEstimated = true;
+      if (popRes.precision === "unknown") hasUnknown = true;
+      if (popRes.total === null) hasNull = true;
+      const wfCap = {};
+      for (const [typeId, res] of Object.entries(projected.workforce.types)) {
+        wfCap[typeId] = res.capacity;
+      }
+      domainBreakdown.push({
+        domainUuid: current.doc.uuid,
+        domainName: current.doc.name,
+        depth: current.depth,
+        isRoot,
+        population: {
+          total: popRes.total,
+          precision: popRes.precision
+        },
+        workforceCapacity: Object.freeze(wfCap),
+        notableCount: projected.notables.length,
+        roleCount: projected.roles.length,
+        operationalGroupCount: projected.operationalGroups.length
+      });
+      if (isRoot || recursive) {
+        const childrenRes = this.#domains.query({ parentDomainUuid: current.doc.uuid });
+        if (childrenRes.ok) {
+          for (const childDoc of childrenRes.value) {
+            if (visitedUuids.has(childDoc.uuid)) {
+              cycleDetected = true;
+              warnings.push(`Cycle detected involving domain '${childDoc.name}' (${childDoc.uuid})`);
+              continue;
+            }
+            visitedUuids.add(childDoc.uuid);
+            queue.push({ doc: childDoc, depth: current.depth + 1 });
+          }
+        }
+      }
+    }
+    let ownPopulation = null;
+    let descendantSum = 0;
+    let hasAnyDescendantCount = false;
+    const ownWorkforce = {};
+    const descendantWorkforce = {};
+    const totalWorkforce = {};
+    for (const item of domainBreakdown) {
+      if (item.isRoot) {
+        ownPopulation = item.population.total;
+        for (const [typeId, cap] of Object.entries(item.workforceCapacity)) {
+          ownWorkforce[typeId] = (ownWorkforce[typeId] ?? 0) + cap;
+          totalWorkforce[typeId] = (totalWorkforce[typeId] ?? 0) + cap;
+        }
+      } else {
+        if (item.population.total !== null) {
+          descendantSum += item.population.total;
+          hasAnyDescendantCount = true;
+        }
+        for (const [typeId, cap] of Object.entries(item.workforceCapacity)) {
+          descendantWorkforce[typeId] = (descendantWorkforce[typeId] ?? 0) + cap;
+          totalWorkforce[typeId] = (totalWorkforce[typeId] ?? 0) + cap;
+        }
+      }
+    }
+    const descendantPopulation = hasAnyDescendantCount ? descendantSum : domainBreakdown.length > 1 ? 0 : null;
+    let totalPopulation = null;
+    if (ownPopulation !== null || descendantPopulation !== null) {
+      totalPopulation = (ownPopulation ?? 0) + (descendantPopulation ?? 0);
+    }
+    let precision = "exact";
+    if (hasUnknown) {
+      precision = "unknown";
+    } else if (hasEstimated) {
+      precision = "estimated";
+    }
+    let completeness = "complete";
+    if (hasUnknown || hasNull) {
+      completeness = totalPopulation !== null && totalPopulation > 0 ? "partial" : "incomplete";
+    }
+    return ok({
+      rootDomainUuid: rootDocRes.value.uuid,
+      completeness,
+      precision,
+      totalPopulation,
+      ownPopulation,
+      descendantPopulation,
+      domainBreakdown: Object.freeze(domainBreakdown),
+      workforceSummary: {
+        ownCapacity: Object.freeze(ownWorkforce),
+        descendantCapacity: Object.freeze(descendantWorkforce),
+        totalCapacity: Object.freeze(totalWorkforce)
+      },
+      cycleDetected,
+      warnings: Object.freeze(warnings)
+    });
+  }
+};
+
+// src/aggregation/people-grants.ts
+function resolvePeopleEffectiveCapabilities(domainInput, roleDefinitions = DEFAULT_ROLE_DEFINITIONS, operationalGroupDefinitions = DEFAULT_OPERATIONAL_GROUP_DEFINITIONS) {
+  const record = "record" in domainInput ? domainInput.record : domainInput;
+  const domainUuid = "uuid" in domainInput ? domainInput.uuid : "unknown";
+  const resolver = createDefaultCapabilityResolver();
+  return resolver.resolveEffectiveCapabilities({
+    domainUuid,
+    domainRecord: record,
+    roleDefinitions,
+    operationalGroupDefinitions
+  });
+}
+
+// src/ui/domain-patterns/people/people-presenter.ts
+function buildPeopleViewModel(domainInput, options) {
+  const record = "record" in domainInput ? domainInput.record : domainInput;
+  const domainUuid = "uuid" in domainInput ? domainInput.uuid : "unknown";
+  const people = getDomainPeopleData(record);
+  const projectionService = new PeopleProjectionService({
+    roleDefinitions: options.customRoleDefinitions
+  });
+  const context = projectionService.project(
+    domainUuid,
+    people,
+    { userId: "viewer", isGm: options.viewerIsGm },
+    {
+      nowReal: options.nowReal,
+      domainCapabilities: record.definition?.capabilities?.enabled
+    }
+  );
+  let formattedTotal;
+  if (context.population.resolution.total === null) {
+    formattedTotal = "Unknown";
+  } else {
+    formattedTotal = `${context.population.resolution.total.toLocaleString("en-US")}${context.population.resolution.precision === "estimated" ? " (est.)" : ""}`;
+  }
+  const notableVMs = context.notables.map((n) => {
+    const status = resolveNotableStatus(n, options.actorResolver);
+    let badgeClass = "healthy";
+    if (status.isBrokenRef) badgeClass = "broken";
+    return {
+      notable: n,
+      status,
+      isSecret: n.visibility === "secret",
+      badgeClass
+    };
+  });
+  const roleDefs = options.customRoleDefinitions ?? DEFAULT_ROLE_DEFINITIONS;
+  const roleVMs = context.roles.map((r) => {
+    const evaluation = evaluateRole(r, roleDefs, context.operationalGroups);
+    let statusClass = "filled";
+    if (evaluation.isVacant) statusClass = "vacant";
+    else if (evaluation.isUnderstaffed) statusClass = "understaffed";
+    return {
+      evaluation,
+      isSecret: r.visibility === "secret",
+      statusClass
+    };
+  });
+  const opgVMs = context.operationalGroups.map((g) => ({
+    group: g,
+    isSecret: g.visibility === "secret",
+    statusClass: g.lifecycle
+  }));
+  return {
+    domainUuid,
+    viewerIsGm: options.viewerIsGm,
+    population: {
+      state: context.population.state,
+      resolution: context.population.resolution,
+      formattedTotal
+    },
+    notables: Object.freeze(notableVMs),
+    roles: Object.freeze(roleVMs),
+    operationalGroups: Object.freeze(opgVMs),
+    workforce: context.workforce,
+    capabilities: context.capabilities
+  };
+}
+
+// src/ui/domain-patterns/people/people-view.ts
+function escapeHtml(value) {
+  if (value === null || value === void 0) return "";
+  return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+function escapeAttribute(value) {
+  return escapeHtml(value);
+}
+function renderPeopleSubsystemHtml(vm) {
+  const pop = vm.population;
+  const notablesHtml = vm.notables.length === 0 ? `<div class="dm-empty-state">No notables registered.</div>` : `<div class="dm-notables-grid">
+        ${vm.notables.map((n) => {
+    const portrait = n.notable.type === "inline" ? n.notable.portrait : void 0;
+    return `
+          <div class="dm-notable-card ${escapeAttribute(n.badgeClass)} ${n.isSecret ? "dm-secret" : ""}" data-notable-id="${escapeAttribute(n.notable.id)}">
+            <div class="dm-notable-portrait">
+              ${portrait ? `<img src="${escapeAttribute(portrait)}" alt="${escapeAttribute(n.status.resolvedName)}" />` : `<div class="dm-default-avatar"></div>`}
+            </div>
+            <div class="dm-notable-details">
+              <span class="dm-notable-name">${escapeHtml(n.status.resolvedName)}</span>
+              <span class="dm-notable-type">${escapeHtml(n.notable.type)}</span>
+              ${n.isSecret ? `<span class="dm-badge-secret">Secret</span>` : ""}
+            </div>
+          </div>
+        `;
+  }).join("")}
+      </div>`;
+  const rolesHtml = vm.roles.length === 0 ? `<div class="dm-empty-state">No roles defined.</div>` : `<div class="dm-roles-list">
+        ${vm.roles.map((r) => `
+          <div class="dm-role-item ${escapeAttribute(r.statusClass)} ${r.isSecret ? "dm-secret" : ""}" data-role-id="${escapeAttribute(r.evaluation.role.id)}">
+            <div class="dm-role-header">
+              <span class="dm-role-title">${escapeHtml(r.evaluation.effectiveLabel)}</span>
+              <span class="dm-role-badge dm-badge-${escapeAttribute(r.statusClass)}">${escapeHtml(r.statusClass)}</span>
+              ${r.isSecret ? `<span class="dm-badge-secret">Secret</span>` : ""}
+            </div>
+            <div class="dm-role-occupants">
+              ${r.evaluation.role.occupants.length === 0 ? "<em>Vacant</em>" : `${r.evaluation.role.occupants.length} occupant(s)`}
+            </div>
+          </div>
+        `).join("")}
+      </div>`;
+  const opgHtml = vm.operationalGroups.length === 0 ? `<div class="dm-empty-state">No operational groups.</div>` : `<div class="dm-opg-list">
+        ${vm.operationalGroups.map((g) => `
+          <div class="dm-opg-item ${escapeAttribute(g.statusClass)} ${g.isSecret ? "dm-secret" : ""}" data-opg-id="${escapeAttribute(g.group.id)}">
+            <span class="dm-opg-name">${escapeHtml(g.group.name)}</span>
+            <span class="dm-opg-size">Size: ${g.group.size} (${escapeHtml(g.group.membershipMode)})</span>
+            <span class="dm-badge dm-badge-${escapeAttribute(g.statusClass)}">${escapeHtml(g.statusClass)}</span>
+          </div>
+        `).join("")}
+      </div>`;
+  const workforceTypes = Object.values(vm.workforce.types);
+  const wfHtml = workforceTypes.length === 0 ? `<div class="dm-empty-state">No workforce available.</div>` : `<div class="dm-workforce-grid">
+        ${workforceTypes.map((w) => `
+          <div class="dm-wf-stat ${w.isOvercommitted ? "dm-overcommitted" : ""}">
+            <span class="dm-wf-label">${escapeHtml(w.workforceTypeId)}</span>
+            <span class="dm-wf-value">${w.available} / ${w.capacity}</span>
+            ${w.isOvercommitted ? `<span class="dm-alert">OVERCOMMIT</span>` : ""}
+          </div>
+        `).join("")}
+      </div>`;
+  return `
+    <div class="dm-people-subsystem" data-domain-uuid="${escapeAttribute(vm.domainUuid)}">
+      <header class="dm-subsystem-header">
+        <h2>People & Demographics</h2>
+        <div class="dm-population-counter">
+          <span class="dm-label">Population:</span>
+          <span class="dm-value">${escapeHtml(pop.formattedTotal)}</span>
+        </div>
+      </header>
+
+      <section class="dm-section dm-notables-section">
+        <h3>Notables</h3>
+        ${notablesHtml}
+      </section>
+
+      <section class="dm-section dm-roles-section">
+        <h3>Roles & Offices</h3>
+        ${rolesHtml}
+      </section>
+
+      <section class="dm-section dm-opg-section">
+        <h3>Operational Groups</h3>
+        ${opgHtml}
+      </section>
+
+      <section class="dm-section dm-workforce-section">
+        <h3>Workforce Status</h3>
+        ${wfHtml}
+      </section>
+    </div>
+  `;
+}
+
+// src/people/services/people-service.ts
+var PeopleService = class {
+  #repository;
+  #projection;
+  #aggregation;
+  constructor(domains, options = {}) {
+    this.#repository = new PeopleRepository(domains);
+    this.#projection = new PeopleProjectionService({
+      roleDefinitions: options.roleDefinitions,
+      groupDefinitions: options.groupDefinitions
+    });
+    this.#aggregation = new PeopleAggregationService(domains);
+  }
+  async getPeopleData(domainUuid) {
+    return this.#repository.getPeopleData(domainUuid);
+  }
+  async getViewerContext(domainUuid, viewer, options = {}) {
+    const dataRes = await this.#repository.getPeopleData(domainUuid);
+    if (!dataRes.ok) return dataRes;
+    return ok(this.#projection.project(domainUuid, dataRes.value, viewer, options));
+  }
+  async getPopulation(domainUuid, viewer) {
+    if (viewer && !viewer.isGm) {
+      const ctxRes = await this.getViewerContext(domainUuid, viewer);
+      if (!ctxRes.ok) return ctxRes;
+      return ok({
+        state: ctxRes.value.population.state,
+        resolution: ctxRes.value.population.resolution
+      });
+    }
+    return this.#repository.getPopulation(domainUuid);
+  }
+  async getPopulationGroups(domainUuid, viewer) {
+    if (viewer && !viewer.isGm) {
+      const ctxRes = await this.getViewerContext(domainUuid, viewer);
+      if (!ctxRes.ok) return ctxRes;
+      return ok(ctxRes.value.populationGroups);
+    }
+    return this.#repository.getPopulationGroups(domainUuid);
+  }
+  async getNotables(domainUuid, viewer) {
+    return this.#repository.getNotables(domainUuid, { viewerIsGm: viewer ? viewer.isGm : true });
+  }
+  async getRoles(domainUuid, viewer) {
+    return this.#repository.getRoles(domainUuid, { viewerIsGm: viewer ? viewer.isGm : true });
+  }
+  async getOperationalGroups(domainUuid, viewer) {
+    return this.#repository.getOperationalGroups(domainUuid, { viewerIsGm: viewer ? viewer.isGm : true });
+  }
+  async getWorkforce(domainUuid, viewer, nowReal) {
+    if (viewer && !viewer.isGm) {
+      const ctxRes = await this.getViewerContext(domainUuid, viewer, { nowReal });
+      if (!ctxRes.ok) return ctxRes;
+      return ok(ctxRes.value.workforce);
+    }
+    return this.#repository.getWorkforce(domainUuid, nowReal);
+  }
+  async getAssignments(domainUuid, viewer) {
+    if (viewer && !viewer.isGm) {
+      const ctxRes = await this.getViewerContext(domainUuid, viewer);
+      if (!ctxRes.ok) return ctxRes;
+      return ok(ctxRes.value.assignments);
+    }
+    return this.#repository.getAssignments(domainUuid);
+  }
+  async getReservations(domainUuid, viewer) {
+    if (viewer && !viewer.isGm) {
+      const ctxRes = await this.getViewerContext(domainUuid, viewer);
+      if (!ctxRes.ok) return ctxRes;
+      return ok(ctxRes.value.reservations);
+    }
+    return this.#repository.getReservations(domainUuid);
+  }
+  getAggregate(rootDomainUuid, options = {}) {
+    return this.#aggregation.queryPeopleAggregate(rootDomainUuid, options);
+  }
+  getEffectiveCapabilities(domainInput, roleDefinitions, operationalGroupDefinitions) {
+    return resolvePeopleEffectiveCapabilities(domainInput, roleDefinitions, operationalGroupDefinitions);
+  }
+  buildViewModel(domainInput, options) {
+    return buildPeopleViewModel(domainInput, options);
+  }
+  renderSubsystemHtml(vm) {
+    return renderPeopleSubsystemHtml(vm);
+  }
+};
+
 // src/diagnostics/g2-diagnostics-provider.ts
 var G2DiagnosticsProvider = class {
   #authorityService;
@@ -5674,6 +9729,11 @@ function composeDomainManagerRuntime(options = {}) {
   const recovery = new RecoveryService({ transactionStore, lockManager });
   const registry = new CommandRegistry();
   registerDomainCommandHandlers(registry, coordinator, mutableDomainRepo);
+  registerPopulationCommandHandlers(registry, coordinator, mutableDomainRepo);
+  registerNotableCommandHandlers(registry, coordinator, mutableDomainRepo);
+  registerRoleCommandHandlers(registry, coordinator, mutableDomainRepo);
+  registerOperationalGroupCommandHandlers(registry, coordinator, mutableDomainRepo);
+  registerAssignmentCommandHandlers(registry, coordinator, mutableDomainRepo);
   registry.freeze();
   const commandQueue = options.commandQueue ?? new CommandQueue({ maxConcurrency: 10 });
   const dedupeStore = options.dedupeStore ?? new CommandDedupeStore();
@@ -5713,6 +9773,7 @@ function composeDomainManagerRuntime(options = {}) {
       });
     }
   });
+  const people = new PeopleService(readOnlyDomains);
   return Object.freeze({
     // G2-AUD-008: Read-only facade exposed publicly
     domains: readOnlyDomains,
@@ -5725,6 +9786,7 @@ function composeDomainManagerRuntime(options = {}) {
     recovery,
     transactionStore,
     diagnostics,
+    people,
     destroy: () => {
       commandBus.destroy();
       if ("destroy" in transport && typeof transport.destroy === "function") {

@@ -4,6 +4,7 @@ import { resolveEffectiveCapabilities, type CapabilityRegistry } from "../../dom
 import { validateDomainHierarchy, type DomainHierarchyNode } from "../../domains/domain-hierarchy-validator.js";
 import { DOMAIN_SCHEMA_VERSION, type DomainRecord } from "../../domains/domain-schema.js";
 import { validateDomainRecord } from "../../domains/domain-validator.js";
+import { validateDomainPeopleData } from "../../people/people-data.js";
 
 export type DomainIntegritySeverity = "error" | "warning";
 
@@ -183,6 +184,142 @@ function addCapabilityIssues(
   }
 }
 
+function addPeopleIntegrityIssues(
+  record: Partial<DomainRecord>,
+  domainId: string,
+  issues: DomainIntegrityIssue[]
+): void {
+  const config = record.definition?.capabilities?.config;
+  if (!config || typeof config !== "object") return;
+
+  const rawPeople = (config as Record<string, unknown>)["domain-manager:people"];
+  if (rawPeople === undefined || rawPeople === null) return;
+
+  // 1. Validate People schema structure
+  const validation = validateDomainPeopleData(rawPeople);
+  if (!validation.ok) {
+    issues.push(issue(
+      validation.error.code as `DM_${string}`,
+      "error",
+      `People subsystem data corruption: ${validation.error.message}`,
+      domainId,
+      validation.error.details
+    ));
+    return;
+  }
+
+  const people = validation.value;
+  const notableIds = new Set<string>(people.notables.map((n) => n.id));
+  const groupIds = new Set<string>(people.operationalGroups.map((g) => g.id));
+  const popGroupIds = new Set<string>(people.populationGroups.map((pg) => pg.id));
+
+  // 2. Check Notables
+  for (const n of people.notables) {
+    if (n.type === "actor") {
+      if (typeof n.actorUuid !== "string" || !n.actorUuid.startsWith("Actor.")) {
+        issues.push(issue(
+          "DM_PEOPLE_INVALID_ACTOR_REF",
+          "error",
+          `Notable '${n.id}' has invalid Actor reference '${n.actorUuid}'`,
+          domainId,
+          { notableId: n.id, actorUuid: n.actorUuid }
+        ));
+      }
+    }
+  }
+
+  // 3. Check Roles: dangling occupants and group references
+  for (const r of people.roles) {
+    for (const occupantId of r.occupants) {
+      if (!notableIds.has(occupantId)) {
+        issues.push(issue(
+          "DM_PEOPLE_DANGLING_NOTABLE_REF",
+          "error",
+          `Role '${r.id}' references non-existent notable '${occupantId}'`,
+          domainId,
+          { roleId: r.id, notableId: occupantId }
+        ));
+      }
+    }
+    if (r.scope === "operational-group" && r.operationalGroupId) {
+      if (!groupIds.has(r.operationalGroupId)) {
+        issues.push(issue(
+          "DM_PEOPLE_DANGLING_GROUP_REF",
+          "error",
+          `Group role '${r.id}' references non-existent operational group '${r.operationalGroupId}'`,
+          domainId,
+          { roleId: r.id, operationalGroupId: r.operationalGroupId }
+        ));
+      }
+    }
+  }
+
+  // 4. Check OperationalGroups: dangling members and population group references
+  for (const g of people.operationalGroups) {
+    for (const memberId of g.members) {
+      if (!notableIds.has(memberId)) {
+        issues.push(issue(
+          "DM_PEOPLE_DANGLING_NOTABLE_REF",
+          "error",
+          `Operational group '${g.id}' references non-existent notable '${memberId}'`,
+          domainId,
+          { groupId: g.id, notableId: memberId }
+        ));
+      }
+    }
+    if (g.populationGroupId && !popGroupIds.has(g.populationGroupId)) {
+      issues.push(issue(
+        "DM_PEOPLE_DANGLING_POPULATION_GROUP_REF",
+        "error",
+        `Operational group '${g.id}' references non-existent population group '${g.populationGroupId}'`,
+        domainId,
+        { groupId: g.id, populationGroupId: g.populationGroupId }
+      ));
+    }
+  }
+
+  // 5. Check Assignments & Reservations: sourceRef validity
+  for (const a of people.assignments) {
+    if (a.sourceRef.startsWith("opg_") && !groupIds.has(a.sourceRef as any)) {
+      issues.push(issue(
+        "DM_PEOPLE_DANGLING_SOURCE_REF",
+        "warning",
+        `Assignment '${a.id}' references non-existent operational group '${a.sourceRef}'`,
+        domainId,
+        { assignmentId: a.id, sourceRef: a.sourceRef }
+      ));
+    } else if (a.sourceRef.startsWith("pop_") && !popGroupIds.has(a.sourceRef as any)) {
+      issues.push(issue(
+        "DM_PEOPLE_DANGLING_SOURCE_REF",
+        "warning",
+        `Assignment '${a.id}' references non-existent population group '${a.sourceRef}'`,
+        domainId,
+        { assignmentId: a.id, sourceRef: a.sourceRef }
+      ));
+    }
+  }
+
+  for (const resv of people.reservations) {
+    if (resv.sourceRef.startsWith("opg_") && !groupIds.has(resv.sourceRef as any)) {
+      issues.push(issue(
+        "DM_PEOPLE_DANGLING_SOURCE_REF",
+        "warning",
+        `Reservation '${resv.id}' references non-existent operational group '${resv.sourceRef}'`,
+        domainId,
+        { reservationId: resv.id, sourceRef: resv.sourceRef }
+      ));
+    } else if (resv.sourceRef.startsWith("pop_") && !popGroupIds.has(resv.sourceRef as any)) {
+      issues.push(issue(
+        "DM_PEOPLE_DANGLING_SOURCE_REF",
+        "warning",
+        `Reservation '${resv.id}' references non-existent population group '${resv.sourceRef}'`,
+        domainId,
+        { reservationId: resv.id, sourceRef: resv.sourceRef }
+      ));
+    }
+  }
+}
+
 function addSchemaIssues(
   document: DomainIntegrityDocument,
   expectedSchemaVersion: number,
@@ -246,6 +383,7 @@ function addSchemaIssues(
 
   addLifecycleIssues(record, document.id, issues);
   addCapabilityIssues(record, document.id, capabilityRegistry, issues);
+  addPeopleIntegrityIssues(record, document.id, issues);
   hierarchyNodes.push({
     uuid: document.uuid,
     parentDomainUuid: record.definition.hierarchy.parentDomainUuid

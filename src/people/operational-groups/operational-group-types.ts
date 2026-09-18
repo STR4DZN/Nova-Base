@@ -49,6 +49,7 @@ export interface OperationalGroupDefinition {
   readonly defaultMembershipMode?: OperationalGroupMembershipMode;
   readonly tags?: readonly string[];
   readonly grants?: readonly string[];
+  readonly keepGrantWhenInactive?: boolean;
 }
 
 export interface OperationalGroup {
@@ -303,3 +304,68 @@ export function validateOperationalGroup(candidate: unknown): Result<Operational
     tags
   });
 }
+
+export function validateOperationalGroupDefinition(candidate: unknown): Result<OperationalGroupDefinition> {
+  if (!candidate || typeof candidate !== "object") {
+    return err(
+      createPublicError({
+        code: "DM_OPG_DEF_INVALID",
+        category: "validation",
+        message: "OperationalGroupDefinition must be an object"
+      })
+    );
+  }
+  const raw = candidate as Record<string, unknown>;
+  if (typeof raw.id !== "string" || !raw.id.includes(":")) {
+    return err(
+      createPublicError({
+        code: "DM_OPG_DEF_INVALID_ID",
+        category: "validation",
+        message: "OperationalGroupDefinition id must be namespaced (e.g. 'domain-manager:militia')"
+      })
+    );
+  }
+  if (typeof raw.version !== "number" || !Number.isSafeInteger(raw.version) || raw.version < 1) {
+    return err(
+      createPublicError({
+        code: "DM_OPG_DEF_INVALID_VERSION",
+        category: "validation",
+        message: "OperationalGroupDefinition version must be a positive integer"
+      })
+    );
+  }
+  if (typeof raw.label !== "string" || raw.label.trim().length === 0) {
+    return err(
+      createPublicError({
+        code: "DM_OPG_DEF_INVALID_LABEL",
+        category: "validation",
+        message: "OperationalGroupDefinition label must be a non-empty string"
+      })
+    );
+  }
+  const defaultMembershipMode = raw.defaultMembershipMode !== undefined ? (raw.defaultMembershipMode as OperationalGroupMembershipMode) : undefined;
+  if (defaultMembershipMode !== undefined && !isOperationalGroupMembershipMode(defaultMembershipMode)) {
+    return err(
+      createPublicError({
+        code: "DM_OPG_DEF_INVALID_MEMBERSHIP_MODE",
+        category: "validation",
+        message: `Invalid defaultMembershipMode: '${String(raw.defaultMembershipMode)}'`
+      })
+    );
+  }
+  const tags = Array.isArray(raw.tags) ? Object.freeze([...raw.tags]) : undefined;
+  const grants = Array.isArray(raw.grants) ? Object.freeze([...raw.grants]) : undefined;
+  const keepGrantWhenInactive = typeof raw.keepGrantWhenInactive === "boolean" ? raw.keepGrantWhenInactive : false;
+
+  return ok({
+    id: raw.id.trim(),
+    version: raw.version,
+    label: raw.label.trim(),
+    description: typeof raw.description === "string" ? raw.description.trim() : undefined,
+    defaultMembershipMode,
+    tags,
+    grants,
+    keepGrantWhenInactive
+  });
+}
+

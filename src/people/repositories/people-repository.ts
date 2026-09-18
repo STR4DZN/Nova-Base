@@ -3,7 +3,7 @@ import type { PopulationGroup, PopulationResolution, PopulationState } from "../
 import { calculatePopulation } from "../population/population-calculator.js";
 import { err, ok, type Result } from "../../core/contracts/result.js";
 import { createPublicError } from "../../core/contracts/public-error.js";
-import { getDomainPeopleData, type DomainPeopleData } from "../people-data.js";
+import { tryGetDomainPeopleData, type DomainPeopleData } from "../people-data.js";
 import type { Notable, NotableStatusReport } from "../notables/notable-types.js";
 import { resolveNotableStatus } from "../notables/notable-types.js";
 import type { DomainRole } from "../roles/role-types.js";
@@ -25,7 +25,7 @@ export class PeopleRepository {
     if (!domainRes.ok) {
       return domainRes;
     }
-    return ok(getDomainPeopleData(domainRes.value.record));
+    return tryGetDomainPeopleData(domainRes.value.record);
   }
 
   async getPopulation(

@@ -2,6 +2,7 @@ import type { OpaqueId } from "../../core/identity/ids.js";
 import { isOpaqueId } from "../../core/identity/ids.js";
 import { err, ok, type Result } from "../../core/contracts/result.js";
 import { createPublicError } from "../../core/contracts/public-error.js";
+import { type WorkforceContribution, validateWorkforceContribution } from "../workforce/workforce-types.js";
 
 export const POPULATION_MODES = ["manual", "sumGroups", "hybrid"] as const;
 export type PopulationMode = (typeof POPULATION_MODES)[number];
@@ -9,10 +10,13 @@ export type PopulationMode = (typeof POPULATION_MODES)[number];
 export const POPULATION_PRECISIONS = ["exact", "estimated", "unknown"] as const;
 export type PopulationPrecision = (typeof POPULATION_PRECISIONS)[number];
 
+export type PopulationGroupVisibility = "public" | "secret";
+
 export interface PopulationState {
   readonly mode: PopulationMode;
   readonly total: number | null;
   readonly precision: PopulationPrecision;
+  readonly visibility?: "public" | "secret";
 }
 
 export interface PopulationGroup {
@@ -21,6 +25,8 @@ export interface PopulationGroup {
   readonly count: number | null;
   readonly precision?: PopulationPrecision;
   readonly includedInTotal: boolean;
+  readonly visibility?: PopulationGroupVisibility;
+  readonly workforceContributions?: readonly WorkforceContribution[];
   readonly tags: readonly string[];
   readonly notes?: string;
 }
@@ -91,10 +97,23 @@ export function validatePopulationState(state: unknown): Result<PopulationState>
     precision = "unknown";
   }
 
+  if (candidate.visibility !== undefined && candidate.visibility !== null) {
+    if (candidate.visibility !== "public" && candidate.visibility !== "secret") {
+      return err(
+        createPublicError({
+          code: "DM_POPULATION_INVALID_VISIBILITY",
+          category: "validation",
+          message: "PopulationState visibility must be 'public' or 'secret'"
+        })
+      );
+    }
+  }
+
   return ok({
     mode: candidate.mode,
     total,
-    precision
+    precision,
+    visibility: candidate.visibility === "secret" ? "secret" : "public"
   });
 }
 
@@ -196,12 +215,45 @@ export function validatePopulationGroup(group: unknown): Result<PopulationGroup>
     }
   }
 
+  if (candidate.visibility !== undefined && candidate.visibility !== null) {
+    if (candidate.visibility !== "public" && candidate.visibility !== "secret") {
+      return err(
+        createPublicError({
+          code: "DM_POPULATION_GROUP_INVALID_VISIBILITY",
+          category: "validation",
+          message: "PopulationGroup visibility must be 'public' or 'secret'"
+        })
+      );
+    }
+  }
+
+  let validatedContributions: WorkforceContribution[] | undefined;
+  if (candidate.workforceContributions !== undefined && candidate.workforceContributions !== null) {
+    if (!Array.isArray(candidate.workforceContributions)) {
+      return err(
+        createPublicError({
+          code: "DM_POPULATION_GROUP_INVALID_CONTRIBUTIONS",
+          category: "validation",
+          message: "PopulationGroup workforceContributions must be an array"
+        })
+      );
+    }
+    validatedContributions = [];
+    for (const rawC of candidate.workforceContributions) {
+      const cRes = validateWorkforceContribution(rawC);
+      if (!cRes.ok) return cRes;
+      validatedContributions.push(cRes.value);
+    }
+  }
+
   return ok({
     id: candidate.id,
     name: candidate.name.trim(),
     count: candidate.count === undefined ? null : (candidate.count as number | null),
     precision: candidate.precision === undefined || candidate.precision === null ? undefined : (candidate.precision as PopulationPrecision),
     includedInTotal: candidate.includedInTotal,
+    visibility: candidate.visibility === "secret" ? "secret" : "public",
+    workforceContributions: validatedContributions ? Object.freeze([...validatedContributions]) : undefined,
     tags: Object.freeze([...candidate.tags]),
     notes: candidate.notes === undefined || candidate.notes === null ? undefined : candidate.notes
   });

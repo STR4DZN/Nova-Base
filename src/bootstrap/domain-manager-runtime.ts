@@ -21,6 +21,12 @@ import { MutationCoordinator } from "../mutations/mutation-coordinator.js";
 import { TransactionStore } from "../mutations/transaction-store.js";
 import { RecoveryService } from "../mutations/recovery-service.js";
 import { registerDomainCommandHandlers } from "../domains/domain-command-handlers.js";
+import { registerPopulationCommandHandlers } from "../people/commands/population-commands.js";
+import { registerNotableCommandHandlers } from "../people/commands/notable-commands.js";
+import { registerRoleCommandHandlers } from "../people/commands/role-commands.js";
+import { registerOperationalGroupCommandHandlers } from "../people/commands/operational-group-commands.js";
+import { registerAssignmentCommandHandlers } from "../people/commands/assignment-commands.js";
+import { PeopleService } from "../people/services/people-service.js";
 import {
   G2DiagnosticsProvider,
   type G2DiagnosticsSnapshot
@@ -32,7 +38,7 @@ import {
  * Implements Master Spec §11.1, §11.2, G2-AUD-001, G2-AUD-008:
  * - Public UI/services only see read operations via `domains: DomainReadRepository`.
  * - State mutations must strictly be dispatched via `commandBus`.
- * - Complete Gate G2 vertical is composed and reachable from production entrypoint.
+ * - Complete Gate G2 and G3 verticals are composed and reachable from production entrypoint.
  */
 export interface DomainManagerRuntime {
   readonly domains: DomainReadRepository;
@@ -45,6 +51,7 @@ export interface DomainManagerRuntime {
   readonly recovery: RecoveryService;
   readonly transactionStore: TransactionStore;
   readonly diagnostics: G2DiagnosticsProvider;
+  readonly people: PeopleService;
   destroy(): void;
 }
 
@@ -76,6 +83,11 @@ export function composeDomainManagerRuntime(
 
   const registry = new CommandRegistry();
   registerDomainCommandHandlers(registry, coordinator, mutableDomainRepo);
+  registerPopulationCommandHandlers(registry, coordinator, mutableDomainRepo);
+  registerNotableCommandHandlers(registry, coordinator, mutableDomainRepo);
+  registerRoleCommandHandlers(registry, coordinator, mutableDomainRepo);
+  registerOperationalGroupCommandHandlers(registry, coordinator, mutableDomainRepo);
+  registerAssignmentCommandHandlers(registry, coordinator, mutableDomainRepo);
   registry.freeze();
 
   const commandQueue = options.commandQueue ?? new CommandQueue({ maxConcurrency: 10 });
@@ -124,6 +136,8 @@ export function composeDomainManagerRuntime(
     }
   });
 
+  const people = new PeopleService(readOnlyDomains);
+
   return Object.freeze({
     // G2-AUD-008: Read-only facade exposed publicly
     domains: readOnlyDomains,
@@ -136,6 +150,7 @@ export function composeDomainManagerRuntime(
     recovery,
     transactionStore,
     diagnostics,
+    people,
     destroy: () => {
       commandBus.destroy();
       if ("destroy" in transport && typeof (transport as any).destroy === "function") {

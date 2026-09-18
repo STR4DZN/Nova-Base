@@ -13,6 +13,24 @@ export function isRoleVisibility(value: unknown): value is RoleVisibility {
   return typeof value === "string" && ROLE_VISIBILITIES.includes(value as RoleVisibility);
 }
 
+export type RoleScope = "domain" | "operational-group";
+export const ROLE_SCOPES: readonly RoleScope[] = Object.freeze(["domain", "operational-group"]);
+
+export function isRoleScope(value: unknown): value is RoleScope {
+  return typeof value === "string" && ROLE_SCOPES.includes(value as RoleScope);
+}
+
+export type RoleGrantPolicy = "exists" | "occupied" | "requirementsSatisfied";
+export const ROLE_GRANT_POLICIES: readonly RoleGrantPolicy[] = Object.freeze([
+  "exists",
+  "occupied",
+  "requirementsSatisfied"
+]);
+
+export function isRoleGrantPolicy(value: unknown): value is RoleGrantPolicy {
+  return typeof value === "string" && ROLE_GRANT_POLICIES.includes(value as RoleGrantPolicy);
+}
+
 export interface RoleOccupancyRule {
   readonly min: number;
   readonly max: number | null;
@@ -26,6 +44,8 @@ export interface RoleDefinition {
   readonly occupancy: RoleOccupancyRule;
   readonly grants?: readonly string[];
   readonly prerequisites?: readonly string[];
+  readonly allowedScopes?: readonly RoleScope[];
+  readonly grantPolicy?: RoleGrantPolicy;
 }
 
 export interface DomainRole {
@@ -34,6 +54,8 @@ export interface DomainRole {
   readonly customLabel?: string;
   readonly occupants: readonly string[]; // notable IDs (not_<UUID>)
   readonly visibility: RoleVisibility;
+  readonly scope?: RoleScope;
+  readonly operationalGroupId?: string;
   readonly notes?: string;
   readonly tags: readonly string[];
 }
@@ -47,6 +69,7 @@ export interface RoleEvaluation {
   readonly isUnderstaffed: boolean;
   readonly isRequirementSatisfied: boolean;
   readonly missingCount: number;
+  readonly isValidGroupRole?: boolean;
 }
 
 export const DEFAULT_ROLE_DEFINITIONS: readonly RoleDefinition[] = Object.freeze([
@@ -190,6 +213,34 @@ export function validateRoleDefinition(candidate: unknown): Result<RoleDefinitio
     return occupancyRes;
   }
 
+  let allowedScopes: readonly RoleScope[] | undefined;
+  if (raw.allowedScopes !== undefined && raw.allowedScopes !== null) {
+    if (!Array.isArray(raw.allowedScopes) || raw.allowedScopes.some((s) => !isRoleScope(s))) {
+      return err(
+        createPublicError({
+          code: "DM_ROLE_DEF_INVALID_ALLOWED_SCOPES",
+          category: "validation",
+          message: `allowedScopes must be an array of: ${ROLE_SCOPES.join(", ")}`
+        })
+      );
+    }
+    allowedScopes = Object.freeze([...raw.allowedScopes]);
+  }
+
+  let grantPolicy: RoleGrantPolicy = "occupied";
+  if (raw.grantPolicy !== undefined && raw.grantPolicy !== null) {
+    if (!isRoleGrantPolicy(raw.grantPolicy)) {
+      return err(
+        createPublicError({
+          code: "DM_ROLE_DEF_INVALID_GRANT_POLICY",
+          category: "validation",
+          message: `grantPolicy must be one of: ${ROLE_GRANT_POLICIES.join(", ")}`
+        })
+      );
+    }
+    grantPolicy = raw.grantPolicy;
+  }
+
   const grants = Array.isArray(raw.grants) ? Object.freeze([...raw.grants]) : undefined;
   const prerequisites = Array.isArray(raw.prerequisites)
     ? Object.freeze([...raw.prerequisites])
@@ -202,7 +253,9 @@ export function validateRoleDefinition(candidate: unknown): Result<RoleDefinitio
     description: typeof raw.description === "string" ? raw.description.trim() : undefined,
     occupancy: occupancyRes.value,
     grants,
-    prerequisites
+    prerequisites,
+    allowedScopes,
+    grantPolicy
   });
 }
 
@@ -303,6 +356,49 @@ export function validateDomainRole(
     );
   }
 
+  const scope: RoleScope = raw.scope === undefined ? "domain" : (raw.scope as RoleScope);
+  if (!isRoleScope(scope)) {
+    return err(
+      createPublicError({
+        code: "DM_ROLE_INVALID_SCOPE",
+        category: "validation",
+        message: `Invalid role scope: '${String(raw.scope)}'. Must be one of: ${ROLE_SCOPES.join(", ")}`
+      })
+    );
+  }
+
+  let operationalGroupId: string | undefined;
+  if (scope === "operational-group") {
+    if (typeof raw.operationalGroupId !== "string" || !isOpaqueId(raw.operationalGroupId, "opg")) {
+      return err(
+        createPublicError({
+          code: "DM_ROLE_INVALID_OPERATIONAL_GROUP_ID",
+          category: "validation",
+          message: "Group role requires a valid operationalGroupId with prefix 'opg_'"
+        })
+      );
+    }
+    operationalGroupId = raw.operationalGroupId;
+  } else if (raw.operationalGroupId !== undefined && raw.operationalGroupId !== null) {
+    return err(
+      createPublicError({
+        code: "DM_ROLE_INVALID_OPERATIONAL_GROUP_ID",
+        category: "validation",
+        message: "Domain-scoped role cannot have operationalGroupId"
+      })
+    );
+  }
+
+  if (definition && definition.allowedScopes && !definition.allowedScopes.includes(scope)) {
+    return err(
+      createPublicError({
+        code: "DM_ROLE_SCOPE_NOT_ALLOWED",
+        category: "validation",
+        message: `Scope '${scope}' is not allowed for role definition '${definition.id}'. Allowed scopes: ${definition.allowedScopes.join(", ")}`
+      })
+    );
+  }
+
   if (raw.notes !== undefined && raw.notes !== null) {
     if (typeof raw.notes !== "string") {
       return err(
@@ -342,6 +438,8 @@ export function validateDomainRole(
     customLabel,
     occupants: Object.freeze([...raw.occupants]),
     visibility,
+    scope,
+    operationalGroupId,
     notes,
     tags
   });
@@ -349,7 +447,8 @@ export function validateDomainRole(
 
 export function evaluateRole(
   role: DomainRole,
-  definitions: readonly RoleDefinition[] = DEFAULT_ROLE_DEFINITIONS
+  definitions: readonly RoleDefinition[] = DEFAULT_ROLE_DEFINITIONS,
+  operationalGroups?: readonly { id: string; members?: readonly string[]; lifecycle?: string }[]
 ): RoleEvaluation {
   const definition = definitions.find((d) => d.id === role.definitionId);
   const effectiveLabel = role.customLabel ?? definition?.label ?? role.definitionId;
@@ -360,7 +459,25 @@ export function evaluateRole(
 
   const minOccupancy = definition?.occupancy.min ?? 0;
   const isUnderstaffed = occupantsCount < minOccupancy;
-  const isRequirementSatisfied = !isUnderstaffed;
+  let isRequirementSatisfied = !isUnderstaffed;
+  let isValidGroupRole = true;
+
+  if (role.scope === "operational-group") {
+    if (operationalGroups) {
+      const group = operationalGroups.find((g) => g.id === role.operationalGroupId);
+      if (!group || group.lifecycle === "disbanded") {
+        isValidGroupRole = false;
+        isRequirementSatisfied = false;
+      } else if (group.members && group.members.length > 0) {
+        const nonMembers = role.occupants.filter((occ) => !group.members!.includes(occ));
+        if (nonMembers.length > 0) {
+          isValidGroupRole = false;
+          isRequirementSatisfied = false;
+        }
+      }
+    }
+  }
+
   const missingCount = Math.max(0, minOccupancy - occupantsCount);
 
   return {
@@ -371,7 +488,8 @@ export function evaluateRole(
     isFilled,
     isUnderstaffed,
     isRequirementSatisfied,
-    missingCount
+    missingCount,
+    isValidGroupRole
   };
 }
 

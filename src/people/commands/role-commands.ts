@@ -26,6 +26,7 @@ import {
   DEFAULT_ROLE_DEFINITIONS,
   validateDomainRole,
   type DomainRole,
+  type RoleScope,
   type RoleVisibility
 } from "../roles/role-types.js";
 import { createOpaqueId, isOpaqueId } from "../../core/identity/ids.js";
@@ -37,6 +38,8 @@ export interface CreateRolePayload {
     readonly customLabel?: string;
     readonly occupants?: readonly string[];
     readonly visibility?: RoleVisibility;
+    readonly scope?: RoleScope;
+    readonly operationalGroupId?: string;
     readonly notes?: string;
     readonly tags?: readonly string[];
   };
@@ -108,6 +111,8 @@ export function registerRoleCommandHandlers(
         customLabel: roleInput.customLabel,
         occupants: roleInput.occupants ?? [],
         visibility: roleInput.visibility ?? "public",
+        scope: roleInput.scope,
+        operationalGroupId: roleInput.operationalGroupId,
         notes: roleInput.notes,
         tags: roleInput.tags ?? []
       };
@@ -117,6 +122,42 @@ export function registerRoleCommandHandlers(
         return roleValidation;
       }
       const newRole = roleValidation.value;
+
+      // Group role validation: target operational group must exist and not be disbanded
+      if (newRole.scope === "operational-group" && newRole.operationalGroupId) {
+        const opGroup = currentPeople.operationalGroups.find((g) => g.id === newRole.operationalGroupId);
+        if (!opGroup) {
+          return err(
+            createPublicError({
+              code: "DM_OPERATIONAL_GROUP_NOT_FOUND",
+              category: "not-found",
+              message: `OperationalGroup '${newRole.operationalGroupId}' not found in domain '${domainDoc.name}'`
+            })
+          );
+        }
+        if (opGroup.lifecycle === "disbanded") {
+          return err(
+            createPublicError({
+              code: "DM_ROLE_GROUP_DISBANDED",
+              category: "validation",
+              message: `Cannot create role for disbanded operational group '${opGroup.name}'`
+            })
+          );
+        }
+        if (opGroup.members && opGroup.members.length > 0) {
+          for (const occupantId of newRole.occupants) {
+            if (!opGroup.members.includes(occupantId)) {
+              return err(
+                createPublicError({
+                  code: "DM_ROLE_GROUP_MEMBER_REQUIRED",
+                  category: "validation",
+                  message: `Occupant notable '${occupantId}' is not a member of operational group '${opGroup.name}'`
+                })
+              );
+            }
+          }
+        }
+      }
 
       // Verify all occupants exist in domain notables (DEC-0996)
       for (const occupantId of newRole.occupants) {
@@ -263,6 +304,31 @@ export function registerRoleCommandHandlers(
       }
 
       const currentRole = currentPeople.roles[roleIndex];
+
+      // If group role, verify group is active and notable is a member if explicit roster
+      if (currentRole.scope === "operational-group" && currentRole.operationalGroupId) {
+        const opGroup = currentPeople.operationalGroups.find((g) => g.id === currentRole.operationalGroupId);
+        if (opGroup) {
+          if (opGroup.lifecycle === "disbanded") {
+            return err(
+              createPublicError({
+                code: "DM_ROLE_GROUP_DISBANDED",
+                category: "validation",
+                message: `Cannot assign notable to role of disbanded operational group '${opGroup.name}'`
+              })
+            );
+          }
+          if (opGroup.members && opGroup.members.length > 0 && !opGroup.members.includes(notableId)) {
+            return err(
+              createPublicError({
+                code: "DM_ROLE_GROUP_MEMBER_REQUIRED",
+                category: "validation",
+                message: `Notable '${notableId}' is not a member of operational group '${opGroup.name}'`
+              })
+            );
+          }
+        }
+      }
 
       // Anti-duplicate occupant in same role
       if (currentRole.occupants.includes(notableId)) {
