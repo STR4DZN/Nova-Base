@@ -53,6 +53,8 @@ export class LedgerStore {
   readonly #sequenceIndex: LedgerEntry[] = [];
   #nextSequence = 1;
   readonly #storageAdapter?: LedgerStorageAdapter;
+  #pendingPersist: Promise<void> | null = null;
+  #lastPersistError: Error | null = null;
 
   constructor(options: LedgerStoreOptions = {}) {
     this.#storageAdapter = options.storageAdapter;
@@ -120,9 +122,7 @@ export class LedgerStore {
     this.#sequenceIndex.push(entry);
     this.#nextSequence++;
 
-    void this.#persist().catch(() => {
-      // Background persistence error logged or captured on flush
-    });
+    this.#schedulePersist();
 
     return ok(entry);
   }
@@ -304,7 +304,22 @@ export class LedgerStore {
   }
 
   async flush(): Promise<void> {
+    if (this.#pendingPersist) {
+      await this.#pendingPersist;
+    }
+    if (this.#lastPersistError) {
+      const err = this.#lastPersistError;
+      this.#lastPersistError = null;
+      throw err;
+    }
     await this.#persist();
+  }
+
+  #schedulePersist(): void {
+    if (!this.#storageAdapter) return;
+    this.#pendingPersist = this.#persist().catch((err: unknown) => {
+      this.#lastPersistError = err instanceof Error ? err : new Error(String(err));
+    });
   }
 
   async #persist(): Promise<void> {

@@ -40,6 +40,8 @@ export class ReservationStore {
   readonly #reservations = new Map<string, Reservation>();
   readonly #events: ReservationEvent[] = [];
   readonly #storageAdapter?: ReservationStorageAdapter;
+  #pendingPersist: Promise<void> | null = null;
+  #lastPersistError: Error | null = null;
 
   constructor(options: ReservationStoreOptions = {}) {
     this.#storageAdapter = options.storageAdapter;
@@ -97,7 +99,7 @@ export class ReservationStore {
       userId: res.source.userId
     });
 
-    void this.#persist().catch(() => {});
+    this.#schedulePersist();
     return ok(res);
   }
 
@@ -217,7 +219,7 @@ export class ReservationStore {
       userId: options?.userId
     });
 
-    void this.#persist().catch(() => {});
+    this.#schedulePersist();
     return ok({ reservation: updated, consumedAmount: amountMinor });
   }
 
@@ -292,7 +294,7 @@ export class ReservationStore {
       userId: options?.userId
     });
 
-    void this.#persist().catch(() => {});
+    this.#schedulePersist();
     return ok({ reservation: updated, releasedAmount: toRelease });
   }
 
@@ -335,12 +337,93 @@ export class ReservationStore {
       reason: options?.reason ?? "Reservation expired"
     });
 
-    void this.#persist().catch(() => {});
+    this.#schedulePersist();
     return ok(updated);
   }
 
+  /**
+   * Rolls back a consumed reservation to its pre-consumption state (G4-AUD-003, G4-AUD-002).
+   * Restores remaining amount and status exactly as in snapshot, recording an 'adjusted' event.
+   */
+  rollbackConsume(
+    snapshot: Reservation,
+    consumedAmount: number,
+    options?: { readonly reason?: string; readonly worldTime?: number | null; readonly userId?: string }
+  ): Result<Reservation, PublicError> {
+    const current = this.#reservations.get(snapshot.id);
+    const restored: Reservation = {
+      ...snapshot,
+      revision: (current?.revision ?? snapshot.revision) + 1
+    };
+
+    this.#reservations.set(snapshot.id, restored);
+
+    this.#recordEvent({
+      reservationId: snapshot.id,
+      type: "adjusted",
+      deltaMinor: consumedAmount,
+      remainingAmountMinor: restored.remainingAmountMinor,
+      timestampReal: Date.now(),
+      timestampWorld: options?.worldTime,
+      reason: options?.reason ?? "Rollback consumed reservation",
+      userId: options?.userId
+    });
+
+    this.#schedulePersist();
+    return ok(restored);
+  }
+
+  /**
+   * Restores a reservation to an exact prior snapshot with an audit adjustment event.
+   */
+  restore(
+    snapshot: Reservation,
+    reason: string,
+    options?: { readonly worldTime?: number | null; readonly userId?: string }
+  ): Result<Reservation, PublicError> {
+    const current = this.#reservations.get(snapshot.id);
+    const currentRemaining = current ? current.remainingAmountMinor : 0;
+    const delta = snapshot.remainingAmountMinor - currentRemaining;
+
+    const restored: Reservation = {
+      ...snapshot,
+      revision: (current?.revision ?? snapshot.revision) + 1
+    };
+
+    this.#reservations.set(snapshot.id, restored);
+
+    this.#recordEvent({
+      reservationId: snapshot.id,
+      type: "adjusted",
+      deltaMinor: delta,
+      remainingAmountMinor: restored.remainingAmountMinor,
+      timestampReal: Date.now(),
+      timestampWorld: options?.worldTime,
+      reason,
+      userId: options?.userId
+    });
+
+    this.#schedulePersist();
+    return ok(restored);
+  }
+
   async flush(): Promise<void> {
+    if (this.#pendingPersist) {
+      await this.#pendingPersist;
+    }
+    if (this.#lastPersistError) {
+      const err = this.#lastPersistError;
+      this.#lastPersistError = null;
+      throw err;
+    }
     await this.#persist();
+  }
+
+  #schedulePersist(): void {
+    if (!this.#storageAdapter) return;
+    this.#pendingPersist = this.#persist().catch((err: unknown) => {
+      this.#lastPersistError = err instanceof Error ? err : new Error(String(err));
+    });
   }
 
   #recordEvent(eventParams: {

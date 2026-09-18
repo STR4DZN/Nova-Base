@@ -6294,13 +6294,101 @@ function transitionTransactionState(record, toState, authorityEpoch, reason, now
   return ok(updated);
 }
 
+// src/mutations/transaction-storage-adapter.ts
+var TRANSACTION_STORAGE_SCHEMA_VERSION = 1;
+var TRANSACTION_DOCUMENT_NAME = "[Domain Manager] Transaction Store";
+var TRANSACTION_FLAG_NAMESPACE = "domain-manager-transactions";
+function runtimeFromGlobals3() {
+  const globals = globalThis;
+  const journal = globals.game?.journal;
+  const JournalEntry = globals.JournalEntry;
+  if (!journal || !JournalEntry || typeof JournalEntry.create !== "function") {
+    return void 0;
+  }
+  return {
+    journal,
+    createJournalEntry: (data) => JournalEntry.create(data)
+  };
+}
+var FoundryJournalTransactionStorageAdapter = class {
+  #runtime;
+  #documentId;
+  constructor(runtime2) {
+    this.#runtime = runtime2 ?? runtimeFromGlobals3();
+  }
+  async loadSnapshot() {
+    if (!this.#runtime) {
+      return null;
+    }
+    const doc = this.#findDocument();
+    if (!doc) {
+      return null;
+    }
+    this.#documentId = doc.id;
+    const rawFlag = doc.flags?.[TRANSACTION_FLAG_NAMESPACE];
+    if (!rawFlag || typeof rawFlag !== "object") {
+      return null;
+    }
+    return rawFlag;
+  }
+  async saveSnapshot(snapshot) {
+    if (!this.#runtime) {
+      return;
+    }
+    let doc = this.#findDocument();
+    if (!doc) {
+      const created = await this.#runtime.createJournalEntry({
+        name: TRANSACTION_DOCUMENT_NAME,
+        flags: {
+          [TRANSACTION_FLAG_NAMESPACE]: snapshot
+        }
+      });
+      if (created) {
+        this.#documentId = created.id;
+      }
+      return;
+    }
+    this.#documentId = doc.id;
+    await doc.update({
+      [`flags.${TRANSACTION_FLAG_NAMESPACE}`]: snapshot
+    });
+  }
+  #findDocument() {
+    if (!this.#runtime) return void 0;
+    if (this.#documentId) {
+      const doc = this.#runtime.journal.get(this.#documentId);
+      if (doc) return doc;
+    }
+    return this.#runtime.journal.contents.find((d) => d.name === TRANSACTION_DOCUMENT_NAME);
+  }
+};
+
 // src/mutations/transaction-store.ts
 var TransactionStore = class {
   #records = /* @__PURE__ */ new Map();
   #byCommandId = /* @__PURE__ */ new Map();
+  #storageAdapter;
+  #pendingPersist = null;
+  #lastPersistError = null;
+  constructor(options = {}) {
+    this.#storageAdapter = options.storageAdapter;
+  }
+  async rehydrate() {
+    if (!this.#storageAdapter) return;
+    const snapshot = await this.#storageAdapter.loadSnapshot();
+    if (snapshot) {
+      this.#records.clear();
+      this.#byCommandId.clear();
+      for (const record of snapshot.records) {
+        this.#records.set(record.transactionId, record);
+        this.#byCommandId.set(record.commandId, record.transactionId);
+      }
+    }
+  }
   save(record) {
     this.#records.set(record.transactionId, record);
     this.#byCommandId.set(record.commandId, record.transactionId);
+    this.#schedulePersist();
   }
   get(transactionId) {
     return this.#records.get(transactionId);
@@ -6317,6 +6405,12 @@ var TransactionStore = class {
       }
     }
     return Object.freeze(unresolved);
+  }
+  listAll() {
+    return Object.freeze(Array.from(this.#records.values()));
+  }
+  get count() {
+    return this.#records.size;
   }
   transition(transactionId, toState, authorityEpoch, reason, now = Date.now()) {
     const existing = this.#records.get(transactionId);
@@ -6342,9 +6436,35 @@ var TransactionStore = class {
     this.save(transitionRes.value);
     return transitionRes;
   }
+  async flush() {
+    if (this.#pendingPersist) {
+      await this.#pendingPersist;
+    }
+    if (this.#lastPersistError) {
+      const err3 = this.#lastPersistError;
+      this.#lastPersistError = null;
+      throw err3;
+    }
+  }
   clear() {
     this.#records.clear();
     this.#byCommandId.clear();
+    this.#schedulePersist();
+  }
+  #schedulePersist() {
+    if (!this.#storageAdapter) return;
+    this.#pendingPersist = this.#persist().catch((err3) => {
+      this.#lastPersistError = err3 instanceof Error ? err3 : new Error(String(err3));
+    });
+  }
+  async #persist() {
+    if (!this.#storageAdapter) return;
+    const snapshot = {
+      schemaVersion: TRANSACTION_STORAGE_SCHEMA_VERSION,
+      records: Array.from(this.#records.values()),
+      updatedAt: Date.now()
+    };
+    await this.#storageAdapter.saveSnapshot(snapshot);
   }
 };
 
@@ -6353,9 +6473,21 @@ var RecoveryService = class {
   #transactionStore;
   #lockManager;
   #heldRecoveryLocks = /* @__PURE__ */ new Map();
-  constructor(options) {
-    this.#transactionStore = options.transactionStore;
-    this.#lockManager = options.lockManager;
+  #compensators = /* @__PURE__ */ new Map();
+  constructor(options, lockManager) {
+    if ("transactionStore" in options) {
+      this.#transactionStore = options.transactionStore;
+      this.#lockManager = options.lockManager;
+    } else {
+      this.#transactionStore = options;
+      this.#lockManager = lockManager;
+    }
+  }
+  registerCompensator(type, compensator) {
+    this.#compensators.set(type, compensator);
+  }
+  getCompensator(type) {
+    return this.#compensators.get(type);
   }
   /**
    * Scans for unresolved transactions at startup or after authority failover.
@@ -6412,7 +6544,9 @@ var RecoveryService = class {
     if (!compTransition.ok) {
       return compTransition;
     }
-    if (!compensator) {
+    const recoveryType = record.recoveryData?.type;
+    const effectiveCompensator = compensator ?? (recoveryType ? this.#compensators.get(recoveryType) : void 0);
+    if (!effectiveCompensator) {
       this.#transactionStore.transition(
         transactionId,
         "needs-recovery",
@@ -6430,7 +6564,7 @@ var RecoveryService = class {
       );
     }
     try {
-      const compRes = await compensator(compTransition.value);
+      const compRes = await effectiveCompensator(compTransition.value);
       if (!compRes.ok) {
         this.#transactionStore.transition(
           transactionId,
@@ -6476,6 +6610,20 @@ var RecoveryService = class {
       handle.release();
       this.#heldRecoveryLocks.delete(transactionId);
     }
+  }
+  /**
+   * Recovers all unresolved transactions using registered compensators.
+   */
+  async recoverAll(currentEpoch) {
+    const unresolved = await this.scanOnStartup(currentEpoch);
+    const results = [];
+    for (const tx of unresolved) {
+      if (!isFinalTransactionState(tx.state)) {
+        const res = await this.recoverTransaction(tx.transactionId, currentEpoch);
+        results.push(res);
+      }
+    }
+    return Object.freeze(results);
   }
   clear() {
     for (const handle of this.#heldRecoveryLocks.values()) {
@@ -12142,6 +12290,13 @@ var G2DiagnosticsProvider = class {
   }
 };
 
+// src/core/versioning/build-metadata.ts
+var BUILD_METADATA = Object.freeze({
+  moduleVersion: "0.0.3",
+  buildChannel: "dev",
+  target: "foundry-vtt"
+});
+
 // src/economy/definitions/canonical-definitions.ts
 var CANONICAL_RESOURCE_TREASURY = Object.freeze({
   id: "domain-manager:treasury",
@@ -12422,6 +12577,78 @@ function validateLedgerEntry(raw) {
 
 // src/economy/storage/ledger-storage-adapter.ts
 var LEDGER_STORAGE_SCHEMA_VERSION = 1;
+var LEDGER_DOCUMENT_NAME = "[Domain Manager] Ledger Store";
+var LEDGER_FLAG_NAMESPACE = "domain-manager-ledger";
+function runtimeFromGlobals4() {
+  const globals = globalThis;
+  const journal = globals.game?.journal;
+  const JournalEntry = globals.JournalEntry;
+  if (!journal || !JournalEntry || typeof JournalEntry.create !== "function") {
+    return void 0;
+  }
+  return {
+    journal,
+    createJournalEntry: (data) => JournalEntry.create(data)
+  };
+}
+var FoundryJournalLedgerStorageAdapter = class {
+  #runtime;
+  #documentId;
+  constructor(runtime2) {
+    this.#runtime = runtime2 ?? runtimeFromGlobals4();
+  }
+  async loadSnapshot() {
+    if (!this.#runtime) {
+      return null;
+    }
+    const doc = this.#findDocument();
+    if (!doc) {
+      return null;
+    }
+    this.#documentId = doc.id;
+    const rawFlag = doc.flags?.[LEDGER_FLAG_NAMESPACE];
+    if (!rawFlag || typeof rawFlag !== "object") {
+      return null;
+    }
+    return rawFlag;
+  }
+  async saveSnapshot(snapshot) {
+    if (!this.#runtime) {
+      return;
+    }
+    let doc = this.#findDocument();
+    if (doc) {
+      this.#documentId = doc.id;
+      if (typeof doc.update === "function") {
+        await doc.update({
+          flags: {
+            [LEDGER_FLAG_NAMESPACE]: snapshot
+          }
+        });
+      }
+    } else {
+      const created = await this.#runtime.createJournalEntry({
+        name: LEDGER_DOCUMENT_NAME,
+        flags: {
+          [LEDGER_FLAG_NAMESPACE]: snapshot
+        }
+      });
+      if (created) {
+        this.#documentId = created.id;
+      }
+    }
+  }
+  #findDocument() {
+    if (!this.#runtime) return void 0;
+    if (this.#documentId) {
+      const found = this.#runtime.journal.get(this.#documentId);
+      if (found) return found;
+    }
+    return this.#runtime.journal.contents.find(
+      (d) => d.name === LEDGER_DOCUMENT_NAME || Boolean(d.flags?.[LEDGER_FLAG_NAMESPACE])
+    );
+  }
+};
 
 // src/economy/ledger/ledger-store.ts
 var LedgerStore = class {
@@ -12430,6 +12657,8 @@ var LedgerStore = class {
   #sequenceIndex = [];
   #nextSequence = 1;
   #storageAdapter;
+  #pendingPersist = null;
+  #lastPersistError = null;
   constructor(options = {}) {
     this.#storageAdapter = options.storageAdapter;
   }
@@ -12481,8 +12710,7 @@ var LedgerStore = class {
     this.#entries.set(entry.id, entry);
     this.#sequenceIndex.push(entry);
     this.#nextSequence++;
-    void this.#persist().catch(() => {
-    });
+    this.#schedulePersist();
     return ok(entry);
   }
   get(id) {
@@ -12631,7 +12859,21 @@ var LedgerStore = class {
     return this.#entries.size;
   }
   async flush() {
+    if (this.#pendingPersist) {
+      await this.#pendingPersist;
+    }
+    if (this.#lastPersistError) {
+      const err3 = this.#lastPersistError;
+      this.#lastPersistError = null;
+      throw err3;
+    }
     await this.#persist();
+  }
+  #schedulePersist() {
+    if (!this.#storageAdapter) return;
+    this.#pendingPersist = this.#persist().catch((err3) => {
+      this.#lastPersistError = err3 instanceof Error ? err3 : new Error(String(err3));
+    });
   }
   async #persist() {
     if (!this.#storageAdapter) return;
@@ -12783,12 +13025,86 @@ function validateReservation2(raw) {
 
 // src/economy/storage/reservation-storage-adapter.ts
 var RESERVATION_STORAGE_SCHEMA_VERSION = 1;
+var RESERVATION_DOCUMENT_NAME = "[Domain Manager] Reservation Store";
+var RESERVATION_FLAG_NAMESPACE = "domain-manager-reservations";
+function runtimeFromGlobals5() {
+  const globals = globalThis;
+  const journal = globals.game?.journal;
+  const JournalEntry = globals.JournalEntry;
+  if (!journal || !JournalEntry || typeof JournalEntry.create !== "function") {
+    return void 0;
+  }
+  return {
+    journal,
+    createJournalEntry: (data) => JournalEntry.create(data)
+  };
+}
+var FoundryJournalReservationStorageAdapter = class {
+  #runtime;
+  #documentId;
+  constructor(runtime2) {
+    this.#runtime = runtime2 ?? runtimeFromGlobals5();
+  }
+  async loadSnapshot() {
+    if (!this.#runtime) {
+      return null;
+    }
+    const doc = this.#findDocument();
+    if (!doc) {
+      return null;
+    }
+    this.#documentId = doc.id;
+    const rawFlag = doc.flags?.[RESERVATION_FLAG_NAMESPACE];
+    if (!rawFlag || typeof rawFlag !== "object") {
+      return null;
+    }
+    return rawFlag;
+  }
+  async saveSnapshot(snapshot) {
+    if (!this.#runtime) {
+      return;
+    }
+    let doc = this.#findDocument();
+    if (doc) {
+      this.#documentId = doc.id;
+      if (typeof doc.update === "function") {
+        await doc.update({
+          flags: {
+            [RESERVATION_FLAG_NAMESPACE]: snapshot
+          }
+        });
+      }
+    } else {
+      const created = await this.#runtime.createJournalEntry({
+        name: RESERVATION_DOCUMENT_NAME,
+        flags: {
+          [RESERVATION_FLAG_NAMESPACE]: snapshot
+        }
+      });
+      if (created) {
+        this.#documentId = created.id;
+      }
+    }
+  }
+  #findDocument() {
+    if (!this.#runtime) return void 0;
+    if (this.#documentId) {
+      const found = this.#runtime.journal.get(this.#documentId);
+      if (found) return found;
+    }
+    return this.#runtime.journal.contents.find(
+      (d) => d.name === RESERVATION_DOCUMENT_NAME || Boolean(d.flags?.[RESERVATION_FLAG_NAMESPACE])
+    );
+  }
+};
 
 // src/economy/reservations/reservation-store.ts
 var ReservationStore = class {
   #reservations = /* @__PURE__ */ new Map();
   #events = [];
   #storageAdapter;
+  #pendingPersist = null;
+  #lastPersistError = null;
   constructor(options = {}) {
     this.#storageAdapter = options.storageAdapter;
   }
@@ -12839,8 +13155,7 @@ var ReservationStore = class {
       sourceRef: res.source.ref,
       userId: res.source.userId
     });
-    void this.#persist().catch(() => {
-    });
+    this.#schedulePersist();
     return ok(res);
   }
   get(id) {
@@ -12937,8 +13252,7 @@ var ReservationStore = class {
       reason: options?.reason,
       userId: options?.userId
     });
-    void this.#persist().catch(() => {
-    });
+    this.#schedulePersist();
     return ok({ reservation: updated, consumedAmount: amountMinor });
   }
   release(reservationId, amountMinor, options) {
@@ -12999,8 +13313,7 @@ var ReservationStore = class {
       reason: options?.reason,
       userId: options?.userId
     });
-    void this.#persist().catch(() => {
-    });
+    this.#schedulePersist();
     return ok({ reservation: updated, releasedAmount: toRelease });
   }
   expire(reservationId, options) {
@@ -13034,12 +13347,74 @@ var ReservationStore = class {
       timestampWorld: options?.worldTime,
       reason: options?.reason ?? "Reservation expired"
     });
-    void this.#persist().catch(() => {
-    });
+    this.#schedulePersist();
     return ok(updated);
   }
+  /**
+   * Rolls back a consumed reservation to its pre-consumption state (G4-AUD-003, G4-AUD-002).
+   * Restores remaining amount and status exactly as in snapshot, recording an 'adjusted' event.
+   */
+  rollbackConsume(snapshot, consumedAmount, options) {
+    const current = this.#reservations.get(snapshot.id);
+    const restored = {
+      ...snapshot,
+      revision: (current?.revision ?? snapshot.revision) + 1
+    };
+    this.#reservations.set(snapshot.id, restored);
+    this.#recordEvent({
+      reservationId: snapshot.id,
+      type: "adjusted",
+      deltaMinor: consumedAmount,
+      remainingAmountMinor: restored.remainingAmountMinor,
+      timestampReal: Date.now(),
+      timestampWorld: options?.worldTime,
+      reason: options?.reason ?? "Rollback consumed reservation",
+      userId: options?.userId
+    });
+    this.#schedulePersist();
+    return ok(restored);
+  }
+  /**
+   * Restores a reservation to an exact prior snapshot with an audit adjustment event.
+   */
+  restore(snapshot, reason, options) {
+    const current = this.#reservations.get(snapshot.id);
+    const currentRemaining = current ? current.remainingAmountMinor : 0;
+    const delta = snapshot.remainingAmountMinor - currentRemaining;
+    const restored = {
+      ...snapshot,
+      revision: (current?.revision ?? snapshot.revision) + 1
+    };
+    this.#reservations.set(snapshot.id, restored);
+    this.#recordEvent({
+      reservationId: snapshot.id,
+      type: "adjusted",
+      deltaMinor: delta,
+      remainingAmountMinor: restored.remainingAmountMinor,
+      timestampReal: Date.now(),
+      timestampWorld: options?.worldTime,
+      reason,
+      userId: options?.userId
+    });
+    this.#schedulePersist();
+    return ok(restored);
+  }
   async flush() {
+    if (this.#pendingPersist) {
+      await this.#pendingPersist;
+    }
+    if (this.#lastPersistError) {
+      const err3 = this.#lastPersistError;
+      this.#lastPersistError = null;
+      throw err3;
+    }
     await this.#persist();
+  }
+  #schedulePersist() {
+    if (!this.#storageAdapter) return;
+    this.#pendingPersist = this.#persist().catch((err3) => {
+      this.#lastPersistError = err3 instanceof Error ? err3 : new Error(String(err3));
+    });
   }
   #recordEvent(eventParams) {
     const event = {
@@ -13057,6 +13432,141 @@ var ReservationStore = class {
       updatedAt: Date.now()
     };
     await this.#storageAdapter.saveSnapshot(snapshot);
+  }
+};
+
+// src/economy/definitions/custom-resource-store.ts
+var CUSTOM_RESOURCE_STORAGE_SCHEMA_VERSION = 1;
+var CUSTOM_RESOURCE_DOCUMENT_NAME = "[Domain Manager] Custom Resources";
+var CUSTOM_RESOURCE_FLAG_NAMESPACE = "domain-manager-custom-resources";
+var InMemoryCustomResourceStorageAdapter = class {
+  #state;
+  constructor(state) {
+    this.#state = state ?? { snapshot: null };
+  }
+  async loadSnapshot() {
+    return this.#state.snapshot ? structuredClone(this.#state.snapshot) : null;
+  }
+  async saveSnapshot(snapshot) {
+    this.#state.snapshot = structuredClone(snapshot);
+  }
+  get state() {
+    return this.#state;
+  }
+};
+function runtimeFromGlobals6() {
+  const globals = globalThis;
+  const journal = globals.game?.journal;
+  const JournalEntry = globals.JournalEntry;
+  if (!journal || !JournalEntry || typeof JournalEntry.create !== "function") {
+    return void 0;
+  }
+  return {
+    journal,
+    createJournalEntry: (data) => JournalEntry.create(data)
+  };
+}
+var FoundryJournalCustomResourceStorageAdapter = class {
+  #runtime;
+  #documentId;
+  constructor(runtime2) {
+    this.#runtime = runtime2 ?? runtimeFromGlobals6();
+  }
+  async loadSnapshot() {
+    if (!this.#runtime) {
+      return null;
+    }
+    const doc = this.#findDocument();
+    if (!doc) {
+      return null;
+    }
+    this.#documentId = doc.id;
+    const rawFlag = doc.flags?.[CUSTOM_RESOURCE_FLAG_NAMESPACE];
+    if (!rawFlag || typeof rawFlag !== "object") {
+      return null;
+    }
+    return rawFlag;
+  }
+  async saveSnapshot(snapshot) {
+    if (!this.#runtime) {
+      return;
+    }
+    let doc = this.#findDocument();
+    if (doc) {
+      this.#documentId = doc.id;
+      if (typeof doc.update === "function") {
+        await doc.update({
+          flags: {
+            [CUSTOM_RESOURCE_FLAG_NAMESPACE]: snapshot
+          }
+        });
+      }
+    } else {
+      const created = await this.#runtime.createJournalEntry({
+        name: CUSTOM_RESOURCE_DOCUMENT_NAME,
+        flags: {
+          [CUSTOM_RESOURCE_FLAG_NAMESPACE]: snapshot
+        }
+      });
+      if (created) {
+        this.#documentId = created.id;
+      }
+    }
+  }
+  #findDocument() {
+    if (!this.#runtime) return void 0;
+    if (this.#documentId) {
+      const found = this.#runtime.journal.get(this.#documentId);
+      if (found) return found;
+    }
+    return this.#runtime.journal.contents.find(
+      (d) => d.name === CUSTOM_RESOURCE_DOCUMENT_NAME || Boolean(d.flags?.[CUSTOM_RESOURCE_FLAG_NAMESPACE])
+    );
+  }
+};
+var CustomResourceDefinitionStore = class {
+  #adapter;
+  #definitions = /* @__PURE__ */ new Map();
+  constructor(adapter = new InMemoryCustomResourceStorageAdapter()) {
+    this.#adapter = adapter;
+  }
+  async rehydrate() {
+    const snapshot = await this.#adapter.loadSnapshot();
+    if (snapshot) {
+      for (const def of snapshot.definitions) {
+        this.#definitions.set(def.id, def);
+      }
+    }
+    return this.list();
+  }
+  has(id) {
+    return this.#definitions.has(id);
+  }
+  register(definition) {
+    const valRes = validateResourceDefinition(definition);
+    if (!valRes.ok) return valRes;
+    this.#definitions.set(valRes.value.id, valRes.value);
+    void this.#persist().catch(() => {
+    });
+    return ok(valRes.value);
+  }
+  async save(definition) {
+    this.#definitions.set(definition.id, definition);
+    await this.#persist();
+  }
+  get(id) {
+    return this.#definitions.get(id);
+  }
+  list() {
+    return Object.freeze(Array.from(this.#definitions.values()));
+  }
+  async #persist() {
+    const snapshot = {
+      schemaVersion: CUSTOM_RESOURCE_STORAGE_SCHEMA_VERSION,
+      definitions: Array.from(this.#definitions.values()),
+      updatedAt: Date.now()
+    };
+    await this.#adapter.saveSnapshot(snapshot);
   }
 };
 
@@ -13516,6 +14026,8 @@ var EconomyService = class {
   #transactionStore;
   #recoveryService;
   #providerRegistry;
+  #thresholdService;
+  #derivedResolvers;
   constructor(options) {
     this.#domains = options.domains;
     this.#resourceRegistry = options.resourceRegistry;
@@ -13525,6 +14037,11 @@ var EconomyService = class {
     this.#transactionStore = options.transactionStore;
     this.#recoveryService = options.recoveryService;
     this.#providerRegistry = options.providerRegistry;
+    this.#thresholdService = options.thresholdService;
+    this.#derivedResolvers = options.derivedResolvers;
+    if (this.#recoveryService) {
+      this.#registerRecoveryCompensators(this.#recoveryService);
+    }
   }
   get registry() {
     return this.#resourceRegistry;
@@ -13537,6 +14054,9 @@ var EconomyService = class {
   }
   get providerRegistry() {
     return this.#providerRegistry;
+  }
+  get thresholdService() {
+    return this.#thresholdService;
   }
   getResourceDefinition(resourceId) {
     return this.#resourceRegistry.get(resourceId);
@@ -13587,46 +14107,62 @@ var EconomyService = class {
       });
     }
     if (acc.mode === "provider") {
-      let balanceMinor = 0;
+      let balanceMinor2 = 0;
       let capacityMinor = null;
-      let isStale = false;
-      let isUnavailable = false;
+      let isStale2 = false;
+      let isUnavailable2 = false;
       if (this.#providerRegistry) {
         const provider = this.#providerRegistry.get(acc.providerId);
         if (provider && "readBalance" in provider) {
           const balRes = await provider.readBalance(domainUuid, resourceId, acc.providerRef);
           if (balRes?.ok) {
-            balanceMinor = balRes.value.balanceMinor;
+            balanceMinor2 = balRes.value.balanceMinor;
             capacityMinor = balRes.value.effectiveCapacityMinor ?? null;
-            isStale = Boolean(balRes.value.isStale);
+            isStale2 = Boolean(balRes.value.isStale);
           } else {
-            isUnavailable = true;
+            isUnavailable2 = true;
           }
         } else {
-          isUnavailable = true;
+          isUnavailable2 = true;
         }
       } else {
-        isUnavailable = true;
+        isUnavailable2 = true;
       }
       const reservedMinor2 = this.#reservationStore.getReservedTotal(domainUuid, resourceId);
-      const availableMinor = balanceMinor - reservedMinor2;
+      const availableMinor = balanceMinor2 - reservedMinor2;
       return ok({
         account: acc,
-        balanceMinor,
+        balanceMinor: balanceMinor2,
         reservedMinor: reservedMinor2,
         availableMinor,
         effectiveCapacityMinor: capacityMinor,
-        isStale,
-        isUnavailable
+        isStale: isStale2,
+        isUnavailable: isUnavailable2
       });
     }
     const reservedMinor = this.#reservationStore.getReservedTotal(domainUuid, resourceId);
+    let balanceMinor = 0;
+    let isUnavailable = true;
+    let isStale = false;
+    if (this.#derivedResolvers) {
+      const resolver = this.#derivedResolvers.get(acc.resolverId);
+      if (resolver) {
+        const res = await resolver(domainUuid, acc);
+        if (res.ok) {
+          balanceMinor = res.value.balanceMinor;
+          isStale = Boolean(res.value.isStale);
+          isUnavailable = false;
+        }
+      }
+    }
     return ok({
       account: acc,
-      balanceMinor: 0,
+      balanceMinor,
       reservedMinor,
-      availableMinor: -reservedMinor,
-      effectiveCapacityMinor: null
+      availableMinor: balanceMinor - reservedMinor,
+      effectiveCapacityMinor: null,
+      isStale,
+      isUnavailable
     });
   }
   async createAccount(params) {
@@ -13640,34 +14176,75 @@ var EconomyService = class {
         })
       );
     }
-    const initialBalance = params.initialBalanceMinor ?? 0;
-    if (!Number.isSafeInteger(initialBalance)) {
-      return err(
-        createPublicError({
-          code: "DM_ECON_AMOUNT_INVALID",
-          category: "validation",
-          message: "initialBalanceMinor must be a safe integer"
-        })
-      );
+    const mode = params.mode ?? "native";
+    let newAccount;
+    if (mode === "provider") {
+      if (!params.providerId || !params.providerRef) {
+        return err(
+          createPublicError({
+            code: "DM_ECON_ACCOUNT_INVALID",
+            category: "validation",
+            message: "Provider account requires providerId and providerRef"
+          })
+        );
+      }
+      newAccount = {
+        mode: "provider",
+        domainUuid: params.domainUuid,
+        resourceId: params.resourceId,
+        providerId: params.providerId,
+        providerRef: params.providerRef,
+        visibility: params.visibility ?? "public",
+        status: "active"
+      };
+    } else if (mode === "derived") {
+      if (!params.resolverId) {
+        return err(
+          createPublicError({
+            code: "DM_ECON_ACCOUNT_INVALID",
+            category: "validation",
+            message: "Derived account requires resolverId"
+          })
+        );
+      }
+      newAccount = {
+        mode: "derived",
+        domainUuid: params.domainUuid,
+        resourceId: params.resourceId,
+        resolverId: params.resolverId,
+        visibility: params.visibility ?? "public",
+        status: "active"
+      };
+    } else {
+      const initialBalance = params.initialBalanceMinor ?? 0;
+      if (!Number.isSafeInteger(initialBalance)) {
+        return err(
+          createPublicError({
+            code: "DM_ECON_AMOUNT_INVALID",
+            category: "validation",
+            message: "initialBalanceMinor must be a safe integer"
+          })
+        );
+      }
+      if (!def.allowNegative && initialBalance < 0) {
+        return err(
+          createPublicError({
+            code: "DM_ECON_NEGATIVE_NOT_ALLOWED",
+            category: "validation",
+            message: `Resource '${params.resourceId}' does not allow negative balances`
+          })
+        );
+      }
+      newAccount = {
+        mode: "native",
+        domainUuid: params.domainUuid,
+        resourceId: params.resourceId,
+        balanceMinor: initialBalance,
+        baseCapacityMinor: params.baseCapacityMinor ?? null,
+        visibility: params.visibility ?? "public",
+        status: "active"
+      };
     }
-    if (!def.allowNegative && initialBalance < 0) {
-      return err(
-        createPublicError({
-          code: "DM_ECON_NEGATIVE_NOT_ALLOWED",
-          category: "validation",
-          message: `Resource '${params.resourceId}' does not allow negative balances`
-        })
-      );
-    }
-    const newAccount = {
-      mode: "native",
-      domainUuid: params.domainUuid,
-      resourceId: params.resourceId,
-      balanceMinor: initialBalance,
-      baseCapacityMinor: params.baseCapacityMinor ?? null,
-      visibility: params.visibility ?? "public",
-      status: "active"
-    };
     const valRes = validateResourceAccount(newAccount);
     if (!valRes.ok) {
       return valRes;
@@ -13689,7 +14266,7 @@ var EconomyService = class {
         if (existing.status === "closed") {
           const reactivated = {
             ...newAccount,
-            balanceMinor: initialBalance
+            ...newAccount.mode === "native" ? { balanceMinor: params.initialBalanceMinor ?? 0 } : {}
           };
           const updatedAccounts2 = econData.accounts.map(
             (a) => a.resourceId === params.resourceId ? reactivated : a
@@ -13718,11 +14295,11 @@ var EconomyService = class {
       const updatedRecord = withDomainEconomyData(doc.record, updatedEconData);
       const updateRes = await this.#domains.update({ ...doc, record: updatedRecord });
       if (!updateRes.ok) return updateRes;
-      if (initialBalance !== 0) {
+      if (newAccount.mode === "native" && newAccount.balanceMinor !== 0) {
         this.#ledgerStore.append({
           domainUuid: params.domainUuid,
           resourceId: params.resourceId,
-          deltaMinor: initialBalance,
+          deltaMinor: newAccount.balanceMinor,
           kind: "opening-balance",
           source: {
             type: "init",
@@ -13730,6 +14307,7 @@ var EconomyService = class {
             userId: params.userId
           }
         });
+        await this.#ledgerStore.flush();
       }
       return ok(newAccount);
     } finally {
@@ -13859,17 +14437,83 @@ var EconomyService = class {
       const doc = docRes.value;
       const econData = getDomainEconomyData(doc.record);
       const accIndex = econData.accounts.findIndex((a) => a.resourceId === params.resourceId);
-      if (accIndex < 0 || econData.accounts[accIndex].mode !== "native") {
+      if (accIndex < 0) {
         return err(
           createPublicError({
             code: "DM_ECON_ACCOUNT_NOT_FOUND",
             category: "not-found",
-            message: `Native account for resource '${params.resourceId}' not found in domain '${params.domainUuid}'`
+            message: `Account for resource '${params.resourceId}' not found in domain '${params.domainUuid}'`
           })
         );
       }
       const existingAccount = econData.accounts[accIndex];
-      const effectiveCap = resolveEffectiveCapacity(existingAccount.baseCapacityMinor, [], def);
+      if (existingAccount.mode === "derived") {
+        return err(
+          createPublicError({
+            code: "DM_ECON_DERIVED_ACCOUNT_READ_ONLY",
+            category: "validation",
+            message: `Account '${params.resourceId}' is derived and cannot be adjusted manually`
+          })
+        );
+      }
+      if (existingAccount.mode === "provider") {
+        const providerAccount = existingAccount;
+        if (!this.#providerRegistry) {
+          return err(
+            createPublicError({
+              code: "DM_ECON_PROVIDER_UNAVAILABLE",
+              category: "provider",
+              message: "Provider registry is not available"
+            })
+          );
+        }
+        const provider = this.#providerRegistry.get(providerAccount.providerId);
+        if (!provider || !("mutateBalance" in provider)) {
+          return err(
+            createPublicError({
+              code: "DM_ECON_PROVIDER_UNAVAILABLE",
+              category: "provider",
+              message: `Provider '${providerAccount.providerId}' is unavailable or does not support balance mutations`
+            })
+          );
+        }
+        const delta = params.deltaMinor ?? 0;
+        if (delta === 0) {
+          return ok({
+            account: providerAccount,
+            entry: void 0,
+            isNoop: true
+          });
+        }
+        const mutRes = await provider.mutateBalance(
+          params.domainUuid,
+          params.resourceId,
+          providerAccount.providerRef,
+          delta,
+          params.reason
+        );
+        if (!mutRes.ok) return mutRes;
+        const entryRes2 = this.#ledgerStore.append({
+          domainUuid: params.domainUuid,
+          resourceId: params.resourceId,
+          deltaMinor: delta,
+          kind: "adjustment",
+          source: {
+            type: "adjustment",
+            ref: providerAccount.providerRef,
+            reason: params.reason,
+            userId: params.userId
+          }
+        });
+        await this.#ledgerStore.flush();
+        return ok({
+          account: providerAccount,
+          entry: entryRes2.ok ? entryRes2.value : void 0,
+          isNoop: false
+        });
+      }
+      const nativeAccount = existingAccount;
+      const effectiveCap = resolveEffectiveCapacity(nativeAccount.baseCapacityMinor, [], def);
       const plan = buildAdjustPlan({
         domainUuid: params.domainUuid,
         resourceId: params.resourceId,
@@ -13877,7 +14521,7 @@ var EconomyService = class {
         targetBalanceMinor: params.targetBalanceMinor,
         reason: params.reason,
         userId: params.userId,
-        account: existingAccount,
+        account: nativeAccount,
         definition: def,
         effectiveCapacityMinor: effectiveCap.effectiveCapacityMinor
       });
@@ -13922,6 +14566,7 @@ var EconomyService = class {
         await this.#domains.update(doc);
         return entryRes;
       }
+      await this.#ledgerStore.flush();
       return ok({
         account: updatedAccount,
         entry: entryRes.value
@@ -14052,11 +14697,12 @@ var EconomyService = class {
           })
         );
       }
-      const cmdId = createOpaqueId("cmd");
+      const cmdId = params.commandId ?? createOpaqueId("cmd");
+      const epoch = params.authorityEpoch ?? 1;
       const txRecord = createTransactionRecord({
         transactionId,
         commandId: cmdId,
-        authorityEpoch: 1,
+        authorityEpoch: epoch,
         lockKeys,
         safeAutoRecovery: true,
         recoveryData: {
@@ -14072,9 +14718,10 @@ var EconomyService = class {
         }
       });
       this.#transactionStore?.save(txRecord);
-      this.#transactionStore?.transition(transactionId, "claimed", 1);
-      this.#transactionStore?.transition(transactionId, "prepared", 1);
-      this.#transactionStore?.transition(transactionId, "committing", 1);
+      this.#transactionStore?.transition(transactionId, "claimed", epoch);
+      this.#transactionStore?.transition(transactionId, "prepared", epoch);
+      this.#transactionStore?.transition(transactionId, "committing", epoch);
+      await this.#transactionStore?.flush();
       const updatedSrcAccount = {
         ...srcAccount,
         balanceMinor: srcAccount.balanceMinor - params.amountMinor
@@ -14097,7 +14744,8 @@ var EconomyService = class {
       });
       const updateSrcRes = await this.#domains.update({ ...srcDoc, record: updatedSrcRecord });
       if (!updateSrcRes.ok) {
-        this.#transactionStore?.transition(transactionId, "failed", 1, "Failed to update source domain");
+        this.#transactionStore?.transition(transactionId, "failed", epoch, "Failed to update source domain");
+        await this.#transactionStore?.flush();
         return updateSrcRes;
       }
       const updateTgtRes = await this.#domains.update({ ...tgtDoc, record: updatedTgtRecord });
@@ -14113,17 +14761,18 @@ var EconomyService = class {
           this.#transactionStore?.transition(
             transactionId,
             "failed",
-            1,
+            epoch,
             "Rolled back source domain after target update failure"
           );
         } else {
           this.#transactionStore?.transition(
             transactionId,
             "needs-recovery",
-            1,
+            epoch,
             "Rollback of source domain failed; needs manual or auto recovery"
           );
         }
+        await this.#transactionStore?.flush();
         return updateTgtRes;
       }
       const debitEntryRes = this.#ledgerStore.append({
@@ -14143,9 +14792,10 @@ var EconomyService = class {
         this.#transactionStore?.transition(
           transactionId,
           "needs-recovery",
-          1,
+          epoch,
           "Failed to append debit ledger entry"
         );
+        await this.#transactionStore?.flush();
         return debitEntryRes;
       }
       const creditEntryRes = this.#ledgerStore.append({
@@ -14165,17 +14815,20 @@ var EconomyService = class {
         this.#transactionStore?.transition(
           transactionId,
           "needs-recovery",
-          1,
+          epoch,
           "Failed to append credit ledger entry"
         );
+        await this.#transactionStore?.flush();
         return creditEntryRes;
       }
+      await this.#ledgerStore.flush();
       this.#transactionStore?.transition(
         transactionId,
         "committed",
-        1,
+        epoch,
         "Transfer completed cleanly"
       );
+      await this.#transactionStore?.flush();
       return ok({
         sourceAccount: updatedSrcAccount,
         targetAccount: updatedTgtAccount,
@@ -14322,11 +14975,12 @@ var EconomyService = class {
           })
         );
       }
-      const cmdId = createOpaqueId("cmd");
+      const cmdId = params.commandId ?? createOpaqueId("cmd");
+      const epoch = params.authorityEpoch ?? 1;
       const txRecord = createTransactionRecord({
         transactionId,
         commandId: cmdId,
-        authorityEpoch: 1,
+        authorityEpoch: epoch,
         lockKeys: [lockKey],
         safeAutoRecovery: true,
         recoveryData: {
@@ -14335,13 +14989,16 @@ var EconomyService = class {
           fromResourceId: params.fromResourceId,
           toResourceId: params.toResourceId,
           fromAmountMinor: params.fromAmountMinor,
-          toAmountMinor: params.toAmountMinor
+          toAmountMinor: params.toAmountMinor,
+          fromInitialBalance: fromAccount.balanceMinor,
+          toInitialBalance: toAccount.balanceMinor
         }
       });
       this.#transactionStore?.save(txRecord);
-      this.#transactionStore?.transition(transactionId, "claimed", 1);
-      this.#transactionStore?.transition(transactionId, "prepared", 1);
-      this.#transactionStore?.transition(transactionId, "committing", 1);
+      this.#transactionStore?.transition(transactionId, "claimed", epoch);
+      this.#transactionStore?.transition(transactionId, "prepared", epoch);
+      this.#transactionStore?.transition(transactionId, "committing", epoch);
+      await this.#transactionStore?.flush();
       const updatedFromAccount = {
         ...fromAccount,
         balanceMinor: fromAccount.balanceMinor - params.fromAmountMinor
@@ -14359,7 +15016,8 @@ var EconomyService = class {
       });
       const updateRes = await this.#domains.update({ ...doc, record: updatedRecord });
       if (!updateRes.ok) {
-        this.#transactionStore?.transition(transactionId, "failed", 1, "Failed to update domain document");
+        this.#transactionStore?.transition(transactionId, "failed", epoch, "Failed to update domain document");
+        await this.#transactionStore?.flush();
         return updateRes;
       }
       const rateReason = params.reason ?? params.rateDescription ?? (params.rateRatio ? `Rate: ${params.rateRatio.numerator}/${params.rateRatio.denominator}` : "Currency/Resource conversion");
@@ -14377,7 +15035,8 @@ var EconomyService = class {
         }
       });
       if (!debitEntryRes.ok) {
-        this.#transactionStore?.transition(transactionId, "needs-recovery", 1, "Failed to append conversion debit entry");
+        this.#transactionStore?.transition(transactionId, "needs-recovery", epoch, "Failed to append conversion debit entry");
+        await this.#transactionStore?.flush();
         return debitEntryRes;
       }
       const creditEntryRes = this.#ledgerStore.append({
@@ -14394,10 +15053,13 @@ var EconomyService = class {
         }
       });
       if (!creditEntryRes.ok) {
-        this.#transactionStore?.transition(transactionId, "needs-recovery", 1, "Failed to append conversion credit entry");
+        this.#transactionStore?.transition(transactionId, "needs-recovery", epoch, "Failed to append conversion credit entry");
+        await this.#transactionStore?.flush();
         return creditEntryRes;
       }
-      this.#transactionStore?.transition(transactionId, "committed", 1, "Conversion completed cleanly");
+      await this.#ledgerStore.flush();
+      this.#transactionStore?.transition(transactionId, "committed", epoch, "Conversion completed cleanly");
+      await this.#transactionStore?.flush();
       return ok({
         fromAccount: updatedFromAccount,
         toAccount: updatedToAccount,
@@ -14444,7 +15106,7 @@ var EconomyService = class {
           })
         );
       }
-      return this.#reservationStore.create({
+      const res = this.#reservationStore.create({
         domainUuid: params.domainUuid,
         resourceId: params.resourceId,
         originalAmountMinor: params.amountMinor,
@@ -14452,6 +15114,10 @@ var EconomyService = class {
         expiresAtWorld: params.expiresAtWorld,
         expiresAtReal: params.expiresAtReal
       });
+      if (res.ok) {
+        await this.#reservationStore.flush();
+      }
+      return res;
     } finally {
       await lockRes.value.release();
     }
@@ -14545,9 +15211,11 @@ var EconomyService = class {
       });
       const updateDocRes = await this.#domains.update({ ...doc, record: updatedRecord });
       if (!updateDocRes.ok) {
-        this.#reservationStore.release(reservation.id, consumedAmount, {
-          reason: "Rollback after failed domain balance update"
+        this.#reservationStore.rollbackConsume(lockedRes, consumedAmount, {
+          reason: "Rollback after failed domain balance update",
+          userId: params.userId
         });
+        await this.#reservationStore.flush();
         return updateDocRes;
       }
       const entryRes = this.#ledgerStore.append({
@@ -14564,12 +15232,22 @@ var EconomyService = class {
         }
       });
       if (!entryRes.ok) {
-        await this.#domains.update(doc);
-        this.#reservationStore.release(reservation.id, consumedAmount, {
-          reason: "Rollback after failed ledger append"
+        await this.#domains.update({
+          ...doc,
+          record: {
+            ...doc.record,
+            revision: updateDocRes.value.revision
+          }
         });
+        this.#reservationStore.rollbackConsume(lockedRes, consumedAmount, {
+          reason: "Rollback after failed ledger append",
+          userId: params.userId
+        });
+        await this.#reservationStore.flush();
         return entryRes;
       }
+      await this.#ledgerStore.flush();
+      await this.#reservationStore.flush();
       return ok({
         reservation,
         entry: entryRes.value,
@@ -14626,10 +15304,14 @@ var EconomyService = class {
           })
         );
       }
-      return this.#reservationStore.release(params.reservationId, params.amountMinor, {
+      const relRes = this.#reservationStore.release(params.reservationId, params.amountMinor, {
         reason: params.reason,
         userId: params.userId
       });
+      if (relRes.ok) {
+        await this.#reservationStore.flush();
+      }
+      return relRes;
     } finally {
       await lockRes.value.release();
     }
@@ -14718,6 +15400,7 @@ var EconomyService = class {
         await this.#domains.update(doc);
         return reversalRes;
       }
+      await this.#ledgerStore.flush();
       return ok({
         reversalEntry: reversalRes.value,
         account: updatedAccount
@@ -14728,6 +15411,111 @@ var EconomyService = class {
   }
   #cleanUuid(domainUuid) {
     return domainUuid.trim();
+  }
+  #registerRecoveryCompensators(recoveryService) {
+    recoveryService.registerCompensator("economy:transfer", async (record) => {
+      const data = record.recoveryData;
+      if (!data || !data.sourceDomainUuid || !data.resourceId || !data.amountMinor) {
+        return ok(void 0);
+      }
+      const srcRes = await this.#domains.read(this.#cleanUuid(data.sourceDomainUuid));
+      if (!srcRes.ok) return srcRes;
+      const srcDoc = srcRes.value;
+      const srcEcon = getDomainEconomyData(srcDoc.record);
+      const srcAccIndex = srcEcon.accounts.findIndex((a) => a.resourceId === data.resourceId);
+      if (srcAccIndex < 0) return ok(void 0);
+      const srcAccount = srcEcon.accounts[srcAccIndex];
+      if (typeof data.sourceInitialBalance === "number" && srcAccount.balanceMinor === data.sourceInitialBalance - data.amountMinor) {
+        const restoredAccount = {
+          ...srcAccount,
+          balanceMinor: data.sourceInitialBalance
+        };
+        const updatedAccounts = [...srcEcon.accounts];
+        updatedAccounts[srcAccIndex] = restoredAccount;
+        const updatedRecord = withDomainEconomyData(srcDoc.record, {
+          ...srcEcon,
+          accounts: Object.freeze(updatedAccounts)
+        });
+        const updateRes = await this.#domains.update({ ...srcDoc, record: updatedRecord });
+        if (!updateRes.ok) return updateRes;
+        this.#ledgerStore.append({
+          domainUuid: data.sourceDomainUuid,
+          resourceId: data.resourceId,
+          deltaMinor: data.amountMinor,
+          kind: "adjustment",
+          transactionId: record.transactionId,
+          source: {
+            type: "recovery",
+            reason: `Recovery compensation for failed transfer ${record.transactionId}`
+          }
+        });
+        await this.#ledgerStore.flush();
+      }
+      return ok(void 0);
+    });
+    recoveryService.registerCompensator("economy:convert", async (record) => {
+      const data = record.recoveryData;
+      if (!data || !data.domainUuid || !data.fromResourceId || !data.toResourceId || !data.fromAmountMinor || !data.toAmountMinor) {
+        return ok(void 0);
+      }
+      const docRes = await this.#domains.read(this.#cleanUuid(data.domainUuid));
+      if (!docRes.ok) return docRes;
+      const doc = docRes.value;
+      const econ = getDomainEconomyData(doc.record);
+      const fromIndex = econ.accounts.findIndex((a) => a.resourceId === data.fromResourceId);
+      const toIndex = econ.accounts.findIndex((a) => a.resourceId === data.toResourceId);
+      if (fromIndex < 0 || toIndex < 0) return ok(void 0);
+      const fromAcc = econ.accounts[fromIndex];
+      const toAcc = econ.accounts[toIndex];
+      let needsDomainUpdate = false;
+      const updatedAccounts = [...econ.accounts];
+      if (typeof data.fromInitialBalance === "number" && fromAcc.balanceMinor === data.fromInitialBalance - data.fromAmountMinor) {
+        updatedAccounts[fromIndex] = {
+          ...fromAcc,
+          balanceMinor: data.fromInitialBalance
+        };
+        needsDomainUpdate = true;
+      }
+      if (typeof data.toInitialBalance === "number" && toAcc.balanceMinor === data.toInitialBalance + data.toAmountMinor) {
+        updatedAccounts[toIndex] = {
+          ...toAcc,
+          balanceMinor: data.toInitialBalance
+        };
+        needsDomainUpdate = true;
+      }
+      if (needsDomainUpdate) {
+        const updatedRecord = withDomainEconomyData(doc.record, {
+          ...econ,
+          accounts: Object.freeze(updatedAccounts)
+        });
+        const updateRes = await this.#domains.update({ ...doc, record: updatedRecord });
+        if (!updateRes.ok) return updateRes;
+        this.#ledgerStore.append({
+          domainUuid: data.domainUuid,
+          resourceId: data.fromResourceId,
+          deltaMinor: data.fromAmountMinor,
+          kind: "adjustment",
+          transactionId: record.transactionId,
+          source: {
+            type: "recovery",
+            reason: `Recovery compensation for failed conversion ${record.transactionId}`
+          }
+        });
+        this.#ledgerStore.append({
+          domainUuid: data.domainUuid,
+          resourceId: data.toResourceId,
+          deltaMinor: -data.toAmountMinor,
+          kind: "adjustment",
+          transactionId: record.transactionId,
+          source: {
+            type: "recovery",
+            reason: `Recovery compensation for failed conversion ${record.transactionId}`
+          }
+        });
+        await this.#ledgerStore.flush();
+      }
+      return ok(void 0);
+    });
   }
 };
 
@@ -14899,7 +15687,7 @@ var EconomyAggregationProvider = class {
         resourceStats.totalAvailable += available;
         resourceStats.contributingCount++;
       }
-      if (domainHadSecret && !viewer.isGm) {
+      if (domainHadSecret && viewer.isGm) {
         hiddenContributors.push(uuid);
       }
     }
@@ -14934,6 +15722,8 @@ var DefaultPublicEconomyApi = class {
   #providerRegistry;
   #projection;
   #aggregation;
+  #thresholdService;
+  #derivedResolvers;
   constructor(options) {
     this.#domains = options.domains;
     this.#commandBus = options.commandBus;
@@ -14941,6 +15731,8 @@ var DefaultPublicEconomyApi = class {
     this.#ledgerStore = options.ledgerStore;
     this.#reservationStore = options.reservationStore;
     this.#providerRegistry = options.providerRegistry;
+    this.#thresholdService = options.thresholdService;
+    this.#derivedResolvers = options.derivedResolvers;
     this.#projection = options.projectionService ?? new EconomyProjectionService();
     this.#aggregation = options.aggregationProvider ?? new EconomyAggregationProvider({
       domains: options.domains,
@@ -14949,6 +15741,52 @@ var DefaultPublicEconomyApi = class {
       providerRegistry: options.providerRegistry,
       projectionService: this.#projection
     });
+  }
+  get thresholds() {
+    return this.#thresholdService;
+  }
+  registerThreshold(input) {
+    if (!this.#thresholdService) {
+      return err(
+        createPublicError({
+          code: "DM_ECON_THRESHOLD_SERVICE_UNAVAILABLE",
+          category: "internal",
+          message: "Threshold service is not configured"
+        })
+      );
+    }
+    return this.#thresholdService.registerThreshold(input);
+  }
+  listThresholds(domainUuid, resourceId) {
+    return this.#thresholdService ? this.#thresholdService.listThresholds(domainUuid, resourceId) : [];
+  }
+  async evaluateThresholds(domainUuid, resourceId) {
+    if (!this.#thresholdService) {
+      return err(
+        createPublicError({
+          code: "DM_ECON_THRESHOLD_SERVICE_UNAVAILABLE",
+          category: "internal",
+          message: "Threshold service is not configured"
+        })
+      );
+    }
+    const availRes = await this.getAccountAvailability(domainUuid, resourceId);
+    if (!availRes.ok) return availRes;
+    if (!availRes.value) {
+      return err(
+        createPublicError({
+          code: "DM_ECON_ACCOUNT_NOT_FOUND",
+          category: "not-found",
+          message: `Account '${resourceId}' in domain '${domainUuid}' not found`
+        })
+      );
+    }
+    const status = this.#thresholdService.evaluateStatus(domainUuid, resourceId, {
+      balanceMinor: availRes.value.balanceMinor,
+      availableMinor: availRes.value.availableMinor,
+      capacityMinor: availRes.value.capacityMinor
+    });
+    return ok(status);
   }
   async getContext(domainUuid, callerViewer) {
     const viewer = this.#projection.resolveViewer(callerViewer);
@@ -14981,6 +15819,23 @@ var DefaultPublicEconomyApi = class {
             isUnavailable = true;
           }
         } else {
+          isUnavailable = true;
+        }
+      }
+      if (acc.mode === "derived") {
+        let resolved = false;
+        if (this.#derivedResolvers) {
+          const resolver = this.#derivedResolvers.get(acc.resolverId);
+          if (resolver) {
+            const res = await resolver(domainUuid, acc);
+            if (res.ok) {
+              balance = res.value.balanceMinor;
+              isStale = Boolean(res.value.isStale);
+              resolved = true;
+            }
+          }
+        }
+        if (!resolved) {
           isUnavailable = true;
         }
       }
@@ -15053,7 +15908,7 @@ var DefaultPublicEconomyApi = class {
   }
   async queryLedger(filter, callerViewer) {
     const viewer = this.#projection.resolveViewer(callerViewer);
-    const raw = this.#ledgerStore.query(filter);
+    const paged = this.#ledgerStore.queryPaged(filter);
     const visibleResourceIds = /* @__PURE__ */ new Set();
     if (filter.domainUuid) {
       const docRes = await this.#domains.read(filter.domainUuid);
@@ -15069,11 +15924,17 @@ var DefaultPublicEconomyApi = class {
       }
     }
     const projected = [];
-    for (const entry of raw) {
+    for (const entry of paged.entries) {
       const proj = this.#projection.projectLedgerEntry(entry, visibleResourceIds, viewer);
       if (proj) projected.push(proj);
     }
-    return ok(Object.freeze(projected));
+    return ok({
+      entries: Object.freeze(projected),
+      totalCount: paged.totalCount,
+      hasMore: paged.hasMore,
+      nextCursor: paged.nextCursor,
+      prevCursor: paged.prevCursor
+    });
   }
   async getReservation(reservationId, callerViewer) {
     const viewer = this.#projection.resolveViewer(callerViewer);
@@ -15084,6 +15945,36 @@ var DefaultPublicEconomyApi = class {
           code: "DM_ECON_RESERVATION_NOT_FOUND",
           category: "not-found",
           message: `Reservation '${reservationId}' not found`
+        })
+      );
+    }
+    const docRes = await this.#domains.read(r.domainUuid);
+    if (!docRes.ok) {
+      return err(
+        createPublicError({
+          code: "DM_ECON_RESERVATION_NOT_FOUND",
+          category: "not-found",
+          message: `Reservation '${reservationId}' not found or clearance insufficient`
+        })
+      );
+    }
+    const econRes = tryGetDomainEconomyData(docRes.value.record);
+    if (!econRes.ok) {
+      return err(
+        createPublicError({
+          code: "DM_ECON_RESERVATION_NOT_FOUND",
+          category: "not-found",
+          message: `Reservation '${reservationId}' not found or clearance insufficient`
+        })
+      );
+    }
+    const account = econRes.value.accounts.find((a) => a.resourceId === r.resourceId);
+    if (!account || !this.#projection.isAccountVisible(account, viewer)) {
+      return err(
+        createPublicError({
+          code: "DM_ECON_RESERVATION_NOT_FOUND",
+          category: "not-found",
+          message: `Reservation '${reservationId}' not found or clearance insufficient`
         })
       );
     }
@@ -15317,7 +16208,9 @@ function registerEconomyCommands(options) {
         deltaMinor: p.deltaMinor,
         targetBalanceMinor: p.targetBalanceMinor,
         reason: p.reason,
-        userId: ctx.senderUserId ?? void 0
+        userId: ctx.senderUserId ?? void 0,
+        commandId: ctx.command.commandId,
+        authorityEpoch: ctx.command.authorityEpoch ?? 1
       });
     }
   });
@@ -15388,7 +16281,9 @@ function registerEconomyCommands(options) {
         resourceId: p.resourceId,
         amountMinor: p.amountMinor,
         reason: p.reason,
-        userId: ctx.senderUserId ?? void 0
+        userId: ctx.senderUserId ?? void 0,
+        commandId: ctx.command.commandId,
+        authorityEpoch: ctx.command.authorityEpoch ?? 1
       });
     }
   });
@@ -15458,7 +16353,9 @@ function registerEconomyCommands(options) {
         toAmountMinor: p.toAmountMinor,
         rateDescription: p.rateDescription,
         reason: p.reason,
-        userId: ctx.senderUserId ?? void 0
+        userId: ctx.senderUserId ?? void 0,
+        commandId: ctx.command.commandId,
+        authorityEpoch: ctx.command.authorityEpoch ?? 1
       });
     }
   });
@@ -15575,7 +16472,9 @@ function registerEconomyCommands(options) {
         reservationId: p.reservationId,
         amountMinor: p.amountMinor,
         reason: p.reason,
-        userId: ctx.senderUserId ?? void 0
+        userId: ctx.senderUserId ?? void 0,
+        commandId: ctx.command.commandId,
+        authorityEpoch: ctx.command.authorityEpoch ?? 1
       });
     }
   });
@@ -15670,9 +16569,13 @@ function registerEconomyCommands(options) {
       return economyService.createAccount({
         domainUuid: p.domainUuid,
         resourceId: p.resourceId,
+        mode: p.mode,
         initialBalanceMinor: p.initialBalanceMinor,
         baseCapacityMinor: p.baseCapacityMinor,
         visibility: p.visibility,
+        providerId: p.providerId,
+        providerRef: p.providerRef,
+        resolverId: p.resolverId,
         reason: p.reason,
         userId: ctx.senderUserId ?? void 0
       });
@@ -15891,6 +16794,25 @@ var ManualCurrencyProvider = class {
     this.#balances.set(targetRef, next);
     return ok({ newBalanceMinor: next });
   }
+  async readBalance(domainUuid, resourceId, providerRef) {
+    const key = providerRef || `${domainUuid}:${resourceId}`;
+    const balRes = await this.getCurrencyBalance(key);
+    if (!balRes.ok) return balRes;
+    return ok({ balanceMinor: balRes.value, isStale: false });
+  }
+  async mutateBalance(domainUuid, resourceId, providerRef, deltaMinor, reason) {
+    const key = providerRef || `${domainUuid}:${resourceId}`;
+    return this.mutateCurrency(key, deltaMinor, reason);
+  }
+  async applyDelta(params) {
+    return this.mutateBalance(
+      params.domainUuid,
+      params.resourceId,
+      params.providerRef,
+      params.deltaMinor,
+      params.reason
+    );
+  }
   setBalance(targetRef, balanceMinor) {
     this.#balances.set(targetRef, balanceMinor);
   }
@@ -15973,6 +16895,169 @@ function createDefaultProviderRegistry(domains) {
   registry.register(new ManualCurrencyProvider());
   return registry;
 }
+
+// src/economy/thresholds/threshold-service.ts
+var ThresholdService = class {
+  #thresholds = /* @__PURE__ */ new Map();
+  #crossedStates = /* @__PURE__ */ new Map();
+  register(input) {
+    return this.registerThreshold(input);
+  }
+  registerThreshold(input) {
+    const id = input.id ?? createOpaqueId("thrs");
+    const value = input.targetValueMinor ?? input.valueMinor ?? 0;
+    if (!Number.isSafeInteger(value)) {
+      return err(
+        createPublicError({
+          code: "DM_ECON_THRESHOLD_INVALID",
+          category: "validation",
+          message: `Threshold valueMinor must be a safe integer: received ${String(value)}`
+        })
+      );
+    }
+    const op = input.operator ?? input.comparator ?? "<=";
+    const label = input.name ?? input.label ?? "Alert";
+    const definition = {
+      id,
+      domainUuid: input.domainUuid,
+      resourceId: input.resourceId,
+      metric: input.metric,
+      comparator: op,
+      operator: op,
+      valueMinor: value,
+      targetValueMinor: value,
+      severity: input.severity,
+      label,
+      name: label,
+      autoHoldReservations: Boolean(input.autoHoldReservations)
+    };
+    this.#thresholds.set(id, definition);
+    return ok(definition);
+  }
+  getThreshold(id) {
+    return this.#thresholds.get(id);
+  }
+  listThresholds(domainUuid, resourceId) {
+    let list = Array.from(this.#thresholds.values());
+    if (domainUuid) {
+      list = list.filter((t) => t.domainUuid === domainUuid);
+    }
+    if (resourceId) {
+      list = list.filter((t) => t.resourceId === resourceId);
+    }
+    return Object.freeze(list);
+  }
+  evaluate(domainUuid, resourceId, values) {
+    const domainThresholds = this.listThresholds(domainUuid, resourceId);
+    const results = [];
+    for (const th of domainThresholds) {
+      const current = th.metric === "balance" ? values.balanceMinor : values.availableMinor;
+      let isCrossed = false;
+      switch (th.operator) {
+        case "<":
+        case "lt":
+          isCrossed = current < th.valueMinor;
+          break;
+        case "<=":
+        case "lte":
+          isCrossed = current <= th.valueMinor;
+          break;
+        case ">":
+        case "gt":
+          isCrossed = current > th.valueMinor;
+          break;
+        case ">=":
+        case "gte":
+          isCrossed = current >= th.valueMinor;
+          break;
+      }
+      if (isCrossed) {
+        results.push({
+          breached: true,
+          definition: th,
+          actualValueMinor: current
+        });
+      }
+    }
+    return Object.freeze(results);
+  }
+  isCrossed(id) {
+    return this.#crossedStates.get(id) ?? false;
+  }
+  resetCrossedState(id) {
+    if (id !== void 0) {
+      this.#crossedStates.delete(id);
+    } else {
+      this.#crossedStates.clear();
+    }
+  }
+  getCrossedStates() {
+    return new Map(this.#crossedStates);
+  }
+  evaluateCrossings(domainUuid, resourceId, values) {
+    const domainThresholds = this.listThresholds(domainUuid, resourceId);
+    const transitions = [];
+    for (const th of domainThresholds) {
+      const current = th.metric === "balance" ? values.balanceMinor : values.availableMinor;
+      let isBreached = false;
+      switch (th.operator) {
+        case "<":
+        case "lt":
+          isBreached = current < th.valueMinor;
+          break;
+        case "<=":
+        case "lte":
+          isBreached = current <= th.valueMinor;
+          break;
+        case ">":
+        case "gt":
+          isBreached = current > th.valueMinor;
+          break;
+        case ">=":
+        case "gte":
+          isBreached = current >= th.valueMinor;
+          break;
+      }
+      const previousState = this.#crossedStates.get(th.id) ?? false;
+      if (isBreached !== previousState) {
+        this.#crossedStates.set(th.id, isBreached);
+        transitions.push({
+          type: isBreached ? "breach" : "recovery",
+          definition: th,
+          actualValueMinor: current,
+          previousState,
+          currentState: isBreached
+        });
+      }
+    }
+    return Object.freeze(transitions);
+  }
+  evaluateStatus(domainUuid, resourceId, values) {
+    const breaches = this.evaluate(domainUuid, resourceId, values);
+    const crossed = breaches.map((b) => b.definition);
+    let highestSeverity;
+    if (crossed.some((t) => t.severity === "critical")) {
+      highestSeverity = "critical";
+    } else if (crossed.some((t) => t.severity === "warning")) {
+      highestSeverity = "warning";
+    } else if (crossed.some((t) => t.severity === "info")) {
+      highestSeverity = "info";
+    }
+    const cap = values.capacityMinor;
+    const isOverCapacity = cap !== null && cap !== void 0 && values.balanceMinor > cap;
+    const isNearCapacity = cap !== null && cap !== void 0 && cap > 0 && values.balanceMinor >= cap * 0.85 && !isOverCapacity;
+    const isLowReserve = values.availableMinor < 0;
+    return {
+      domainUuid,
+      resourceId,
+      crossedThresholds: Object.freeze(crossed),
+      highestSeverity,
+      isNearCapacity,
+      isOverCapacity,
+      isLowReserve
+    };
+  }
+};
 
 // src/economy/math/minor-units.ts
 function assertSafeInteger(value, fieldName = "amount") {
@@ -16165,7 +17250,12 @@ function buildEconomyViewModel(domainInput, options) {
       capacityFormatted,
       capacityPercentage,
       isSecret: acc.visibility === "secret",
-      statusBadgeClass
+      statusBadgeClass,
+      providerId: acc.mode === "provider" ? acc.providerId : void 0,
+      providerAvailable: acc.mode === "provider" ? providerAvailable : void 0,
+      description: def?.description,
+      categoryId: def?.categoryId ?? void 0,
+      tags: def?.tags
     });
   }
   const visibleResourceIds = new Set(accountVMs.map((a) => a.resourceId));
@@ -16204,17 +17294,30 @@ function buildEconomyViewModel(domainInput, options) {
         amountFormatted: formatResourceAmount(r.remainingAmountMinor, resDef, { showUnit: true }),
         status: r.status,
         reason: r.source.reason,
-        expiresAtFormatted: r.expiresAtReal ? new Date(r.expiresAtReal).toLocaleTimeString() : void 0
+        expiresAtFormatted: r.expiresAtReal ? new Date(r.expiresAtReal).toLocaleTimeString() : void 0,
+        canRelease: true
       });
     }
   }
   const ledgerVMs = [];
+  const ledgerPage = Math.max(0, options.ledgerPage ?? 0);
+  const ledgerPageSize = Math.max(1, options.ledgerPageSize ?? 20);
+  let ledgerTotalCount = 0;
+  let ledgerHasMore = false;
+  let ledgerHasPrev = ledgerPage > 0;
   if (options.ledgerStore) {
-    const rawEntries = options.ledgerStore.query({ domainUuid, direction: "desc", limit: 20 });
-    for (const entry of rawEntries) {
-      if (!options.viewerIsGm && !visibleResourceIds.has(entry.resourceId)) {
-        continue;
-      }
+    const allEntries = options.ledgerStore.query({ domainUuid, direction: "desc" });
+    const filteredEntries = allEntries.filter(
+      (entry) => options.viewerIsGm || visibleResourceIds.has(entry.resourceId)
+    );
+    ledgerTotalCount = filteredEntries.length;
+    ledgerHasMore = (ledgerPage + 1) * ledgerPageSize < ledgerTotalCount;
+    ledgerHasPrev = ledgerPage > 0;
+    const pagedEntries = filteredEntries.slice(
+      ledgerPage * ledgerPageSize,
+      (ledgerPage + 1) * ledgerPageSize
+    );
+    for (const entry of pagedEntries) {
       const def = options.resourceRegistry.get(entry.resourceId);
       const label = def?.label ?? entry.resourceId;
       const precision = def?.precision ?? 0;
@@ -16252,7 +17355,11 @@ function buildEconomyViewModel(domainInput, options) {
     viewerIsGm: options.viewerIsGm,
     accounts: Object.freeze(accountVMs),
     reservations: Object.freeze(reservationVMs),
-    recentLedger: Object.freeze(ledgerVMs)
+    recentLedger: Object.freeze(ledgerVMs),
+    ledgerPage,
+    ledgerTotalCount,
+    ledgerHasMore,
+    ledgerHasPrev
   };
 }
 
@@ -16297,7 +17404,12 @@ function renderEconomySubsystemHtml(vm) {
 
       <section class="dm-ledger-history-section">
         <h4><i class="fas fa-history"></i> Recent Ledger Activity</h4>
-        ${renderLedgerTable(vm.recentLedger)}
+        ${renderLedgerTable(vm.recentLedger, {
+    page: vm.ledgerPage,
+    totalCount: vm.ledgerTotalCount,
+    hasMore: vm.ledgerHasMore,
+    hasPrev: vm.ledgerHasPrev
+  })}
       </section>
     </div>
   `;
@@ -16315,7 +17427,13 @@ function renderResourceCards(accounts = []) {
           <div class="dm-card-header">
             <div class="dm-card-icon"><i class="${escapeAttribute2(acc.icon ?? "fas fa-box")}"></i></div>
             <h4 class="dm-card-title">${escapeHtml2(acc.label)}</h4>
-            ${acc.isSecret ? `<span class="dm-badge-secret"><i class="fas fa-eye-slash"></i> Secret</span>` : ""}
+            <div class="dm-card-badges">
+              ${acc.isSecret ? `<span class="dm-badge-secret"><i class="fas fa-eye-slash"></i> Secret</span>` : ""}
+              ${acc.mode === "provider" ? `<span class="dm-badge-provider ${acc.providerAvailable ? "online" : "offline"}"><i class="fas fa-plug"></i> ${escapeHtml2(acc.providerId ?? "Provider")} (${acc.providerAvailable ? "Active" : "Offline"})</span>` : ""}
+              <button type="button" class="dm-btn-icon dm-btn-detail" data-action="openResourceDetail" data-resource-id="${escapeAttribute2(acc.resourceId)}" title="View details">
+                <i class="fas fa-info-circle"></i>
+              </button>
+            </div>
           </div>
 
           <div class="dm-card-balance">
@@ -16348,35 +17466,48 @@ function renderResourceCards(accounts = []) {
     </div>
   `;
 }
-function renderLedgerTable(entries = []) {
+function renderLedgerTable(entries = [], pagination) {
   if (!entries || entries.length === 0) {
     return `<div class="dm-empty-state">No recent ledger transactions recorded.</div>`;
   }
   return `
-    <table class="dm-ledger-table">
-      <thead>
-        <tr>
-          <th>Time</th>
-          <th>Resource</th>
-          <th>Type</th>
-          <th>Delta</th>
-          <th>Reason</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${entries.map(
-    (e) => `
-          <tr class="dm-ledger-row">
-            <td class="dm-col-time">${escapeHtml2(e.timestampFormatted)}</td>
-            <td class="dm-col-resource">${escapeHtml2(e.resourceLabel)}</td>
-            <td class="dm-col-kind"><span class="dm-kind-badge">${escapeHtml2(e.kind)}</span></td>
-            <td class="dm-col-delta ${escapeAttribute2(e.deltaClass)}">${escapeHtml2(e.deltaFormatted)}</td>
-            <td class="dm-col-reason">${escapeHtml2(e.reason ?? "\u2014")}</td>
+    <div class="dm-ledger-container">
+      <table class="dm-ledger-table">
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>Resource</th>
+            <th>Type</th>
+            <th>Delta</th>
+            <th>Reason</th>
           </tr>
-        `
+        </thead>
+        <tbody>
+          ${entries.map(
+    (e) => `
+            <tr class="dm-ledger-row">
+              <td class="dm-col-time">${escapeHtml2(e.timestampFormatted)}</td>
+              <td class="dm-col-resource">${escapeHtml2(e.resourceLabel)}</td>
+              <td class="dm-col-kind"><span class="dm-kind-badge">${escapeHtml2(e.kind)}</span></td>
+              <td class="dm-col-delta ${escapeAttribute2(e.deltaClass)}">${escapeHtml2(e.deltaFormatted)}</td>
+              <td class="dm-col-reason">${escapeHtml2(e.reason ?? "\u2014")}</td>
+            </tr>
+          `
   ).join("")}
-      </tbody>
-    </table>
+        </tbody>
+      </table>
+      ${pagination !== void 0 ? `
+        <div class="dm-ledger-pagination">
+          <button type="button" class="dm-btn dm-btn-secondary dm-btn-sm" data-action="prevLedgerPage" ${!pagination.hasPrev ? "disabled" : ""}>
+            <i class="fas fa-chevron-left"></i> Previous
+          </button>
+          <span class="dm-ledger-page-info">Showing ${entries.length} of ${pagination.totalCount} transactions (Page ${pagination.page + 1})</span>
+          <button type="button" class="dm-btn dm-btn-secondary dm-btn-sm" data-action="nextLedgerPage" ${!pagination.hasMore ? "disabled" : ""}>
+            Next <i class="fas fa-chevron-right"></i>
+          </button>
+        </div>
+      ` : ""}
+    </div>
   `;
 }
 function renderReservationsTable(reservations = []) {
@@ -16392,6 +17523,7 @@ function renderReservationsTable(reservations = []) {
           <th>Status</th>
           <th>Reason</th>
           <th>Expires</th>
+          <th>Actions</th>
         </tr>
       </thead>
       <tbody>
@@ -16403,6 +17535,11 @@ function renderReservationsTable(reservations = []) {
             <td class="dm-col-status"><span class="dm-kind-badge ${escapeAttribute2(r.status)}">${escapeHtml2(r.status)}</span></td>
             <td class="dm-col-reason">${escapeHtml2(r.reason ?? "\u2014")}</td>
             <td class="dm-col-expires">${escapeHtml2(r.expiresAtFormatted ?? "Never")}</td>
+            <td class="dm-col-actions">
+              <button type="button" class="dm-btn dm-btn-xs dm-btn-danger" data-action="releaseReservation" data-reservation-id="${escapeAttribute2(r.id)}" title="Release Reservation">
+                <i class="fas fa-times-circle"></i> Release
+              </button>
+            </td>
           </tr>
         `
   ).join("")}
@@ -16419,7 +17556,7 @@ function renderTransferModalHtml(domainUuid, accounts) {
         <label>
           Resource:
           <select name="resourceId" required>
-            ${accounts.map((a) => `<option value="${escapeAttribute2(a.resourceId)}" data-precision="${escapeAttribute2(a.precision)}">${escapeHtml2(a.label)} (Available: ${escapeHtml2(a.availableFormatted)})</option>`).join("")}
+            ${accounts.map((a) => `<option value="${escapeAttribute2(a.resourceId)}" data-precision="${escapeAttribute2(a.precision)}" data-available="${escapeAttribute2(a.availableMinor)}" data-label="${escapeAttribute2(a.label)}" data-unit="${escapeAttribute2(a.displayUnit ?? "")}">${escapeHtml2(a.label)} (Available: ${escapeHtml2(a.availableFormatted)})</option>`).join("")}
           </select>
         </label>
         <label>
@@ -16430,6 +17567,12 @@ function renderTransferModalHtml(domainUuid, accounts) {
           Amount:
           <input type="text" inputmode="decimal" name="amount" required placeholder="Amount (e.g. 10 or 10.50)" />
         </label>
+        <div class="dm-preview-box" id="dm-transfer-preview">
+          <div class="dm-preview-title"><i class="fas fa-eye"></i> Transfer Impact Preview</div>
+          <div class="dm-preview-body">
+            <span class="dm-preview-item">Available after transfer: <span class="dm-preview-val">\u2014</span></span>
+          </div>
+        </div>
         <label>
           Reason:
           <input type="text" name="reason" placeholder="Transfer notes or motivation" />
@@ -16451,13 +17594,19 @@ function renderAdjustModalHtml(domainUuid, accounts) {
         <label>
           Resource:
           <select name="resourceId" required>
-            ${accounts.map((a) => `<option value="${escapeAttribute2(a.resourceId)}" data-precision="${escapeAttribute2(a.precision)}">${escapeHtml2(a.label)} (Current: ${escapeHtml2(a.balanceFormatted)})</option>`).join("")}
+            ${accounts.map((a) => `<option value="${escapeAttribute2(a.resourceId)}" data-precision="${escapeAttribute2(a.precision)}" data-balance="${escapeAttribute2(a.balanceMinor)}" data-label="${escapeAttribute2(a.label)}" data-unit="${escapeAttribute2(a.displayUnit ?? "")}">${escapeHtml2(a.label)} (Current: ${escapeHtml2(a.balanceFormatted)})</option>`).join("")}
           </select>
         </label>
         <label>
           Delta Amount (positive or negative):
           <input type="text" inputmode="decimal" name="delta" required placeholder="Delta (e.g. +10.50 or -5)" />
         </label>
+        <div class="dm-preview-box" id="dm-adjust-preview">
+          <div class="dm-preview-title"><i class="fas fa-eye"></i> Adjustment Impact Preview</div>
+          <div class="dm-preview-body">
+            <span class="dm-preview-item">Balance after adjustment: <span class="dm-preview-val">\u2014</span></span>
+          </div>
+        </div>
         <label>
           Reason (Required):
           <input type="text" name="reason" required placeholder="Mandatory audit explanation" />
@@ -16467,6 +17616,29 @@ function renderAdjustModalHtml(domainUuid, accounts) {
           <button type="submit" class="dm-btn dm-btn-primary">Apply Adjustment</button>
         </div>
       </form>
+    </div>
+  `;
+}
+function renderResourceDetailModalHtml(account) {
+  return `
+    <div class="dm-modal dm-detail-modal" data-modal-type="resourceDetail">
+      <h3><i class="${escapeAttribute2(account.icon ?? "fas fa-box")}"></i> ${escapeHtml2(account.label)}</h3>
+      <div class="dm-detail-content">
+        <div class="dm-detail-row"><span class="dm-detail-label">Resource ID:</span> <code>${escapeHtml2(account.resourceId)}</code></div>
+        <div class="dm-detail-row"><span class="dm-detail-label">Description:</span> <span>${escapeHtml2(account.description || "No description provided.")}</span></div>
+        <div class="dm-detail-row"><span class="dm-detail-label">Category:</span> <span>${escapeHtml2(account.categoryId || "Custom")}</span></div>
+        ${account.tags && account.tags.length > 0 ? `<div class="dm-detail-row"><span class="dm-detail-label">Tags:</span> <span>${account.tags.map((t) => `<span class="dm-tag">${escapeHtml2(t)}</span>`).join(" ")}</span></div>` : ""}
+        <div class="dm-detail-row"><span class="dm-detail-label">Mode:</span> <span class="dm-kind-badge">${escapeHtml2(account.mode)}</span></div>
+        ${account.mode === "provider" ? `<div class="dm-detail-row"><span class="dm-detail-label">Provider:</span> <span>${escapeHtml2(account.providerId ?? "external")} (${account.providerAvailable ? "Active" : "Unavailable"})</span></div>` : ""}
+        <div class="dm-detail-row"><span class="dm-detail-label">Balance:</span> <strong>${escapeHtml2(account.balanceFormatted)}</strong> (raw: ${escapeHtml2(account.balanceMinor)})</div>
+        <div class="dm-detail-row"><span class="dm-detail-label">Reserved:</span> <span>${escapeHtml2(account.reservedFormatted)}</span> (raw: ${escapeHtml2(account.reservedMinor)})</div>
+        <div class="dm-detail-row"><span class="dm-detail-label">Available:</span> <span>${escapeHtml2(account.availableFormatted)}</span> (raw: ${escapeHtml2(account.availableMinor)})</div>
+        <div class="dm-detail-row"><span class="dm-detail-label">Capacity:</span> <span>${escapeHtml2(account.capacityFormatted)}</span></div>
+        <div class="dm-detail-row"><span class="dm-detail-label">Status:</span> <span>${escapeHtml2(account.status)}</span></div>
+      </div>
+      <div class="dm-modal-actions">
+        <button type="button" class="dm-btn dm-btn-primary" data-action="closeModal">Close</button>
+      </div>
     </div>
   `;
 }
@@ -16535,6 +17707,8 @@ var EconomyApplicationController = class {
   #domains;
   #viewer;
   #activeModal = null;
+  #selectedResourceId = null;
+  #ledgerPage = 0;
   #lastViewModel = null;
   constructor(options) {
     this.#domainUuid = options.domainUuid;
@@ -16552,6 +17726,12 @@ var EconomyApplicationController = class {
   get activeModal() {
     return this.#activeModal;
   }
+  get selectedResourceId() {
+    return this.#selectedResourceId;
+  }
+  get ledgerPage() {
+    return this.#ledgerPage;
+  }
   get viewModel() {
     return this.#lastViewModel;
   }
@@ -16561,25 +17741,50 @@ var EconomyApplicationController = class {
     if (!docRes.ok) {
       return docRes;
     }
-    const isGm = Boolean(
-      this.#viewer?.isGm ?? globalThis.game?.user?.isGM ?? true
-    );
+    const viewer = resolveCurrentViewer(this.#viewer);
+    const isGm = viewer.isGm;
     const presenterOptions = {
       viewerIsGm: isGm,
       resourceRegistry: this.#resourceRegistry ?? { get: () => void 0, list: () => [] },
       ledgerStore: this.#ledgerStore,
       reservationStore: this.#reservationStore,
-      providerRegistry: this.#providerRegistry
+      providerRegistry: this.#providerRegistry,
+      ledgerPage: this.#ledgerPage,
+      ledgerPageSize: 20
     };
     const vm = buildEconomyViewModel(docRes.value, presenterOptions);
     this.#lastViewModel = vm;
     return ok(vm);
   }
-  openModal(modalType) {
+  openModal(modalType, resourceId) {
     this.#activeModal = modalType;
+    if (resourceId !== void 0) {
+      this.#selectedResourceId = resourceId;
+    }
+  }
+  openResourceDetail(resourceId) {
+    this.#selectedResourceId = resourceId;
+    this.#activeModal = "resourceDetail";
   }
   closeModal() {
     this.#activeModal = null;
+    this.#selectedResourceId = null;
+  }
+  nextLedgerPage() {
+    this.#ledgerPage++;
+  }
+  prevLedgerPage() {
+    if (this.#ledgerPage > 0) {
+      this.#ledgerPage--;
+    }
+  }
+  async dispatchReleaseReservation(payload) {
+    const cmd = makeCommand2("economy:release-reservation", {
+      domainUuid: this.#domainUuid,
+      reservationId: payload.reservationId,
+      amountMinor: payload.amountMinor
+    });
+    return this.#executeCommand(cmd);
   }
   async dispatchTransfer(payload) {
     const cmd = makeCommand2("economy:transfer", {
@@ -16642,6 +17847,11 @@ var EconomyApplicationController = class {
     } else if (this.#activeModal === "createAccount") {
       const defs = this.#resourceRegistry ? this.#resourceRegistry.list() : [];
       modalHtml = renderCreateAccountModalHtml(this.#domainUuid, defs);
+    } else if (this.#activeModal === "resourceDetail" && this.#selectedResourceId) {
+      const acc = vm.accounts.find((a) => a.resourceId === this.#selectedResourceId);
+      if (acc) {
+        modalHtml = renderResourceDetailModalHtml(acc);
+      }
     }
     return `
       <div class="dm-economy-app-v2" data-domain-uuid="${escapeAttribute2(this.#domainUuid)}">
@@ -16719,6 +17929,10 @@ var EconomyApplication = class _EconomyApplication extends BaseApp2 {
       openTransferModal: _EconomyApplication.#onOpenTransferModal,
       openAdjustModal: _EconomyApplication.#onOpenAdjustModal,
       openCreateAccountModal: _EconomyApplication.#onOpenCreateAccountModal,
+      openResourceDetail: _EconomyApplication.#onOpenResourceDetail,
+      releaseReservation: _EconomyApplication.#onReleaseReservation,
+      nextLedgerPage: _EconomyApplication.#onNextLedgerPage,
+      prevLedgerPage: _EconomyApplication.#onPrevLedgerPage,
       closeModal: _EconomyApplication.#onCloseModal
     }
   };
@@ -16759,6 +17973,113 @@ var EconomyApplication = class _EconomyApplication extends BaseApp2 {
     }
   }
   attachEventListeners(element) {
+    const actionButtons = element.querySelectorAll?.("[data-action]") ?? [];
+    actionButtons.forEach((btn) => {
+      if (btn._dmActionBound) return;
+      btn._dmActionBound = true;
+      btn.addEventListener("click", async () => {
+        const action = btn.getAttribute("data-action");
+        if (action === "openResourceDetail") {
+          const resId = btn.getAttribute("data-resource-id");
+          if (resId) {
+            this.#controller.openResourceDetail(resId);
+            this.render();
+          }
+        } else if (action === "releaseReservation") {
+          const resId = btn.getAttribute("data-reservation-id");
+          if (resId) {
+            await this.#controller.dispatchReleaseReservation({ reservationId: resId });
+            this.render();
+          }
+        } else if (action === "nextLedgerPage") {
+          this.#controller.nextLedgerPage();
+          this.render();
+        } else if (action === "prevLedgerPage") {
+          this.#controller.prevLedgerPage();
+          this.render();
+        } else if (action === "closeModal") {
+          this.#controller.closeModal();
+          this.render();
+        } else if (action === "openTransferModal") {
+          this.#controller.openModal("transfer");
+          this.render();
+        } else if (action === "openAdjustModal") {
+          this.#controller.openModal("adjust");
+          this.render();
+        } else if (action === "openCreateAccountModal") {
+          this.#controller.openModal("createAccount");
+          this.render();
+        }
+      });
+    });
+    const transferForm = element.querySelector?.('form[data-form-type="transfer"]');
+    if (transferForm && !transferForm._dmPreviewBound) {
+      transferForm._dmPreviewBound = true;
+      const amountInput = transferForm.querySelector?.('input[name="amount"]');
+      const resSelect = transferForm.querySelector?.('select[name="resourceId"]');
+      const previewVal = transferForm.querySelector?.("#dm-transfer-preview .dm-preview-val");
+      const updateTransferPreview = () => {
+        if (!previewVal) return;
+        const opt = resSelect?.selectedOptions?.[0];
+        const precision = opt?.dataset?.precision ? parseInt(opt.dataset.precision, 10) : 0;
+        const availableMinor = opt?.dataset?.available ? parseInt(opt.dataset.available, 10) : 0;
+        const unit = opt?.dataset?.unit ?? "";
+        const valStr = (amountInput?.value ?? "").trim();
+        if (!valStr) {
+          previewVal.textContent = "\u2014";
+          return;
+        }
+        const parsed = parseResourceAmount(valStr, precision);
+        if (!parsed.ok || parsed.value <= 0) {
+          previewVal.textContent = "Invalid amount";
+          return;
+        }
+        const remainingMinor = availableMinor - parsed.value;
+        const formatted = (remainingMinor / Math.pow(10, precision)).toFixed(precision);
+        previewVal.textContent = `${formatted} ${unit} (remaining)`;
+        if (remainingMinor < 0) {
+          previewVal.style.color = "var(--dm-color-danger, #d9534f)";
+        } else {
+          previewVal.style.color = "inherit";
+        }
+      };
+      amountInput?.addEventListener("input", updateTransferPreview);
+      resSelect?.addEventListener("change", updateTransferPreview);
+    }
+    const adjustForm = element.querySelector?.('form[data-form-type="adjust"]');
+    if (adjustForm && !adjustForm._dmPreviewBound) {
+      adjustForm._dmPreviewBound = true;
+      const deltaInput = adjustForm.querySelector?.('input[name="delta"]');
+      const resSelect = adjustForm.querySelector?.('select[name="resourceId"]');
+      const previewVal = adjustForm.querySelector?.("#dm-adjust-preview .dm-preview-val");
+      const updateAdjustPreview = () => {
+        if (!previewVal) return;
+        const opt = resSelect?.selectedOptions?.[0];
+        const precision = opt?.dataset?.precision ? parseInt(opt.dataset.precision, 10) : 0;
+        const balanceMinor = opt?.dataset?.balance ? parseInt(opt.dataset.balance, 10) : 0;
+        const unit = opt?.dataset?.unit ?? "";
+        const valStr = (deltaInput?.value ?? "").trim();
+        if (!valStr) {
+          previewVal.textContent = "\u2014";
+          return;
+        }
+        const parsed = parseResourceAmount(valStr, precision);
+        if (!parsed.ok) {
+          previewVal.textContent = "Invalid delta";
+          return;
+        }
+        const newBalanceMinor = balanceMinor + parsed.value;
+        const formatted = (newBalanceMinor / Math.pow(10, precision)).toFixed(precision);
+        previewVal.textContent = `${formatted} ${unit} (new balance)`;
+        if (newBalanceMinor < 0) {
+          previewVal.style.color = "var(--dm-color-danger, #d9534f)";
+        } else {
+          previewVal.style.color = "inherit";
+        }
+      };
+      deltaInput?.addEventListener("input", updateAdjustPreview);
+      resSelect?.addEventListener("change", updateAdjustPreview);
+    }
     const forms = element.querySelectorAll?.("form[data-form-type]") ?? [];
     forms.forEach((form) => {
       if (form._dmSubmitBound) return;
@@ -16841,6 +18162,28 @@ var EconomyApplication = class _EconomyApplication extends BaseApp2 {
     this.#controller.openModal("createAccount");
     this.render();
   }
+  static #onOpenResourceDetail(event, target) {
+    const resId = target?.dataset?.resourceId ?? event?.currentTarget?.dataset?.resourceId;
+    if (resId) {
+      this.#controller.openResourceDetail(resId);
+      this.render();
+    }
+  }
+  static async #onReleaseReservation(event, target) {
+    const resId = target?.dataset?.reservationId ?? event?.currentTarget?.dataset?.reservationId;
+    if (resId) {
+      await this.#controller.dispatchReleaseReservation({ reservationId: resId });
+      this.render();
+    }
+  }
+  static #onNextLedgerPage() {
+    this.#controller.nextLedgerPage();
+    this.render();
+  }
+  static #onPrevLedgerPage() {
+    this.#controller.prevLedgerPage();
+    this.render();
+  }
   static #onCloseModal() {
     this.#controller.closeModal();
     this.render();
@@ -16854,12 +18197,22 @@ function composeDomainManagerRuntime(options = {}) {
   const authority = options.authority ?? new FoundryPrimaryAuthorityAdapter();
   const lockManager = options.lockManager ?? new LockManager();
   const coordinator = new MutationCoordinator({ lockManager });
-  const transactionStore = options.transactionStore ?? new TransactionStore();
+  const transactionStore = options.transactionStore ?? new TransactionStore({
+    storageAdapter: options.transactionStorageAdapter ?? new FoundryJournalTransactionStorageAdapter()
+  });
   const recovery = new RecoveryService({ transactionStore, lockManager });
   const resourceRegistry = options.resourceRegistry ?? createDefaultResourceRegistry();
-  const ledgerStore = options.ledgerStore ?? new LedgerStore();
-  const reservationStore = options.reservationStore ?? new ReservationStore();
+  const ledgerStore = options.ledgerStore ?? new LedgerStore({
+    storageAdapter: options.ledgerStorageAdapter ?? new FoundryJournalLedgerStorageAdapter()
+  });
+  const reservationStore = options.reservationStore ?? new ReservationStore({
+    storageAdapter: options.reservationStorageAdapter ?? new FoundryJournalReservationStorageAdapter()
+  });
+  const customResourceStore = options.customResourceStore ?? new CustomResourceDefinitionStore(
+    options.customResourceStorageAdapter ?? new FoundryJournalCustomResourceStorageAdapter()
+  );
   const providerRegistry = options.providerRegistry ?? createDefaultProviderRegistry(mutableDomainRepo);
+  const thresholdService = options.thresholdService ?? new ThresholdService();
   const economyService = new EconomyService({
     domains: mutableDomainRepo,
     resourceRegistry,
@@ -16868,7 +18221,8 @@ function composeDomainManagerRuntime(options = {}) {
     lockManager,
     transactionStore,
     recoveryService: recovery,
-    providerRegistry
+    providerRegistry,
+    thresholdService
   });
   const controllerProvider = options.controllerProvider ?? new DefaultDomainControllerProvider();
   const registry = new CommandRegistry();
@@ -16935,9 +18289,18 @@ function composeDomainManagerRuntime(options = {}) {
     resourceRegistry,
     ledgerStore,
     reservationStore,
-    providerRegistry
+    providerRegistry,
+    thresholdService
+  });
+  const publicApi = Object.freeze({
+    version: BUILD_METADATA.moduleVersion,
+    domains: readOnlyDomains,
+    economy: publicEconomy,
+    people,
+    diagnostics
   });
   return Object.freeze({
+    publicApi,
     // G2-AUD-008 & G4-AUD-004: Read-only facades exposed publicly
     domains: readOnlyDomains,
     authority,
@@ -16957,6 +18320,19 @@ function composeDomainManagerRuntime(options = {}) {
     ledgerStore,
     reservationStore,
     providerRegistry,
+    customResourceStore,
+    thresholds: thresholdService,
+    initialize: async () => {
+      await transactionStore.rehydrate();
+      await ledgerStore.rehydrate();
+      await reservationStore.rehydrate();
+      const customDefs = await customResourceStore.rehydrate();
+      for (const def of customDefs) {
+        if (!resourceRegistry.get(def.id)) {
+          resourceRegistry.register(def);
+        }
+      }
+    },
     destroy: () => {
       unregisterPolicy();
       commandBus.destroy();
@@ -16967,13 +18343,6 @@ function composeDomainManagerRuntime(options = {}) {
     }
   });
 }
-
-// src/core/versioning/build-metadata.ts
-var BUILD_METADATA = Object.freeze({
-  moduleVersion: "0.0.3",
-  buildChannel: "dev",
-  target: "foundry-vtt"
-});
 
 // src/diagnostics/build-diagnostics.ts
 function getBuildDiagnostics() {
@@ -17010,117 +18379,6 @@ var Logger = class {
   }
 };
 
-// src/economy/thresholds/threshold-service.ts
-var ThresholdService = class {
-  #thresholds = /* @__PURE__ */ new Map();
-  register(input) {
-    return this.registerThreshold(input);
-  }
-  registerThreshold(input) {
-    const id = input.id ?? createOpaqueId("thrs");
-    const value = input.targetValueMinor ?? input.valueMinor ?? 0;
-    if (!Number.isSafeInteger(value)) {
-      return err(
-        createPublicError({
-          code: "DM_ECON_THRESHOLD_INVALID",
-          category: "validation",
-          message: `Threshold valueMinor must be a safe integer: received ${String(value)}`
-        })
-      );
-    }
-    const op = input.operator ?? input.comparator ?? "<=";
-    const label = input.name ?? input.label ?? "Alert";
-    const definition = {
-      id,
-      domainUuid: input.domainUuid,
-      resourceId: input.resourceId,
-      metric: input.metric,
-      comparator: op,
-      operator: op,
-      valueMinor: value,
-      targetValueMinor: value,
-      severity: input.severity,
-      label,
-      name: label,
-      autoHoldReservations: Boolean(input.autoHoldReservations)
-    };
-    this.#thresholds.set(id, definition);
-    return ok(definition);
-  }
-  getThreshold(id) {
-    return this.#thresholds.get(id);
-  }
-  listThresholds(domainUuid, resourceId) {
-    let list = Array.from(this.#thresholds.values());
-    if (domainUuid) {
-      list = list.filter((t) => t.domainUuid === domainUuid);
-    }
-    if (resourceId) {
-      list = list.filter((t) => t.resourceId === resourceId);
-    }
-    return Object.freeze(list);
-  }
-  evaluate(domainUuid, resourceId, values) {
-    const domainThresholds = this.listThresholds(domainUuid, resourceId);
-    const results = [];
-    for (const th of domainThresholds) {
-      const current = th.metric === "balance" ? values.balanceMinor : values.availableMinor;
-      let isCrossed = false;
-      switch (th.operator) {
-        case "<":
-        case "lt":
-          isCrossed = current < th.valueMinor;
-          break;
-        case "<=":
-        case "lte":
-          isCrossed = current <= th.valueMinor;
-          break;
-        case ">":
-        case "gt":
-          isCrossed = current > th.valueMinor;
-          break;
-        case ">=":
-        case "gte":
-          isCrossed = current >= th.valueMinor;
-          break;
-      }
-      if (isCrossed) {
-        results.push({
-          breached: true,
-          definition: th,
-          actualValueMinor: current
-        });
-      }
-    }
-    return Object.freeze(results);
-  }
-  evaluateStatus(domainUuid, resourceId, values) {
-    const breaches = this.evaluate(domainUuid, resourceId, values);
-    const crossed = breaches.map((b) => b.definition);
-    let highestSeverity;
-    if (crossed.some((t) => t.severity === "critical")) {
-      highestSeverity = "critical";
-    } else if (crossed.some((t) => t.severity === "warning")) {
-      highestSeverity = "warning";
-    } else if (crossed.some((t) => t.severity === "info")) {
-      highestSeverity = "info";
-    }
-    const cap = values.capacityMinor;
-    const isOverCapacity = cap !== null && cap !== void 0 && values.balanceMinor > cap;
-    const isNearCapacity = cap !== null && cap !== void 0 && cap > 0 && values.balanceMinor >= cap * 0.85 && !isOverCapacity;
-    const isLowReserve = values.availableMinor < 0;
-    return {
-      domainUuid,
-      resourceId,
-      crossedThresholds: Object.freeze(crossed),
-      highestSeverity,
-      isNearCapacity,
-      isOverCapacity,
-      isLowReserve
-    };
-  }
-};
-
 // src/main.ts
 var logger = new Logger("Domain Manager");
 var runtime = null;
@@ -17148,20 +18406,21 @@ Hooks.once("init", () => {
   });
   logger.info("init");
 });
-Hooks.once("ready", () => {
+Hooks.once("ready", async () => {
   runtime = composeDomainManagerRuntime();
+  await runtime.initialize();
   const module = globalThis.game?.modules?.get?.("domain-manager");
   if (module) {
-    module.api = runtime;
+    module.api = runtime.publicApi;
   }
   reconcileAuthority();
   if (runtime.authority.service.isCurrentUser()) {
     const currentEpoch = runtime.authority.service.getStatus().authorityEpoch;
-    void runtime.recovery.scanOnStartup(currentEpoch).then((unresolved) => {
-      if (unresolved.length > 0) {
-        logger.warn(
-          `Startup recovery scan discovered ${unresolved.length} unresolved transactions`,
-          { unresolvedCount: unresolved.length }
+    void runtime.recovery.recoverAll(currentEpoch).then((results) => {
+      if (results.length > 0) {
+        logger.info(
+          `Startup recovery processed ${results.length} transactions`,
+          { processedCount: results.length }
         );
       }
     }).catch((error) => {

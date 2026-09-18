@@ -136,7 +136,9 @@ export class EconomyAggregationProvider {
         resourceStats.contributingCount++;
       }
 
-      if (domainHadSecret && !viewer.isGm) {
+      // G4-AUD-007: Only GM viewers may see secret domain UUIDs in hiddenContributors.
+      // For non-GMs, hiddenContributors remains strictly empty to prevent information leakage.
+      if (domainHadSecret && viewer.isGm) {
         hiddenContributors.push(uuid);
       }
     }

@@ -194,7 +194,20 @@ test("G4.9: renderEconomySubsystemHtml escapes malicious input against XSS", () 
 });
 
 test("G4.9: EconomyApplication and EconomyApplicationController lifecycle", async () => {
-  const doc = document("dom-1", "Domain Capital", testRecord);
+  const initialRecord = withDomainEconomyData(testRecord, {
+    schemaVersion: 1,
+    accounts: [
+      {
+        mode: "native",
+        domainUuid: "JournalEntry.dom-1",
+        resourceId: "domain-manager:treasury",
+        balanceMinor: 5000,
+        baseCapacityMinor: 10000,
+        visibility: "public"
+      }
+    ]
+  });
+  const doc = document("dom-1", "Domain Capital", initialRecord);
   const store = createStore([doc]);
   const domains = new StorageDomainRepository(store);
   const resourceRegistry = createDefaultResourceRegistry();
@@ -248,4 +261,63 @@ test("G4.9: EconomyApplication and EconomyApplicationController lifecycle", asyn
 
   await app.render();
   assert.equal(app.element.innerHTML.includes("dm-transfer-modal"), false);
+
+  // 1. Resource Detail Modal
+  app.controller.openResourceDetail("domain-manager:treasury");
+  assert.equal(app.controller.activeModal, "resourceDetail");
+  assert.equal(app.controller.selectedResourceId, "domain-manager:treasury");
+
+  await app.render();
+  assert.equal(app.element.innerHTML.includes("dm-detail-modal"), true);
+  assert.equal(app.element.innerHTML.includes("domain-manager:treasury"), true);
+
+  app.controller.closeModal();
+  await app.render();
+  assert.equal(app.element.innerHTML.includes("dm-detail-modal"), false);
+
+  // 2. Transfer & Adjust preview boxes
+  app.controller.openModal("transfer");
+  await app.render();
+  assert.equal(app.element.innerHTML.includes("dm-transfer-preview"), true);
+
+  app.controller.openModal("adjust");
+  await app.render();
+  assert.equal(app.element.innerHTML.includes("dm-adjust-preview"), true);
+  app.controller.closeModal();
+
+  // 3. Ledger pagination controls
+  for (let i = 1; i <= 25; i++) {
+    ledgerStore.append({
+      domainUuid: doc.uuid,
+      resourceId: "domain-manager:treasury",
+      deltaMinor: i * 10,
+      kind: "adjustment",
+      source: { type: "manual" }
+    });
+  }
+
+  await app.render();
+  assert.equal(app.element.innerHTML.includes("dm-ledger-pagination"), true);
+  assert.equal(app.element.innerHTML.includes("nextLedgerPage"), true);
+
+  // Next page navigation
+  app.controller.nextLedgerPage();
+  assert.equal(app.controller.ledgerPage, 1);
+  await app.render();
+  assert.equal(app.element.innerHTML.includes("Page 2"), true);
+
+  app.controller.prevLedgerPage();
+  assert.equal(app.controller.ledgerPage, 0);
+
+  // 4. Reservation release action button
+  const createRes = reservationStore.create({
+    domainUuid: doc.uuid,
+    resourceId: "domain-manager:treasury",
+    originalAmountMinor: 500,
+    source: { type: "manual", reason: "Test reservation" }
+  });
+  assert.equal(createRes.ok, true);
+
+  await app.render();
+  assert.equal(app.element.innerHTML.includes('data-action="releaseReservation"'), true);
 });

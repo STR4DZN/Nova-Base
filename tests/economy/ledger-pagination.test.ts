@@ -92,3 +92,51 @@ test("G4-AUD-009: LedgerStore.query sorts descending by default when direction i
   assert.equal(descEntries[1].sequence, 2);
   assert.equal(descEntries[2].sequence, 1);
 });
+
+test("G4-AUD-009: LedgerStore handles 10,000+ entries scale test with performant paged queries", async () => {
+  const store = new LedgerStore();
+  const totalEntries = 10_000;
+
+  // Append 10,000 entries
+  for (let i = 1; i <= totalEntries; i++) {
+    store.append({
+      domainUuid: "dom-scale",
+      resourceId: "domain-manager:supplies",
+      deltaMinor: i,
+      kind: "adjustment",
+      source: { type: "system", reason: `Tick #${i}` }
+    });
+  }
+
+  assert.equal(store.count, totalEntries);
+
+  const start = performance.now();
+  const page1 = store.queryPaged({
+    domainUuid: "dom-scale",
+    direction: "desc",
+    limit: 50
+  });
+  const duration = performance.now() - start;
+
+  assert.equal(page1.totalCount, totalEntries);
+  assert.equal(page1.entries.length, 50);
+  assert.equal(page1.hasMore, true);
+  assert.equal(page1.entries[0].sequence, 10_000);
+  assert.equal(page1.entries[49].sequence, 9_951);
+  assert.ok(page1.nextCursor);
+  // Query should execute in under 100ms
+  assert.ok(duration < 250, `Query took ${duration.toFixed(2)}ms, should be < 250ms`);
+
+  // Query next page with cursor
+  const page2 = store.queryPaged({
+    domainUuid: "dom-scale",
+    direction: "desc",
+    cursor: page1.nextCursor,
+    limit: 50
+  });
+
+  assert.equal(page2.entries.length, 50);
+  assert.equal(page2.entries[0].sequence, 9_950);
+  assert.equal(page2.entries[49].sequence, 9_901);
+});
+

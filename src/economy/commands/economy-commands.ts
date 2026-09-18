@@ -66,9 +66,13 @@ export interface ResourceReleaseReservationCommandPayload {
 export interface ResourceCreateAccountCommandPayload {
   readonly domainUuid: string;
   readonly resourceId: string;
+  readonly mode?: "native" | "provider" | "derived";
   readonly initialBalanceMinor?: number;
   readonly baseCapacityMinor?: number | null;
   readonly visibility?: "public" | "restricted" | "secret";
+  readonly providerId?: string;
+  readonly providerRef?: string;
+  readonly resolverId?: string;
   readonly reason?: string;
 }
 
@@ -145,7 +149,9 @@ export function registerEconomyCommands(options: RegisterEconomyCommandsOptions)
         deltaMinor: p.deltaMinor,
         targetBalanceMinor: p.targetBalanceMinor,
         reason: p.reason,
-        userId: ctx.senderUserId ?? undefined
+        userId: ctx.senderUserId ?? undefined,
+        commandId: ctx.command.commandId,
+        authorityEpoch: ctx.command.authorityEpoch ?? 1
       });
     }
   });
@@ -223,7 +229,9 @@ export function registerEconomyCommands(options: RegisterEconomyCommandsOptions)
         resourceId: p.resourceId,
         amountMinor: p.amountMinor,
         reason: p.reason,
-        userId: ctx.senderUserId ?? undefined
+        userId: ctx.senderUserId ?? undefined,
+        commandId: ctx.command.commandId,
+        authorityEpoch: ctx.command.authorityEpoch ?? 1
       });
     }
   });
@@ -304,7 +312,9 @@ export function registerEconomyCommands(options: RegisterEconomyCommandsOptions)
         toAmountMinor: p.toAmountMinor,
         rateDescription: p.rateDescription,
         reason: p.reason,
-        userId: ctx.senderUserId ?? undefined
+        userId: ctx.senderUserId ?? undefined,
+        commandId: ctx.command.commandId,
+        authorityEpoch: ctx.command.authorityEpoch ?? 1
       });
     }
   });
@@ -435,7 +445,9 @@ export function registerEconomyCommands(options: RegisterEconomyCommandsOptions)
         reservationId: p.reservationId,
         amountMinor: p.amountMinor,
         reason: p.reason,
-        userId: ctx.senderUserId ?? undefined
+        userId: ctx.senderUserId ?? undefined,
+        commandId: ctx.command.commandId,
+        authorityEpoch: ctx.command.authorityEpoch ?? 1
       });
     }
   });
@@ -536,9 +548,13 @@ export function registerEconomyCommands(options: RegisterEconomyCommandsOptions)
       return economyService.createAccount({
         domainUuid: p.domainUuid,
         resourceId: p.resourceId,
+        mode: p.mode,
         initialBalanceMinor: p.initialBalanceMinor,
         baseCapacityMinor: p.baseCapacityMinor,
         visibility: p.visibility,
+        providerId: p.providerId,
+        providerRef: p.providerRef,
+        resolverId: p.resolverId,
         reason: p.reason,
         userId: ctx.senderUserId ?? undefined
       });

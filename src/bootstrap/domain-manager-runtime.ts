@@ -39,12 +39,30 @@ import {
   G2DiagnosticsProvider,
   type G2DiagnosticsSnapshot
 } from "../diagnostics/g2-diagnostics-provider.js";
+import { BUILD_METADATA } from "../core/versioning/build-metadata.js";
 import {
   ResourceDefinitionRegistry,
   createDefaultResourceRegistry
 } from "../economy/definitions/resource-registry.js";
 import { LedgerStore } from "../economy/ledger/ledger-store.js";
+import {
+  FoundryJournalLedgerStorageAdapter,
+  type LedgerStorageAdapter
+} from "../economy/storage/ledger-storage-adapter.js";
 import { ReservationStore } from "../economy/reservations/reservation-store.js";
+import {
+  FoundryJournalReservationStorageAdapter,
+  type ReservationStorageAdapter
+} from "../economy/storage/reservation-storage-adapter.js";
+import {
+  FoundryJournalTransactionStorageAdapter,
+  type TransactionStorageAdapter
+} from "../mutations/transaction-storage-adapter.js";
+import {
+  CustomResourceDefinitionStore,
+  FoundryJournalCustomResourceStorageAdapter,
+  type CustomResourceStorageAdapter
+} from "../economy/definitions/custom-resource-store.js";
 import { EconomyService } from "../economy/services/economy-service.js";
 import {
   DefaultPublicEconomyApi,
@@ -55,7 +73,22 @@ import {
   ProviderRegistry,
   createDefaultProviderRegistry
 } from "../economy/providers/provider-registry.js";
+import { ThresholdService } from "../economy/thresholds/threshold-service.js";
 import { EconomyApplication, EconomyApplicationController } from "../ui/domain-patterns/economy/economy-app.js";
+
+/**
+ * Public API exposed to external modules / users via module.api.
+ *
+ * Implements G4-AUD-004:
+ * Strict isolation between internal stores/mutators and public query/dispatch facades.
+ */
+export interface PublicModuleApi {
+  readonly version: string;
+  readonly domains: DomainReadRepository;
+  readonly economy: PublicEconomyApi;
+  readonly people: PublicPeopleApi;
+  readonly diagnostics: G2DiagnosticsProvider;
+}
 
 /**
  * Runtime services owned by the Domain Manager composition root.
@@ -66,6 +99,7 @@ import { EconomyApplication, EconomyApplicationController } from "../ui/domain-p
  * - Complete Gate G2, G3, and G4 verticals are composed and reachable from production entrypoint.
  */
 export interface DomainManagerRuntime {
+  readonly publicApi: PublicModuleApi;
   readonly domains: DomainReadRepository;
   readonly authority: PrimaryAuthorityHost;
   readonly commandBus: CommandBus;
@@ -84,6 +118,9 @@ export interface DomainManagerRuntime {
   readonly ledgerStore: LedgerStore;
   readonly reservationStore: ReservationStore;
   readonly providerRegistry: ProviderRegistry;
+  readonly customResourceStore: CustomResourceDefinitionStore;
+  readonly thresholds: ThresholdService;
+  initialize(): Promise<void>;
   destroy(): void;
 }
 
@@ -93,14 +130,20 @@ export interface DomainManagerRuntimeOptions {
   readonly transport?: CommandTransport;
   readonly lockManager?: LockManager;
   readonly transactionStore?: TransactionStore;
+  readonly transactionStorageAdapter?: TransactionStorageAdapter;
   readonly rateLimiter?: RateLimiter;
   readonly dedupeStore?: CommandDedupeStore;
   readonly commandQueue?: CommandQueue;
   readonly controllerProvider?: DomainControllerProvider;
   readonly resourceRegistry?: ResourceDefinitionRegistry;
   readonly ledgerStore?: LedgerStore;
+  readonly ledgerStorageAdapter?: LedgerStorageAdapter;
   readonly reservationStore?: ReservationStore;
+  readonly reservationStorageAdapter?: ReservationStorageAdapter;
   readonly providerRegistry?: ProviderRegistry;
+  readonly customResourceStore?: CustomResourceDefinitionStore;
+  readonly customResourceStorageAdapter?: CustomResourceStorageAdapter;
+  readonly thresholdService?: ThresholdService;
 }
 
 /**
@@ -115,14 +158,36 @@ export function composeDomainManagerRuntime(
   const authority = options.authority ?? new FoundryPrimaryAuthorityAdapter();
   const lockManager = options.lockManager ?? new LockManager();
   const coordinator = new MutationCoordinator({ lockManager });
-  const transactionStore = options.transactionStore ?? new TransactionStore();
+  const transactionStore =
+    options.transactionStore ??
+    new TransactionStore({
+      storageAdapter:
+        options.transactionStorageAdapter ?? new FoundryJournalTransactionStorageAdapter()
+    });
   const recovery = new RecoveryService({ transactionStore, lockManager });
 
   const resourceRegistry = options.resourceRegistry ?? createDefaultResourceRegistry();
-  const ledgerStore = options.ledgerStore ?? new LedgerStore();
-  const reservationStore = options.reservationStore ?? new ReservationStore();
+  const ledgerStore =
+    options.ledgerStore ??
+    new LedgerStore({
+      storageAdapter:
+        options.ledgerStorageAdapter ?? new FoundryJournalLedgerStorageAdapter()
+    });
+  const reservationStore =
+    options.reservationStore ??
+    new ReservationStore({
+      storageAdapter:
+        options.reservationStorageAdapter ?? new FoundryJournalReservationStorageAdapter()
+    });
+  const customResourceStore =
+    options.customResourceStore ??
+    new CustomResourceDefinitionStore(
+      options.customResourceStorageAdapter ?? new FoundryJournalCustomResourceStorageAdapter()
+    );
   const providerRegistry =
     options.providerRegistry ?? createDefaultProviderRegistry(mutableDomainRepo);
+
+  const thresholdService = options.thresholdService ?? new ThresholdService();
 
   const economyService = new EconomyService({
     domains: mutableDomainRepo,
@@ -132,7 +197,8 @@ export function composeDomainManagerRuntime(
     lockManager,
     transactionStore,
     recoveryService: recovery,
-    providerRegistry
+    providerRegistry,
+    thresholdService
   });
 
   // G4-AUD-005: Instantiate canonical DomainControllerProvider BEFORE registering economy commands
@@ -215,10 +281,20 @@ export function composeDomainManagerRuntime(
     resourceRegistry,
     ledgerStore,
     reservationStore,
-    providerRegistry
+    providerRegistry,
+    thresholdService
+  });
+
+  const publicApi: PublicModuleApi = Object.freeze({
+    version: BUILD_METADATA.moduleVersion,
+    domains: readOnlyDomains,
+    economy: publicEconomy,
+    people,
+    diagnostics
   });
 
   return Object.freeze({
+    publicApi,
     // G2-AUD-008 & G4-AUD-004: Read-only facades exposed publicly
     domains: readOnlyDomains,
     authority,
@@ -238,6 +314,19 @@ export function composeDomainManagerRuntime(
     ledgerStore,
     reservationStore,
     providerRegistry,
+    customResourceStore,
+    thresholds: thresholdService,
+    initialize: async () => {
+      await transactionStore.rehydrate();
+      await ledgerStore.rehydrate();
+      await reservationStore.rehydrate();
+      const customDefs = await customResourceStore.rehydrate();
+      for (const def of customDefs) {
+        if (!resourceRegistry.get(def.id)) {
+          resourceRegistry.register(def);
+        }
+      }
+    },
     destroy: () => {
       unregisterPolicy();
       commandBus.destroy();

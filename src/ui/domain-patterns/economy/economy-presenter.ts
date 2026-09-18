@@ -17,6 +17,8 @@ export interface EconomyPresenterOptions {
   readonly ledgerStore?: LedgerStore;
   readonly reservationStore?: ReservationStore;
   readonly providerRegistry?: ProviderRegistry;
+  readonly ledgerPage?: number;
+  readonly ledgerPageSize?: number;
 }
 
 export interface ResourceAccountViewModel {
@@ -38,6 +40,11 @@ export interface ResourceAccountViewModel {
   readonly capacityPercentage: number | null;
   readonly isSecret: boolean;
   readonly statusBadgeClass: "normal" | "near-capacity" | "over-capacity" | "low-reserve" | "closed";
+  readonly providerId?: string;
+  readonly providerAvailable?: boolean;
+  readonly description?: string;
+  readonly categoryId?: string;
+  readonly tags?: readonly string[];
 }
 
 export interface ReservationItemViewModel {
@@ -49,6 +56,7 @@ export interface ReservationItemViewModel {
   readonly status: string;
   readonly reason?: string;
   readonly expiresAtFormatted?: string;
+  readonly canRelease: boolean;
 }
 
 export interface LedgerEntryViewModel {
@@ -67,6 +75,10 @@ export interface EconomySubsystemViewModel {
   readonly accounts: readonly ResourceAccountViewModel[];
   readonly reservations: readonly ReservationItemViewModel[];
   readonly recentLedger: readonly LedgerEntryViewModel[];
+  readonly ledgerPage: number;
+  readonly ledgerTotalCount: number;
+  readonly ledgerHasMore: boolean;
+  readonly ledgerHasPrev: boolean;
 }
 
 export function buildEconomyViewModel(
@@ -191,7 +203,12 @@ export function buildEconomyViewModel(
       capacityFormatted,
       capacityPercentage,
       isSecret: acc.visibility === "secret",
-      statusBadgeClass
+      statusBadgeClass,
+      providerId: acc.mode === "provider" ? acc.providerId : undefined,
+      providerAvailable: acc.mode === "provider" ? providerAvailable : undefined,
+      description: def?.description,
+      categoryId: def?.categoryId ?? undefined,
+      tags: def?.tags
     });
   }
 
@@ -235,22 +252,36 @@ export function buildEconomyViewModel(
         amountFormatted: formatResourceAmount(r.remainingAmountMinor, resDef, { showUnit: true }),
         status: r.status,
         reason: r.source.reason,
-        expiresAtFormatted: r.expiresAtReal ? new Date(r.expiresAtReal).toLocaleTimeString() : undefined
+        expiresAtFormatted: r.expiresAtReal ? new Date(r.expiresAtReal).toLocaleTimeString() : undefined,
+        canRelease: true
       });
     }
   }
 
-  // Ledger history (sanitized, descending by default - G4-AUD-009)
+  // Ledger history (sanitized, paginated descending - G4-AUD-009)
   const ledgerVMs: LedgerEntryViewModel[] = [];
+  const ledgerPage = Math.max(0, options.ledgerPage ?? 0);
+  const ledgerPageSize = Math.max(1, options.ledgerPageSize ?? 20);
+  let ledgerTotalCount = 0;
+  let ledgerHasMore = false;
+  let ledgerHasPrev = ledgerPage > 0;
+
   if (options.ledgerStore) {
-    const rawEntries = options.ledgerStore.query({ domainUuid, direction: "desc", limit: 20 });
+    const allEntries = options.ledgerStore.query({ domainUuid, direction: "desc" });
+    const filteredEntries = allEntries.filter((entry) =>
+      options.viewerIsGm || visibleResourceIds.has(entry.resourceId)
+    );
 
-    for (const entry of rawEntries) {
-      // Non-GM viewers only see ledger entries for accounts they can see
-      if (!options.viewerIsGm && !visibleResourceIds.has(entry.resourceId)) {
-        continue;
-      }
+    ledgerTotalCount = filteredEntries.length;
+    ledgerHasMore = (ledgerPage + 1) * ledgerPageSize < ledgerTotalCount;
+    ledgerHasPrev = ledgerPage > 0;
 
+    const pagedEntries = filteredEntries.slice(
+      ledgerPage * ledgerPageSize,
+      (ledgerPage + 1) * ledgerPageSize
+    );
+
+    for (const entry of pagedEntries) {
       const def = options.resourceRegistry.get(entry.resourceId);
       const label = def?.label ?? entry.resourceId;
       const precision = def?.precision ?? 0;
@@ -293,6 +324,10 @@ export function buildEconomyViewModel(
     viewerIsGm: options.viewerIsGm,
     accounts: Object.freeze(accountVMs),
     reservations: Object.freeze(reservationVMs),
-    recentLedger: Object.freeze(ledgerVMs)
+    recentLedger: Object.freeze(ledgerVMs),
+    ledgerPage,
+    ledgerTotalCount,
+    ledgerHasMore,
+    ledgerHasPrev
   };
 }

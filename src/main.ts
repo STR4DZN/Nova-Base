@@ -45,24 +45,25 @@ Hooks.once("init", () => {
   logger.info("init");
 });
 
-Hooks.once("ready", () => {
+Hooks.once("ready", async () => {
   runtime = composeDomainManagerRuntime();
+  await runtime.initialize();
   const module = (globalThis as any).game?.modules?.get?.("domain-manager");
   if (module) {
-    module.api = runtime;
+    module.api = runtime.publicApi;
   }
   reconcileAuthority();
 
-  // If this host is the elected Primary Authority at startup, run recovery scan
+  // If this host is the elected Primary Authority at startup, run recovery scan and recover
   if (runtime.authority.service.isCurrentUser()) {
     const currentEpoch = runtime.authority.service.getStatus().authorityEpoch;
     void runtime.recovery
-      .scanOnStartup(currentEpoch)
-      .then((unresolved) => {
-        if (unresolved.length > 0) {
-          logger.warn(
-            `Startup recovery scan discovered ${unresolved.length} unresolved transactions`,
-            { unresolvedCount: unresolved.length }
+      .recoverAll(currentEpoch)
+      .then((results) => {
+        if (results.length > 0) {
+          logger.info(
+            `Startup recovery processed ${results.length} transactions`,
+            { processedCount: results.length }
           );
         }
       })
@@ -114,4 +115,5 @@ export {
 } from "./economy/providers/provider-registry.js";
 export { ThresholdService } from "./economy/thresholds/threshold-service.js";
 export { EconomyApplication, EconomyApplicationController } from "./ui/domain-patterns/economy/economy-app.js";
+export type { PublicModuleApi } from "./bootstrap/domain-manager-runtime.js";
 

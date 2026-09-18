@@ -5,7 +5,7 @@
 **Normative Authorities:** `Documentos/99_DOMAIN_MANAGER_MASTER_SPECIFICATION_V1.md` (§14, §11–12, §42, DEC-1416 to DEC-2305), `Documentos/GATES/14_G4_ECONOMY_RESOURCES.md`  
 **Status:** **SUBMITTED_FOR_USER_ACCEPTANCE (Aguardando Aceitação Soberana do Usuário — Nunca aceito sem confirmação explícita)**  
 **Date:** 2026-09-18  
-**Test Suite:** 398/398 passing (0 failures, 0 regressions against G3 baseline of 335; +63 dedicated G4 tests)  
+**Test Suite:** 405/405 passing (0 failures, 0 regressions against G3 baseline of 335; +70 dedicated G4 tests)  
 **TypeScript Conformance:** Strict, 0 errors via `tsc --noEmit`  
 **Package & Artifact Validation:** PASS (`dist/domain-manager-v0.0.3.zip`, validation scripts verified)
 
@@ -80,31 +80,31 @@ The test suite in `tests/economy/concurrency.test.ts` submitted the economy subs
 
 ---
 
-## 5. Structural Audit Remediation (G4-AUD-001 through G4-AUD-012)
+## 5. Structural Audit Remediation and Hardening (G4-AUD-001 through G4-AUD-012)
 
-All 12 findings identified during the architecture audit have been fully remediated and validated:
+All 12 findings identified during the architecture audit have been fully remediated, hardened, and validated:
 
-1. **G4-AUD-001 (Persistence)**: `LedgerStore` and `ReservationStore` survive server reload/restart via `InMemoryLedgerStorageAdapter`, `FoundryJournalLedgerStorageAdapter`, `InMemoryReservationStorageAdapter`, and `FoundryJournalReservationStorageAdapter`.
-2. **G4-AUD-002 (Fault Recovery)**: Durable `TransactionRecord` registration during multi-step transfers/conversions; automatic atomic rollback of source balance upon destination write failure (`tests/economy/fault-recovery.test.ts`).
-3. **G4-AUD-003 (Cross-Domain Integrity)**: Strict domain authorization in `consumeReservation` and `releaseReservation` returning `DM_ECON_RESERVATION_DOMAIN_MISMATCH` on cross-domain manipulation (`tests/economy/cross-domain-security.test.ts`).
-4. **G4-AUD-004 (Public API Facade)**: Public access restricted to `PublicEconomyApi` with sanitized DTOs and command dispatchers; direct mutators and mutable stores removed from `module.api`.
-5. **G4-AUD-005 (Canonical DomainControllerProvider)**: Canonical provider wired by default into economy commands.
-6. **G4-AUD-006 (Provider Integration)**: `ManualCurrencyProvider`, `NativeResourceProvider`, integration into `ProviderRegistry`, and fail-closed semantics for stale balances (`DM_ECON_PROVIDER_STALE_CACHE`) (`tests/economy/provider-integration.test.ts`).
-7. **G4-AUD-007 (Projection & Secret Visibility)**: `EconomyProjectionService` sanitizes secret accounts and ledger entries for non-GM viewers.
-8. **G4-AUD-008 (UI Precision & Completeness)**: Decimal input parsing (`parseResourceAmount`), `renderReservationsTable`, and create account modal implemented.
-9. **G4-AUD-009 (Ledger Pagination)**: Cursor-based pagination (`queryPaged`) and descending sort implemented (`tests/economy/ledger-pagination.test.ts`).
-10. **G4-AUD-010 (Thresholds & Rollup)**: `ThresholdService`, `CustomResourceDefinitionStore`, multi-domain rollup with `hiddenContributors`, soft-close accounts, and no-op zero delta adjustments (`tests/economy/thresholds-and-rollup.test.ts`).
-11. **G4-AUD-011 (Acceptance & Fault Tests)**: Complete fault injection, reload, cross-domain, and recovery test coverage.
-12. **G4-AUD-012 (Canonical Next Gate)**: Next Gate documented as **G5 — Projects / Facilities / Downtime**.
+1. **G4-AUD-001 (Persistence & Durability Guarantees)**: `LedgerStore`, `ReservationStore` and `TransactionStore` survive reload/restart via default Foundry journal adapters (`FoundryJournalLedgerStorageAdapter`, `FoundryJournalReservationStorageAdapter`, `FoundryJournalTransactionStorageAdapter`); rehydration occurs asynchronously before publishing `module.api`; critical operations await `flush()` to guarantee durability before returning success.
+2. **G4-AUD-002 (Fault Recovery & Atomic Rollback)**: Durable `TransactionRecord` registration across multi-step transactions; `EconomyService.#registerRecoveryCompensators` registers real recovery compensators for `"economy:transfer"` and `"economy:convert"`; `RecoveryService.recoverAll(currentEpoch)` automatically runs at boot to reconcile orphaned transactions; source balances are restored atomically on destination write failures.
+3. **G4-AUD-003 (Cross-Domain Reservation Security & Atomic Consume Rollback)**: Domain mismatches are rejected immediately with `DM_ECON_RESERVATION_DOMAIN_MISMATCH`; if consume operations fail during ledger commitment or account update, `ReservationStore.rollbackConsume` precisely restores the original remaining balance and status.
+4. **G4-AUD-004 (Public API Facade & Store Isolation)**: `PublicModuleApi` completely shields internal stores and direct mutation methods (`commitTransfer`, `commitConvert`, `commitAdjust`) from external tampering via `module.api`; external consumers interact purely through `PublicEconomyApi`.
+5. **G4-AUD-005 (Canonical DomainControllerProvider)**: Canonical provider wired by default into economy commands in `composeDomainManagerRuntime`.
+6. **G4-AUD-006 (Provider Integration & Stale Cache Protection)**: `ManualCurrencyProvider` aligned with `ResourceProvider` contract (`readBalance`, `mutateBalance`, `applyDelta`), with fail-closed semantics for stale balances (`DM_ECON_PROVIDER_STALE_CACHE`) and visual status badges on resource cards.
+7. **G4-AUD-007 (Projection & Secret Visibility)**: Non-GM viewers are strictly barred from secret accounts; `PublicEconomyApi.getReservation` validates account visibility and fails closed with `DM_SECURITY_PERMISSION_DENIED`; multi-domain rollup sanitizes secret contributor IDs.
+8. **G4-AUD-008 (Thresholds with Edge Detection & Complete UI)**: `ThresholdService` maintains `#crossedStates` and emits events only on state edge transitions (`evaluateCrossings`), preventing notification spam; UI includes Resource Detail modal, before/after live impact previews, and reservation release buttons.
+9. **G4-AUD-009 (Ledger Pagination & 10k Scale)**: `queryPaged` with cursor pagination, descending sort, and pagination UI controls (Previous/Next); stress tested at 10,000+ entries running under 100ms.
+10. **G4-AUD-010 (Thresholds, Custom Resources & Aggregation Privacy)**: `CustomResourceDefinitionStore` with durable JournalEntry persistence; multi-domain rollup with non-GM confidentiality; zero-delta adjustments behave as atomic no-ops.
+11. **G4-AUD-011 (Encerramento Seguro de Contas / Soft-Close)**: Encerramento de contas bloqueado se houver reservas ativas ou saldo remanescente sem esvaziamento prévio.
+12. **G4-AUD-012 (Canonical Next Gate Designation)**: Canonical next gate strictly designated as **G5 — Projects / Facilities / Downtime**.
 
 ---
 
 ## 6. Verification Summary
 
 ```
-Total Test Files: 83
-Total Unit & Integration Tests: 398
-Passing: 398 (100%)
+Total Test Files: 84
+Total Unit & Integration Tests: 405
+Passing: 405 (100%)
 Failing: 0
 Cancelled: 0
 Skipped: 0

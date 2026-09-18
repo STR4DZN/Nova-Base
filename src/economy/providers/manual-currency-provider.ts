@@ -1,6 +1,10 @@
 import { createPublicError, type PublicError } from "../../core/contracts/public-error.js";
 import { err, ok, type Result } from "../../core/contracts/result.js";
-import type { CurrencyProvider, ProviderHealth } from "./provider-types.js";
+import type {
+  CurrencyProvider,
+  ProviderHealth,
+  ResourceProviderBalanceResult
+} from "./provider-types.js";
 
 export const MANUAL_CURRENCY_PROVIDER_ID = "domain-manager:manual-currency";
 
@@ -61,6 +65,44 @@ export class ManualCurrencyProvider implements CurrencyProvider {
     const next = current + deltaMinor;
     this.#balances.set(targetRef, next);
     return ok({ newBalanceMinor: next });
+  }
+
+  async readBalance(
+    domainUuid: string,
+    resourceId: string,
+    providerRef: string
+  ): Promise<Result<ResourceProviderBalanceResult, PublicError>> {
+    const key = providerRef || `${domainUuid}:${resourceId}`;
+    const balRes = await this.getCurrencyBalance(key);
+    if (!balRes.ok) return balRes;
+    return ok({ balanceMinor: balRes.value, isStale: false });
+  }
+
+  async mutateBalance(
+    domainUuid: string,
+    resourceId: string,
+    providerRef: string,
+    deltaMinor: number,
+    reason: string
+  ): Promise<Result<{ newBalanceMinor: number }, PublicError>> {
+    const key = providerRef || `${domainUuid}:${resourceId}`;
+    return this.mutateCurrency(key, deltaMinor, reason);
+  }
+
+  async applyDelta(params: {
+    readonly domainUuid: string;
+    readonly resourceId: string;
+    readonly providerRef: string;
+    readonly deltaMinor: number;
+    readonly reason: string;
+  }): Promise<Result<{ newBalanceMinor: number }, PublicError>> {
+    return this.mutateBalance(
+      params.domainUuid,
+      params.resourceId,
+      params.providerRef,
+      params.deltaMinor,
+      params.reason
+    );
   }
 
   setBalance(targetRef: string, balanceMinor: number): void {

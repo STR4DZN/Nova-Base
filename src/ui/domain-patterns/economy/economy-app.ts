@@ -14,7 +14,7 @@ import type { LedgerStore } from "../../../economy/ledger/ledger-store.js";
 import type { ReservationStore } from "../../../economy/reservations/reservation-store.js";
 import type { ProviderRegistry } from "../../../economy/providers/provider-registry.js";
 import { parseResourceAmount } from "../../../economy/math/minor-units.js";
-import type { ViewerIdentity } from "../../../projection/viewer-identity.js";
+import { resolveCurrentViewer, type ViewerIdentity } from "../../../projection/viewer-identity.js";
 import {
   buildEconomyViewModel,
   type EconomyPresenterOptions,
@@ -26,6 +26,7 @@ import {
   renderAdjustModalHtml,
   renderCreateAccountModalHtml,
   renderEconomySubsystemHtml,
+  renderResourceDetailModalHtml,
   renderTransferModalHtml
 } from "./economy-view.js";
 
@@ -51,7 +52,7 @@ export interface EconomyAppOptions {
   readonly viewer?: Partial<ViewerIdentity>;
 }
 
-export type EconomyModalType = "transfer" | "adjust" | "createAccount" | null;
+export type EconomyModalType = "transfer" | "adjust" | "createAccount" | "resourceDetail" | null;
 
 export class EconomyApplicationController {
   readonly #domainUuid: string;
@@ -64,6 +65,8 @@ export class EconomyApplicationController {
   readonly #viewer?: Partial<ViewerIdentity>;
 
   #activeModal: EconomyModalType = null;
+  #selectedResourceId: string | null = null;
+  #ledgerPage: number = 0;
   #lastViewModel: EconomySubsystemViewModel | null = null;
 
   constructor(options: EconomyAppOptions) {
@@ -89,6 +92,14 @@ export class EconomyApplicationController {
     return this.#activeModal;
   }
 
+  get selectedResourceId(): string | null {
+    return this.#selectedResourceId;
+  }
+
+  get ledgerPage(): number {
+    return this.#ledgerPage;
+  }
+
   get viewModel(): EconomySubsystemViewModel | null {
     return this.#lastViewModel;
   }
@@ -103,18 +114,17 @@ export class EconomyApplicationController {
       return docRes;
     }
 
-    const isGm = Boolean(
-      this.#viewer?.isGm ??
-        (globalThis as any).game?.user?.isGM ??
-        true
-    );
+    const viewer = resolveCurrentViewer(this.#viewer);
+    const isGm = viewer.isGm;
 
     const presenterOptions: EconomyPresenterOptions = {
       viewerIsGm: isGm,
       resourceRegistry: this.#resourceRegistry ?? ({ get: () => undefined, list: () => [] } as any),
       ledgerStore: this.#ledgerStore,
       reservationStore: this.#reservationStore,
-      providerRegistry: this.#providerRegistry
+      providerRegistry: this.#providerRegistry,
+      ledgerPage: this.#ledgerPage,
+      ledgerPageSize: 20
     };
 
     const vm = buildEconomyViewModel(docRes.value, presenterOptions);
@@ -122,12 +132,43 @@ export class EconomyApplicationController {
     return ok(vm);
   }
 
-  openModal(modalType: "transfer" | "adjust" | "createAccount"): void {
+  openModal(modalType: EconomyModalType, resourceId?: string): void {
     this.#activeModal = modalType;
+    if (resourceId !== undefined) {
+      this.#selectedResourceId = resourceId;
+    }
+  }
+
+  openResourceDetail(resourceId: string): void {
+    this.#selectedResourceId = resourceId;
+    this.#activeModal = "resourceDetail";
   }
 
   closeModal(): void {
     this.#activeModal = null;
+    this.#selectedResourceId = null;
+  }
+
+  nextLedgerPage(): void {
+    this.#ledgerPage++;
+  }
+
+  prevLedgerPage(): void {
+    if (this.#ledgerPage > 0) {
+      this.#ledgerPage--;
+    }
+  }
+
+  async dispatchReleaseReservation(payload: {
+    readonly reservationId: string;
+    readonly amountMinor?: number;
+  }): Promise<Result<unknown>> {
+    const cmd = makeCommand("economy:release-reservation", {
+      domainUuid: this.#domainUuid,
+      reservationId: payload.reservationId,
+      amountMinor: payload.amountMinor
+    });
+    return this.#executeCommand(cmd);
   }
 
   async dispatchTransfer(payload: {
@@ -214,6 +255,11 @@ export class EconomyApplicationController {
     } else if (this.#activeModal === "createAccount") {
       const defs = this.#resourceRegistry ? this.#resourceRegistry.list() : [];
       modalHtml = renderCreateAccountModalHtml(this.#domainUuid, defs);
+    } else if (this.#activeModal === "resourceDetail" && this.#selectedResourceId) {
+      const acc = vm.accounts.find((a) => a.resourceId === this.#selectedResourceId);
+      if (acc) {
+        modalHtml = renderResourceDetailModalHtml(acc);
+      }
     }
 
     return `
@@ -302,6 +348,10 @@ export class EconomyApplication extends BaseApp {
       openTransferModal: EconomyApplication.#onOpenTransferModal,
       openAdjustModal: EconomyApplication.#onOpenAdjustModal,
       openCreateAccountModal: EconomyApplication.#onOpenCreateAccountModal,
+      openResourceDetail: EconomyApplication.#onOpenResourceDetail,
+      releaseReservation: EconomyApplication.#onReleaseReservation,
+      nextLedgerPage: EconomyApplication.#onNextLedgerPage,
+      prevLedgerPage: EconomyApplication.#onPrevLedgerPage,
       closeModal: EconomyApplication.#onCloseModal
     }
   };
@@ -350,6 +400,122 @@ export class EconomyApplication extends BaseApp {
   }
 
   attachEventListeners(element: HTMLElement): void {
+    const actionButtons = element.querySelectorAll?.("[data-action]") ?? [];
+    actionButtons.forEach((btn: any) => {
+      if (btn._dmActionBound) return;
+      btn._dmActionBound = true;
+      btn.addEventListener("click", async () => {
+        const action = btn.getAttribute("data-action");
+        if (action === "openResourceDetail") {
+          const resId = btn.getAttribute("data-resource-id");
+          if (resId) {
+            this.#controller.openResourceDetail(resId);
+            this.render();
+          }
+        } else if (action === "releaseReservation") {
+          const resId = btn.getAttribute("data-reservation-id");
+          if (resId) {
+            await this.#controller.dispatchReleaseReservation({ reservationId: resId });
+            this.render();
+          }
+        } else if (action === "nextLedgerPage") {
+          this.#controller.nextLedgerPage();
+          this.render();
+        } else if (action === "prevLedgerPage") {
+          this.#controller.prevLedgerPage();
+          this.render();
+        } else if (action === "closeModal") {
+          this.#controller.closeModal();
+          this.render();
+        } else if (action === "openTransferModal") {
+          this.#controller.openModal("transfer");
+          this.render();
+        } else if (action === "openAdjustModal") {
+          this.#controller.openModal("adjust");
+          this.render();
+        } else if (action === "openCreateAccountModal") {
+          this.#controller.openModal("createAccount");
+          this.render();
+        }
+      });
+    });
+
+    // Transfer live impact preview
+    const transferForm = element.querySelector?.('form[data-form-type="transfer"]');
+    if (transferForm && !(transferForm as any)._dmPreviewBound) {
+      (transferForm as any)._dmPreviewBound = true;
+      const amountInput = transferForm.querySelector?.('input[name="amount"]') as HTMLInputElement | null;
+      const resSelect = transferForm.querySelector?.('select[name="resourceId"]') as HTMLSelectElement | null;
+      const previewVal = transferForm.querySelector?.("#dm-transfer-preview .dm-preview-val") as HTMLElement | null;
+
+      const updateTransferPreview = () => {
+        if (!previewVal) return;
+        const opt = resSelect?.selectedOptions?.[0] as HTMLOptionElement | undefined;
+        const precision = opt?.dataset?.precision ? parseInt(opt.dataset.precision, 10) : 0;
+        const availableMinor = opt?.dataset?.available ? parseInt(opt.dataset.available, 10) : 0;
+        const unit = opt?.dataset?.unit ?? "";
+        const valStr = (amountInput?.value ?? "").trim();
+        if (!valStr) {
+          previewVal.textContent = "—";
+          return;
+        }
+        const parsed = parseResourceAmount(valStr, precision);
+        if (!parsed.ok || parsed.value <= 0) {
+          previewVal.textContent = "Invalid amount";
+          return;
+        }
+        const remainingMinor = availableMinor - parsed.value;
+        const formatted = (remainingMinor / Math.pow(10, precision)).toFixed(precision);
+        previewVal.textContent = `${formatted} ${unit} (remaining)`;
+        if (remainingMinor < 0) {
+          previewVal.style.color = "var(--dm-color-danger, #d9534f)";
+        } else {
+          previewVal.style.color = "inherit";
+        }
+      };
+
+      amountInput?.addEventListener("input", updateTransferPreview);
+      resSelect?.addEventListener("change", updateTransferPreview);
+    }
+
+    // Adjust live impact preview
+    const adjustForm = element.querySelector?.('form[data-form-type="adjust"]');
+    if (adjustForm && !(adjustForm as any)._dmPreviewBound) {
+      (adjustForm as any)._dmPreviewBound = true;
+      const deltaInput = adjustForm.querySelector?.('input[name="delta"]') as HTMLInputElement | null;
+      const resSelect = adjustForm.querySelector?.('select[name="resourceId"]') as HTMLSelectElement | null;
+      const previewVal = adjustForm.querySelector?.("#dm-adjust-preview .dm-preview-val") as HTMLElement | null;
+
+      const updateAdjustPreview = () => {
+        if (!previewVal) return;
+        const opt = resSelect?.selectedOptions?.[0] as HTMLOptionElement | undefined;
+        const precision = opt?.dataset?.precision ? parseInt(opt.dataset.precision, 10) : 0;
+        const balanceMinor = opt?.dataset?.balance ? parseInt(opt.dataset.balance, 10) : 0;
+        const unit = opt?.dataset?.unit ?? "";
+        const valStr = (deltaInput?.value ?? "").trim();
+        if (!valStr) {
+          previewVal.textContent = "—";
+          return;
+        }
+        const parsed = parseResourceAmount(valStr, precision);
+        if (!parsed.ok) {
+          previewVal.textContent = "Invalid delta";
+          return;
+        }
+        const newBalanceMinor = balanceMinor + parsed.value;
+        const formatted = (newBalanceMinor / Math.pow(10, precision)).toFixed(precision);
+        previewVal.textContent = `${formatted} ${unit} (new balance)`;
+        if (newBalanceMinor < 0) {
+          previewVal.style.color = "var(--dm-color-danger, #d9534f)";
+        } else {
+          previewVal.style.color = "inherit";
+        }
+      };
+
+      deltaInput?.addEventListener("input", updateAdjustPreview);
+      resSelect?.addEventListener("change", updateAdjustPreview);
+    }
+
     const forms = element.querySelectorAll?.("form[data-form-type]") ?? [];
     forms.forEach((form: any) => {
       if (form._dmSubmitBound) return;
@@ -438,6 +604,32 @@ export class EconomyApplication extends BaseApp {
 
   static #onOpenCreateAccountModal(this: EconomyApplication): void {
     this.#controller.openModal("createAccount");
+    this.render();
+  }
+
+  static #onOpenResourceDetail(this: EconomyApplication, event: any, target: any): void {
+    const resId = target?.dataset?.resourceId ?? event?.currentTarget?.dataset?.resourceId;
+    if (resId) {
+      this.#controller.openResourceDetail(resId);
+      this.render();
+    }
+  }
+
+  static async #onReleaseReservation(this: EconomyApplication, event: any, target: any): Promise<void> {
+    const resId = target?.dataset?.reservationId ?? event?.currentTarget?.dataset?.reservationId;
+    if (resId) {
+      await this.#controller.dispatchReleaseReservation({ reservationId: resId });
+      this.render();
+    }
+  }
+
+  static #onNextLedgerPage(this: EconomyApplication): void {
+    this.#controller.nextLedgerPage();
+    this.render();
+  }
+
+  static #onPrevLedgerPage(this: EconomyApplication): void {
+    this.#controller.prevLedgerPage();
     this.render();
   }
 

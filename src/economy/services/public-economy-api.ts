@@ -39,17 +39,38 @@ import type {
   ResourceReversalCommandPayload,
   ResourceTransferCommandPayload
 } from "../commands/economy-commands.js";
+import type {
+  ThresholdService,
+  ThresholdDefinition,
+  ThresholdInput,
+  ThresholdStatus
+} from "../thresholds/threshold-service.js";
+import type { DerivedAccountResolver } from "./economy-service.js";
+
+export interface PagedLedgerResultDto {
+  readonly entries: readonly LedgerEntryDto[];
+  readonly totalCount: number;
+  readonly hasMore: boolean;
+  readonly nextCursor?: string;
+  readonly prevCursor?: string;
+}
 
 export interface PublicEconomyApi {
   getContext(domainUuid: string, viewer?: Partial<ViewerIdentity>): Promise<Result<EconomyContextDto, PublicError>>;
   getResource(domainUuid: string, resourceId: string, viewer?: Partial<ViewerIdentity>): Promise<Result<ResourceAccountDto, PublicError>>;
   getAccount(domainUuid: string, resourceId: string, viewer?: Partial<ViewerIdentity>): Promise<Result<ResourceAccountDto | undefined, PublicError>>;
   getAccountAvailability(domainUuid: string, resourceId: string, viewer?: Partial<ViewerIdentity>): Promise<Result<{ balanceMinor: number; availableMinor: number; reservedMinor: number; capacityMinor: number | null } | undefined, PublicError>>;
-  queryLedger(filter: LedgerFilter, viewer?: Partial<ViewerIdentity>): Promise<Result<readonly LedgerEntryDto[], PublicError>>;
+  queryLedger(filter: LedgerFilter, viewer?: Partial<ViewerIdentity>): Promise<Result<PagedLedgerResultDto, PublicError>>;
   getReservation(reservationId: string, viewer?: Partial<ViewerIdentity>): Promise<Result<ReservationDto, PublicError>>;
   queryReservations(filter: ReservationFilter, viewer?: Partial<ViewerIdentity>): Promise<Result<readonly ReservationDto[], PublicError>>;
   getProviderHealth(providerId?: string): Promise<Result<readonly ProviderHealth[], PublicError>>;
   getAggregateContext(domainUuids: readonly string[], viewer?: Partial<ViewerIdentity>): Promise<Result<EconomyAggregateContextDto, PublicError>>;
+
+  // Threshold queries and operations
+  readonly thresholds?: ThresholdService;
+  registerThreshold(input: ThresholdInput): Result<ThresholdDefinition, PublicError>;
+  listThresholds(domainUuid?: string, resourceId?: string): readonly ThresholdDefinition[];
+  evaluateThresholds(domainUuid: string, resourceId: string): Promise<Result<ThresholdStatus, PublicError>>;
 
   // Safe semantic mutation helpers (strictly dispatched via CommandBus)
   adjust(payload: ResourceAdjustCommandPayload, options?: TransportSendOptions): Promise<Result<TransportReceipt, PublicError>>;
@@ -72,6 +93,8 @@ export interface DefaultPublicEconomyApiOptions {
   readonly providerRegistry?: ProviderRegistry;
   readonly projectionService?: EconomyProjectionService;
   readonly aggregationProvider?: EconomyAggregationProvider;
+  readonly thresholdService?: ThresholdService;
+  readonly derivedResolvers?: Map<string, DerivedAccountResolver>;
 }
 
 export class DefaultPublicEconomyApi implements PublicEconomyApi {
@@ -83,6 +106,8 @@ export class DefaultPublicEconomyApi implements PublicEconomyApi {
   readonly #providerRegistry?: ProviderRegistry;
   readonly #projection: EconomyProjectionService;
   readonly #aggregation: EconomyAggregationProvider;
+  readonly #thresholdService?: ThresholdService;
+  readonly #derivedResolvers?: Map<string, DerivedAccountResolver>;
 
   constructor(options: DefaultPublicEconomyApiOptions) {
     this.#domains = options.domains;
@@ -91,6 +116,8 @@ export class DefaultPublicEconomyApi implements PublicEconomyApi {
     this.#ledgerStore = options.ledgerStore;
     this.#reservationStore = options.reservationStore;
     this.#providerRegistry = options.providerRegistry;
+    this.#thresholdService = options.thresholdService;
+    this.#derivedResolvers = options.derivedResolvers;
     this.#projection = options.projectionService ?? new EconomyProjectionService();
     this.#aggregation =
       options.aggregationProvider ??
@@ -101,6 +128,59 @@ export class DefaultPublicEconomyApi implements PublicEconomyApi {
         providerRegistry: options.providerRegistry,
         projectionService: this.#projection
       });
+  }
+
+  get thresholds(): ThresholdService | undefined {
+    return this.#thresholdService;
+  }
+
+  registerThreshold(input: ThresholdInput): Result<ThresholdDefinition, PublicError> {
+    if (!this.#thresholdService) {
+      return err(
+        createPublicError({
+          code: "DM_ECON_THRESHOLD_SERVICE_UNAVAILABLE",
+          category: "internal",
+          message: "Threshold service is not configured"
+        })
+      );
+    }
+    return this.#thresholdService.registerThreshold(input);
+  }
+
+  listThresholds(domainUuid?: string, resourceId?: string): readonly ThresholdDefinition[] {
+    return this.#thresholdService ? this.#thresholdService.listThresholds(domainUuid, resourceId) : [];
+  }
+
+  async evaluateThresholds(
+    domainUuid: string,
+    resourceId: string
+  ): Promise<Result<ThresholdStatus, PublicError>> {
+    if (!this.#thresholdService) {
+      return err(
+        createPublicError({
+          code: "DM_ECON_THRESHOLD_SERVICE_UNAVAILABLE",
+          category: "internal",
+          message: "Threshold service is not configured"
+        })
+      );
+    }
+    const availRes = await this.getAccountAvailability(domainUuid, resourceId);
+    if (!availRes.ok) return availRes;
+    if (!availRes.value) {
+      return err(
+        createPublicError({
+          code: "DM_ECON_ACCOUNT_NOT_FOUND",
+          category: "not-found",
+          message: `Account '${resourceId}' in domain '${domainUuid}' not found`
+        })
+      );
+    }
+    const status = this.#thresholdService.evaluateStatus(domainUuid, resourceId, {
+      balanceMinor: availRes.value.balanceMinor,
+      availableMinor: availRes.value.availableMinor,
+      capacityMinor: availRes.value.capacityMinor
+    });
+    return ok(status);
   }
 
   async getContext(
@@ -142,6 +222,24 @@ export class DefaultPublicEconomyApi implements PublicEconomyApi {
             isUnavailable = true;
           }
         } else {
+          isUnavailable = true;
+        }
+      }
+
+      if (acc.mode === "derived") {
+        let resolved = false;
+        if (this.#derivedResolvers) {
+          const resolver = this.#derivedResolvers.get(acc.resolverId);
+          if (resolver) {
+            const res = await resolver(domainUuid, acc);
+            if (res.ok) {
+              balance = res.value.balanceMinor;
+              isStale = Boolean(res.value.isStale);
+              resolved = true;
+            }
+          }
+        }
+        if (!resolved) {
           isUnavailable = true;
         }
       }
@@ -251,9 +349,9 @@ export class DefaultPublicEconomyApi implements PublicEconomyApi {
   async queryLedger(
     filter: LedgerFilter,
     callerViewer?: Partial<ViewerIdentity>
-  ): Promise<Result<readonly LedgerEntryDto[], PublicError>> {
+  ): Promise<Result<PagedLedgerResultDto, PublicError>> {
     const viewer = this.#projection.resolveViewer(callerViewer);
-    const raw = this.#ledgerStore.query(filter);
+    const paged = this.#ledgerStore.queryPaged(filter);
     const visibleResourceIds = new Set<string>();
 
     if (filter.domainUuid) {
@@ -271,12 +369,18 @@ export class DefaultPublicEconomyApi implements PublicEconomyApi {
     }
 
     const projected: LedgerEntryDto[] = [];
-    for (const entry of raw) {
+    for (const entry of paged.entries) {
       const proj = this.#projection.projectLedgerEntry(entry, visibleResourceIds, viewer);
       if (proj) projected.push(proj);
     }
 
-    return ok(Object.freeze(projected));
+    return ok({
+      entries: Object.freeze(projected),
+      totalCount: paged.totalCount,
+      hasMore: paged.hasMore,
+      nextCursor: paged.nextCursor,
+      prevCursor: paged.prevCursor
+    });
   }
 
   async getReservation(
@@ -291,6 +395,40 @@ export class DefaultPublicEconomyApi implements PublicEconomyApi {
           code: "DM_ECON_RESERVATION_NOT_FOUND",
           category: "not-found",
           message: `Reservation '${reservationId}' not found`
+        })
+      );
+    }
+
+    // Resolve domain and check account visibility (G4-AUD-007)
+    const docRes = await this.#domains.read(r.domainUuid);
+    if (!docRes.ok) {
+      return err(
+        createPublicError({
+          code: "DM_ECON_RESERVATION_NOT_FOUND",
+          category: "not-found",
+          message: `Reservation '${reservationId}' not found or clearance insufficient`
+        })
+      );
+    }
+
+    const econRes = tryGetDomainEconomyData(docRes.value.record);
+    if (!econRes.ok) {
+      return err(
+        createPublicError({
+          code: "DM_ECON_RESERVATION_NOT_FOUND",
+          category: "not-found",
+          message: `Reservation '${reservationId}' not found or clearance insufficient`
+        })
+      );
+    }
+
+    const account = econRes.value.accounts.find((a) => a.resourceId === r.resourceId);
+    if (!account || !this.#projection.isAccountVisible(account, viewer)) {
+      return err(
+        createPublicError({
+          code: "DM_ECON_RESERVATION_NOT_FOUND",
+          category: "not-found",
+          message: `Reservation '${reservationId}' not found or clearance insufficient`
         })
       );
     }

@@ -52,8 +52,19 @@ export interface ThresholdInput {
   readonly autoHoldReservations?: boolean;
 }
 
+export type ThresholdTransitionType = "breach" | "recovery";
+
+export interface ThresholdTransitionEvent {
+  readonly type: ThresholdTransitionType;
+  readonly definition: ThresholdDefinition;
+  readonly actualValueMinor: number;
+  readonly previousState: boolean;
+  readonly currentState: boolean;
+}
+
 export class ThresholdService {
   readonly #thresholds = new Map<string, ThresholdDefinition>();
+  readonly #crossedStates = new Map<string, boolean>();
 
   register(input: ThresholdInput): Result<ThresholdDefinition, PublicError> {
     return this.registerThreshold(input);
@@ -150,6 +161,69 @@ export class ThresholdService {
     }
 
     return Object.freeze(results);
+  }
+
+  isCrossed(id: string): boolean {
+    return this.#crossedStates.get(id) ?? false;
+  }
+
+  resetCrossedState(id?: string): void {
+    if (id !== undefined) {
+      this.#crossedStates.delete(id);
+    } else {
+      this.#crossedStates.clear();
+    }
+  }
+
+  getCrossedStates(): ReadonlyMap<string, boolean> {
+    return new Map(this.#crossedStates);
+  }
+
+  evaluateCrossings(
+    domainUuid: string,
+    resourceId: string,
+    values: { balanceMinor: number; reservedMinor?: number; availableMinor: number; capacityMinor?: number | null }
+  ): readonly ThresholdTransitionEvent[] {
+    const domainThresholds = this.listThresholds(domainUuid, resourceId);
+    const transitions: ThresholdTransitionEvent[] = [];
+
+    for (const th of domainThresholds) {
+      const current = th.metric === "balance" ? values.balanceMinor : values.availableMinor;
+      let isBreached = false;
+
+      switch (th.operator) {
+        case "<":
+        case "lt":
+          isBreached = current < th.valueMinor;
+          break;
+        case "<=":
+        case "lte":
+          isBreached = current <= th.valueMinor;
+          break;
+        case ">":
+        case "gt":
+          isBreached = current > th.valueMinor;
+          break;
+        case ">=":
+        case "gte":
+          isBreached = current >= th.valueMinor;
+          break;
+      }
+
+      const previousState = this.#crossedStates.get(th.id) ?? false;
+      if (isBreached !== previousState) {
+        this.#crossedStates.set(th.id, isBreached);
+        transitions.push({
+          type: isBreached ? "breach" : "recovery",
+          definition: th,
+          actualValueMinor: current,
+          previousState,
+          currentState: isBreached
+        });
+      }
+    }
+
+    return Object.freeze(transitions);
   }
 
   evaluateStatus(

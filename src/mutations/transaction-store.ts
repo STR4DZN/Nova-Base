@@ -7,18 +7,48 @@ import {
   type TransactionRecord,
   type TransactionState
 } from "./transaction-record.js";
+import {
+  TRANSACTION_STORAGE_SCHEMA_VERSION,
+  type TransactionSnapshot,
+  type TransactionStorageAdapter
+} from "./transaction-storage-adapter.js";
+
+export interface TransactionStoreOptions {
+  readonly storageAdapter?: TransactionStorageAdapter;
+}
 
 /**
- * Storage for transaction records with lifecycle transition enforcement.
- * (Master Spec §11.7, DEC-649–660).
+ * Storage for transaction records with lifecycle transition enforcement and durable persistence.
+ * (Master Spec §11.7, DEC-649–660, G4-AUD-002).
  */
 export class TransactionStore {
   readonly #records = new Map<string, TransactionRecord>();
   readonly #byCommandId = new Map<CommandId, string>();
+  readonly #storageAdapter?: TransactionStorageAdapter;
+  #pendingPersist: Promise<void> | null = null;
+  #lastPersistError: Error | null = null;
+
+  constructor(options: TransactionStoreOptions = {}) {
+    this.#storageAdapter = options.storageAdapter;
+  }
+
+  async rehydrate(): Promise<void> {
+    if (!this.#storageAdapter) return;
+    const snapshot = await this.#storageAdapter.loadSnapshot();
+    if (snapshot) {
+      this.#records.clear();
+      this.#byCommandId.clear();
+      for (const record of snapshot.records) {
+        this.#records.set(record.transactionId, record);
+        this.#byCommandId.set(record.commandId, record.transactionId);
+      }
+    }
+  }
 
   save(record: TransactionRecord): void {
     this.#records.set(record.transactionId, record);
     this.#byCommandId.set(record.commandId, record.transactionId);
+    this.#schedulePersist();
   }
 
   get(transactionId: string): TransactionRecord | undefined {
@@ -38,6 +68,14 @@ export class TransactionStore {
       }
     }
     return Object.freeze(unresolved);
+  }
+
+  listAll(): readonly TransactionRecord[] {
+    return Object.freeze(Array.from(this.#records.values()));
+  }
+
+  get count(): number {
+    return this.#records.size;
   }
 
   transition(
@@ -74,8 +112,37 @@ export class TransactionStore {
     return transitionRes;
   }
 
+  async flush(): Promise<void> {
+    if (this.#pendingPersist) {
+      await this.#pendingPersist;
+    }
+    if (this.#lastPersistError) {
+      const err = this.#lastPersistError;
+      this.#lastPersistError = null;
+      throw err;
+    }
+  }
+
   clear(): void {
     this.#records.clear();
     this.#byCommandId.clear();
+    this.#schedulePersist();
+  }
+
+  #schedulePersist(): void {
+    if (!this.#storageAdapter) return;
+    this.#pendingPersist = this.#persist().catch((err: unknown) => {
+      this.#lastPersistError = err instanceof Error ? err : new Error(String(err));
+    });
+  }
+
+  async #persist(): Promise<void> {
+    if (!this.#storageAdapter) return;
+    const snapshot: TransactionSnapshot = {
+      schemaVersion: TRANSACTION_STORAGE_SCHEMA_VERSION,
+      records: Array.from(this.#records.values()),
+      updatedAt: Date.now()
+    };
+    await this.#storageAdapter.saveSnapshot(snapshot);
   }
 }

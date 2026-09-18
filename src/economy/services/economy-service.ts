@@ -14,9 +14,13 @@ import type { TransactionStore } from "../../mutations/transaction-store.js";
 import type { RecoveryService } from "../../mutations/recovery-service.js";
 import { createTransactionRecord } from "../../mutations/transaction-record.js";
 import type { ProviderRegistry } from "../providers/provider-registry.js";
+import type { ThresholdService } from "../thresholds/threshold-service.js";
 import {
+  type DerivedResourceAccount,
   type NativeResourceAccount,
+  type ProviderResourceAccount,
   type ResourceAccount,
+  type ResourceAccountMode,
   type ResourceVisibility,
   validateResourceAccount
 } from "../accounts/account-types.js";
@@ -37,6 +41,11 @@ import {
   resolveEffectiveCapacity
 } from "../accounts/capacity-resolver.js";
 
+export type DerivedAccountResolver = (
+  domainUuid: string,
+  account: DerivedResourceAccount
+) => Promise<Result<{ balanceMinor: number; isStale?: boolean }, PublicError>>;
+
 export interface EconomyServiceOptions {
   readonly domains: DomainRepositoryContract;
   readonly resourceRegistry: ResourceDefinitionRegistry;
@@ -46,14 +55,20 @@ export interface EconomyServiceOptions {
   readonly transactionStore?: TransactionStore;
   readonly recoveryService?: RecoveryService;
   readonly providerRegistry?: ProviderRegistry;
+  readonly thresholdService?: ThresholdService;
+  readonly derivedResolvers?: Map<string, DerivedAccountResolver>;
 }
 
 export interface CreateAccountParams {
   readonly domainUuid: string;
   readonly resourceId: string;
+  readonly mode?: ResourceAccountMode;
   readonly initialBalanceMinor?: number;
   readonly baseCapacityMinor?: number | null;
   readonly visibility?: ResourceVisibility;
+  readonly providerId?: string;
+  readonly providerRef?: string;
+  readonly resolverId?: string;
   readonly reason?: string;
   readonly userId?: string;
 }
@@ -72,6 +87,8 @@ export interface AdjustParams {
   readonly targetBalanceMinor?: number;
   readonly reason: string;
   readonly userId?: string;
+  readonly commandId?: CommandId;
+  readonly authorityEpoch?: number;
 }
 
 export interface TransferParams {
@@ -81,6 +98,8 @@ export interface TransferParams {
   readonly amountMinor: number;
   readonly reason?: string;
   readonly userId?: string;
+  readonly commandId?: CommandId;
+  readonly authorityEpoch?: number;
 }
 
 export interface ConvertParams {
@@ -94,6 +113,8 @@ export interface ConvertParams {
   readonly policyRef?: string;
   readonly reason?: string;
   readonly userId?: string;
+  readonly commandId?: CommandId;
+  readonly authorityEpoch?: number;
 }
 
 export interface ReserveParams {
@@ -111,6 +132,8 @@ export interface ConsumeReservationParams {
   readonly amountMinor: number;
   readonly reason?: string;
   readonly userId?: string;
+  readonly commandId?: CommandId;
+  readonly authorityEpoch?: number;
 }
 
 export interface ReleaseReservationParams {
@@ -137,6 +160,8 @@ export class EconomyService {
   readonly #transactionStore?: TransactionStore;
   readonly #recoveryService?: RecoveryService;
   readonly #providerRegistry?: ProviderRegistry;
+  readonly #thresholdService?: ThresholdService;
+  readonly #derivedResolvers?: Map<string, DerivedAccountResolver>;
 
   constructor(options: EconomyServiceOptions) {
     this.#domains = options.domains;
@@ -147,6 +172,12 @@ export class EconomyService {
     this.#transactionStore = options.transactionStore;
     this.#recoveryService = options.recoveryService;
     this.#providerRegistry = options.providerRegistry;
+    this.#thresholdService = options.thresholdService;
+    this.#derivedResolvers = options.derivedResolvers;
+
+    if (this.#recoveryService) {
+      this.#registerRecoveryCompensators(this.#recoveryService);
+    }
   }
 
   get registry(): ResourceDefinitionRegistry {
@@ -163,6 +194,10 @@ export class EconomyService {
 
   get providerRegistry(): ProviderRegistry | undefined {
     return this.#providerRegistry;
+  }
+
+  get thresholdService(): ThresholdService | undefined {
+    return this.#thresholdService;
   }
 
   getResourceDefinition(resourceId: string): ResourceDefinition | undefined {
@@ -278,20 +313,38 @@ export class EconomyService {
       });
     }
 
-    // Derived mode
+    // Derived mode: resolve via registered resolver or flag as unavailable (G4-AUD-006)
     const reservedMinor = this.#reservationStore.getReservedTotal(domainUuid, resourceId);
+    let balanceMinor = 0;
+    let isUnavailable = true;
+    let isStale = false;
+
+    if (this.#derivedResolvers) {
+      const resolver = this.#derivedResolvers.get(acc.resolverId);
+      if (resolver) {
+        const res = await resolver(domainUuid, acc);
+        if (res.ok) {
+          balanceMinor = res.value.balanceMinor;
+          isStale = Boolean(res.value.isStale);
+          isUnavailable = false;
+        }
+      }
+    }
+
     return ok({
       account: acc,
-      balanceMinor: 0,
+      balanceMinor,
       reservedMinor,
-      availableMinor: -reservedMinor,
-      effectiveCapacityMinor: null
+      availableMinor: balanceMinor - reservedMinor,
+      effectiveCapacityMinor: null,
+      isStale,
+      isUnavailable
     });
   }
 
   async createAccount(
     params: CreateAccountParams
-  ): Promise<Result<NativeResourceAccount, PublicError>> {
+  ): Promise<Result<ResourceAccount, PublicError>> {
     const def = this.#resourceRegistry.get(params.resourceId);
     if (!def) {
       return err(
@@ -303,35 +356,77 @@ export class EconomyService {
       );
     }
 
-    const initialBalance = params.initialBalanceMinor ?? 0;
-    if (!Number.isSafeInteger(initialBalance)) {
-      return err(
-        createPublicError({
-          code: "DM_ECON_AMOUNT_INVALID",
-          category: "validation",
-          message: "initialBalanceMinor must be a safe integer"
-        })
-      );
-    }
-    if (!def.allowNegative && initialBalance < 0) {
-      return err(
-        createPublicError({
-          code: "DM_ECON_NEGATIVE_NOT_ALLOWED",
-          category: "validation",
-          message: `Resource '${params.resourceId}' does not allow negative balances`
-        })
-      );
-    }
+    const mode = params.mode ?? "native";
+    let newAccount: ResourceAccount;
 
-    const newAccount: NativeResourceAccount = {
-      mode: "native",
-      domainUuid: params.domainUuid,
-      resourceId: params.resourceId,
-      balanceMinor: initialBalance,
-      baseCapacityMinor: params.baseCapacityMinor ?? null,
-      visibility: params.visibility ?? "public",
-      status: "active"
-    };
+    if (mode === "provider") {
+      if (!params.providerId || !params.providerRef) {
+        return err(
+          createPublicError({
+            code: "DM_ECON_ACCOUNT_INVALID",
+            category: "validation",
+            message: "Provider account requires providerId and providerRef"
+          })
+        );
+      }
+      newAccount = {
+        mode: "provider",
+        domainUuid: params.domainUuid,
+        resourceId: params.resourceId,
+        providerId: params.providerId,
+        providerRef: params.providerRef,
+        visibility: params.visibility ?? "public",
+        status: "active"
+      };
+    } else if (mode === "derived") {
+      if (!params.resolverId) {
+        return err(
+          createPublicError({
+            code: "DM_ECON_ACCOUNT_INVALID",
+            category: "validation",
+            message: "Derived account requires resolverId"
+          })
+        );
+      }
+      newAccount = {
+        mode: "derived",
+        domainUuid: params.domainUuid,
+        resourceId: params.resourceId,
+        resolverId: params.resolverId,
+        visibility: params.visibility ?? "public",
+        status: "active"
+      };
+    } else {
+      const initialBalance = params.initialBalanceMinor ?? 0;
+      if (!Number.isSafeInteger(initialBalance)) {
+        return err(
+          createPublicError({
+            code: "DM_ECON_AMOUNT_INVALID",
+            category: "validation",
+            message: "initialBalanceMinor must be a safe integer"
+          })
+        );
+      }
+      if (!def.allowNegative && initialBalance < 0) {
+        return err(
+          createPublicError({
+            code: "DM_ECON_NEGATIVE_NOT_ALLOWED",
+            category: "validation",
+            message: `Resource '${params.resourceId}' does not allow negative balances`
+          })
+        );
+      }
+
+      newAccount = {
+        mode: "native",
+        domainUuid: params.domainUuid,
+        resourceId: params.resourceId,
+        balanceMinor: initialBalance,
+        baseCapacityMinor: params.baseCapacityMinor ?? null,
+        visibility: params.visibility ?? "public",
+        status: "active"
+      };
+    }
 
     const valRes = validateResourceAccount(newAccount);
     if (!valRes.ok) {
@@ -356,10 +451,12 @@ export class EconomyService {
       if (existing) {
         if (existing.status === "closed") {
           // Re-activate closed account
-          const reactivated: NativeResourceAccount = {
+          const reactivated: ResourceAccount = {
             ...newAccount,
-            balanceMinor: initialBalance
-          };
+            ...(newAccount.mode === "native"
+              ? { balanceMinor: params.initialBalanceMinor ?? 0 }
+              : {})
+          } as ResourceAccount;
           const updatedAccounts = econData.accounts.map((a) =>
             a.resourceId === params.resourceId ? reactivated : a
           );
@@ -391,11 +488,11 @@ export class EconomyService {
       const updateRes = await this.#domains.update({ ...doc, record: updatedRecord });
       if (!updateRes.ok) return updateRes;
 
-      if (initialBalance !== 0) {
+      if (newAccount.mode === "native" && newAccount.balanceMinor !== 0) {
         this.#ledgerStore.append({
           domainUuid: params.domainUuid,
           resourceId: params.resourceId,
-          deltaMinor: initialBalance,
+          deltaMinor: newAccount.balanceMinor,
           kind: "opening-balance",
           source: {
             type: "init",
@@ -403,6 +500,7 @@ export class EconomyService {
             userId: params.userId
           }
         });
+        await this.#ledgerStore.flush();
       }
 
       return ok(newAccount);
@@ -536,7 +634,7 @@ export class EconomyService {
   ): Promise<
     Result<
       {
-        account: NativeResourceAccount;
+        account: ResourceAccount;
         entry?: LedgerEntry;
         isNoop?: boolean;
       },
@@ -569,18 +667,89 @@ export class EconomyService {
 
       const econData = getDomainEconomyData(doc.record);
       const accIndex = econData.accounts.findIndex((a) => a.resourceId === params.resourceId);
-      if (accIndex < 0 || econData.accounts[accIndex].mode !== "native") {
+      if (accIndex < 0) {
         return err(
           createPublicError({
             code: "DM_ECON_ACCOUNT_NOT_FOUND",
             category: "not-found",
-            message: `Native account for resource '${params.resourceId}' not found in domain '${params.domainUuid}'`
+            message: `Account for resource '${params.resourceId}' not found in domain '${params.domainUuid}'`
           })
         );
       }
 
-      const existingAccount = econData.accounts[accIndex] as NativeResourceAccount;
-      const effectiveCap = resolveEffectiveCapacity(existingAccount.baseCapacityMinor, [], def);
+      const existingAccount = econData.accounts[accIndex];
+
+      if (existingAccount.mode === "derived") {
+        return err(
+          createPublicError({
+            code: "DM_ECON_DERIVED_ACCOUNT_READ_ONLY",
+            category: "validation",
+            message: `Account '${params.resourceId}' is derived and cannot be adjusted manually`
+          })
+        );
+      }
+
+      if (existingAccount.mode === "provider") {
+        const providerAccount = existingAccount as ProviderResourceAccount;
+        if (!this.#providerRegistry) {
+          return err(
+            createPublicError({
+              code: "DM_ECON_PROVIDER_UNAVAILABLE",
+              category: "provider",
+              message: "Provider registry is not available"
+            })
+          );
+        }
+        const provider = this.#providerRegistry.get(providerAccount.providerId);
+        if (!provider || !("mutateBalance" in provider)) {
+          return err(
+            createPublicError({
+              code: "DM_ECON_PROVIDER_UNAVAILABLE",
+              category: "provider",
+              message: `Provider '${providerAccount.providerId}' is unavailable or does not support balance mutations`
+            })
+          );
+        }
+        const delta = params.deltaMinor ?? 0;
+        if (delta === 0) {
+          return ok({
+            account: providerAccount,
+            entry: undefined,
+            isNoop: true
+          });
+        }
+        const mutRes = await (provider as any).mutateBalance(
+          params.domainUuid,
+          params.resourceId,
+          providerAccount.providerRef,
+          delta,
+          params.reason
+        );
+        if (!mutRes.ok) return mutRes;
+
+        const entryRes = this.#ledgerStore.append({
+          domainUuid: params.domainUuid,
+          resourceId: params.resourceId,
+          deltaMinor: delta,
+          kind: "adjustment",
+          source: {
+            type: "adjustment",
+            ref: providerAccount.providerRef,
+            reason: params.reason,
+            userId: params.userId
+          }
+        });
+        await this.#ledgerStore.flush();
+
+        return ok({
+          account: providerAccount,
+          entry: entryRes.ok ? entryRes.value : undefined,
+          isNoop: false
+        });
+      }
+
+      const nativeAccount = existingAccount as NativeResourceAccount;
+      const effectiveCap = resolveEffectiveCapacity(nativeAccount.baseCapacityMinor, [], def);
 
       const plan = buildAdjustPlan({
         domainUuid: params.domainUuid,
@@ -589,7 +758,7 @@ export class EconomyService {
         targetBalanceMinor: params.targetBalanceMinor,
         reason: params.reason,
         userId: params.userId,
-        account: existingAccount,
+        account: nativeAccount,
         definition: def,
         effectiveCapacityMinor: effectiveCap.effectiveCapacityMinor
       });
@@ -647,6 +816,7 @@ export class EconomyService {
         return entryRes;
       }
 
+      await this.#ledgerStore.flush();
       return ok({
         account: updatedAccount,
         entry: entryRes.value
@@ -815,11 +985,12 @@ export class EconomyService {
       }
 
       // Register durable TransactionRecord (G4-AUD-002, DEC-17222)
-      const cmdId = createOpaqueId("cmd") as CommandId;
+      const cmdId = params.commandId ?? (createOpaqueId("cmd") as CommandId);
+      const epoch = params.authorityEpoch ?? 1;
       const txRecord = createTransactionRecord({
         transactionId,
         commandId: cmdId,
-        authorityEpoch: 1,
+        authorityEpoch: epoch,
         lockKeys,
         safeAutoRecovery: true,
         recoveryData: {
@@ -835,9 +1006,10 @@ export class EconomyService {
         }
       });
       this.#transactionStore?.save(txRecord);
-      this.#transactionStore?.transition(transactionId, "claimed", 1);
-      this.#transactionStore?.transition(transactionId, "prepared", 1);
-      this.#transactionStore?.transition(transactionId, "committing", 1);
+      this.#transactionStore?.transition(transactionId, "claimed", epoch);
+      this.#transactionStore?.transition(transactionId, "prepared", epoch);
+      this.#transactionStore?.transition(transactionId, "committing", epoch);
+      await this.#transactionStore?.flush();
 
       // Execute balance updates
       const updatedSrcAccount: NativeResourceAccount = {
@@ -866,7 +1038,8 @@ export class EconomyService {
       // Write source domain
       const updateSrcRes = await this.#domains.update({ ...srcDoc, record: updatedSrcRecord });
       if (!updateSrcRes.ok) {
-        this.#transactionStore?.transition(transactionId, "failed", 1, "Failed to update source domain");
+        this.#transactionStore?.transition(transactionId, "failed", epoch, "Failed to update source domain");
+        await this.#transactionStore?.flush();
         return updateSrcRes;
       }
 
@@ -885,17 +1058,18 @@ export class EconomyService {
           this.#transactionStore?.transition(
             transactionId,
             "failed",
-            1,
+            epoch,
             "Rolled back source domain after target update failure"
           );
         } else {
           this.#transactionStore?.transition(
             transactionId,
             "needs-recovery",
-            1,
+            epoch,
             "Rollback of source domain failed; needs manual or auto recovery"
           );
         }
+        await this.#transactionStore?.flush();
         return updateTgtRes;
       }
 
@@ -917,9 +1091,10 @@ export class EconomyService {
         this.#transactionStore?.transition(
           transactionId,
           "needs-recovery",
-          1,
+          epoch,
           "Failed to append debit ledger entry"
         );
+        await this.#transactionStore?.flush();
         return debitEntryRes;
       }
 
@@ -940,18 +1115,21 @@ export class EconomyService {
         this.#transactionStore?.transition(
           transactionId,
           "needs-recovery",
-          1,
+          epoch,
           "Failed to append credit ledger entry"
         );
+        await this.#transactionStore?.flush();
         return creditEntryRes;
       }
 
+      await this.#ledgerStore.flush();
       this.#transactionStore?.transition(
         transactionId,
         "committed",
-        1,
+        epoch,
         "Transfer completed cleanly"
       );
+      await this.#transactionStore?.flush();
 
       return ok({
         sourceAccount: updatedSrcAccount,
@@ -1129,11 +1307,12 @@ export class EconomyService {
       }
 
       // Register transaction record
-      const cmdId = createOpaqueId("cmd") as CommandId;
+      const cmdId = params.commandId ?? (createOpaqueId("cmd") as CommandId);
+      const epoch = params.authorityEpoch ?? 1;
       const txRecord = createTransactionRecord({
         transactionId,
         commandId: cmdId,
-        authorityEpoch: 1,
+        authorityEpoch: epoch,
         lockKeys: [lockKey],
         safeAutoRecovery: true,
         recoveryData: {
@@ -1142,13 +1321,16 @@ export class EconomyService {
           fromResourceId: params.fromResourceId,
           toResourceId: params.toResourceId,
           fromAmountMinor: params.fromAmountMinor,
-          toAmountMinor: params.toAmountMinor
+          toAmountMinor: params.toAmountMinor,
+          fromInitialBalance: fromAccount.balanceMinor,
+          toInitialBalance: toAccount.balanceMinor
         }
       });
       this.#transactionStore?.save(txRecord);
-      this.#transactionStore?.transition(transactionId, "claimed", 1);
-      this.#transactionStore?.transition(transactionId, "prepared", 1);
-      this.#transactionStore?.transition(transactionId, "committing", 1);
+      this.#transactionStore?.transition(transactionId, "claimed", epoch);
+      this.#transactionStore?.transition(transactionId, "prepared", epoch);
+      this.#transactionStore?.transition(transactionId, "committing", epoch);
+      await this.#transactionStore?.flush();
 
       const updatedFromAccount: NativeResourceAccount = {
         ...fromAccount,
@@ -1170,7 +1352,8 @@ export class EconomyService {
 
       const updateRes = await this.#domains.update({ ...doc, record: updatedRecord });
       if (!updateRes.ok) {
-        this.#transactionStore?.transition(transactionId, "failed", 1, "Failed to update domain document");
+        this.#transactionStore?.transition(transactionId, "failed", epoch, "Failed to update domain document");
+        await this.#transactionStore?.flush();
         return updateRes;
       }
 
@@ -1195,7 +1378,8 @@ export class EconomyService {
         }
       });
       if (!debitEntryRes.ok) {
-        this.#transactionStore?.transition(transactionId, "needs-recovery", 1, "Failed to append conversion debit entry");
+        this.#transactionStore?.transition(transactionId, "needs-recovery", epoch, "Failed to append conversion debit entry");
+        await this.#transactionStore?.flush();
         return debitEntryRes;
       }
 
@@ -1213,11 +1397,14 @@ export class EconomyService {
         }
       });
       if (!creditEntryRes.ok) {
-        this.#transactionStore?.transition(transactionId, "needs-recovery", 1, "Failed to append conversion credit entry");
+        this.#transactionStore?.transition(transactionId, "needs-recovery", epoch, "Failed to append conversion credit entry");
+        await this.#transactionStore?.flush();
         return creditEntryRes;
       }
 
-      this.#transactionStore?.transition(transactionId, "committed", 1, "Conversion completed cleanly");
+      await this.#ledgerStore.flush();
+      this.#transactionStore?.transition(transactionId, "committed", epoch, "Conversion completed cleanly");
+      await this.#transactionStore?.flush();
 
       return ok({
         fromAccount: updatedFromAccount,
@@ -1271,7 +1458,7 @@ export class EconomyService {
       }
 
       // Reservation does NOT alter balance, does NOT create LedgerEntry (DEC-17049–17054)
-      return this.#reservationStore.create({
+      const res = this.#reservationStore.create({
         domainUuid: params.domainUuid,
         resourceId: params.resourceId,
         originalAmountMinor: params.amountMinor,
@@ -1279,6 +1466,10 @@ export class EconomyService {
         expiresAtWorld: params.expiresAtWorld,
         expiresAtReal: params.expiresAtReal
       });
+      if (res.ok) {
+        await this.#reservationStore.flush();
+      }
+      return res;
     } finally {
       await lockRes.value.release();
     }
@@ -1401,9 +1592,11 @@ export class EconomyService {
       const updateDocRes = await this.#domains.update({ ...doc, record: updatedRecord });
       if (!updateDocRes.ok) {
         // Rollback reservation consumption if domain update fails!
-        this.#reservationStore.release(reservation.id, consumedAmount, {
-          reason: "Rollback after failed domain balance update"
+        this.#reservationStore.rollbackConsume(lockedRes, consumedAmount, {
+          reason: "Rollback after failed domain balance update",
+          userId: params.userId
         });
+        await this.#reservationStore.flush();
         return updateDocRes;
       }
 
@@ -1423,12 +1616,23 @@ export class EconomyService {
       });
       if (!entryRes.ok) {
         // Rollback domain update and reservation consumption if ledger append fails
-        await this.#domains.update(doc);
-        this.#reservationStore.release(reservation.id, consumedAmount, {
-          reason: "Rollback after failed ledger append"
+        await this.#domains.update({
+          ...doc,
+          record: {
+            ...doc.record,
+            revision: updateDocRes.value.revision
+          }
         });
+        this.#reservationStore.rollbackConsume(lockedRes, consumedAmount, {
+          reason: "Rollback after failed ledger append",
+          userId: params.userId
+        });
+        await this.#reservationStore.flush();
         return entryRes;
       }
+
+      await this.#ledgerStore.flush();
+      await this.#reservationStore.flush();
 
       return ok({
         reservation,
@@ -1497,10 +1701,14 @@ export class EconomyService {
         );
       }
 
-      return this.#reservationStore.release(params.reservationId, params.amountMinor, {
+      const relRes = this.#reservationStore.release(params.reservationId, params.amountMinor, {
         reason: params.reason,
         userId: params.userId
       });
+      if (relRes.ok) {
+        await this.#reservationStore.flush();
+      }
+      return relRes;
     } finally {
       await lockRes.value.release();
     }
@@ -1606,6 +1814,7 @@ export class EconomyService {
         return reversalRes;
       }
 
+      await this.#ledgerStore.flush();
       return ok({
         reversalEntry: reversalRes.value,
         account: updatedAccount
@@ -1617,5 +1826,145 @@ export class EconomyService {
 
   #cleanUuid(domainUuid: string): string {
     return domainUuid.trim();
+  }
+
+  #registerRecoveryCompensators(recoveryService: RecoveryService): void {
+    recoveryService.registerCompensator("economy:transfer", async (record) => {
+      const data = record.recoveryData as Record<string, any> | undefined;
+      if (!data || !data.sourceDomainUuid || !data.resourceId || !data.amountMinor) {
+        return ok(undefined);
+      }
+
+      const srcRes = await this.#domains.read(this.#cleanUuid(data.sourceDomainUuid));
+      if (!srcRes.ok) return srcRes;
+      const srcDoc = srcRes.value;
+      const srcEcon = getDomainEconomyData(srcDoc.record);
+      const srcAccIndex = srcEcon.accounts.findIndex((a) => a.resourceId === data.resourceId);
+      if (srcAccIndex < 0) return ok(undefined);
+
+      const srcAccount = srcEcon.accounts[srcAccIndex] as NativeResourceAccount;
+
+      // If source was debited but target was not credited: restore source balance!
+      if (
+        typeof data.sourceInitialBalance === "number" &&
+        srcAccount.balanceMinor === data.sourceInitialBalance - data.amountMinor
+      ) {
+        const restoredAccount: NativeResourceAccount = {
+          ...srcAccount,
+          balanceMinor: data.sourceInitialBalance
+        };
+        const updatedAccounts = [...srcEcon.accounts];
+        updatedAccounts[srcAccIndex] = restoredAccount;
+        const updatedRecord = withDomainEconomyData(srcDoc.record, {
+          ...srcEcon,
+          accounts: Object.freeze(updatedAccounts)
+        });
+        const updateRes = await this.#domains.update({ ...srcDoc, record: updatedRecord });
+        if (!updateRes.ok) return updateRes;
+
+        this.#ledgerStore.append({
+          domainUuid: data.sourceDomainUuid,
+          resourceId: data.resourceId,
+          deltaMinor: data.amountMinor,
+          kind: "adjustment",
+          transactionId: record.transactionId,
+          source: {
+            type: "recovery",
+            reason: `Recovery compensation for failed transfer ${record.transactionId}`
+          }
+        });
+        await this.#ledgerStore.flush();
+      }
+
+      return ok(undefined);
+    });
+
+    recoveryService.registerCompensator("economy:convert", async (record) => {
+      const data = record.recoveryData as Record<string, any> | undefined;
+      if (
+        !data ||
+        !data.domainUuid ||
+        !data.fromResourceId ||
+        !data.toResourceId ||
+        !data.fromAmountMinor ||
+        !data.toAmountMinor
+      ) {
+        return ok(undefined);
+      }
+
+      const docRes = await this.#domains.read(this.#cleanUuid(data.domainUuid));
+      if (!docRes.ok) return docRes;
+      const doc = docRes.value;
+      const econ = getDomainEconomyData(doc.record);
+
+      const fromIndex = econ.accounts.findIndex((a) => a.resourceId === data.fromResourceId);
+      const toIndex = econ.accounts.findIndex((a) => a.resourceId === data.toResourceId);
+      if (fromIndex < 0 || toIndex < 0) return ok(undefined);
+
+      const fromAcc = econ.accounts[fromIndex] as NativeResourceAccount;
+      const toAcc = econ.accounts[toIndex] as NativeResourceAccount;
+
+      let needsDomainUpdate = false;
+      const updatedAccounts = [...econ.accounts];
+
+      if (
+        typeof data.fromInitialBalance === "number" &&
+        fromAcc.balanceMinor === data.fromInitialBalance - data.fromAmountMinor
+      ) {
+        updatedAccounts[fromIndex] = {
+          ...fromAcc,
+          balanceMinor: data.fromInitialBalance
+        };
+        needsDomainUpdate = true;
+      }
+
+      if (
+        typeof data.toInitialBalance === "number" &&
+        toAcc.balanceMinor === data.toInitialBalance + data.toAmountMinor
+      ) {
+        updatedAccounts[toIndex] = {
+          ...toAcc,
+          balanceMinor: data.toInitialBalance
+        };
+        needsDomainUpdate = true;
+      }
+
+      if (needsDomainUpdate) {
+        const updatedRecord = withDomainEconomyData(doc.record, {
+          ...econ,
+          accounts: Object.freeze(updatedAccounts)
+        });
+        const updateRes = await this.#domains.update({ ...doc, record: updatedRecord });
+        if (!updateRes.ok) return updateRes;
+
+        this.#ledgerStore.append({
+          domainUuid: data.domainUuid,
+          resourceId: data.fromResourceId,
+          deltaMinor: data.fromAmountMinor,
+          kind: "adjustment",
+          transactionId: record.transactionId,
+          source: {
+            type: "recovery",
+            reason: `Recovery compensation for failed conversion ${record.transactionId}`
+          }
+        });
+
+        this.#ledgerStore.append({
+          domainUuid: data.domainUuid,
+          resourceId: data.toResourceId,
+          deltaMinor: -data.toAmountMinor,
+          kind: "adjustment",
+          transactionId: record.transactionId,
+          source: {
+            type: "recovery",
+            reason: `Recovery compensation for failed conversion ${record.transactionId}`
+          }
+        });
+
+        await this.#ledgerStore.flush();
+      }
+
+      return ok(undefined);
+    });
   }
 }

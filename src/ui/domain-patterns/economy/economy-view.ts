@@ -56,7 +56,12 @@ export function renderEconomySubsystemHtml(vm: EconomySubsystemViewModel): strin
 
       <section class="dm-ledger-history-section">
         <h4><i class="fas fa-history"></i> Recent Ledger Activity</h4>
-        ${renderLedgerTable(vm.recentLedger)}
+        ${renderLedgerTable(vm.recentLedger, {
+          page: vm.ledgerPage,
+          totalCount: vm.ledgerTotalCount,
+          hasMore: vm.ledgerHasMore,
+          hasPrev: vm.ledgerHasPrev
+        })}
       </section>
     </div>
   `;
@@ -77,7 +82,17 @@ function renderResourceCards(accounts: readonly ResourceAccountViewModel[] = [])
           <div class="dm-card-header">
             <div class="dm-card-icon"><i class="${escapeAttribute(acc.icon ?? "fas fa-box")}"></i></div>
             <h4 class="dm-card-title">${escapeHtml(acc.label)}</h4>
-            ${acc.isSecret ? `<span class="dm-badge-secret"><i class="fas fa-eye-slash"></i> Secret</span>` : ""}
+            <div class="dm-card-badges">
+              ${acc.isSecret ? `<span class="dm-badge-secret"><i class="fas fa-eye-slash"></i> Secret</span>` : ""}
+              ${
+                acc.mode === "provider"
+                  ? `<span class="dm-badge-provider ${acc.providerAvailable ? "online" : "offline"}"><i class="fas fa-plug"></i> ${escapeHtml(acc.providerId ?? "Provider")} (${acc.providerAvailable ? "Active" : "Offline"})</span>`
+                  : ""
+              }
+              <button type="button" class="dm-btn-icon dm-btn-detail" data-action="openResourceDetail" data-resource-id="${escapeAttribute(acc.resourceId)}" title="View details">
+                <i class="fas fa-info-circle"></i>
+              </button>
+            </div>
           </div>
 
           <div class="dm-card-balance">
@@ -116,38 +131,63 @@ function renderResourceCards(accounts: readonly ResourceAccountViewModel[] = [])
   `;
 }
 
-function renderLedgerTable(entries: readonly LedgerEntryViewModel[] = []): string {
+function renderLedgerTable(
+  entries: readonly LedgerEntryViewModel[] = [],
+  pagination?: {
+    page: number;
+    totalCount: number;
+    hasMore: boolean;
+    hasPrev: boolean;
+  }
+): string {
   if (!entries || entries.length === 0) {
     return `<div class="dm-empty-state">No recent ledger transactions recorded.</div>`;
   }
 
   return `
-    <table class="dm-ledger-table">
-      <thead>
-        <tr>
-          <th>Time</th>
-          <th>Resource</th>
-          <th>Type</th>
-          <th>Delta</th>
-          <th>Reason</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${entries
-          .map(
-            (e) => `
-          <tr class="dm-ledger-row">
-            <td class="dm-col-time">${escapeHtml(e.timestampFormatted)}</td>
-            <td class="dm-col-resource">${escapeHtml(e.resourceLabel)}</td>
-            <td class="dm-col-kind"><span class="dm-kind-badge">${escapeHtml(e.kind)}</span></td>
-            <td class="dm-col-delta ${escapeAttribute(e.deltaClass)}">${escapeHtml(e.deltaFormatted)}</td>
-            <td class="dm-col-reason">${escapeHtml(e.reason ?? "—")}</td>
+    <div class="dm-ledger-container">
+      <table class="dm-ledger-table">
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>Resource</th>
+            <th>Type</th>
+            <th>Delta</th>
+            <th>Reason</th>
           </tr>
-        `
-          )
-          .join("")}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          ${entries
+            .map(
+              (e) => `
+            <tr class="dm-ledger-row">
+              <td class="dm-col-time">${escapeHtml(e.timestampFormatted)}</td>
+              <td class="dm-col-resource">${escapeHtml(e.resourceLabel)}</td>
+              <td class="dm-col-kind"><span class="dm-kind-badge">${escapeHtml(e.kind)}</span></td>
+              <td class="dm-col-delta ${escapeAttribute(e.deltaClass)}">${escapeHtml(e.deltaFormatted)}</td>
+              <td class="dm-col-reason">${escapeHtml(e.reason ?? "—")}</td>
+            </tr>
+          `
+            )
+            .join("")}
+        </tbody>
+      </table>
+      ${
+        pagination !== undefined
+          ? `
+        <div class="dm-ledger-pagination">
+          <button type="button" class="dm-btn dm-btn-secondary dm-btn-sm" data-action="prevLedgerPage" ${!pagination.hasPrev ? "disabled" : ""}>
+            <i class="fas fa-chevron-left"></i> Previous
+          </button>
+          <span class="dm-ledger-page-info">Showing ${entries.length} of ${pagination.totalCount} transactions (Page ${pagination.page + 1})</span>
+          <button type="button" class="dm-btn dm-btn-secondary dm-btn-sm" data-action="nextLedgerPage" ${!pagination.hasMore ? "disabled" : ""}>
+            Next <i class="fas fa-chevron-right"></i>
+          </button>
+        </div>
+      `
+          : ""
+      }
+    </div>
   `;
 }
 
@@ -165,6 +205,7 @@ function renderReservationsTable(reservations: readonly ReservationItemViewModel
           <th>Status</th>
           <th>Reason</th>
           <th>Expires</th>
+          <th>Actions</th>
         </tr>
       </thead>
       <tbody>
@@ -177,6 +218,11 @@ function renderReservationsTable(reservations: readonly ReservationItemViewModel
             <td class="dm-col-status"><span class="dm-kind-badge ${escapeAttribute(r.status)}">${escapeHtml(r.status)}</span></td>
             <td class="dm-col-reason">${escapeHtml(r.reason ?? "—")}</td>
             <td class="dm-col-expires">${escapeHtml(r.expiresAtFormatted ?? "Never")}</td>
+            <td class="dm-col-actions">
+              <button type="button" class="dm-btn dm-btn-xs dm-btn-danger" data-action="releaseReservation" data-reservation-id="${escapeAttribute(r.id)}" title="Release Reservation">
+                <i class="fas fa-times-circle"></i> Release
+              </button>
+            </td>
           </tr>
         `
           )
@@ -198,7 +244,7 @@ export function renderTransferModalHtml(
         <label>
           Resource:
           <select name="resourceId" required>
-            ${accounts.map((a) => `<option value="${escapeAttribute(a.resourceId)}" data-precision="${escapeAttribute(a.precision)}">${escapeHtml(a.label)} (Available: ${escapeHtml(a.availableFormatted)})</option>`).join("")}
+            ${accounts.map((a) => `<option value="${escapeAttribute(a.resourceId)}" data-precision="${escapeAttribute(a.precision)}" data-available="${escapeAttribute(a.availableMinor)}" data-label="${escapeAttribute(a.label)}" data-unit="${escapeAttribute(a.displayUnit ?? "")}">${escapeHtml(a.label)} (Available: ${escapeHtml(a.availableFormatted)})</option>`).join("")}
           </select>
         </label>
         <label>
@@ -209,6 +255,12 @@ export function renderTransferModalHtml(
           Amount:
           <input type="text" inputmode="decimal" name="amount" required placeholder="Amount (e.g. 10 or 10.50)" />
         </label>
+        <div class="dm-preview-box" id="dm-transfer-preview">
+          <div class="dm-preview-title"><i class="fas fa-eye"></i> Transfer Impact Preview</div>
+          <div class="dm-preview-body">
+            <span class="dm-preview-item">Available after transfer: <span class="dm-preview-val">—</span></span>
+          </div>
+        </div>
         <label>
           Reason:
           <input type="text" name="reason" placeholder="Transfer notes or motivation" />
@@ -234,13 +286,19 @@ export function renderAdjustModalHtml(
         <label>
           Resource:
           <select name="resourceId" required>
-            ${accounts.map((a) => `<option value="${escapeAttribute(a.resourceId)}" data-precision="${escapeAttribute(a.precision)}">${escapeHtml(a.label)} (Current: ${escapeHtml(a.balanceFormatted)})</option>`).join("")}
+            ${accounts.map((a) => `<option value="${escapeAttribute(a.resourceId)}" data-precision="${escapeAttribute(a.precision)}" data-balance="${escapeAttribute(a.balanceMinor)}" data-label="${escapeAttribute(a.label)}" data-unit="${escapeAttribute(a.displayUnit ?? "")}">${escapeHtml(a.label)} (Current: ${escapeHtml(a.balanceFormatted)})</option>`).join("")}
           </select>
         </label>
         <label>
           Delta Amount (positive or negative):
           <input type="text" inputmode="decimal" name="delta" required placeholder="Delta (e.g. +10.50 or -5)" />
         </label>
+        <div class="dm-preview-box" id="dm-adjust-preview">
+          <div class="dm-preview-title"><i class="fas fa-eye"></i> Adjustment Impact Preview</div>
+          <div class="dm-preview-body">
+            <span class="dm-preview-item">Balance after adjustment: <span class="dm-preview-val">—</span></span>
+          </div>
+        </div>
         <label>
           Reason (Required):
           <input type="text" name="reason" required placeholder="Mandatory audit explanation" />
@@ -250,6 +308,38 @@ export function renderAdjustModalHtml(
           <button type="submit" class="dm-btn dm-btn-primary">Apply Adjustment</button>
         </div>
       </form>
+    </div>
+  `;
+}
+
+export function renderResourceDetailModalHtml(account: ResourceAccountViewModel): string {
+  return `
+    <div class="dm-modal dm-detail-modal" data-modal-type="resourceDetail">
+      <h3><i class="${escapeAttribute(account.icon ?? "fas fa-box")}"></i> ${escapeHtml(account.label)}</h3>
+      <div class="dm-detail-content">
+        <div class="dm-detail-row"><span class="dm-detail-label">Resource ID:</span> <code>${escapeHtml(account.resourceId)}</code></div>
+        <div class="dm-detail-row"><span class="dm-detail-label">Description:</span> <span>${escapeHtml(account.description || "No description provided.")}</span></div>
+        <div class="dm-detail-row"><span class="dm-detail-label">Category:</span> <span>${escapeHtml(account.categoryId || "Custom")}</span></div>
+        ${
+          account.tags && account.tags.length > 0
+            ? `<div class="dm-detail-row"><span class="dm-detail-label">Tags:</span> <span>${account.tags.map((t) => `<span class="dm-tag">${escapeHtml(t)}</span>`).join(" ")}</span></div>`
+            : ""
+        }
+        <div class="dm-detail-row"><span class="dm-detail-label">Mode:</span> <span class="dm-kind-badge">${escapeHtml(account.mode)}</span></div>
+        ${
+          account.mode === "provider"
+            ? `<div class="dm-detail-row"><span class="dm-detail-label">Provider:</span> <span>${escapeHtml(account.providerId ?? "external")} (${account.providerAvailable ? "Active" : "Unavailable"})</span></div>`
+            : ""
+        }
+        <div class="dm-detail-row"><span class="dm-detail-label">Balance:</span> <strong>${escapeHtml(account.balanceFormatted)}</strong> (raw: ${escapeHtml(account.balanceMinor)})</div>
+        <div class="dm-detail-row"><span class="dm-detail-label">Reserved:</span> <span>${escapeHtml(account.reservedFormatted)}</span> (raw: ${escapeHtml(account.reservedMinor)})</div>
+        <div class="dm-detail-row"><span class="dm-detail-label">Available:</span> <span>${escapeHtml(account.availableFormatted)}</span> (raw: ${escapeHtml(account.availableMinor)})</div>
+        <div class="dm-detail-row"><span class="dm-detail-label">Capacity:</span> <span>${escapeHtml(account.capacityFormatted)}</span></div>
+        <div class="dm-detail-row"><span class="dm-detail-label">Status:</span> <span>${escapeHtml(account.status)}</span></div>
+      </div>
+      <div class="dm-modal-actions">
+        <button type="button" class="dm-btn dm-btn-primary" data-action="closeModal">Close</button>
+      </div>
     </div>
   `;
 }

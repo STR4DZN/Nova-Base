@@ -31,10 +31,24 @@ export class RecoveryService {
   readonly #transactionStore: TransactionStore;
   readonly #lockManager: LockManager;
   readonly #heldRecoveryLocks = new Map<string, LockHandle>();
+  readonly #compensators = new Map<string, TransactionCompensator>();
 
-  constructor(options: RecoveryServiceOptions) {
-    this.#transactionStore = options.transactionStore;
-    this.#lockManager = options.lockManager;
+  constructor(options: RecoveryServiceOptions | TransactionStore, lockManager?: LockManager) {
+    if ("transactionStore" in options) {
+      this.#transactionStore = options.transactionStore;
+      this.#lockManager = options.lockManager;
+    } else {
+      this.#transactionStore = options;
+      this.#lockManager = lockManager!;
+    }
+  }
+
+  registerCompensator(type: string, compensator: TransactionCompensator): void {
+    this.#compensators.set(type, compensator);
+  }
+
+  getCompensator(type: string): TransactionCompensator | undefined {
+    return this.#compensators.get(type);
   }
 
   /**
@@ -109,7 +123,11 @@ export class RecoveryService {
       return compTransition;
     }
 
-    if (!compensator) {
+    const recoveryType = (record.recoveryData as any)?.type;
+    const effectiveCompensator =
+      compensator ?? (recoveryType ? this.#compensators.get(recoveryType) : undefined);
+
+    if (!effectiveCompensator) {
       // G2-AUD-011: Without a verified compensation/reconciliation strategy,
       // transaction must NOT be marked 'compensated'. It remains in 'needs-recovery'.
       this.#transactionStore.transition(
@@ -130,7 +148,7 @@ export class RecoveryService {
     }
 
     try {
-      const compRes = await compensator(compTransition.value);
+      const compRes = await effectiveCompensator(compTransition.value);
       if (!compRes.ok) {
         // Compensation failed: remains in needs-recovery
         this.#transactionStore.transition(
@@ -181,6 +199,23 @@ export class RecoveryService {
       handle.release();
       this.#heldRecoveryLocks.delete(transactionId);
     }
+  }
+
+  /**
+   * Recovers all unresolved transactions using registered compensators.
+   */
+  async recoverAll(
+    currentEpoch: number
+  ): Promise<readonly Result<TransactionRecord, PublicError>[]> {
+    const unresolved = await this.scanOnStartup(currentEpoch);
+    const results: Result<TransactionRecord, PublicError>[] = [];
+    for (const tx of unresolved) {
+      if (!isFinalTransactionState(tx.state)) {
+        const res = await this.recoverTransaction(tx.transactionId, currentEpoch);
+        results.push(res);
+      }
+    }
+    return Object.freeze(results);
   }
 
   clear(): void {
