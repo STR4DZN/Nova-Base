@@ -735,20 +735,27 @@ export class EconomyService {
             params.resourceId,
             providerAccount.providerRef
           );
-          if (balRes.ok) {
-            const debitCheck = assertDebitAllowedOnProviderBalance(balRes.value, providerAccount.providerId);
-            if (!debitCheck.ok) {
-              return debitCheck;
-            }
-            if (balRes.value.balanceMinor + delta < 0) {
-              return err(
-                createPublicError({
-                  code: "DM_ECON_INSUFFICIENT_FUNDS",
-                  category: "validation",
-                  message: `Insufficient funds in provider account '${params.resourceId}'. Current: ${balRes.value.balanceMinor}, required: ${Math.abs(delta)}`
-                })
-              );
-            }
+          if (!balRes.ok) {
+            return err(
+              createPublicError({
+                code: "DM_ECON_PROVIDER_UNAVAILABLE",
+                category: "provider",
+                message: `Failed to read fresh balance from provider before debit: ${balRes.error.message}`
+              })
+            );
+          }
+          const debitCheck = assertDebitAllowedOnProviderBalance(balRes.value, providerAccount.providerId);
+          if (!debitCheck.ok) {
+            return debitCheck;
+          }
+          if (balRes.value.balanceMinor + delta < 0) {
+            return err(
+              createPublicError({
+                code: "DM_ECON_INSUFFICIENT_FUNDS",
+                category: "validation",
+                message: `Insufficient funds in provider account '${params.resourceId}'. Current: ${balRes.value.balanceMinor}, required: ${Math.abs(delta)}`
+              })
+            );
           }
         }
 
@@ -825,6 +832,43 @@ export class EconomyService {
           this.#transactionStore?.transition(transactionId, "failed", epoch, mutRes.error.message);
           await this.#transactionStore?.flush();
           return mutRes;
+        }
+
+        const valueOutcome = mutRes.value?.outcome;
+        if (valueOutcome === "unknown") {
+          this.#transactionStore?.transition(
+            transactionId,
+            "needs-recovery",
+            epoch,
+            "Provider mutation outcome is unknown despite successful call"
+          );
+          await this.#transactionStore?.flush();
+          return err(
+            createPublicError({
+              code: "DM_ECON_PROVIDER_TIMEOUT",
+              category: "provider",
+              message: "Provider mutation outcome is unknown; transaction transitioned to needs-recovery",
+              details: { outcome: "unknown" }
+            })
+          );
+        }
+
+        if (valueOutcome === "failed-before-write") {
+          this.#transactionStore?.transition(
+            transactionId,
+            "failed",
+            epoch,
+            "Provider mutation failed before write"
+          );
+          await this.#transactionStore?.flush();
+          return err(
+            createPublicError({
+              code: "DM_ECON_PROVIDER_MUTATION_FAILED",
+              category: "provider",
+              message: "Provider reported mutation failed before write",
+              details: { outcome: "failed-before-write" }
+            })
+          );
         }
 
         (txRecord.recoveryData as any).providerWriteConfirmed = true;

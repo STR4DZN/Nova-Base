@@ -7,6 +7,7 @@ export const MANUAL_CURRENCY_FLAG_NAMESPACE = "domain-manager-manual-currency";
 export interface ManualCurrencySnapshot {
   readonly schemaVersion: number;
   readonly balances: Readonly<Record<string, number>>;
+  readonly operations?: Readonly<Record<string, { deltaMinor: number; timestamp: number }>>;
   readonly updatedAt: number;
 }
 

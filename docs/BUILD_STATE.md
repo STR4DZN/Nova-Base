@@ -32,17 +32,44 @@
 | Verificação | Resultado |
 |---|---|
 | TypeScript strict (`tsc --noEmit`) | PASS (0 erros) |
-| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 428/428 (0 falhas) |
-| Relatório de Aceitação | Gerado (`docs/GATE_G4_ACCEPTANCE_REPORT.md` e `docs/GATE_G4_REVALIDACAO_FINAL_4.md`) |
+| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 434/434 (0 falhas) |
+| Relatório de Aceitação | Gerado (`docs/GATE_G4_ACCEPTANCE_REPORT.md` e `docs/GATE_G4_REVALIDACAO_FINAL_5.md`) |
 | Regressões G0/G1/G2/G3 | 0 (todos os 335 testes anteriores preservados e passando) |
-| Testes novos Gate G4 | 93 testes dedicados (G4.1 a G4.10 + 10 suítes de auditoria, isolamento, hardening, matriz de recuperação de falhas e revalidações 3/4) |
+| Testes novos Gate G4 | 99 testes dedicados (G4.1 a G4.10 + suítes de auditoria, isolamento, hardening, matriz de recuperação e revalidações 3/4/5) |
 | Remediação de Auditoria G4-AUD-001 a G4-AUD-012 | PASS — 100% remediado, endurecido e verificado |
 | Remediação da Revalidação G4-REVAL3-001 a G4-REVAL3-007 | PASS — 100% remediado, endurecido e verificado |
 | Remediação da Revalidação G4-REVAL4-001 a G4-REVAL4-004 | PASS — 100% remediado, endurecido e verificado |
+| Remediação da Revalidação G4-REVAL5-001 a G4-REVAL5-004 | PASS — 100% remediado, endurecido e verificado |
 | Build do pacote (`node build.mjs`) | PASS (`dist/main.js` gerado) |
 | Empacotamento (`node scripts/package.mjs`) | PASS (`dist/domain-manager-v0.0.3.zip` gerado) |
 | Validação de pacote (`node scripts/validate-package.mjs`) | PASS |
 | Validação de artefato (`node scripts/validate-artifact.mjs`) | PASS |
+
+## Remediação da Revalidação Final (5ª Rodada) — G4-REVAL5-001 a G4-REVAL5-004
+
+1. **G4-REVAL5-001 (ALTO / RECUPERAÇÃO — Durabilidade de Histórico de Operações, Outcome Explícito & Fail-Closed em Débito)**:
+   - `#operations` persistido e reidratado em `ManualCurrencySnapshot`, assegurando que `reconcile()` funcione após reinicialização do sistema.
+   - `EconomyService.commitAdjust` interpreta explicitamente `outcome: "unknown"` (transiciona transação para `"needs-recovery"`, flushes, retorna `DM_ECON_PROVIDER_TIMEOUT`) e `outcome: "failed-before-write"` (termina em `"failed"` sem recuperação, flushes, retorna `DM_ECON_PROVIDER_MUTATION_FAILED`).
+   - `commitAdjust` em débito (`deltaMinor < 0`) falha imediatamente em modo fechado com `DM_ECON_PROVIDER_UNAVAILABLE` caso `readBalance()` falhe, nunca ignorando a verificação de saldo.
+   - Suíte de testes: `tests/economy/providers.test.ts`.
+
+2. **G4-REVAL5-002 (ALTO / SEGURANÇA — Isolamento Multi-Domínio com Chaves Qualificadas no Ledger)**:
+   - `LedgerStore.queryPaged` recebe `allowedDomainResourceKeys`, aplicando filtragem qualificada por domínio (`${entry.domainUuid}:${entry.resourceId}`) antes de computar `totalCount`, `hasMore`, `hasPrev` e cursores.
+   - Domínios com o mesmo `resourceId` não vazam contagem ou existência de entradas para não-GMs.
+   - Suíte de testes: `tests/economy/ledger-pagination.test.ts`.
+
+3. **G4-REVAL5-003 (ALTO / SEGURANÇA — Projeção Segura de Transações e Sanitização Cross-Domain)**:
+   - Transações envolvendo recursos estritamente secretos/invisíveis são omitidas de `listTransactions` para não-GMs e rejeitadas com `DM_SECURITY_PERMISSION_DENIED` em `getTransaction`.
+   - Transferências cross-domain expõem apenas `lockKeys` referentes aos domínios acessíveis pelo usuário requisitante; chaves de outros domínios e do sistema interno são removidas.
+   - `failureReason` interno é mascarado para `"Transaction failed"` para visualizadores não-GM.
+   - `EconomyPresenter.buildEconomyViewModel` aplica as mesmas regras de filtragem e sanitização.
+   - Suíte de testes: `tests/economy/public-api-isolation.test.ts`.
+
+4. **G4-REVAL5-004 (MÉDIO / ALTO — Rollback de Estado em Memória em Falhas de Storage)**:
+   - `ThresholdService`: adicionado `rollbackThreshold(id, previous)`; `economy:set-threshold` executa rollback restaurando a definição anterior (ou deletando nova) se o `flush()` falhar, retornando `DM_DOMAIN_STORAGE_ERROR`.
+   - `CustomResourceDefinitionStore`: `save()` restaura o mapa de `#definitions` prévio caso `#persist()` lance exceção.
+   - `economy:register-custom-resource`: persiste no store primeiro e rejeita antes de modificar o `ResourceDefinitionRegistry` global em caso de erro de I/O.
+   - Suíte de testes: `tests/economy/thresholds-and-rollup.test.ts`.
 
 ## Remediação da Revalidação Final (4ª Rodada) — G4-REVAL4-001 a G4-REVAL4-004
 

@@ -56,6 +56,13 @@ export class ResourceDefinitionRegistry {
     return this.#definitions.has(id);
   }
 
+  unregister(id: string): boolean {
+    if (this.#frozen) {
+      return false;
+    }
+    return this.#definitions.delete(id);
+  }
+
   list(filter?: ResourceListFilter): readonly ResourceDefinition[] {
     const all = Array.from(this.#definitions.values());
     if (!filter) {

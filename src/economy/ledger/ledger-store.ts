@@ -34,6 +34,7 @@ export interface LedgerFilter {
   readonly direction?: "asc" | "desc";
   readonly recent?: boolean;
   readonly allowedResourceIds?: readonly string[];
+  readonly allowedDomainResourceKeys?: readonly string[] | ReadonlySet<string>;
 }
 
 export interface PagedLedgerResult {
@@ -158,6 +159,22 @@ export class LedgerStore {
     }
     if (filter.allowedResourceIds !== undefined) {
       filtered = filtered.filter((e) => filter.allowedResourceIds!.includes(e.resourceId));
+    }
+    if (filter.allowedDomainResourceKeys !== undefined) {
+      const allowedSet =
+        filter.allowedDomainResourceKeys instanceof Set
+          ? filter.allowedDomainResourceKeys
+          : new Set(filter.allowedDomainResourceKeys);
+      filtered = filtered.filter((e) => {
+        const cleanDom = e.domainUuid.startsWith("JournalEntry.")
+          ? e.domainUuid.slice("JournalEntry.".length)
+          : e.domainUuid;
+        return (
+          allowedSet.has(`${e.domainUuid}:${e.resourceId}`) ||
+          allowedSet.has(`${cleanDom}:${e.resourceId}`) ||
+          allowedSet.has(`JournalEntry.${cleanDom}:${e.resourceId}`)
+        );
+      });
     }
     if (filter.transactionId !== undefined) {
       filtered = filtered.filter((e) => e.transactionId === filter.transactionId);

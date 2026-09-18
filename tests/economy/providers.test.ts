@@ -815,4 +815,328 @@ test("G4-REVAL4-001: Stale cache strictly forbids debits (DEC-16806)", async () 
   }
 });
 
+test("G4-REVAL5-001: ManualCurrencyProvider persists operations history across restart for restart-safe reconcile()", async () => {
+  const { InMemoryManualCurrencyStorageAdapter } = await import(
+    "../../src/economy/storage/manual-currency-storage-adapter.js"
+  );
+  const { ManualCurrencyProvider } = await import(
+    "../../src/economy/providers/manual-currency-provider.js"
+  );
+
+  const adapter = new InMemoryManualCurrencyStorageAdapter();
+  const provider1 = new ManualCurrencyProvider({ storageAdapter: adapter });
+
+  // Perform a mutation that records an operation
+  const mutRes = await provider1.mutateBalance(
+    "JournalEntry.dom-reconcile",
+    "domain-manager:treasury",
+    "wallet-reconcile-1",
+    500,
+    "Initial credit",
+    { operationRef: "tx-op-restart-123" }
+  );
+  assert.equal(mutRes.ok, true);
+
+  // Simulate server restart: create a new provider instance from the same adapter and rehydrate
+  const provider2 = new ManualCurrencyProvider({ storageAdapter: adapter });
+  await provider2.rehydrate();
+
+  // Reconcile on provider2 must successfully find the persisted operation and return "written"
+  const recRes = await provider2.reconcile(
+    "JournalEntry.dom-reconcile",
+    "domain-manager:treasury",
+    "wallet-reconcile-1",
+    "tx-op-restart-123"
+  );
+  assert.equal(recRes.ok, true);
+  if (recRes.ok) {
+    assert.equal(recRes.value.outcome, "written");
+    assert.equal(recRes.value.currentBalanceMinor, 500);
+  }
+
+  // Non-existent operation returns "not-written"
+  const recNotFound = await provider2.reconcile(
+    "JournalEntry.dom-reconcile",
+    "domain-manager:treasury",
+    "wallet-reconcile-1",
+    "tx-unknown-operation"
+  );
+  assert.equal(recNotFound.ok, true);
+  if (recNotFound.ok) {
+    assert.equal(recNotFound.value.outcome, "not-written");
+  }
+});
+
+test("G4-REVAL5-001: EconomyService handles mutateBalance outcome 'unknown' and 'failed-before-write' correctly", async () => {
+  const { DomainRepository: StorageDomainRepository } = await import(
+    "../../src/storage/repositories/domain-repository.js"
+  );
+  const { createDefaultResourceRegistry } = await import(
+    "../../src/economy/definitions/resource-registry.js"
+  );
+  const { LedgerStore } = await import("../../src/economy/ledger/ledger-store.js");
+  const { ReservationStore } = await import(
+    "../../src/economy/reservations/reservation-store.js"
+  );
+  const { EconomyService } = await import(
+    "../../src/economy/services/economy-service.js"
+  );
+  const { LockManager } = await import("../../src/mutations/lock-manager.js");
+  const { TransactionStore } = await import("../../src/mutations/transaction-store.js");
+  const { RecoveryService } = await import("../../src/mutations/recovery-service.js");
+  const { ProviderRegistry } = await import("../../src/economy/providers/provider-registry.js");
+  const { ManualCurrencyProvider } = await import(
+    "../../src/economy/providers/manual-currency-provider.js"
+  );
+  const { InMemoryManualCurrencyStorageAdapter } = await import(
+    "../../src/economy/storage/manual-currency-storage-adapter.js"
+  );
+  const { ok } = await import("../../src/core/contracts/result.js");
+
+  let docFlags: Record<string, unknown> = {
+    "domain-manager": {
+      schemaVersion: 1,
+      revision: 0,
+      definition: {
+        identity: { aliases: [], summary: "Test", description: "" },
+        classification: { kind: "base", scale: "small", tags: [] },
+        hierarchy: { parentDomainUuid: null },
+        capabilities: { enabled: ["domain-manager:domain", "domain-manager:economy"], config: {} }
+      },
+      state: { lifecycle: "active" },
+      metadata: { createdByUserId: null, archivedAt: null, source: { type: "manual", ref: null } }
+    }
+  };
+
+  const doc = {
+    id: "dom-outcome-test",
+    uuid: "JournalEntry.dom-outcome-test",
+    name: "Outcome Test Domain",
+    get flags() { return docFlags; },
+    ownership: { default: 3 },
+    update: async (data: any) => {
+      if (data["flags.domain-manager"]) {
+        docFlags = { ...docFlags, "domain-manager": data["flags.domain-manager"] };
+      }
+    }
+  };
+
+  const domains = new StorageDomainRepository({
+    get: () => doc as any,
+    list: () => [doc as any],
+    create: async () => { throw new Error("not used"); }
+  });
+
+  // 1. Provider returning outcome: "unknown"
+  class UnknownOutcomeProvider extends ManualCurrencyProvider {
+    override async mutateBalance(): Promise<any> {
+      return ok({
+        balanceMinor: 1000,
+        outcome: "unknown",
+        appliedDeltaMinor: 0
+      });
+    }
+  }
+
+  const txStore1 = new TransactionStore();
+  const prov1 = new UnknownOutcomeProvider({ storageAdapter: new InMemoryManualCurrencyStorageAdapter() });
+  const reg1 = new ProviderRegistry();
+  reg1.register(prov1);
+
+  const econ1 = new EconomyService({
+    domains,
+    resourceRegistry: createDefaultResourceRegistry(),
+    ledgerStore: new LedgerStore(),
+    reservationStore: new ReservationStore(),
+    lockManager: new LockManager(),
+    transactionStore: txStore1,
+    recoveryService: new RecoveryService(txStore1, new LockManager()),
+    providerRegistry: reg1
+  });
+
+  await econ1.createAccount({
+    domainUuid: doc.uuid,
+    resourceId: "domain-manager:treasury",
+    mode: "provider",
+    providerId: prov1.providerId,
+    providerRef: `${doc.uuid}:treasury`
+  });
+
+  const unknownRes = await econ1.commitAdjust({
+    domainUuid: doc.uuid,
+    resourceId: "domain-manager:treasury",
+    deltaMinor: 500,
+    reason: "Test unknown outcome"
+  });
+
+  assert.equal(unknownRes.ok, false);
+  if (!unknownRes.ok) {
+    assert.equal(unknownRes.error.code, "DM_ECON_PROVIDER_TIMEOUT");
+  }
+  // Transaction must be in "needs-recovery"
+  const txList1 = txStore1.listAll();
+  assert.equal(txList1.length, 1);
+  assert.equal(txList1[0].state, "needs-recovery", "Transaction with outcome 'unknown' must transition to needs-recovery");
+
+  // 2. Provider returning outcome: "failed-before-write"
+  class FailedBeforeWriteProvider extends ManualCurrencyProvider {
+    override async mutateBalance(): Promise<any> {
+      return ok({
+        balanceMinor: 1000,
+        outcome: "failed-before-write",
+        appliedDeltaMinor: 0
+      });
+    }
+  }
+
+  const txStore2 = new TransactionStore();
+  const prov2 = new FailedBeforeWriteProvider({ storageAdapter: new InMemoryManualCurrencyStorageAdapter() });
+  const reg2 = new ProviderRegistry();
+  reg2.register(prov2);
+
+  const econ2 = new EconomyService({
+    domains,
+    resourceRegistry: createDefaultResourceRegistry(),
+    ledgerStore: new LedgerStore(),
+    reservationStore: new ReservationStore(),
+    lockManager: new LockManager(),
+    transactionStore: txStore2,
+    recoveryService: new RecoveryService(txStore2, new LockManager()),
+    providerRegistry: reg2
+  });
+
+  const failedBeforeRes = await econ2.commitAdjust({
+    domainUuid: doc.uuid,
+    resourceId: "domain-manager:treasury",
+    deltaMinor: 500,
+    reason: "Test failed-before-write outcome"
+  });
+
+  assert.equal(failedBeforeRes.ok, false);
+  if (!failedBeforeRes.ok) {
+    assert.equal(failedBeforeRes.error.code, "DM_ECON_PROVIDER_MUTATION_FAILED");
+  }
+  // Transaction must be in "failed", NOT needs-recovery
+  const txList2 = txStore2.listAll();
+  assert.equal(txList2.length, 1);
+  assert.equal(txList2[0].state, "failed", "Transaction with outcome 'failed-before-write' must terminate in failed without recovery");
+});
+
+test("G4-REVAL5-001: commitAdjust debit fails closed when readBalance fails", async () => {
+  const { DomainRepository: StorageDomainRepository } = await import(
+    "../../src/storage/repositories/domain-repository.js"
+  );
+  const { createDefaultResourceRegistry } = await import(
+    "../../src/economy/definitions/resource-registry.js"
+  );
+  const { LedgerStore } = await import("../../src/economy/ledger/ledger-store.js");
+  const { ReservationStore } = await import(
+    "../../src/economy/reservations/reservation-store.js"
+  );
+  const { EconomyService } = await import(
+    "../../src/economy/services/economy-service.js"
+  );
+  const { LockManager } = await import("../../src/mutations/lock-manager.js");
+  const { TransactionStore } = await import("../../src/mutations/transaction-store.js");
+  const { RecoveryService } = await import("../../src/mutations/recovery-service.js");
+  const { ProviderRegistry } = await import("../../src/economy/providers/provider-registry.js");
+  const { ManualCurrencyProvider } = await import(
+    "../../src/economy/providers/manual-currency-provider.js"
+  );
+  const { InMemoryManualCurrencyStorageAdapter } = await import(
+    "../../src/economy/storage/manual-currency-storage-adapter.js"
+  );
+  const { err } = await import("../../src/core/contracts/result.js");
+  const { createPublicError } = await import("../../src/core/contracts/public-error.js");
+
+  let docFlags: Record<string, unknown> = {
+    "domain-manager": {
+      schemaVersion: 1,
+      revision: 0,
+      definition: {
+        identity: { aliases: [], summary: "Test", description: "" },
+        classification: { kind: "base", scale: "small", tags: [] },
+        hierarchy: { parentDomainUuid: null },
+        capabilities: { enabled: ["domain-manager:domain", "domain-manager:economy"], config: {} }
+      },
+      state: { lifecycle: "active" },
+      metadata: { createdByUserId: null, archivedAt: null, source: { type: "manual", ref: null } }
+    }
+  };
+
+  const doc = {
+    id: "dom-read-fail",
+    uuid: "JournalEntry.dom-read-fail",
+    name: "Read Fail Domain",
+    get flags() { return docFlags; },
+    ownership: { default: 3 },
+    update: async (data: any) => {
+      if (data["flags.domain-manager"]) {
+        docFlags = { ...docFlags, "domain-manager": data["flags.domain-manager"] };
+      }
+    }
+  };
+
+  const domains = new StorageDomainRepository({
+    get: () => doc as any,
+    list: () => [doc as any],
+    create: async () => { throw new Error("not used"); }
+  });
+
+  let mutateCalled = false;
+  class BrokenReadProvider extends ManualCurrencyProvider {
+    override async readBalance(): Promise<any> {
+      return err(createPublicError({
+        code: "DM_ECON_PROVIDER_UNAVAILABLE",
+        category: "provider",
+        message: "Provider read failure"
+      }));
+    }
+    override async mutateBalance(): Promise<any> {
+      mutateCalled = true;
+      return super.mutateBalance(...arguments as any);
+    }
+  }
+
+  const brokenProvider = new BrokenReadProvider({
+    storageAdapter: new InMemoryManualCurrencyStorageAdapter()
+  });
+  const providerRegistry = new ProviderRegistry();
+  providerRegistry.register(brokenProvider);
+
+  const economy = new EconomyService({
+    domains,
+    resourceRegistry: createDefaultResourceRegistry(),
+    ledgerStore: new LedgerStore(),
+    reservationStore: new ReservationStore(),
+    lockManager: new LockManager(),
+    transactionStore: new TransactionStore(),
+    recoveryService: new RecoveryService(new TransactionStore(), new LockManager()),
+    providerRegistry
+  });
+
+  await economy.createAccount({
+    domainUuid: doc.uuid,
+    resourceId: "domain-manager:treasury",
+    mode: "provider",
+    providerId: brokenProvider.providerId,
+    providerRef: `${doc.uuid}:treasury`
+  });
+
+  // Attempting debit (-100) when readBalance fails must fail closed with DM_ECON_PROVIDER_UNAVAILABLE
+  const debitRes = await economy.commitAdjust({
+    domainUuid: doc.uuid,
+    resourceId: "domain-manager:treasury",
+    deltaMinor: -100,
+    reason: "Debit with failing read"
+  });
+
+  assert.equal(debitRes.ok, false);
+  if (!debitRes.ok) {
+    assert.equal(debitRes.error.code, "DM_ECON_PROVIDER_UNAVAILABLE");
+  }
+  assert.equal(mutateCalled, false, "mutateBalance must never be called when read fails during debit check");
+});
+
+
 

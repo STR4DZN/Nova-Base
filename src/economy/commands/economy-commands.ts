@@ -792,11 +792,13 @@ export function registerEconomyCommands(options: RegisterEconomyCommandsOptions)
           })
         );
       }
+      const previous = p.id ? targetThresholdService.getThreshold(p.id) : undefined;
       const regRes = targetThresholdService.registerThreshold(p);
       if (regRes.ok) {
         try {
           await targetThresholdService.flush();
         } catch (e: unknown) {
+          targetThresholdService.rollbackThreshold(regRes.value.id, previous);
           return err(
             createPublicError({
               code: "DM_DOMAIN_STORAGE_ERROR",
@@ -839,25 +841,50 @@ export function registerEconomyCommands(options: RegisterEconomyCommandsOptions)
     handler: async (ctx: AuthenticatedCommandContext<any>) => {
       const def = ctx.command.payload.definition as ResourceDefinition;
       const targetRegistry = resourceRegistry ?? economyService.registry;
-      if (targetRegistry) {
-        if (targetRegistry.has(def.id)) {
+      const targetStore = customResourceStore;
+
+      if (targetRegistry && targetRegistry.has(def.id)) {
+        return err(
+          createPublicError({
+            code: "DM_ECON_RESOURCE_ALREADY_EXISTS",
+            category: "conflict",
+            message: `Resource definition with ID '${def.id}' already exists`
+          })
+        );
+      }
+
+      if (targetStore && targetStore.has(def.id)) {
+        return err(
+          createPublicError({
+            code: "DM_ECON_RESOURCE_ALREADY_EXISTS",
+            category: "conflict",
+            message: `Resource definition with ID '${def.id}' already exists in store`
+          })
+        );
+      }
+
+      if (targetStore) {
+        try {
+          await targetStore.save(def);
+        } catch (e: unknown) {
           return err(
             createPublicError({
-              code: "DM_ECON_RESOURCE_ALREADY_EXISTS",
-              category: "conflict",
-              message: `Resource definition with ID '${def.id}' already exists`
+              code: "DM_DOMAIN_STORAGE_ERROR",
+              category: "provider",
+              message: `Failed to persist custom resource: ${e instanceof Error ? e.message : String(e)}`,
+              retryable: true
             })
           );
         }
+      }
+
+      if (targetRegistry) {
         const regRes = targetRegistry.register(def);
         if (!regRes.ok) {
           return regRes;
         }
       }
-      const targetStore = customResourceStore;
-      if (targetStore) {
-        await targetStore.save(def);
-      }
+
       return ok(def);
     }
   });

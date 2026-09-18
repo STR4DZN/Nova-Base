@@ -147,11 +147,21 @@ export class EconomyProjectionService {
 
   projectLedgerEntry(
     entry: LedgerEntry,
-    visibleResourceIds: ReadonlySet<string>,
+    visibleResourceIdsOrKeys: ReadonlySet<string>,
     viewer: ViewerIdentity
   ): LedgerEntryDto | null {
-    if (!visibleResourceIds.has(entry.resourceId) && !viewer.isGm) {
-      return null;
+    if (!viewer.isGm) {
+      const cleanDom = entry.domainUuid.startsWith("JournalEntry.")
+        ? entry.domainUuid.slice("JournalEntry.".length)
+        : entry.domainUuid;
+      const isAllowed =
+        visibleResourceIdsOrKeys.has(`${entry.domainUuid}:${entry.resourceId}`) ||
+        visibleResourceIdsOrKeys.has(`${cleanDom}:${entry.resourceId}`) ||
+        visibleResourceIdsOrKeys.has(`JournalEntry.${cleanDom}:${entry.resourceId}`) ||
+        visibleResourceIdsOrKeys.has(entry.resourceId);
+      if (!isAllowed) {
+        return null;
+      }
     }
 
     return {

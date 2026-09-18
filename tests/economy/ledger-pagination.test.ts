@@ -200,4 +200,81 @@ test("G4-REVAL4-003: LedgerStore.queryPaged filters strictly by allowedResourceI
   }
 });
 
+test("G4-REVAL5-002: LedgerStore.queryPaged enforces domain-qualified allowedDomainResourceKeys preventing cross-domain leaks", async () => {
+  const store = new LedgerStore();
+
+  const domainAUuid = "JournalEntry.dom-a";
+  const domainBUuid = "JournalEntry.dom-b";
+
+  // Populate 12 entries for Domain A treasury (public)
+  for (let i = 1; i <= 12; i++) {
+    store.append({
+      domainUuid: domainAUuid,
+      resourceId: "domain-manager:treasury",
+      deltaMinor: 100 * i,
+      kind: "adjustment",
+      source: { type: "manual", reason: `DomA #${i}` }
+    });
+  }
+
+  // Populate 18 entries for Domain B treasury (secret)
+  for (let i = 1; i <= 18; i++) {
+    store.append({
+      domainUuid: domainBUuid,
+      resourceId: "domain-manager:treasury",
+      deltaMinor: 200 * i,
+      kind: "adjustment",
+      source: { type: "manual", reason: `DomB #${i}` }
+    });
+  }
+
+  assert.equal(store.count, 30);
+
+  // Player has access ONLY to Domain A treasury
+  const allowedKeys = [`${domainAUuid}:domain-manager:treasury`];
+
+  // 1. Querying Domain B with player's allowedDomainResourceKeys yields 0 entries and 0 totalCount
+  const domBQuery = store.queryPaged({
+    domainUuid: domainBUuid,
+    allowedDomainResourceKeys: allowedKeys,
+    direction: "desc",
+    limit: 10
+  });
+
+  assert.equal(domBQuery.totalCount, 0, "Domain B totalCount must be 0 for player without access");
+  assert.equal(domBQuery.entries.length, 0, "Domain B entries must be empty for unauthorized player");
+  assert.equal(domBQuery.hasMore, false);
+
+  // 2. Global query across domains (no domainUuid filter) with allowedDomainResourceKeys
+  const globalPage1 = store.queryPaged({
+    allowedDomainResourceKeys: allowedKeys,
+    direction: "desc",
+    limit: 10
+  });
+
+  // totalCount MUST be 12 (Domain A entries only), NEVER 30!
+  assert.equal(globalPage1.totalCount, 12, "Global totalCount must only count entries from authorized domains");
+  assert.equal(globalPage1.entries.length, 10);
+  assert.equal(globalPage1.hasMore, true);
+  for (const entry of globalPage1.entries) {
+    assert.equal(entry.domainUuid, domainAUuid, "Entries must belong exclusively to authorized Domain A");
+    assert.equal(entry.resourceId, "domain-manager:treasury");
+  }
+
+  // 3. Global query page 2 using cursor
+  const globalPage2 = store.queryPaged({
+    allowedDomainResourceKeys: new Set(allowedKeys),
+    direction: "desc",
+    cursor: globalPage1.nextCursor,
+    limit: 10
+  });
+
+  assert.equal(globalPage2.entries.length, 2, "Page 2 must have remaining 2 entries from Domain A");
+  assert.equal(globalPage2.hasMore, false, "hasMore must be false after the 12th Domain A entry");
+  for (const entry of globalPage2.entries) {
+    assert.equal(entry.domainUuid, domainAUuid);
+  }
+});
+
+
 

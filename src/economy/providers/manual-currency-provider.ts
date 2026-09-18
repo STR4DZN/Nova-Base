@@ -39,6 +39,12 @@ export class ManualCurrencyProvider implements CurrencyProvider {
       for (const [key, bal] of Object.entries(snapshot.balances)) {
         this.#balances.set(key, bal);
       }
+      this.#operations.clear();
+      if (snapshot.operations) {
+        for (const [key, op] of Object.entries(snapshot.operations)) {
+          this.#operations.set(key, op);
+        }
+      }
     }
   }
 
@@ -59,9 +65,14 @@ export class ManualCurrencyProvider implements CurrencyProvider {
     for (const [k, v] of this.#balances.entries()) {
       balancesObj[k] = v;
     }
+    const operationsObj: Record<string, { deltaMinor: number; timestamp: number }> = {};
+    for (const [k, v] of this.#operations.entries()) {
+      operationsObj[k] = v;
+    }
     const snapshot: ManualCurrencySnapshot = {
       schemaVersion: MANUAL_CURRENCY_STORAGE_SCHEMA_VERSION,
       balances: balancesObj,
+      operations: operationsObj,
       updatedAt: Date.now()
     };
     await this.#storageAdapter.saveSnapshot(snapshot);

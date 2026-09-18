@@ -838,3 +838,164 @@ test("G4-REVAL4-004: EconomyAggregationProvider marks unresolvable derived accou
   assert.ok(result.unknownContributors.includes(docDerived.uuid), "Domain UUID must be included in unknownContributors for GM");
 });
 
+test("G4-REVAL5-004: In-memory state rolls back on storage failure for thresholds and custom resources", async () => {
+  // 1. ThresholdService rollback on flush failure (both new threshold and updating existing)
+  let throwOnSave = true;
+  class FailingThresholdStorageAdapter implements ThresholdStorageAdapter {
+    async loadSnapshot() { return null; }
+    async saveSnapshot() {
+      if (throwOnSave) {
+        throw new Error("I/O Storage Error: Disk full");
+      }
+    }
+  }
+
+  const thresholdAdapter = new FailingThresholdStorageAdapter();
+  const thresholdService = new ThresholdService({ storageAdapter: thresholdAdapter });
+
+  // First save an initial threshold while storage is working
+  throwOnSave = false;
+  const initRes = thresholdService.register({
+    id: "thresh-existing",
+    domainUuid: "JournalEntry.dom-rollback",
+    resourceId: "domain-manager:treasury",
+    name: "Original Name",
+    metric: "balance",
+    operator: "<=",
+    targetValueMinor: 100,
+    severity: "warning"
+  });
+  assert.equal(initRes.ok, true);
+  await thresholdService.flush();
+
+  // Re-enable failure
+  throwOnSave = true;
+
+  const registry = new CommandRegistry();
+  const authorityService = new PrimaryAuthorityService(
+    {
+      getUsers: () => [{ id: "gm-1", isGM: true, active: true }],
+      getPreferredUserId: () => null,
+      getCurrentUserId: () => "gm-1"
+    },
+    { authorityUserId: "gm-1", authorityEpoch: 1, initialized: true }
+  );
+  const commandBus = new CommandBus({ registry, authorityService });
+
+  const doc = createDoc("dom-rollback", "Rollback Domain");
+  const docMap = new Map([[doc.id, doc], [doc.uuid, doc]]);
+  const domains = new StorageDomainRepository({
+    get: (id: string) => docMap.get(id),
+    list: () => [...new Set(docMap.values())],
+    create: async () => { throw new Error("not used"); }
+  });
+
+  const resourceRegistry = createDefaultResourceRegistry();
+
+  class FailingCustomResourceStorageAdapter implements CustomResourceStorageAdapter {
+    async loadSnapshot() { return null; }
+    async saveSnapshot() {
+      throw new Error("I/O Storage Error: Custom resource disk full");
+    }
+  }
+
+  const customResourceStore = new CustomResourceDefinitionStore({
+    storageAdapter: new FailingCustomResourceStorageAdapter()
+  });
+
+  registerEconomyCommands({
+    registry,
+    domains,
+    resourceRegistry,
+    thresholdService,
+    customResourceStore
+  });
+
+  // A. Command setting NEW threshold fails and rolls back from in-memory ThresholdService
+  const cmdNewThreshold = {
+    contractVersion: COMMAND_CONTRACT_VERSION_V1,
+    commandId: createOpaqueId("cmd"),
+    type: "economy:set-threshold",
+    payload: {
+      id: "thresh-new-fail",
+      domainUuid: doc.uuid,
+      resourceId: "domain-manager:treasury",
+      name: "New Failed Threshold",
+      metric: "balance" as const,
+      operator: "<=" as const,
+      targetValueMinor: 50,
+      severity: "critical" as const
+    },
+    issuedAtReal: Date.now()
+  };
+
+  const receiptNew = await commandBus.execute(cmdNewThreshold);
+  assert.equal(receiptNew.ok, true);
+  assert.equal(receiptNew.value.status, "rejected");
+  assert.equal(receiptNew.value.error?.code, "DM_DOMAIN_STORAGE_ERROR");
+  assert.equal(thresholdService.getThreshold("thresh-new-fail"), undefined, "New threshold must be rolled back from in-memory state");
+
+  // B. Command updating EXISTING threshold fails and restores original threshold in memory
+  const cmdUpdateThreshold = {
+    contractVersion: COMMAND_CONTRACT_VERSION_V1,
+    commandId: createOpaqueId("cmd"),
+    type: "economy:set-threshold",
+    payload: {
+      id: "thresh-existing",
+      domainUuid: doc.uuid,
+      resourceId: "domain-manager:treasury",
+      name: "Updated Name That Should Rollback",
+      metric: "balance" as const,
+      operator: "<=" as const,
+      targetValueMinor: 999,
+      severity: "critical" as const
+    },
+    issuedAtReal: Date.now()
+  };
+
+  const receiptUpdate = await commandBus.execute(cmdUpdateThreshold);
+  assert.equal(receiptUpdate.ok, true);
+  assert.equal(receiptUpdate.value.status, "rejected");
+  assert.equal(receiptUpdate.value.error?.code, "DM_DOMAIN_STORAGE_ERROR");
+  // Check that the existing threshold in memory was restored to original values!
+  const restored = thresholdService.getThreshold("thresh-existing");
+  assert.ok(restored);
+  assert.equal(restored?.name, "Original Name", "Existing threshold must be restored to previous state on failure");
+  assert.equal(restored?.targetValueMinor, 100);
+
+  // C. Command registering custom resource fails on storage: definition rolled back from store and NOT in registry
+  const customDef = {
+    id: "world:failed-mineral",
+    version: 1,
+    label: "Failed Mineral",
+    description: "Will fail storage",
+    categoryId: "mineral",
+    tags: ["ore"],
+    precision: 2,
+    displayUnit: { singular: "chunk", plural: "chunks" },
+    minimumMinor: 0,
+    maximumMinor: 50000,
+    allowNegative: false,
+    defaultCapacityPolicy: "block" as const,
+    lifecycle: "active" as const
+  };
+
+  const cmdCustom = {
+    contractVersion: COMMAND_CONTRACT_VERSION_V1,
+    commandId: createOpaqueId("cmd"),
+    type: "economy:register-custom-resource",
+    payload: { definition: customDef },
+    issuedAtReal: Date.now()
+  };
+
+  const receiptCustom = await commandBus.execute(cmdCustom);
+  assert.equal(receiptCustom.ok, true);
+  assert.equal(receiptCustom.value.status, "rejected");
+  assert.equal(receiptCustom.value.error?.code, "DM_DOMAIN_STORAGE_ERROR");
+
+  // Verify definition is NOT present in customResourceStore or resourceRegistry
+  assert.equal(customResourceStore.get("world:failed-mineral"), undefined, "Definition must be rolled back from CustomResourceDefinitionStore");
+  assert.equal(resourceRegistry.get("world:failed-mineral"), undefined, "Definition must not be registered in ResourceDefinitionRegistry");
+});
+
+

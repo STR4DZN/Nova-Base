@@ -327,3 +327,244 @@ test("G4-REVAL4-004: PublicEconomyApi transaction inspection (getTransaction and
   }
 });
 
+test("G4-REVAL5-003: PublicEconomyApi and EconomyPresenter sanitize transactions for non-GM viewers (secret resources, cross-domain locks, failure reasons)", async () => {
+  const docAFlags: Record<string, unknown> = {
+    "domain-manager": {
+      schemaVersion: 1,
+      revision: 0,
+      definition: {
+        identity: { aliases: [], summary: "Domain A", description: "" },
+        classification: { kind: "base", scale: "small", tags: [] },
+        hierarchy: { parentDomainUuid: null },
+        capabilities: {
+          enabled: ["domain-manager:domain", "domain-manager:economy"],
+          config: {
+            "domain-manager:economy": {
+              schemaVersion: 1,
+              accounts: [
+                {
+                  mode: "native",
+                  domainUuid: "JournalEntry.dom-sec-a",
+                  resourceId: "domain-manager:treasury",
+                  balanceMinor: 1000,
+                  baseCapacityMinor: 10000,
+                  visibility: "public"
+                },
+                {
+                  mode: "native",
+                  domainUuid: "JournalEntry.dom-sec-a",
+                  resourceId: "domain-manager:materials",
+                  balanceMinor: 500,
+                  baseCapacityMinor: 10000,
+                  visibility: "secret"
+                }
+              ]
+            }
+          }
+        }
+      },
+      state: { lifecycle: "active" },
+      metadata: { createdByUserId: null, archivedAt: null, source: { type: "manual", ref: null } }
+    }
+  };
+
+  const docBFlags: Record<string, unknown> = {
+    "domain-manager": {
+      schemaVersion: 1,
+      revision: 0,
+      definition: {
+        identity: { aliases: [], summary: "Domain B", description: "" },
+        classification: { kind: "base", scale: "small", tags: [] },
+        hierarchy: { parentDomainUuid: null },
+        capabilities: {
+          enabled: ["domain-manager:domain", "domain-manager:economy"],
+          config: {
+            "domain-manager:economy": {
+              schemaVersion: 1,
+              accounts: [
+                {
+                  mode: "native",
+                  domainUuid: "JournalEntry.dom-sec-b",
+                  resourceId: "domain-manager:treasury",
+                  balanceMinor: 2000,
+                  baseCapacityMinor: 10000,
+                  visibility: "public"
+                }
+              ]
+            }
+          }
+        }
+      },
+      state: { lifecycle: "active" },
+      metadata: { createdByUserId: null, archivedAt: null, source: { type: "manual", ref: null } }
+    }
+  };
+
+  const docA: IdentifiedJournalEntryDocumentLike = {
+    id: "dom-sec-a",
+    uuid: "JournalEntry.dom-sec-a",
+    get name() { return "Domain A"; },
+    get flags() { return docAFlags; },
+    get ownership() { return { default: 2, "player-1": 3 }; }, // player-1 has access
+    update: async () => {}
+  };
+
+  const docB: IdentifiedJournalEntryDocumentLike = {
+    id: "dom-sec-b",
+    uuid: "JournalEntry.dom-sec-b",
+    get name() { return "Domain B"; },
+    get flags() { return docBFlags; },
+    get ownership() { return { default: 0 }; }, // player-1 has NO access to Domain B
+    update: async () => {}
+  };
+
+  const store: DomainDocumentStore = {
+    get: (idOrUuid: string) => {
+      if (idOrUuid.includes("dom-sec-a")) return docA;
+      if (idOrUuid.includes("dom-sec-b")) return docB;
+      return undefined;
+    },
+    list: () => [docA, docB],
+    create: async () => { throw new Error("not used"); }
+  };
+
+  const runtime = composeDomainManagerRuntime({
+    domainStore: store as any,
+    authority: createMockAuthority() as any,
+    transport: createMockTransport() as any,
+    ledgerStorageAdapter: new InMemoryLedgerStorageAdapter(),
+    reservationStorageAdapter: new InMemoryReservationStorageAdapter(),
+    transactionStorageAdapter: new InMemoryTransactionStorageAdapter()
+  });
+
+  await runtime.initialize();
+
+  const { createTransactionRecord } = await import("../../src/mutations/transaction-record.js");
+
+  // 1. Transaction involving public treasury in Domain A
+  const txPublic = createTransactionRecord({
+    transactionId: "tx-proj-public",
+    commandId: "cmd-p-1" as any,
+    authorityEpoch: 1,
+    lockKeys: [docA.uuid],
+    recoveryData: {
+      type: "economy:provider-adjust",
+      domainUuid: docA.uuid,
+      resourceId: "domain-manager:treasury",
+      deltaMinor: 100
+    }
+  });
+
+  // 2. Transaction involving secret materials in Domain A
+  const txSecret = createTransactionRecord({
+    transactionId: "tx-proj-secret",
+    commandId: "cmd-s-1" as any,
+    authorityEpoch: 1,
+    lockKeys: [docA.uuid],
+    recoveryData: {
+      type: "economy:provider-adjust",
+      domainUuid: docA.uuid,
+      resourceId: "domain-manager:materials",
+      deltaMinor: 50
+    }
+  });
+
+  // 3. Cross-domain transfer between Domain A and Domain B that failed with internal reason
+  const txTransfer = createTransactionRecord({
+    transactionId: "tx-proj-transfer",
+    commandId: "cmd-t-1" as any,
+    authorityEpoch: 1,
+    lockKeys: [docA.uuid, docB.uuid, "system:internal-lock"],
+    recoveryData: {
+      type: "economy:transfer",
+      sourceDomainUuid: docA.uuid,
+      targetDomainUuid: docB.uuid,
+      fromResourceId: "domain-manager:treasury",
+      toResourceId: "domain-manager:treasury",
+      amountMinor: 200
+    }
+  });
+
+  runtime.transactionStore.save(txPublic);
+  runtime.transactionStore.transition(txPublic.transactionId, "claimed", 1);
+  runtime.transactionStore.transition(txPublic.transactionId, "prepared", 1);
+  runtime.transactionStore.transition(txPublic.transactionId, "committing", 1);
+  runtime.transactionStore.transition(txPublic.transactionId, "committed", 1);
+
+  runtime.transactionStore.save(txSecret);
+  runtime.transactionStore.transition(txSecret.transactionId, "claimed", 1);
+  runtime.transactionStore.transition(txSecret.transactionId, "prepared", 1);
+  runtime.transactionStore.transition(txSecret.transactionId, "committing", 1);
+  runtime.transactionStore.transition(txSecret.transactionId, "committed", 1);
+
+  runtime.transactionStore.save(txTransfer);
+  runtime.transactionStore.transition(txTransfer.transactionId, "claimed", 1);
+  runtime.transactionStore.transition(txTransfer.transactionId, "prepared", 1);
+  runtime.transactionStore.transition(txTransfer.transactionId, "failed", 1, "Internal deadlock on DB cluster node 4");
+
+  const playerContext = { isGm: false, userId: "player-1" };
+  const gmContext = { isGm: true, userId: "user-1" };
+
+  // Verification 1: listTransactions for player omits secret-resource transaction
+  const playerListRes = await runtime.publicApi.economy.listTransactions({ domainUuid: docA.uuid }, playerContext);
+  assert.equal(playerListRes.ok, true);
+  if (playerListRes.ok) {
+    const ids = playerListRes.value.map(t => t.transactionId);
+    assert.ok(ids.includes("tx-proj-public"), "Public transaction must be visible to player");
+    assert.ok(!ids.includes("tx-proj-secret"), "Secret resource transaction must be hidden from player");
+    assert.ok(ids.includes("tx-proj-transfer"), "Transfer involving player domain must be visible");
+  }
+
+  // Verification 2: getTransaction on secret-resource transaction returns DM_SECURITY_PERMISSION_DENIED for player
+  const playerSecretRes = await runtime.publicApi.economy.getTransaction("tx-proj-secret", playerContext);
+  assert.equal(playerSecretRes.ok, false);
+  if (!playerSecretRes.ok) {
+    assert.equal(playerSecretRes.error.code, "DM_SECURITY_PERMISSION_DENIED");
+  }
+
+  // GM can access secret transaction
+  const gmSecretRes = await runtime.publicApi.economy.getTransaction("tx-proj-secret", gmContext);
+  assert.equal(gmSecretRes.ok, true);
+
+  // Verification 3: Cross-domain transfer sanitizes remote domain lockKeys and failureReason for player
+  const playerTransferRes = await runtime.publicApi.economy.getTransaction("tx-proj-transfer", playerContext);
+  assert.equal(playerTransferRes.ok, true);
+  if (playerTransferRes.ok) {
+    // Only docA.uuid should be in lockKeys
+    assert.ok(playerTransferRes.value.lockKeys.includes(docA.uuid), "Authorized domain lock key should remain");
+    assert.ok(!playerTransferRes.value.lockKeys.includes(docB.uuid), "Unauthorized remote domain lock key must be sanitized");
+    assert.ok(!playerTransferRes.value.lockKeys.includes("system:internal-lock"), "Internal system lock key must be sanitized");
+    // failureReason masked
+    assert.equal(playerTransferRes.value.failureReason, "Transaction failed", "Internal failure details must be sanitized for non-GM");
+  }
+
+  // GM sees full failureReason and all lockKeys
+  const gmTransferRes = await runtime.publicApi.economy.getTransaction("tx-proj-transfer", gmContext);
+  assert.equal(gmTransferRes.ok, true);
+  if (gmTransferRes.ok) {
+    assert.ok(gmTransferRes.value.lockKeys.includes(docB.uuid));
+    assert.equal(gmTransferRes.value.failureReason, "Internal deadlock on DB cluster node 4");
+  }
+
+  // Verification 4: EconomyPresenter viewModel applies same filtering
+  const { buildEconomyViewModel } = await import("../../src/ui/domain-patterns/economy/economy-presenter.js");
+  const { createDefaultResourceRegistry } = await import("../../src/economy/definitions/resource-registry.js");
+
+  const playerVm = buildEconomyViewModel(docA, {
+    viewer: playerContext,
+    resourceRegistry: createDefaultResourceRegistry(),
+    transactionStore: runtime.transactionStore
+  });
+  const vmTxIds = playerVm.transactions.map(t => t.transactionId);
+  assert.ok(vmTxIds.includes("tx-proj-public"));
+  assert.ok(!vmTxIds.includes("tx-proj-secret"), "Presenter must omit secret-resource transactions for player");
+  const vmTransfer = playerVm.transactions.find(t => t.transactionId === "tx-proj-transfer");
+  assert.ok(vmTransfer);
+  if (vmTransfer) {
+    assert.equal(vmTransfer.failureReason, "Transaction failed");
+    assert.ok(!vmTransfer.lockKeys.includes(docB.uuid));
+  }
+});
+
+
+

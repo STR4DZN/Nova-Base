@@ -180,6 +180,15 @@ export class ThresholdService {
     return deleted;
   }
 
+  rollbackThreshold(id: string, previous?: ThresholdDefinition): void {
+    if (previous) {
+      this.#thresholds.set(id, previous);
+    } else {
+      this.#thresholds.delete(id);
+      this.#crossedStates.delete(id);
+    }
+  }
+
   getThreshold(id: string): ThresholdDefinition | undefined {
     return this.#thresholds.get(id);
   }

@@ -184,8 +184,18 @@ export class CustomResourceDefinitionStore {
   }
 
   async save(definition: ResourceDefinition): Promise<void> {
+    const previous = this.#definitions.get(definition.id);
     this.#definitions.set(definition.id, definition);
-    await this.#persist();
+    try {
+      await this.#persist();
+    } catch (err) {
+      if (previous) {
+        this.#definitions.set(definition.id, previous);
+      } else {
+        this.#definitions.delete(definition.id);
+      }
+      throw err;
+    }
   }
 
   get(id: string): ResourceDefinition | undefined {

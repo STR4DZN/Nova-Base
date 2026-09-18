@@ -12419,6 +12419,12 @@ var ResourceDefinitionRegistry = class {
   has(id) {
     return this.#definitions.has(id);
   }
+  unregister(id) {
+    if (this.#frozen) {
+      return false;
+    }
+    return this.#definitions.delete(id);
+  }
   list(filter) {
     const all = Array.from(this.#definitions.values());
     if (!filter) {
@@ -12756,6 +12762,13 @@ var LedgerStore = class {
     }
     if (filter.allowedResourceIds !== void 0) {
       filtered = filtered.filter((e) => filter.allowedResourceIds.includes(e.resourceId));
+    }
+    if (filter.allowedDomainResourceKeys !== void 0) {
+      const allowedSet = filter.allowedDomainResourceKeys instanceof Set ? filter.allowedDomainResourceKeys : new Set(filter.allowedDomainResourceKeys);
+      filtered = filtered.filter((e) => {
+        const cleanDom = e.domainUuid.startsWith("JournalEntry.") ? e.domainUuid.slice("JournalEntry.".length) : e.domainUuid;
+        return allowedSet.has(`${e.domainUuid}:${e.resourceId}`) || allowedSet.has(`${cleanDom}:${e.resourceId}`) || allowedSet.has(`JournalEntry.${cleanDom}:${e.resourceId}`);
+      });
     }
     if (filter.transactionId !== void 0) {
       filtered = filtered.filter((e) => e.transactionId === filter.transactionId);
@@ -13577,8 +13590,18 @@ var CustomResourceDefinitionStore = class {
     return ok(valRes.value);
   }
   async save(definition) {
+    const previous = this.#definitions.get(definition.id);
     this.#definitions.set(definition.id, definition);
-    await this.#persist();
+    try {
+      await this.#persist();
+    } catch (err3) {
+      if (previous) {
+        this.#definitions.set(definition.id, previous);
+      } else {
+        this.#definitions.delete(definition.id);
+      }
+      throw err3;
+    }
   }
   get(id) {
     return this.#definitions.get(id);
@@ -14551,20 +14574,27 @@ var EconomyService = class {
             params.resourceId,
             providerAccount.providerRef
           );
-          if (balRes.ok) {
-            const debitCheck = assertDebitAllowedOnProviderBalance(balRes.value, providerAccount.providerId);
-            if (!debitCheck.ok) {
-              return debitCheck;
-            }
-            if (balRes.value.balanceMinor + delta < 0) {
-              return err(
-                createPublicError({
-                  code: "DM_ECON_INSUFFICIENT_FUNDS",
-                  category: "validation",
-                  message: `Insufficient funds in provider account '${params.resourceId}'. Current: ${balRes.value.balanceMinor}, required: ${Math.abs(delta)}`
-                })
-              );
-            }
+          if (!balRes.ok) {
+            return err(
+              createPublicError({
+                code: "DM_ECON_PROVIDER_UNAVAILABLE",
+                category: "provider",
+                message: `Failed to read fresh balance from provider before debit: ${balRes.error.message}`
+              })
+            );
+          }
+          const debitCheck = assertDebitAllowedOnProviderBalance(balRes.value, providerAccount.providerId);
+          if (!debitCheck.ok) {
+            return debitCheck;
+          }
+          if (balRes.value.balanceMinor + delta < 0) {
+            return err(
+              createPublicError({
+                code: "DM_ECON_INSUFFICIENT_FUNDS",
+                category: "validation",
+                message: `Insufficient funds in provider account '${params.resourceId}'. Current: ${balRes.value.balanceMinor}, required: ${Math.abs(delta)}`
+              })
+            );
           }
         }
         const transactionId = createOpaqueId("tx");
@@ -14630,6 +14660,41 @@ var EconomyService = class {
           this.#transactionStore?.transition(transactionId, "failed", epoch, mutRes.error.message);
           await this.#transactionStore?.flush();
           return mutRes;
+        }
+        const valueOutcome = mutRes.value?.outcome;
+        if (valueOutcome === "unknown") {
+          this.#transactionStore?.transition(
+            transactionId,
+            "needs-recovery",
+            epoch,
+            "Provider mutation outcome is unknown despite successful call"
+          );
+          await this.#transactionStore?.flush();
+          return err(
+            createPublicError({
+              code: "DM_ECON_PROVIDER_TIMEOUT",
+              category: "provider",
+              message: "Provider mutation outcome is unknown; transaction transitioned to needs-recovery",
+              details: { outcome: "unknown" }
+            })
+          );
+        }
+        if (valueOutcome === "failed-before-write") {
+          this.#transactionStore?.transition(
+            transactionId,
+            "failed",
+            epoch,
+            "Provider mutation failed before write"
+          );
+          await this.#transactionStore?.flush();
+          return err(
+            createPublicError({
+              code: "DM_ECON_PROVIDER_MUTATION_FAILED",
+              category: "provider",
+              message: "Provider reported mutation failed before write",
+              details: { outcome: "failed-before-write" }
+            })
+          );
         }
         txRecord.recoveryData.providerWriteConfirmed = true;
         if (mutRes.value?.providerTransactionRef) {
@@ -16012,9 +16077,13 @@ var EconomyProjectionService = class {
       } : {}
     };
   }
-  projectLedgerEntry(entry, visibleResourceIds, viewer) {
-    if (!visibleResourceIds.has(entry.resourceId) && !viewer.isGm) {
-      return null;
+  projectLedgerEntry(entry, visibleResourceIdsOrKeys, viewer) {
+    if (!viewer.isGm) {
+      const cleanDom = entry.domainUuid.startsWith("JournalEntry.") ? entry.domainUuid.slice("JournalEntry.".length) : entry.domainUuid;
+      const isAllowed = visibleResourceIdsOrKeys.has(`${entry.domainUuid}:${entry.resourceId}`) || visibleResourceIdsOrKeys.has(`${cleanDom}:${entry.resourceId}`) || visibleResourceIdsOrKeys.has(`JournalEntry.${cleanDom}:${entry.resourceId}`) || visibleResourceIdsOrKeys.has(entry.resourceId);
+      if (!isAllowed) {
+        return null;
+      }
     }
     return {
       id: entry.id,
@@ -16208,17 +16277,36 @@ var EconomyAggregationProvider = class {
 };
 
 // src/economy/services/public-economy-api.ts
-function toTransactionDto(tx) {
+function toTransactionDto(tx, viewer, accessibleDomains) {
   const lastTransition = tx.history[tx.history.length - 1];
+  if (viewer.isGm) {
+    return {
+      transactionId: tx.transactionId,
+      commandId: tx.commandId,
+      authorityEpoch: tx.authorityEpoch,
+      state: tx.state,
+      lockKeys: tx.lockKeys,
+      createdAtReal: tx.createdAt,
+      updatedAtReal: tx.updatedAt,
+      failureReason: lastTransition?.reason
+    };
+  }
+  const sanitizedLocks = tx.lockKeys.filter((k) => {
+    if (!accessibleDomains) return true;
+    for (const d of accessibleDomains) {
+      if (k.includes(d)) return true;
+    }
+    return false;
+  });
   return {
     transactionId: tx.transactionId,
     commandId: tx.commandId,
     authorityEpoch: tx.authorityEpoch,
     state: tx.state,
-    lockKeys: tx.lockKeys,
+    lockKeys: Object.freeze(sanitizedLocks),
     createdAtReal: tx.createdAt,
     updatedAtReal: tx.updatedAt,
-    failureReason: lastTransition?.reason
+    failureReason: tx.state === "failed" ? "Transaction failed" : void 0
   };
 }
 var DefaultPublicEconomyApi = class {
@@ -16256,6 +16344,71 @@ var DefaultPublicEconomyApi = class {
   async setThreshold(payload, options) {
     return this.#dispatchCommand("economy:set-threshold", payload, options);
   }
+  async #projectTransaction(tx, viewer) {
+    if (viewer.isGm) {
+      return toTransactionDto(tx, viewer);
+    }
+    const rec = tx.recoveryData && typeof tx.recoveryData === "object" ? tx.recoveryData : null;
+    const directDomainUuid = rec?.domainUuid;
+    const sourceDomainUuid = rec?.sourceDomainUuid;
+    const targetDomainUuid = rec?.targetDomainUuid;
+    const candidateDomains = [];
+    if (directDomainUuid) candidateDomains.push(directDomainUuid);
+    if (sourceDomainUuid) candidateDomains.push(sourceDomainUuid);
+    if (targetDomainUuid) candidateDomains.push(targetDomainUuid);
+    if (candidateDomains.length === 0) {
+      for (const k of tx.lockKeys) {
+        if (k.startsWith("domain:")) candidateDomains.push(k.slice("domain:".length));
+        else if (k.startsWith("JournalEntry.")) candidateDomains.push(k);
+      }
+    }
+    const accessibleDomains = /* @__PURE__ */ new Set();
+    for (const d of candidateDomains) {
+      const cleanId = d.startsWith("JournalEntry.") ? d.slice("JournalEntry.".length) : d;
+      const docRes = await this.#domains.read(cleanId);
+      if (docRes.ok) {
+        const doc = docRes.value;
+        const ownership = doc.ownership;
+        const userLevel = ownership ? viewer.userId ? ownership[viewer.userId] ?? ownership.default ?? 0 : ownership.default ?? 0 : 0;
+        if (userLevel >= 1) {
+          accessibleDomains.add(cleanId);
+          accessibleDomains.add(d);
+          accessibleDomains.add(docRes.value.uuid);
+        }
+      }
+    }
+    if (accessibleDomains.size === 0) {
+      return null;
+    }
+    const resourceIds = [];
+    if (rec?.resourceId) resourceIds.push(rec.resourceId);
+    if (rec?.fromResourceId) resourceIds.push(rec.fromResourceId);
+    if (rec?.toResourceId) resourceIds.push(rec.toResourceId);
+    if (resourceIds.length > 0) {
+      let anyResourceVisible = false;
+      for (const d of accessibleDomains) {
+        const cleanId = d.startsWith("JournalEntry.") ? d.slice("JournalEntry.".length) : d;
+        const docRes = await this.#domains.read(cleanId);
+        if (docRes.ok) {
+          const econRes = tryGetDomainEconomyData(docRes.value.record);
+          if (econRes.ok) {
+            for (const resId of resourceIds) {
+              const acc = econRes.value.accounts.find((a) => a.resourceId === resId);
+              if (acc && this.#projection.isAccountVisible(acc, viewer)) {
+                anyResourceVisible = true;
+                break;
+              }
+            }
+          }
+        }
+        if (anyResourceVisible) break;
+      }
+      if (!anyResourceVisible) {
+        return null;
+      }
+    }
+    return toTransactionDto(tx, viewer, accessibleDomains);
+  }
   async getTransaction(transactionId, callerViewer) {
     if (!this.#transactionStore) {
       return ok(void 0);
@@ -16265,39 +16418,9 @@ var DefaultPublicEconomyApi = class {
     if (!tx) {
       return ok(void 0);
     }
-    if (!viewer.isGm) {
-      let domainUuid;
-      const domainKey = tx.lockKeys.find((k) => k.startsWith("domain:") || k.startsWith("JournalEntry."));
-      if (domainKey) {
-        domainUuid = domainKey.startsWith("domain:") ? domainKey.slice("domain:".length) : domainKey;
-      } else if (tx.recoveryData && typeof tx.recoveryData === "object") {
-        domainUuid = tx.recoveryData.domainUuid ?? tx.recoveryData.sourceDomainUuid;
-      }
-      if (domainUuid) {
-        const cleanId = domainUuid.startsWith("JournalEntry.") ? domainUuid.slice("JournalEntry.".length) : domainUuid;
-        const docRes = await this.#domains.read(cleanId);
-        if (!docRes.ok) {
-          return err(
-            createPublicError({
-              code: "DM_SECURITY_PERMISSION_DENIED",
-              category: "permission",
-              message: "Permission denied for transaction"
-            })
-          );
-        }
-        const doc = docRes.value;
-        const ownership = doc.ownership;
-        const userLevel = ownership ? viewer.userId ? ownership[viewer.userId] ?? ownership.default ?? 0 : ownership.default ?? 0 : 0;
-        if (userLevel < 1) {
-          return err(
-            createPublicError({
-              code: "DM_SECURITY_PERMISSION_DENIED",
-              category: "permission",
-              message: "Permission denied for transaction"
-            })
-          );
-        }
-      } else {
+    const projected = await this.#projectTransaction(tx, viewer);
+    if (!projected) {
+      if (!viewer.isGm) {
         return err(
           createPublicError({
             code: "DM_SECURITY_PERMISSION_DENIED",
@@ -16306,8 +16429,9 @@ var DefaultPublicEconomyApi = class {
           })
         );
       }
+      return ok(void 0);
     }
-    return ok(toTransactionDto(tx));
+    return ok(projected);
   }
   async listTransactions(filter, callerViewer) {
     if (!this.#transactionStore) {
@@ -16319,43 +16443,26 @@ var DefaultPublicEconomyApi = class {
       list = list.filter((tx) => tx.state === filter.state);
     }
     if (filter?.domainUuid) {
+      const cleanFilter = filter.domainUuid.startsWith("JournalEntry.") ? filter.domainUuid.slice("JournalEntry.".length) : filter.domainUuid;
       list = list.filter((tx) => {
-        if (tx.lockKeys.some((k) => k.includes(filter.domainUuid))) {
+        if (tx.lockKeys.some((k) => k.includes(cleanFilter))) {
           return true;
         }
         if (tx.recoveryData && typeof tx.recoveryData === "object") {
           const rec = tx.recoveryData;
-          return rec.domainUuid === filter.domainUuid || rec.sourceDomainUuid === filter.domainUuid || rec.targetDomainUuid === filter.domainUuid;
+          return rec.domainUuid === filter.domainUuid || rec.domainUuid === cleanFilter || rec.sourceDomainUuid === filter.domainUuid || rec.sourceDomainUuid === cleanFilter || rec.targetDomainUuid === filter.domainUuid || rec.targetDomainUuid === cleanFilter;
         }
         return false;
       });
     }
-    if (!viewer.isGm) {
-      const allowed = [];
-      for (const tx of list) {
-        let domainUuid;
-        const domainKey = tx.lockKeys.find((k) => k.startsWith("domain:") || k.startsWith("JournalEntry."));
-        if (domainKey) {
-          domainUuid = domainKey.startsWith("domain:") ? domainKey.slice("domain:".length) : domainKey;
-        } else if (tx.recoveryData && typeof tx.recoveryData === "object") {
-          domainUuid = tx.recoveryData.domainUuid ?? tx.recoveryData.sourceDomainUuid;
-        }
-        if (!domainUuid) {
-          continue;
-        }
-        const cleanId = domainUuid.startsWith("JournalEntry.") ? domainUuid.slice("JournalEntry.".length) : domainUuid;
-        const docRes = await this.#domains.read(cleanId);
-        if (!docRes.ok) continue;
-        const doc = docRes.value;
-        const ownership = doc.ownership;
-        const userLevel = ownership ? viewer.userId ? ownership[viewer.userId] ?? ownership.default ?? 0 : ownership.default ?? 0 : 0;
-        if (userLevel >= 1) {
-          allowed.push(toTransactionDto(tx));
-        }
+    const allowed = [];
+    for (const tx of list) {
+      const proj = await this.#projectTransaction(tx, viewer);
+      if (proj) {
+        allowed.push(proj);
       }
-      return ok(Object.freeze(allowed));
     }
-    return ok(Object.freeze(list.map(toTransactionDto)));
+    return ok(Object.freeze(allowed));
   }
   listThresholds(domainUuid, resourceId) {
     return this.#thresholdService ? this.#thresholdService.listThresholds(domainUuid, resourceId) : [];
@@ -16508,15 +16615,18 @@ var DefaultPublicEconomyApi = class {
   }
   async queryLedger(filter, callerViewer) {
     const viewer = this.#projection.resolveViewer(callerViewer);
-    const visibleResourceIds = /* @__PURE__ */ new Set();
+    const visibleDomainResourceKeys = /* @__PURE__ */ new Set();
     if (filter.domainUuid) {
-      const docRes = await this.#domains.read(filter.domainUuid);
+      const cleanId = filter.domainUuid.startsWith("JournalEntry.") ? filter.domainUuid.slice("JournalEntry.".length) : filter.domainUuid;
+      const docRes = await this.#domains.read(cleanId);
       if (docRes.ok) {
         const econRes = tryGetDomainEconomyData(docRes.value.record);
         if (econRes.ok) {
           for (const acc of econRes.value.accounts) {
             if (this.#projection.isAccountVisible(acc, viewer)) {
-              visibleResourceIds.add(acc.resourceId);
+              visibleDomainResourceKeys.add(`${cleanId}:${acc.resourceId}`);
+              visibleDomainResourceKeys.add(`JournalEntry.${cleanId}:${acc.resourceId}`);
+              visibleDomainResourceKeys.add(`${docRes.value.uuid}:${acc.resourceId}`);
             }
           }
         }
@@ -16525,11 +16635,14 @@ var DefaultPublicEconomyApi = class {
       const allDocsRes = this.#domains.query();
       if (allDocsRes.ok) {
         for (const doc of allDocsRes.value) {
+          const cleanId = doc.id;
           const econRes = tryGetDomainEconomyData(doc.record);
           if (econRes.ok) {
             for (const acc of econRes.value.accounts) {
               if (this.#projection.isAccountVisible(acc, viewer)) {
-                visibleResourceIds.add(acc.resourceId);
+                visibleDomainResourceKeys.add(`${cleanId}:${acc.resourceId}`);
+                visibleDomainResourceKeys.add(`JournalEntry.${cleanId}:${acc.resourceId}`);
+                visibleDomainResourceKeys.add(`${doc.uuid}:${acc.resourceId}`);
               }
             }
           }
@@ -16538,12 +16651,12 @@ var DefaultPublicEconomyApi = class {
     }
     const storeFilter = viewer.isGm ? filter : {
       ...filter,
-      allowedResourceIds: Array.from(visibleResourceIds)
+      allowedDomainResourceKeys: visibleDomainResourceKeys
     };
     const paged = this.#ledgerStore.queryPaged(storeFilter);
     const projected = [];
     for (const entry of paged.entries) {
-      const proj = this.#projection.projectLedgerEntry(entry, visibleResourceIds, viewer);
+      const proj = this.#projection.projectLedgerEntry(entry, visibleDomainResourceKeys, viewer);
       if (proj) projected.push(proj);
     }
     return ok({
@@ -17395,11 +17508,13 @@ function registerEconomyCommands(options) {
           })
         );
       }
+      const previous = p.id ? targetThresholdService.getThreshold(p.id) : void 0;
       const regRes = targetThresholdService.registerThreshold(p);
       if (regRes.ok) {
         try {
           await targetThresholdService.flush();
         } catch (e) {
+          targetThresholdService.rollbackThreshold(regRes.value.id, previous);
           return err(
             createPublicError({
               code: "DM_DOMAIN_STORAGE_ERROR",
@@ -17439,24 +17554,44 @@ function registerEconomyCommands(options) {
     handler: async (ctx) => {
       const def = ctx.command.payload.definition;
       const targetRegistry = resourceRegistry ?? economyService.registry;
-      if (targetRegistry) {
-        if (targetRegistry.has(def.id)) {
+      const targetStore = customResourceStore;
+      if (targetRegistry && targetRegistry.has(def.id)) {
+        return err(
+          createPublicError({
+            code: "DM_ECON_RESOURCE_ALREADY_EXISTS",
+            category: "conflict",
+            message: `Resource definition with ID '${def.id}' already exists`
+          })
+        );
+      }
+      if (targetStore && targetStore.has(def.id)) {
+        return err(
+          createPublicError({
+            code: "DM_ECON_RESOURCE_ALREADY_EXISTS",
+            category: "conflict",
+            message: `Resource definition with ID '${def.id}' already exists in store`
+          })
+        );
+      }
+      if (targetStore) {
+        try {
+          await targetStore.save(def);
+        } catch (e) {
           return err(
             createPublicError({
-              code: "DM_ECON_RESOURCE_ALREADY_EXISTS",
-              category: "conflict",
-              message: `Resource definition with ID '${def.id}' already exists`
+              code: "DM_DOMAIN_STORAGE_ERROR",
+              category: "provider",
+              message: `Failed to persist custom resource: ${e instanceof Error ? e.message : String(e)}`,
+              retryable: true
             })
           );
         }
+      }
+      if (targetRegistry) {
         const regRes = targetRegistry.register(def);
         if (!regRes.ok) {
           return regRes;
         }
-      }
-      const targetStore = customResourceStore;
-      if (targetStore) {
-        await targetStore.save(def);
       }
       return ok(def);
     }
@@ -17611,6 +17746,12 @@ var ManualCurrencyProvider = class {
       for (const [key, bal] of Object.entries(snapshot.balances)) {
         this.#balances.set(key, bal);
       }
+      this.#operations.clear();
+      if (snapshot.operations) {
+        for (const [key, op] of Object.entries(snapshot.operations)) {
+          this.#operations.set(key, op);
+        }
+      }
     }
   }
   #schedulePersist() {
@@ -17627,9 +17768,14 @@ var ManualCurrencyProvider = class {
     for (const [k, v] of this.#balances.entries()) {
       balancesObj[k] = v;
     }
+    const operationsObj = {};
+    for (const [k, v] of this.#operations.entries()) {
+      operationsObj[k] = v;
+    }
     const snapshot = {
       schemaVersion: MANUAL_CURRENCY_STORAGE_SCHEMA_VERSION,
       balances: balancesObj,
+      operations: operationsObj,
       updatedAt: Date.now()
     };
     await this.#storageAdapter.saveSnapshot(snapshot);
@@ -17997,6 +18143,14 @@ var ThresholdService = class {
       this.#schedulePersist();
     }
     return deleted;
+  }
+  rollbackThreshold(id, previous) {
+    if (previous) {
+      this.#thresholds.set(id, previous);
+    } else {
+      this.#thresholds.delete(id);
+      this.#crossedStates.delete(id);
+    }
   }
   getThreshold(id) {
     return this.#thresholds.get(id);
@@ -18452,6 +18606,19 @@ function buildEconomyViewModel(domainInput, options) {
       return false;
     });
     for (const tx of rawTxs) {
+      if (!viewer.isGm && tx.recoveryData && typeof tx.recoveryData === "object") {
+        const rec = tx.recoveryData;
+        const resIds = [];
+        if (rec.resourceId) resIds.push(rec.resourceId);
+        if (rec.fromResourceId) resIds.push(rec.fromResourceId);
+        if (rec.toResourceId) resIds.push(rec.toResourceId);
+        if (resIds.length > 0) {
+          const hasVisibleResource = resIds.some((rId) => visibleResourceIds.has(rId));
+          if (!hasVisibleResource) {
+            continue;
+          }
+        }
+      }
       const lastTransition = tx.history[tx.history.length - 1];
       let stateBadgeClass = "in-flight";
       if (tx.state === "committed") stateBadgeClass = "committed";
@@ -18459,18 +18626,20 @@ function buildEconomyViewModel(domainInput, options) {
       else if (tx.state === "failed") stateBadgeClass = "failed";
       let reason = void 0;
       if (tx.recoveryData && typeof tx.recoveryData === "object") {
-        reason = tx.recoveryData.reason;
+        reason = viewer.isGm ? tx.recoveryData.reason : void 0;
       }
+      const lockKeys = viewer.isGm ? tx.lockKeys : tx.lockKeys.filter((k) => k.includes(domainUuid));
+      const failureReason = viewer.isGm ? lastTransition?.reason : tx.state === "failed" ? "Transaction failed" : void 0;
       transactionVMs.push({
         transactionId: tx.transactionId,
         commandId: tx.commandId,
         state: tx.state,
         authorityEpoch: tx.authorityEpoch,
-        lockKeys: tx.lockKeys,
+        lockKeys: Object.freeze(lockKeys),
         createdAtFormatted: new Date(tx.createdAt).toLocaleTimeString(),
         stateBadgeClass,
         reason,
-        failureReason: lastTransition?.reason
+        failureReason
       });
     }
   }

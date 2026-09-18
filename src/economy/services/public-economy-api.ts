@@ -49,17 +49,42 @@ import type { DerivedAccountResolver } from "./economy-service.js";
 import type { TransactionStore } from "../../mutations/transaction-store.js";
 import type { TransactionRecord, TransactionState } from "../../mutations/transaction-record.js";
 
-function toTransactionDto(tx: TransactionRecord): TransactionRecordDto {
+function toTransactionDto(
+  tx: TransactionRecord,
+  viewer: ViewerIdentity,
+  accessibleDomains?: ReadonlySet<string>
+): TransactionRecordDto {
   const lastTransition = tx.history[tx.history.length - 1];
+  if (viewer.isGm) {
+    return {
+      transactionId: tx.transactionId,
+      commandId: tx.commandId,
+      authorityEpoch: tx.authorityEpoch,
+      state: tx.state,
+      lockKeys: tx.lockKeys,
+      createdAtReal: tx.createdAt,
+      updatedAtReal: tx.updatedAt,
+      failureReason: lastTransition?.reason
+    };
+  }
+
+  const sanitizedLocks = tx.lockKeys.filter((k) => {
+    if (!accessibleDomains) return true;
+    for (const d of accessibleDomains) {
+      if (k.includes(d)) return true;
+    }
+    return false;
+  });
+
   return {
     transactionId: tx.transactionId,
     commandId: tx.commandId,
     authorityEpoch: tx.authorityEpoch,
     state: tx.state,
-    lockKeys: tx.lockKeys,
+    lockKeys: Object.freeze(sanitizedLocks),
     createdAtReal: tx.createdAt,
     updatedAtReal: tx.updatedAt,
-    failureReason: lastTransition?.reason
+    failureReason: tx.state === "failed" ? "Transaction failed" : undefined
   };
 }
 
@@ -171,6 +196,84 @@ export class DefaultPublicEconomyApi implements PublicEconomyApi {
     return this.#dispatchCommand("economy:set-threshold", payload, options);
   }
 
+  async #projectTransaction(
+    tx: TransactionRecord,
+    viewer: ViewerIdentity
+  ): Promise<TransactionRecordDto | null> {
+    if (viewer.isGm) {
+      return toTransactionDto(tx, viewer);
+    }
+
+    const rec = tx.recoveryData && typeof tx.recoveryData === "object" ? (tx.recoveryData as any) : null;
+    const directDomainUuid: string | undefined = rec?.domainUuid;
+    const sourceDomainUuid: string | undefined = rec?.sourceDomainUuid;
+    const targetDomainUuid: string | undefined = rec?.targetDomainUuid;
+
+    const candidateDomains: string[] = [];
+    if (directDomainUuid) candidateDomains.push(directDomainUuid);
+    if (sourceDomainUuid) candidateDomains.push(sourceDomainUuid);
+    if (targetDomainUuid) candidateDomains.push(targetDomainUuid);
+    if (candidateDomains.length === 0) {
+      for (const k of tx.lockKeys) {
+        if (k.startsWith("domain:")) candidateDomains.push(k.slice("domain:".length));
+        else if (k.startsWith("JournalEntry.")) candidateDomains.push(k);
+      }
+    }
+
+    const accessibleDomains = new Set<string>();
+    for (const d of candidateDomains) {
+      const cleanId = d.startsWith("JournalEntry.") ? d.slice("JournalEntry.".length) : d;
+      const docRes = await this.#domains.read(cleanId);
+      if (docRes.ok) {
+        const doc = docRes.value as any;
+        const ownership = doc.ownership as Record<string, number> | undefined;
+        const userLevel = ownership ? (viewer.userId ? (ownership[viewer.userId] ?? ownership.default ?? 0) : (ownership.default ?? 0)) : 0;
+        if (userLevel >= 1) {
+          accessibleDomains.add(cleanId);
+          accessibleDomains.add(d);
+          accessibleDomains.add(docRes.value.uuid);
+        }
+      }
+    }
+
+    if (accessibleDomains.size === 0) {
+      return null;
+    }
+
+    // Check resource visibility in accessible domain(s)
+    const resourceIds: string[] = [];
+    if (rec?.resourceId) resourceIds.push(rec.resourceId);
+    if (rec?.fromResourceId) resourceIds.push(rec.fromResourceId);
+    if (rec?.toResourceId) resourceIds.push(rec.toResourceId);
+
+    if (resourceIds.length > 0) {
+      let anyResourceVisible = false;
+      for (const d of accessibleDomains) {
+        const cleanId = d.startsWith("JournalEntry.") ? d.slice("JournalEntry.".length) : d;
+        const docRes = await this.#domains.read(cleanId);
+        if (docRes.ok) {
+          const econRes = tryGetDomainEconomyData(docRes.value.record);
+          if (econRes.ok) {
+            for (const resId of resourceIds) {
+              const acc = econRes.value.accounts.find((a) => a.resourceId === resId);
+              if (acc && this.#projection.isAccountVisible(acc, viewer)) {
+                anyResourceVisible = true;
+                break;
+              }
+            }
+          }
+        }
+        if (anyResourceVisible) break;
+      }
+
+      if (!anyResourceVisible) {
+        return null;
+      }
+    }
+
+    return toTransactionDto(tx, viewer, accessibleDomains);
+  }
+
   async getTransaction(
     transactionId: string,
     callerViewer?: Partial<ViewerIdentity>
@@ -184,40 +287,9 @@ export class DefaultPublicEconomyApi implements PublicEconomyApi {
       return ok(undefined);
     }
 
-    if (!viewer.isGm) {
-      let domainUuid: string | undefined;
-      const domainKey = tx.lockKeys.find((k) => k.startsWith("domain:") || k.startsWith("JournalEntry."));
-      if (domainKey) {
-        domainUuid = domainKey.startsWith("domain:") ? domainKey.slice("domain:".length) : domainKey;
-      } else if (tx.recoveryData && typeof tx.recoveryData === "object") {
-        domainUuid = (tx.recoveryData as any).domainUuid ?? (tx.recoveryData as any).sourceDomainUuid;
-      }
-
-      if (domainUuid) {
-        const cleanId = domainUuid.startsWith("JournalEntry.") ? domainUuid.slice("JournalEntry.".length) : domainUuid;
-        const docRes = await this.#domains.read(cleanId);
-        if (!docRes.ok) {
-          return err(
-            createPublicError({
-              code: "DM_SECURITY_PERMISSION_DENIED",
-              category: "permission",
-              message: "Permission denied for transaction"
-            })
-          );
-        }
-        const doc = docRes.value as any;
-        const ownership = doc.ownership as Record<string, number> | undefined;
-        const userLevel = ownership ? (viewer.userId ? (ownership[viewer.userId] ?? ownership.default ?? 0) : (ownership.default ?? 0)) : 0;
-        if (userLevel < 1) {
-          return err(
-            createPublicError({
-              code: "DM_SECURITY_PERMISSION_DENIED",
-              category: "permission",
-              message: "Permission denied for transaction"
-            })
-          );
-        }
-      } else {
+    const projected = await this.#projectTransaction(tx, viewer);
+    if (!projected) {
+      if (!viewer.isGm) {
         return err(
           createPublicError({
             code: "DM_SECURITY_PERMISSION_DENIED",
@@ -226,9 +298,10 @@ export class DefaultPublicEconomyApi implements PublicEconomyApi {
           })
         );
       }
+      return ok(undefined);
     }
 
-    return ok(toTransactionDto(tx));
+    return ok(projected);
   }
 
   async listTransactions(
@@ -246,49 +319,36 @@ export class DefaultPublicEconomyApi implements PublicEconomyApi {
     }
 
     if (filter?.domainUuid) {
+      const cleanFilter = filter.domainUuid.startsWith("JournalEntry.")
+        ? filter.domainUuid.slice("JournalEntry.".length)
+        : filter.domainUuid;
       list = list.filter((tx) => {
-        if (tx.lockKeys.some((k) => k.includes(filter.domainUuid!))) {
+        if (tx.lockKeys.some((k) => k.includes(cleanFilter))) {
           return true;
         }
         if (tx.recoveryData && typeof tx.recoveryData === "object") {
           const rec = tx.recoveryData as any;
           return (
             rec.domainUuid === filter.domainUuid ||
+            rec.domainUuid === cleanFilter ||
             rec.sourceDomainUuid === filter.domainUuid ||
-            rec.targetDomainUuid === filter.domainUuid
+            rec.sourceDomainUuid === cleanFilter ||
+            rec.targetDomainUuid === filter.domainUuid ||
+            rec.targetDomainUuid === cleanFilter
           );
         }
         return false;
       });
     }
 
-    if (!viewer.isGm) {
-      const allowed: TransactionRecordDto[] = [];
-      for (const tx of list) {
-        let domainUuid: string | undefined;
-        const domainKey = tx.lockKeys.find((k) => k.startsWith("domain:") || k.startsWith("JournalEntry."));
-        if (domainKey) {
-          domainUuid = domainKey.startsWith("domain:") ? domainKey.slice("domain:".length) : domainKey;
-        } else if (tx.recoveryData && typeof tx.recoveryData === "object") {
-          domainUuid = (tx.recoveryData as any).domainUuid ?? (tx.recoveryData as any).sourceDomainUuid;
-        }
-        if (!domainUuid) {
-          continue;
-        }
-        const cleanId = domainUuid.startsWith("JournalEntry.") ? domainUuid.slice("JournalEntry.".length) : domainUuid;
-        const docRes = await this.#domains.read(cleanId);
-        if (!docRes.ok) continue;
-        const doc = docRes.value as any;
-        const ownership = doc.ownership as Record<string, number> | undefined;
-        const userLevel = ownership ? (viewer.userId ? (ownership[viewer.userId] ?? ownership.default ?? 0) : (ownership.default ?? 0)) : 0;
-        if (userLevel >= 1) {
-          allowed.push(toTransactionDto(tx));
-        }
+    const allowed: TransactionRecordDto[] = [];
+    for (const tx of list) {
+      const proj = await this.#projectTransaction(tx, viewer);
+      if (proj) {
+        allowed.push(proj);
       }
-      return ok(Object.freeze(allowed));
     }
-
-    return ok(Object.freeze(list.map(toTransactionDto)));
+    return ok(Object.freeze(allowed));
   }
 
   listThresholds(domainUuid?: string, resourceId?: string): readonly ThresholdDefinition[] {
@@ -495,16 +555,21 @@ export class DefaultPublicEconomyApi implements PublicEconomyApi {
     callerViewer?: Partial<ViewerIdentity>
   ): Promise<Result<PagedLedgerResultDto, PublicError>> {
     const viewer = this.#projection.resolveViewer(callerViewer);
-    const visibleResourceIds = new Set<string>();
+    const visibleDomainResourceKeys = new Set<string>();
 
     if (filter.domainUuid) {
-      const docRes = await this.#domains.read(filter.domainUuid);
+      const cleanId = filter.domainUuid.startsWith("JournalEntry.")
+        ? filter.domainUuid.slice("JournalEntry.".length)
+        : filter.domainUuid;
+      const docRes = await this.#domains.read(cleanId);
       if (docRes.ok) {
         const econRes = tryGetDomainEconomyData(docRes.value.record);
         if (econRes.ok) {
           for (const acc of econRes.value.accounts) {
             if (this.#projection.isAccountVisible(acc, viewer)) {
-              visibleResourceIds.add(acc.resourceId);
+              visibleDomainResourceKeys.add(`${cleanId}:${acc.resourceId}`);
+              visibleDomainResourceKeys.add(`JournalEntry.${cleanId}:${acc.resourceId}`);
+              visibleDomainResourceKeys.add(`${docRes.value.uuid}:${acc.resourceId}`);
             }
           }
         }
@@ -513,11 +578,14 @@ export class DefaultPublicEconomyApi implements PublicEconomyApi {
       const allDocsRes = this.#domains.query();
       if (allDocsRes.ok) {
         for (const doc of allDocsRes.value) {
+          const cleanId = doc.id;
           const econRes = tryGetDomainEconomyData(doc.record);
           if (econRes.ok) {
             for (const acc of econRes.value.accounts) {
               if (this.#projection.isAccountVisible(acc, viewer)) {
-                visibleResourceIds.add(acc.resourceId);
+                visibleDomainResourceKeys.add(`${cleanId}:${acc.resourceId}`);
+                visibleDomainResourceKeys.add(`JournalEntry.${cleanId}:${acc.resourceId}`);
+                visibleDomainResourceKeys.add(`${doc.uuid}:${acc.resourceId}`);
               }
             }
           }
@@ -525,21 +593,21 @@ export class DefaultPublicEconomyApi implements PublicEconomyApi {
       }
     }
 
-    // G4-REVAL4-003: If not GM, strictly constrain queryPaged via allowedResourceIds so that
-    // totalCount, hasMore, and cursors are computed ONLY over visible resources, preventing
-    // secret transaction counts or existence from leaking.
+    // G4-REVAL5-002: If not GM, strictly constrain queryPaged via allowedDomainResourceKeys so that
+    // totalCount, hasMore, and cursors are computed ONLY over visible domain:resource pairs, preventing
+    // secret accounts sharing a resource ID with another domain from leaking counts or existence.
     const storeFilter: LedgerFilter = viewer.isGm
       ? filter
       : {
           ...filter,
-          allowedResourceIds: Array.from(visibleResourceIds)
+          allowedDomainResourceKeys: visibleDomainResourceKeys
         };
 
     const paged = this.#ledgerStore.queryPaged(storeFilter);
 
     const projected: LedgerEntryDto[] = [];
     for (const entry of paged.entries) {
-      const proj = this.#projection.projectLedgerEntry(entry, visibleResourceIds, viewer);
+      const proj = this.#projection.projectLedgerEntry(entry, visibleDomainResourceKeys, viewer);
       if (proj) projected.push(proj);
     }
 

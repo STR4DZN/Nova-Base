@@ -396,6 +396,22 @@ export function buildEconomyViewModel(
     });
 
     for (const tx of rawTxs) {
+      // G4-REVAL5-003: Check resource visibility for non-GM
+      if (!viewer.isGm && tx.recoveryData && typeof tx.recoveryData === "object") {
+        const rec = tx.recoveryData as any;
+        const resIds: string[] = [];
+        if (rec.resourceId) resIds.push(rec.resourceId);
+        if (rec.fromResourceId) resIds.push(rec.fromResourceId);
+        if (rec.toResourceId) resIds.push(rec.toResourceId);
+
+        if (resIds.length > 0) {
+          const hasVisibleResource = resIds.some((rId) => visibleResourceIds.has(rId));
+          if (!hasVisibleResource) {
+            continue; // Skip secret-resource transactions
+          }
+        }
+      }
+
       const lastTransition = tx.history[tx.history.length - 1];
       let stateBadgeClass: TransactionItemViewModel["stateBadgeClass"] = "in-flight";
       if (tx.state === "committed") stateBadgeClass = "committed";
@@ -404,19 +420,27 @@ export function buildEconomyViewModel(
 
       let reason: string | undefined = undefined;
       if (tx.recoveryData && typeof tx.recoveryData === "object") {
-        reason = (tx.recoveryData as any).reason;
+        reason = viewer.isGm ? (tx.recoveryData as any).reason : undefined;
       }
+
+      const lockKeys = viewer.isGm
+        ? tx.lockKeys
+        : tx.lockKeys.filter((k) => k.includes(domainUuid));
+
+      const failureReason = viewer.isGm
+        ? lastTransition?.reason
+        : (tx.state === "failed" ? "Transaction failed" : undefined);
 
       transactionVMs.push({
         transactionId: tx.transactionId,
         commandId: tx.commandId,
         state: tx.state,
         authorityEpoch: tx.authorityEpoch,
-        lockKeys: tx.lockKeys,
+        lockKeys: Object.freeze(lockKeys),
         createdAtFormatted: new Date(tx.createdAt).toLocaleTimeString(),
         stateBadgeClass,
         reason,
-        failureReason: lastTransition?.reason
+        failureReason
       });
     }
   }
