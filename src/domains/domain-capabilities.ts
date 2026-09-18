@@ -1,6 +1,7 @@
 import { err, ok, type Result } from "../core/contracts/result.js";
 import { createPublicError, type Warning } from "../core/contracts/public-error.js";
 import type { DomainCapabilities } from "./domain-schema.js";
+import { validateDomainPeopleData } from "../people/people-data.js";
 
 export type CapabilityConfigValidator = (config: unknown) => Result<void>;
 
@@ -185,6 +186,16 @@ export function createDefaultCapabilityRegistry(): CapabilityRegistry {
   const registry = new CapabilityRegistry();
   registry.register({ id: "domain-manager:core", label: "Core technical shell", functional: false });
   registry.register({ id: "domain-manager:domain", label: "Domain management", functional: true });
+  registry.register({
+    id: "domain-manager:people",
+    label: "People & Population management",
+    functional: true,
+    validateConfig: (config) => {
+      if (config === undefined || config === null) return ok(undefined);
+      const res = validateDomainPeopleData(config);
+      return res.ok ? ok(undefined) : err(res.error);
+    }
+  });
   return registry;
 }
 

@@ -318,6 +318,13 @@ function isJournalEntryUuid(value) {
   if (segments[0] !== "Compendium") return false;
   return segments.includes("JournalEntry");
 }
+function isActorUuid(value) {
+  if (!isFoundryUuid(value)) return false;
+  const segments = value.split(".");
+  if (segments[0] === "Actor") return segments.length >= 2;
+  if (segments[0] !== "Compendium") return false;
+  return segments.includes("Actor");
+}
 
 // src/domains/domain-validator.ts
 function invalid(message) {
@@ -500,6 +507,1168 @@ var FoundryDomainDocumentStore = class {
   }
 };
 
+// src/core/identity/ids.ts
+function isOpaqueId(value, prefix) {
+  if (typeof value !== "string") return false;
+  const pattern = prefix === void 0 ? /^(cmd|tx|prj|rel|rep|led|resv|req|role|pop|not|opg|asg)_[0-9a-f-]{36}$/ : new RegExp(`^${prefix}_[0-9a-f-]{36}$`);
+  return pattern.test(value);
+}
+
+// src/people/population/population-types.ts
+var POPULATION_MODES = ["manual", "sumGroups", "hybrid"];
+var POPULATION_PRECISIONS = ["exact", "estimated", "unknown"];
+function isPopulationMode(value) {
+  return typeof value === "string" && POPULATION_MODES.includes(value);
+}
+function isPopulationPrecision(value) {
+  return typeof value === "string" && POPULATION_PRECISIONS.includes(value);
+}
+function validatePopulationState(state) {
+  if (!state || typeof state !== "object") {
+    return err(
+      createPublicError({
+        code: "DM_POPULATION_INVALID_STATE",
+        category: "validation",
+        message: "PopulationState must be an object"
+      })
+    );
+  }
+  const candidate = state;
+  if (!isPopulationMode(candidate.mode)) {
+    return err(
+      createPublicError({
+        code: "DM_POPULATION_INVALID_MODE",
+        category: "validation",
+        message: `Invalid population mode: '${String(candidate.mode)}'. Must be one of: ${POPULATION_MODES.join(", ")}`
+      })
+    );
+  }
+  if (!isPopulationPrecision(candidate.precision)) {
+    return err(
+      createPublicError({
+        code: "DM_POPULATION_INVALID_PRECISION",
+        category: "validation",
+        message: `Invalid population precision: '${String(candidate.precision)}'. Must be one of: ${POPULATION_PRECISIONS.join(", ")}`
+      })
+    );
+  }
+  if (candidate.total !== null && candidate.total !== void 0) {
+    if (typeof candidate.total !== "number" || !Number.isSafeInteger(candidate.total) || candidate.total < 0) {
+      return err(
+        createPublicError({
+          code: "DM_POPULATION_INVALID_TOTAL",
+          category: "validation",
+          message: "Population total must be a non-negative safe integer or null"
+        })
+      );
+    }
+  }
+  const total = candidate.total === void 0 ? null : candidate.total;
+  let precision = candidate.precision;
+  if (total === null && precision !== "unknown") {
+    precision = "unknown";
+  }
+  return ok({
+    mode: candidate.mode,
+    total,
+    precision
+  });
+}
+function validatePopulationGroup(group) {
+  if (!group || typeof group !== "object") {
+    return err(
+      createPublicError({
+        code: "DM_POPULATION_GROUP_INVALID",
+        category: "validation",
+        message: "PopulationGroup must be an object"
+      })
+    );
+  }
+  const candidate = group;
+  if (!isOpaqueId(candidate.id, "pop")) {
+    return err(
+      createPublicError({
+        code: "DM_POPULATION_GROUP_INVALID_ID",
+        category: "validation",
+        message: `PopulationGroup id must be an opaque ID with prefix 'pop_', received: '${String(candidate.id)}'`
+      })
+    );
+  }
+  if (typeof candidate.name !== "string" || candidate.name.trim().length === 0) {
+    return err(
+      createPublicError({
+        code: "DM_POPULATION_GROUP_INVALID_NAME",
+        category: "validation",
+        message: "PopulationGroup name must be a non-empty string"
+      })
+    );
+  }
+  if (candidate.count !== null && candidate.count !== void 0) {
+    if (typeof candidate.count !== "number" || !Number.isSafeInteger(candidate.count) || candidate.count < 0) {
+      return err(
+        createPublicError({
+          code: "DM_POPULATION_GROUP_INVALID_COUNT",
+          category: "validation",
+          message: "PopulationGroup count must be a non-negative safe integer or null"
+        })
+      );
+    }
+  }
+  if (typeof candidate.includedInTotal !== "boolean") {
+    return err(
+      createPublicError({
+        code: "DM_POPULATION_GROUP_INVALID_INCLUDED",
+        category: "validation",
+        message: "PopulationGroup includedInTotal must be a boolean"
+      })
+    );
+  }
+  if (!Array.isArray(candidate.tags) || candidate.tags.some((t) => typeof t !== "string")) {
+    return err(
+      createPublicError({
+        code: "DM_POPULATION_GROUP_INVALID_TAGS",
+        category: "validation",
+        message: "PopulationGroup tags must be an array of strings"
+      })
+    );
+  }
+  if (candidate.notes !== void 0 && candidate.notes !== null) {
+    if (typeof candidate.notes !== "string") {
+      return err(
+        createPublicError({
+          code: "DM_POPULATION_GROUP_INVALID_NOTES",
+          category: "validation",
+          message: "PopulationGroup notes must be a string"
+        })
+      );
+    }
+    if (candidate.notes.length > 2e3) {
+      return err(
+        createPublicError({
+          code: "DM_POPULATION_GROUP_NOTES_TOO_LONG",
+          category: "validation",
+          message: "PopulationGroup notes must not exceed 2000 characters"
+        })
+      );
+    }
+  }
+  if (candidate.precision !== void 0 && candidate.precision !== null) {
+    if (!isPopulationPrecision(candidate.precision)) {
+      return err(
+        createPublicError({
+          code: "DM_POPULATION_INVALID_PRECISION",
+          category: "validation",
+          message: `Invalid population group precision: '${String(candidate.precision)}'. Must be one of: ${POPULATION_PRECISIONS.join(", ")}`
+        })
+      );
+    }
+  }
+  return ok({
+    id: candidate.id,
+    name: candidate.name.trim(),
+    count: candidate.count === void 0 ? null : candidate.count,
+    precision: candidate.precision === void 0 || candidate.precision === null ? void 0 : candidate.precision,
+    includedInTotal: candidate.includedInTotal,
+    tags: Object.freeze([...candidate.tags]),
+    notes: candidate.notes === void 0 || candidate.notes === null ? void 0 : candidate.notes
+  });
+}
+
+// src/people/notables/notable-types.ts
+var NOTABLE_VISIBILITIES = Object.freeze([
+  "public",
+  "restricted",
+  "secret"
+]);
+function isNotableVisibility(value) {
+  return typeof value === "string" && NOTABLE_VISIBILITIES.includes(value);
+}
+function validateNotable(candidate) {
+  if (!candidate || typeof candidate !== "object") {
+    return err(
+      createPublicError({
+        code: "DM_NOTABLE_INVALID",
+        category: "validation",
+        message: "Notable must be an object"
+      })
+    );
+  }
+  const raw = candidate;
+  if (!isOpaqueId(raw.id, "not")) {
+    return err(
+      createPublicError({
+        code: "DM_NOTABLE_INVALID_ID",
+        category: "validation",
+        message: `Notable id must be an opaque ID with prefix 'not_', received: '${String(raw.id)}'`
+      })
+    );
+  }
+  const visibility = raw.visibility === void 0 ? "public" : raw.visibility;
+  if (!isNotableVisibility(visibility)) {
+    return err(
+      createPublicError({
+        code: "DM_NOTABLE_INVALID_VISIBILITY",
+        category: "validation",
+        message: `Invalid notable visibility: '${String(raw.visibility)}'. Must be one of: ${NOTABLE_VISIBILITIES.join(", ")}`
+      })
+    );
+  }
+  if (raw.tags !== void 0 && (!Array.isArray(raw.tags) || raw.tags.some((t) => typeof t !== "string"))) {
+    return err(
+      createPublicError({
+        code: "DM_NOTABLE_INVALID_TAGS",
+        category: "validation",
+        message: "Notable tags must be an array of strings"
+      })
+    );
+  }
+  const tags = Object.freeze(Array.isArray(raw.tags) ? [...raw.tags] : []);
+  if (raw.description !== void 0 && raw.description !== null) {
+    if (typeof raw.description !== "string") {
+      return err(
+        createPublicError({
+          code: "DM_NOTABLE_INVALID_DESCRIPTION",
+          category: "validation",
+          message: "Notable description must be a string"
+        })
+      );
+    }
+    if (raw.description.length > 2e3) {
+      return err(
+        createPublicError({
+          code: "DM_NOTABLE_DESCRIPTION_TOO_LONG",
+          category: "validation",
+          message: "Notable description must not exceed 2000 characters"
+        })
+      );
+    }
+  }
+  const description = raw.description ? raw.description.trim() : void 0;
+  if (raw.type === "inline") {
+    if (typeof raw.name !== "string" || raw.name.trim().length === 0) {
+      return err(
+        createPublicError({
+          code: "DM_NOTABLE_INVALID_NAME",
+          category: "validation",
+          message: "Inline Notable requires a non-empty name"
+        })
+      );
+    }
+    if (raw.portrait !== void 0 && raw.portrait !== null && typeof raw.portrait !== "string") {
+      return err(
+        createPublicError({
+          code: "DM_NOTABLE_INVALID_PORTRAIT",
+          category: "validation",
+          message: "Notable portrait must be a string URL"
+        })
+      );
+    }
+    const portrait = raw.portrait ? raw.portrait.trim() : void 0;
+    return ok({
+      id: raw.id,
+      type: "inline",
+      name: raw.name.trim(),
+      portrait,
+      description,
+      tags,
+      visibility
+    });
+  }
+  if (raw.type === "actor") {
+    if (typeof raw.actorUuid !== "string" || !isActorUuid(raw.actorUuid)) {
+      return err(
+        createPublicError({
+          code: "DM_NOTABLE_INVALID_ACTOR_REF",
+          category: "validation",
+          message: `Actor Notable requires a valid Actor UUID, received: '${String(raw.actorUuid)}'`
+        })
+      );
+    }
+    const name = typeof raw.name === "string" && raw.name.trim().length > 0 ? raw.name.trim() : void 0;
+    return ok({
+      id: raw.id,
+      type: "actor",
+      actorUuid: raw.actorUuid,
+      name,
+      description,
+      tags,
+      visibility
+    });
+  }
+  return err(
+    createPublicError({
+      code: "DM_NOTABLE_INVALID_TYPE",
+      category: "validation",
+      message: `Invalid notable type: '${String(raw.type)}'. Must be 'inline' or 'actor'`
+    })
+  );
+}
+
+// src/people/roles/role-types.ts
+var ROLE_VISIBILITIES = Object.freeze([
+  "public",
+  "restricted",
+  "secret"
+]);
+function isRoleVisibility(value) {
+  return typeof value === "string" && ROLE_VISIBILITIES.includes(value);
+}
+var DEFAULT_ROLE_DEFINITIONS = Object.freeze([
+  {
+    id: "domain-manager:leader",
+    version: 1,
+    label: "Leader",
+    description: "Primary leader or ruler of the domain",
+    occupancy: { min: 1, max: 1 }
+  },
+  {
+    id: "domain-manager:administrator",
+    version: 1,
+    label: "Administrator",
+    description: "Manages day-to-day operations and civil affairs",
+    occupancy: { min: 0, max: 2 }
+  },
+  {
+    id: "domain-manager:commander",
+    version: 1,
+    label: "Military Commander",
+    description: "Directs defenses and garrison forces",
+    occupancy: { min: 0, max: 1 }
+  },
+  {
+    id: "domain-manager:treasurer",
+    version: 1,
+    label: "Treasurer",
+    description: "Oversees revenue, vaults, and fiscal planning",
+    occupancy: { min: 0, max: 1 }
+  },
+  {
+    id: "domain-manager:councilor",
+    version: 1,
+    label: "Councilor",
+    description: "Advises leadership on policy and external relations",
+    occupancy: { min: 0, max: null }
+  }
+]);
+function validateDomainRole(candidate, definitions = DEFAULT_ROLE_DEFINITIONS) {
+  if (!candidate || typeof candidate !== "object") {
+    return err(
+      createPublicError({
+        code: "DM_ROLE_INVALID",
+        category: "validation",
+        message: "DomainRole must be an object"
+      })
+    );
+  }
+  const raw = candidate;
+  if (!isOpaqueId(raw.id, "role")) {
+    return err(
+      createPublicError({
+        code: "DM_ROLE_INVALID_ID",
+        category: "validation",
+        message: `DomainRole id must be an opaque ID with prefix 'role_', received: '${String(raw.id)}'`
+      })
+    );
+  }
+  if (typeof raw.definitionId !== "string" || raw.definitionId.trim().length === 0) {
+    return err(
+      createPublicError({
+        code: "DM_ROLE_INVALID_DEFINITION_ID",
+        category: "validation",
+        message: "DomainRole definitionId is required"
+      })
+    );
+  }
+  const definition = definitions.find((d) => d.id === raw.definitionId);
+  if (raw.customLabel !== void 0 && raw.customLabel !== null) {
+    if (typeof raw.customLabel !== "string" || raw.customLabel.trim().length === 0) {
+      return err(
+        createPublicError({
+          code: "DM_ROLE_INVALID_LABEL",
+          category: "validation",
+          message: "DomainRole customLabel must be a non-empty string if provided"
+        })
+      );
+    }
+  }
+  const customLabel = raw.customLabel ? raw.customLabel.trim() : void 0;
+  if (!Array.isArray(raw.occupants) || raw.occupants.some((o) => !isOpaqueId(o, "not"))) {
+    return err(
+      createPublicError({
+        code: "DM_ROLE_INVALID_OCCUPANTS",
+        category: "validation",
+        message: "DomainRole occupants must be an array of notable IDs (not_*)"
+      })
+    );
+  }
+  const occupantSet = new Set(raw.occupants);
+  if (occupantSet.size !== raw.occupants.length) {
+    return err(
+      createPublicError({
+        code: "DM_ROLE_DUPLICATE_OCCUPANT",
+        category: "validation",
+        message: "Duplicate notable occupant found in role"
+      })
+    );
+  }
+  if (definition && definition.occupancy.max !== null && raw.occupants.length > definition.occupancy.max) {
+    return err(
+      createPublicError({
+        code: "DM_ROLE_OCCUPANCY_EXCEEDED",
+        category: "validation",
+        message: `Role occupants count (${raw.occupants.length}) exceeds maximum allowed (${definition.occupancy.max})`
+      })
+    );
+  }
+  const visibility = raw.visibility === void 0 ? "public" : raw.visibility;
+  if (!isRoleVisibility(visibility)) {
+    return err(
+      createPublicError({
+        code: "DM_ROLE_INVALID_VISIBILITY",
+        category: "validation",
+        message: `Invalid role visibility: '${String(raw.visibility)}'. Must be one of: ${ROLE_VISIBILITIES.join(", ")}`
+      })
+    );
+  }
+  if (raw.notes !== void 0 && raw.notes !== null) {
+    if (typeof raw.notes !== "string") {
+      return err(
+        createPublicError({
+          code: "DM_ROLE_INVALID_NOTES",
+          category: "validation",
+          message: "Role notes must be a string"
+        })
+      );
+    }
+    if (raw.notes.length > 2e3) {
+      return err(
+        createPublicError({
+          code: "DM_ROLE_NOTES_TOO_LONG",
+          category: "validation",
+          message: "Role notes must not exceed 2000 characters"
+        })
+      );
+    }
+  }
+  const notes = raw.notes ? raw.notes.trim() : void 0;
+  if (raw.tags !== void 0 && (!Array.isArray(raw.tags) || raw.tags.some((t) => typeof t !== "string"))) {
+    return err(
+      createPublicError({
+        code: "DM_ROLE_INVALID_TAGS",
+        category: "validation",
+        message: "Role tags must be an array of strings"
+      })
+    );
+  }
+  const tags = Object.freeze(Array.isArray(raw.tags) ? [...raw.tags] : []);
+  return ok({
+    id: raw.id,
+    definitionId: raw.definitionId.trim(),
+    customLabel,
+    occupants: Object.freeze([...raw.occupants]),
+    visibility,
+    notes,
+    tags
+  });
+}
+
+// src/people/operational-groups/operational-group-types.ts
+var OPERATIONAL_GROUP_LIFECYCLES = Object.freeze([
+  "active",
+  "inactive",
+  "disbanded"
+]);
+function isOperationalGroupLifecycle(value) {
+  return typeof value === "string" && OPERATIONAL_GROUP_LIFECYCLES.includes(value);
+}
+var OPERATIONAL_GROUP_MEMBERSHIP_MODES = Object.freeze([
+  "abstract",
+  "partial",
+  "explicit"
+]);
+function isOperationalGroupMembershipMode(value) {
+  return typeof value === "string" && OPERATIONAL_GROUP_MEMBERSHIP_MODES.includes(value);
+}
+var OPERATIONAL_GROUP_VISIBILITIES = Object.freeze([
+  "public",
+  "restricted",
+  "secret"
+]);
+function isOperationalGroupVisibility(value) {
+  return typeof value === "string" && OPERATIONAL_GROUP_VISIBILITIES.includes(value);
+}
+var DEFAULT_OPERATIONAL_GROUP_DEFINITIONS = Object.freeze([
+  {
+    id: "domain-manager:militia",
+    version: 1,
+    label: "Local Militia",
+    description: "Basic garrison and defensive force",
+    defaultMembershipMode: "partial"
+  },
+  {
+    id: "domain-manager:labor-squad",
+    version: 1,
+    label: "Labor Squad",
+    description: "Organized civilian workforce for infrastructure and projects",
+    defaultMembershipMode: "abstract"
+  },
+  {
+    id: "domain-manager:scout-patrol",
+    version: 1,
+    label: "Scout Patrol",
+    description: "Mobile reconnaissance unit operating on domain frontiers",
+    defaultMembershipMode: "explicit"
+  }
+]);
+function validateOperationalGroup(candidate) {
+  if (!candidate || typeof candidate !== "object") {
+    return err(
+      createPublicError({
+        code: "DM_OPG_INVALID",
+        category: "validation",
+        message: "OperationalGroup must be an object"
+      })
+    );
+  }
+  const raw = candidate;
+  if (!isOpaqueId(raw.id, "opg")) {
+    return err(
+      createPublicError({
+        code: "DM_OPG_INVALID_ID",
+        category: "validation",
+        message: `OperationalGroup id must be an opaque ID with prefix 'opg_', received: '${String(raw.id)}'`
+      })
+    );
+  }
+  if (typeof raw.name !== "string" || raw.name.trim().length === 0) {
+    return err(
+      createPublicError({
+        code: "DM_OPG_INVALID_NAME",
+        category: "validation",
+        message: "OperationalGroup name must be a non-empty string"
+      })
+    );
+  }
+  const name = raw.name.trim();
+  if (typeof raw.definitionId !== "string" || raw.definitionId.trim().length === 0) {
+    return err(
+      createPublicError({
+        code: "DM_OPG_INVALID_DEFINITION_ID",
+        category: "validation",
+        message: "OperationalGroup definitionId is required"
+      })
+    );
+  }
+  const definitionId = raw.definitionId.trim();
+  const membershipMode = raw.membershipMode === void 0 ? "abstract" : raw.membershipMode;
+  if (!isOperationalGroupMembershipMode(membershipMode)) {
+    return err(
+      createPublicError({
+        code: "DM_OPG_INVALID_MEMBERSHIP_MODE",
+        category: "validation",
+        message: `Invalid membershipMode: '${String(raw.membershipMode)}'. Must be one of: ${OPERATIONAL_GROUP_MEMBERSHIP_MODES.join(", ")}`
+      })
+    );
+  }
+  const rawMembers = raw.members === void 0 ? [] : raw.members;
+  if (!Array.isArray(rawMembers) || rawMembers.some((m) => !isOpaqueId(m, "not"))) {
+    return err(
+      createPublicError({
+        code: "DM_OPG_INVALID_MEMBERS",
+        category: "validation",
+        message: "OperationalGroup members must be an array of notable IDs (not_*)"
+      })
+    );
+  }
+  const memberSet = new Set(rawMembers);
+  if (memberSet.size !== rawMembers.length) {
+    return err(
+      createPublicError({
+        code: "DM_OPG_DUPLICATE_MEMBER",
+        category: "validation",
+        message: "Duplicate notable member found in OperationalGroup"
+      })
+    );
+  }
+  if (membershipMode === "abstract" && rawMembers.length > 0) {
+    return err(
+      createPublicError({
+        code: "DM_OPG_ABSTRACT_CANNOT_HAVE_MEMBERS",
+        category: "validation",
+        message: "OperationalGroup in 'abstract' membership mode cannot have individual members in roster"
+      })
+    );
+  }
+  let size;
+  if (membershipMode === "explicit") {
+    size = rawMembers.length;
+  } else {
+    if (typeof raw.size !== "number" || !Number.isSafeInteger(raw.size) || raw.size < 0) {
+      return err(
+        createPublicError({
+          code: "DM_OPG_INVALID_SIZE",
+          category: "validation",
+          message: "OperationalGroup size must be a non-negative integer for abstract/partial modes"
+        })
+      );
+    }
+    size = raw.size;
+    if (membershipMode === "partial" && rawMembers.length > size) {
+      return err(
+        createPublicError({
+          code: "DM_OPG_PARTIAL_MEMBERS_EXCEED_SIZE",
+          category: "validation",
+          message: `OperationalGroup roster length (${rawMembers.length}) cannot exceed declared size (${size}) in partial mode`
+        })
+      );
+    }
+  }
+  const lifecycle = raw.lifecycle === void 0 ? "active" : raw.lifecycle;
+  if (!isOperationalGroupLifecycle(lifecycle)) {
+    return err(
+      createPublicError({
+        code: "DM_OPG_INVALID_LIFECYCLE",
+        category: "validation",
+        message: `Invalid lifecycle: '${String(raw.lifecycle)}'. Must be one of: ${OPERATIONAL_GROUP_LIFECYCLES.join(", ")}`
+      })
+    );
+  }
+  const visibility = raw.visibility === void 0 ? "public" : raw.visibility;
+  if (!isOperationalGroupVisibility(visibility)) {
+    return err(
+      createPublicError({
+        code: "DM_OPG_INVALID_VISIBILITY",
+        category: "validation",
+        message: `Invalid visibility: '${String(raw.visibility)}'. Must be one of: ${OPERATIONAL_GROUP_VISIBILITIES.join(", ")}`
+      })
+    );
+  }
+  let populationGroupId = void 0;
+  if (raw.populationGroupId !== void 0 && raw.populationGroupId !== null) {
+    if (!isOpaqueId(raw.populationGroupId, "pop")) {
+      return err(
+        createPublicError({
+          code: "DM_OPG_INVALID_POPULATION_GROUP_ID",
+          category: "validation",
+          message: `populationGroupId must have prefix 'pop_', received: '${String(raw.populationGroupId)}'`
+        })
+      );
+    }
+    populationGroupId = raw.populationGroupId;
+  }
+  if (raw.notes !== void 0 && raw.notes !== null) {
+    if (typeof raw.notes !== "string") {
+      return err(
+        createPublicError({
+          code: "DM_OPG_INVALID_NOTES",
+          category: "validation",
+          message: "OperationalGroup notes must be a string"
+        })
+      );
+    }
+    if (raw.notes.length > 2e3) {
+      return err(
+        createPublicError({
+          code: "DM_OPG_NOTES_TOO_LONG",
+          category: "validation",
+          message: "OperationalGroup notes must not exceed 2000 characters"
+        })
+      );
+    }
+  }
+  const notes = raw.notes ? raw.notes.trim() : void 0;
+  if (raw.tags !== void 0 && (!Array.isArray(raw.tags) || raw.tags.some((t) => typeof t !== "string"))) {
+    return err(
+      createPublicError({
+        code: "DM_OPG_INVALID_TAGS",
+        category: "validation",
+        message: "OperationalGroup tags must be an array of strings"
+      })
+    );
+  }
+  const tags = Object.freeze(Array.isArray(raw.tags) ? [...raw.tags] : []);
+  return ok({
+    id: raw.id,
+    name,
+    definitionId,
+    membershipMode,
+    size,
+    members: Object.freeze([...rawMembers]),
+    lifecycle,
+    visibility,
+    populationGroupId,
+    notes,
+    tags
+  });
+}
+
+// src/people/assignments/assignment-types.ts
+var ASSIGNMENT_STATUSES = Object.freeze([
+  "active",
+  "completed",
+  "cancelled"
+]);
+function isAssignmentStatus(value) {
+  return typeof value === "string" && ASSIGNMENT_STATUSES.includes(value);
+}
+var RESERVATION_STATUSES = Object.freeze([
+  "active",
+  "claimed",
+  "expired",
+  "released"
+]);
+function isReservationStatus(value) {
+  return typeof value === "string" && RESERVATION_STATUSES.includes(value);
+}
+function validateAssignment(candidate) {
+  if (!candidate || typeof candidate !== "object") {
+    return err(
+      createPublicError({
+        code: "DM_ASSIGNMENT_INVALID",
+        category: "validation",
+        message: "Assignment must be an object"
+      })
+    );
+  }
+  const raw = candidate;
+  if (!isOpaqueId(raw.id, "asg")) {
+    return err(
+      createPublicError({
+        code: "DM_ASSIGNMENT_INVALID_ID",
+        category: "validation",
+        message: `Assignment id must be an opaque ID with prefix 'asg_', received: '${String(raw.id)}'`
+      })
+    );
+  }
+  if (typeof raw.sourceRef !== "string" || raw.sourceRef.trim().length === 0) {
+    return err(
+      createPublicError({
+        code: "DM_ASSIGNMENT_INVALID_SOURCE",
+        category: "validation",
+        message: "sourceRef is required"
+      })
+    );
+  }
+  if (typeof raw.targetRef !== "string" || raw.targetRef.trim().length === 0) {
+    return err(
+      createPublicError({
+        code: "DM_ASSIGNMENT_INVALID_TARGET",
+        category: "validation",
+        message: "targetRef is required"
+      })
+    );
+  }
+  if (typeof raw.workforceTypeId !== "string" || raw.workforceTypeId.trim().length === 0) {
+    return err(
+      createPublicError({
+        code: "DM_ASSIGNMENT_INVALID_WORKFORCE_TYPE",
+        category: "validation",
+        message: "workforceTypeId is required"
+      })
+    );
+  }
+  if (typeof raw.amount !== "number" || !Number.isSafeInteger(raw.amount) || raw.amount <= 0) {
+    return err(
+      createPublicError({
+        code: "DM_ASSIGNMENT_INVALID_AMOUNT",
+        category: "validation",
+        message: "amount must be a positive safe integer"
+      })
+    );
+  }
+  const status = raw.status === void 0 ? "active" : raw.status;
+  if (!isAssignmentStatus(status)) {
+    return err(
+      createPublicError({
+        code: "DM_ASSIGNMENT_INVALID_STATUS",
+        category: "validation",
+        message: `Invalid assignment status: '${String(raw.status)}'`
+      })
+    );
+  }
+  if (raw.notes !== void 0 && raw.notes !== null) {
+    if (typeof raw.notes !== "string") {
+      return err(
+        createPublicError({
+          code: "DM_ASSIGNMENT_INVALID_NOTES",
+          category: "validation",
+          message: "notes must be a string"
+        })
+      );
+    }
+  }
+  return ok({
+    id: raw.id,
+    sourceRef: raw.sourceRef.trim(),
+    targetRef: raw.targetRef.trim(),
+    workforceTypeId: raw.workforceTypeId.trim(),
+    amount: raw.amount,
+    status,
+    notes: typeof raw.notes === "string" ? raw.notes.trim() : void 0
+  });
+}
+function validateReservation(candidate) {
+  if (!candidate || typeof candidate !== "object") {
+    return err(
+      createPublicError({
+        code: "DM_RESERVATION_INVALID",
+        category: "validation",
+        message: "Reservation must be an object"
+      })
+    );
+  }
+  const raw = candidate;
+  if (!isOpaqueId(raw.id, "resv")) {
+    return err(
+      createPublicError({
+        code: "DM_RESERVATION_INVALID_ID",
+        category: "validation",
+        message: `Reservation id must be an opaque ID with prefix 'resv_', received: '${String(raw.id)}'`
+      })
+    );
+  }
+  if (typeof raw.sourceRef !== "string" || raw.sourceRef.trim().length === 0) {
+    return err(
+      createPublicError({
+        code: "DM_RESERVATION_INVALID_SOURCE",
+        category: "validation",
+        message: "sourceRef is required"
+      })
+    );
+  }
+  if (typeof raw.targetRef !== "string" || raw.targetRef.trim().length === 0) {
+    return err(
+      createPublicError({
+        code: "DM_RESERVATION_INVALID_TARGET",
+        category: "validation",
+        message: "targetRef is required"
+      })
+    );
+  }
+  if (typeof raw.workforceTypeId !== "string" || raw.workforceTypeId.trim().length === 0) {
+    return err(
+      createPublicError({
+        code: "DM_RESERVATION_INVALID_WORKFORCE_TYPE",
+        category: "validation",
+        message: "workforceTypeId is required"
+      })
+    );
+  }
+  if (typeof raw.amount !== "number" || !Number.isSafeInteger(raw.amount) || raw.amount <= 0) {
+    return err(
+      createPublicError({
+        code: "DM_RESERVATION_INVALID_AMOUNT",
+        category: "validation",
+        message: "amount must be a positive safe integer"
+      })
+    );
+  }
+  const status = raw.status === void 0 ? "active" : raw.status;
+  if (!isReservationStatus(status)) {
+    return err(
+      createPublicError({
+        code: "DM_RESERVATION_INVALID_STATUS",
+        category: "validation",
+        message: `Invalid reservation status: '${String(raw.status)}'`
+      })
+    );
+  }
+  let expiresAtReal = void 0;
+  if (raw.expiresAtReal !== void 0 && raw.expiresAtReal !== null) {
+    if (typeof raw.expiresAtReal !== "number" || !Number.isFinite(raw.expiresAtReal)) {
+      return err(
+        createPublicError({
+          code: "DM_RESERVATION_INVALID_EXPIRY",
+          category: "validation",
+          message: "expiresAtReal must be a finite number"
+        })
+      );
+    }
+    expiresAtReal = raw.expiresAtReal;
+  }
+  if (raw.notes !== void 0 && raw.notes !== null) {
+    if (typeof raw.notes !== "string") {
+      return err(
+        createPublicError({
+          code: "DM_RESERVATION_INVALID_NOTES",
+          category: "validation",
+          message: "notes must be a string"
+        })
+      );
+    }
+  }
+  return ok({
+    id: raw.id,
+    sourceRef: raw.sourceRef.trim(),
+    targetRef: raw.targetRef.trim(),
+    workforceTypeId: raw.workforceTypeId.trim(),
+    amount: raw.amount,
+    status,
+    expiresAtReal,
+    notes: typeof raw.notes === "string" ? raw.notes.trim() : void 0
+  });
+}
+
+// src/people/people-data.ts
+var PEOPLE_SCHEMA_VERSION = 1;
+function validateDomainPeopleData(raw) {
+  if (!raw || typeof raw !== "object") {
+    return err(
+      createPublicError({
+        code: "DM_PEOPLE_DATA_INVALID",
+        category: "validation",
+        message: "People data must be an object"
+      })
+    );
+  }
+  const candidate = raw;
+  if (candidate.schemaVersion !== PEOPLE_SCHEMA_VERSION) {
+    return err(
+      createPublicError({
+        code: "DM_PEOPLE_INVALID_SCHEMA_VERSION",
+        category: "validation",
+        message: `Invalid People schemaVersion: ${String(candidate.schemaVersion)}. Expected ${PEOPLE_SCHEMA_VERSION}`
+      })
+    );
+  }
+  const popResult = validatePopulationState(candidate.population);
+  if (!popResult.ok) {
+    return popResult;
+  }
+  if (!Array.isArray(candidate.populationGroups)) {
+    return err(
+      createPublicError({
+        code: "DM_PEOPLE_INVALID_GROUPS",
+        category: "validation",
+        message: "populationGroups must be an array"
+      })
+    );
+  }
+  const validatedGroups = [];
+  const groupIds = /* @__PURE__ */ new Set();
+  for (const g of candidate.populationGroups) {
+    const groupResult = validatePopulationGroup(g);
+    if (!groupResult.ok) {
+      return groupResult;
+    }
+    if (groupIds.has(groupResult.value.id)) {
+      return err(
+        createPublicError({
+          code: "DM_PEOPLE_DUPLICATE_GROUP_ID",
+          category: "validation",
+          message: `Duplicate population group ID found: ${groupResult.value.id}`
+        })
+      );
+    }
+    groupIds.add(groupResult.value.id);
+    validatedGroups.push(groupResult.value);
+  }
+  if (candidate.notables !== void 0 && !Array.isArray(candidate.notables)) {
+    return err(
+      createPublicError({
+        code: "DM_PEOPLE_INVALID_NOTABLES",
+        category: "validation",
+        message: "notables must be an array"
+      })
+    );
+  }
+  const rawNotables = Array.isArray(candidate.notables) ? candidate.notables : [];
+  const validatedNotables = [];
+  const notableIds = /* @__PURE__ */ new Set();
+  const notableActorUuids = /* @__PURE__ */ new Set();
+  for (const n of rawNotables) {
+    const notableResult = validateNotable(n);
+    if (!notableResult.ok) {
+      return notableResult;
+    }
+    const val = notableResult.value;
+    if (notableIds.has(val.id)) {
+      return err(
+        createPublicError({
+          code: "DM_PEOPLE_DUPLICATE_NOTABLE_ID",
+          category: "validation",
+          message: `Duplicate notable ID found: ${val.id}`
+        })
+      );
+    }
+    notableIds.add(val.id);
+    if (val.type === "actor") {
+      if (notableActorUuids.has(val.actorUuid)) {
+        return err(
+          createPublicError({
+            code: "DM_NOTABLE_DUPLICATE_ACTOR",
+            category: "validation",
+            message: `Actor '${val.actorUuid}' is already linked to a Notable in this domain`
+          })
+        );
+      }
+      notableActorUuids.add(val.actorUuid);
+    }
+    validatedNotables.push(val);
+  }
+  if (candidate.roles !== void 0 && !Array.isArray(candidate.roles)) {
+    return err(
+      createPublicError({
+        code: "DM_PEOPLE_INVALID_ROLES",
+        category: "validation",
+        message: "roles must be an array"
+      })
+    );
+  }
+  const rawRoles = Array.isArray(candidate.roles) ? candidate.roles : [];
+  const validatedRoles = [];
+  const roleIds = /* @__PURE__ */ new Set();
+  for (const r of rawRoles) {
+    const roleResult = validateDomainRole(r);
+    if (!roleResult.ok) {
+      return roleResult;
+    }
+    const val = roleResult.value;
+    if (roleIds.has(val.id)) {
+      return err(
+        createPublicError({
+          code: "DM_PEOPLE_DUPLICATE_ROLE_ID",
+          category: "validation",
+          message: `Duplicate role ID found: ${val.id}`
+        })
+      );
+    }
+    roleIds.add(val.id);
+    for (const occupantId of val.occupants) {
+      if (!notableIds.has(occupantId)) {
+        return err(
+          createPublicError({
+            code: "DM_NOTABLE_NOT_FOUND",
+            category: "not-found",
+            message: `Role occupant notable '${occupantId}' does not exist in domain`
+          })
+        );
+      }
+    }
+    validatedRoles.push(val);
+  }
+  if (candidate.operationalGroups !== void 0 && !Array.isArray(candidate.operationalGroups)) {
+    return err(
+      createPublicError({
+        code: "DM_PEOPLE_INVALID_OPERATIONAL_GROUPS",
+        category: "validation",
+        message: "operationalGroups must be an array"
+      })
+    );
+  }
+  const rawOperationalGroups = Array.isArray(candidate.operationalGroups) ? candidate.operationalGroups : [];
+  const validatedOperationalGroups = [];
+  const opgIds = /* @__PURE__ */ new Set();
+  for (const o of rawOperationalGroups) {
+    const opgResult = validateOperationalGroup(o);
+    if (!opgResult.ok) {
+      return opgResult;
+    }
+    const val = opgResult.value;
+    if (opgIds.has(val.id)) {
+      return err(
+        createPublicError({
+          code: "DM_PEOPLE_DUPLICATE_OPERATIONAL_GROUP_ID",
+          category: "validation",
+          message: `Duplicate operational group ID found: ${val.id}`
+        })
+      );
+    }
+    opgIds.add(val.id);
+    for (const memberId of val.members) {
+      if (!notableIds.has(memberId)) {
+        return err(
+          createPublicError({
+            code: "DM_NOTABLE_NOT_FOUND",
+            category: "not-found",
+            message: `OperationalGroup member notable '${memberId}' does not exist in domain`
+          })
+        );
+      }
+    }
+    if (val.populationGroupId !== void 0 && !groupIds.has(val.populationGroupId)) {
+      return err(
+        createPublicError({
+          code: "DM_POPULATION_GROUP_NOT_FOUND",
+          category: "not-found",
+          message: `Linked population group '${val.populationGroupId}' does not exist in domain`
+        })
+      );
+    }
+    validatedOperationalGroups.push(val);
+  }
+  if (candidate.assignments !== void 0 && !Array.isArray(candidate.assignments)) {
+    return err(
+      createPublicError({
+        code: "DM_PEOPLE_INVALID_ASSIGNMENTS",
+        category: "validation",
+        message: "assignments must be an array"
+      })
+    );
+  }
+  const rawAssignments = Array.isArray(candidate.assignments) ? candidate.assignments : [];
+  const validatedAssignments = [];
+  const asgIds = /* @__PURE__ */ new Set();
+  for (const a of rawAssignments) {
+    const asgRes = validateAssignment(a);
+    if (!asgRes.ok) {
+      return asgRes;
+    }
+    const val = asgRes.value;
+    if (asgIds.has(val.id)) {
+      return err(
+        createPublicError({
+          code: "DM_PEOPLE_DUPLICATE_ASSIGNMENT_ID",
+          category: "validation",
+          message: `Duplicate assignment ID found: ${val.id}`
+        })
+      );
+    }
+    asgIds.add(val.id);
+    validatedAssignments.push(val);
+  }
+  if (candidate.reservations !== void 0 && !Array.isArray(candidate.reservations)) {
+    return err(
+      createPublicError({
+        code: "DM_PEOPLE_INVALID_RESERVATIONS",
+        category: "validation",
+        message: "reservations must be an array"
+      })
+    );
+  }
+  const rawReservations = Array.isArray(candidate.reservations) ? candidate.reservations : [];
+  const validatedReservations = [];
+  const resvIds = /* @__PURE__ */ new Set();
+  for (const r of rawReservations) {
+    const resvRes = validateReservation(r);
+    if (!resvRes.ok) {
+      return resvRes;
+    }
+    const val = resvRes.value;
+    if (resvIds.has(val.id)) {
+      return err(
+        createPublicError({
+          code: "DM_PEOPLE_DUPLICATE_RESERVATION_ID",
+          category: "validation",
+          message: `Duplicate reservation ID found: ${val.id}`
+        })
+      );
+    }
+    resvIds.add(val.id);
+    validatedReservations.push(val);
+  }
+  return ok({
+    schemaVersion: PEOPLE_SCHEMA_VERSION,
+    population: popResult.value,
+    populationGroups: Object.freeze(validatedGroups),
+    notables: Object.freeze(validatedNotables),
+    roles: Object.freeze(validatedRoles),
+    operationalGroups: Object.freeze(validatedOperationalGroups),
+    assignments: Object.freeze(validatedAssignments),
+    reservations: Object.freeze(validatedReservations)
+  });
+}
+
 // src/domains/domain-capabilities.ts
 var CapabilityRegistry = class {
   definitions = /* @__PURE__ */ new Map();
@@ -629,6 +1798,16 @@ function createDefaultCapabilityRegistry() {
   const registry = new CapabilityRegistry();
   registry.register({ id: "domain-manager:core", label: "Core technical shell", functional: false });
   registry.register({ id: "domain-manager:domain", label: "Domain management", functional: true });
+  registry.register({
+    id: "domain-manager:people",
+    label: "People & Population management",
+    functional: true,
+    validateConfig: (config) => {
+      if (config === void 0 || config === null) return ok(void 0);
+      const res = validateDomainPeopleData(config);
+      return res.ok ? ok(void 0) : err(res.error);
+    }
+  });
   return registry;
 }
 var domainCapabilityRegistry = createDefaultCapabilityRegistry();
@@ -1488,13 +2667,6 @@ var DomainRepository = class {
     }, { expectedRevision });
   }
 };
-
-// src/core/identity/ids.ts
-function isOpaqueId(value, prefix) {
-  if (typeof value !== "string") return false;
-  const pattern = prefix === void 0 ? /^(cmd|tx|prj|rel|rep|led|resv|req|role)_[0-9a-f-]{36}$/ : new RegExp(`^${prefix}_[0-9a-f-]{36}$`);
-  return pattern.test(value);
-}
 
 // src/commands/command-envelope.ts
 var COMMAND_CONTRACT_VERSION_V1 = 1;

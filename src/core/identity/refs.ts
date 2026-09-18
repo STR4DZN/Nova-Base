@@ -39,3 +39,18 @@ export function worldJournalEntryUuid(id: string): string {
   }
   return `JournalEntry.${id}`;
 }
+
+export function isActorUuid(value: unknown): value is string {
+  if (!isFoundryUuid(value)) return false;
+  const segments = (value as string).split(".");
+  if (segments[0] === "Actor") return segments.length >= 2;
+  if (segments[0] !== "Compendium") return false;
+  return segments.includes("Actor");
+}
+
+export function worldActorUuid(id: string): string {
+  if (typeof id !== "string" || id.trim().length === 0 || id.includes(".")) {
+    throw new Error("Actor id must be a non-empty local document id");
+  }
+  return `Actor.${id}`;
+}
