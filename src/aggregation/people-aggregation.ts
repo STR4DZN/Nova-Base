@@ -3,14 +3,15 @@ import { err, ok, type Result } from "../core/contracts/result.js";
 import type { DomainReadRepository } from "../storage/repositories/domain-repository.js";
 import { getDomainPeopleData } from "../people/people-data.js";
 import { PeopleProjectionService } from "../projection/people/people-projection-service.js";
-import type { ViewerIdentity } from "../projection/viewer-identity.js";
+import { resolveCurrentViewer, type ViewerIdentity } from "../projection/viewer-identity.js";
 import type { RoleDefinition } from "../people/roles/role-types.js";
 import type { OperationalGroupDefinition } from "../people/operational-groups/operational-group-types.js";
 
 export interface PeopleAggregationQueryOptions {
   readonly recursive?: boolean; // default: true
-  readonly viewer?: ViewerIdentity;
+  readonly viewer?: Partial<ViewerIdentity>;
   readonly nowReal?: number;
+  readonly nowWorld?: number;
   readonly roleDefinitions?: readonly RoleDefinition[];
   readonly groupDefinitions?: readonly OperationalGroupDefinition[];
 }
@@ -37,6 +38,7 @@ export interface PeopleAggregateResult {
   readonly totalPopulation: number | null;
   readonly ownPopulation: number | null;
   readonly descendantPopulation: number | null;
+  readonly unknownContributors: readonly string[];
   readonly domainBreakdown: readonly PeopleDomainContribution[];
   readonly workforceSummary: {
     readonly ownCapacity: Readonly<Record<string, number>>;
@@ -68,7 +70,7 @@ export class PeopleAggregationService {
     }
 
     const recursive = options.recursive ?? true;
-    const viewer: ViewerIdentity = options.viewer ?? { userId: "system-authority", isGm: true };
+    const viewer = resolveCurrentViewer(options.viewer);
     const projectionService = new PeopleProjectionService({
       roleDefinitions: options.roleDefinitions,
       groupDefinitions: options.groupDefinitions
@@ -77,6 +79,7 @@ export class PeopleAggregationService {
     const warnings: string[] = [];
     const visitedUuids = new Set<string>();
     const domainBreakdown: PeopleDomainContribution[] = [];
+    const unknownContributors: string[] = [];
 
     let hasEstimated = false;
     let hasUnknown = false;
@@ -98,12 +101,15 @@ export class PeopleAggregationService {
         current.doc.uuid,
         people,
         viewer,
-        { nowReal: options.nowReal }
+        { nowReal: options.nowReal, nowWorld: options.nowWorld }
       );
 
       const popRes = projected.population.resolution;
       if (popRes.precision === "estimated") hasEstimated = true;
-      if (popRes.precision === "unknown") hasUnknown = true;
+      if (popRes.precision === "unknown" || popRes.total === null) {
+        hasUnknown = true;
+        unknownContributors.push(current.doc.uuid);
+      }
       if (popRes.total === null) hasNull = true;
 
       const wfCap: Record<string, number> = {};
@@ -197,6 +203,7 @@ export class PeopleAggregationService {
       totalPopulation,
       ownPopulation,
       descendantPopulation,
+      unknownContributors: Object.freeze(unknownContributors),
       domainBreakdown: Object.freeze(domainBreakdown),
       workforceSummary: {
         ownCapacity: Object.freeze(ownWorkforce),

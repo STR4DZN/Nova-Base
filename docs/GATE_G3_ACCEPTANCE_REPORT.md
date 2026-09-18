@@ -4,8 +4,8 @@
 **Gate:** G3 — People Subsystem & Lifecycle  
 **Normative Authorities:** `Documentos/99_DOMAIN_MANAGER_MASTER_SPECIFICATION_V1.md` (§13, DEC-0891 to DEC-1415), `Documentos/GATES/13_G3_PEOPLE.md`  
 **Status:** **GATE_ACCEPTED**  
-**Date:** 2026-09-17  
-**Test Suite:** 282/282 passing (0 failures, 0 regressions against G2 baseline of 233)  
+**Date:** 2026-09-18  
+**Test Suite:** 305/305 passing (0 failures, 0 regressions against G2 baseline of 233)  
 **TypeScript Conformance:** Strict, 0 errors via `tsc --noEmit`  
 
 ---
@@ -53,20 +53,35 @@ Gate G3 implements the complete, vertical **People Subsystem** for the Domain Ma
 
 ---
 
-## 4. Verification & Quality Metrics
+## 4. Gate G3 Audit Hardening & Remediation Matrix
+
+| # | Audit Finding & Focus Area | Architectural Remediation Implemented | Verification Evidence | Status |
+|---|---|---|---|:---:|
+| 1 | **Public People API & Viewer Clamping** (Security/Blocker) | Segregated `PublicPeopleApi` from `AdminPeopleApi`. Clamped caller viewer in `resolveCurrentViewer()` against session context. Non-GMs cannot request raw `DomainPeopleData` or spoof GM identities. | `tests/people/g3-audit-remediation.test.ts` | **PASS** |
+| 2 | **Assignment & Reservation Contracts** (Data Integrity) | Introduced `AssignmentTargetRegistry` with `options.validateTarget`. Enforced individual Notable capacity of 1 (DEC-1133), source-existence validation, and world-time expiration handling (`endsAtWorld`, `expiresAtWorld`). | `tests/people/g3-audit-remediation.test.ts` | **PASS** |
+| 3 | **People UI Application Controller** (Architecture) | Implemented `PeopleApplicationController` in `src/ui/domain-patterns/people/people-app.ts` providing full state orchestration (active tab, selection, view model loading, command dispatch, escaping). | `tests/people/g3-audit-remediation.test.ts` | **PASS** |
+| 4 | **Role Prerequisites Validation** (DEC-0988) | Integrated domain capability prerequisite verification in `evaluateRole()`. Roles with unmet capability prerequisites report `requirementsSatisfied: false` and list unmet capability IDs. | `tests/people/g3-audit-remediation.test.ts` | **PASS** |
+| 5 | **Restricted Visibility & Projections** (Information Leakage) | Implemented fail-closed projection logic in `PeopleProjectionService`: operational groups with `restricted` visibility and their members/occupants are completely scrubbed unless caller has explicit clearance. | `tests/people/g3-audit-remediation.test.ts` | **PASS** |
+| 6 | **Diagnostics & Authoritative Repair Tool** (Operational Maintenance) | Added 6 diagnostic codes (`DM_PEOPLE_UNKNOWN_ROLE_DEFINITION`, `DM_PEOPLE_UNKNOWN_GROUP_DEFINITION`, `DM_PEOPLE_EXPLICIT_MEMBERSHIP_MISMATCH`, `DM_PEOPLE_DANGLING_TARGET_REF`, `DM_PEOPLE_INDETERMINATE_SUM_GROUPS`, `DM_PEOPLE_WORKFORCE_OVERCOMMIT`) and implemented `PeopleRepairTool` for authoritative mutations. | `tests/people/g3-audit-remediation.test.ts` | **PASS** |
+| 7 | **People Aggregation Unknown Contributors** (DEC-1184) | Added `unknownContributors: readonly string[]` tracking domains with `unknown` or unavailable population data during hierarchy aggregation. | `tests/people/g3-audit-remediation.test.ts` | **PASS** |
+| 8 | **Operational Groups Explicit Sizing Derivation** | Fixed `updateOperationalGroupMutation` so when `membershipMode === "explicit"` and size is not explicitly overridden, size automatically reflects `members.length`. | `tests/people/operational-groups.test.ts` | **PASS** |
+
+---
+
+## 5. Verification & Quality Metrics
 
 - **TypeScript Compilation (`tsc --noEmit`)**: 0 errors. Strict typing across all data types, schemas, presenters, repositories, calculators, and mutation coordinators.
 - **Node.js Test Suite (`node tests/run-tests.mjs`)**:
-  - Total Tests: **282**
-  - Passed: **282**
+  - Total Tests: **305**
+  - Passed: **305**
   - Failed: **0**
-  - Regressions: **0** (All 233 Gate G2 tests + 49 Gate G3 tests pass 100%)
+  - Regressions: **0** (All 233 Gate G2 tests + 72 Gate G3 & Audit Hardening tests pass 100%)
 - **Capability Registry Verification**:
   - Connected `validateDomainPeopleData` directly to `CapabilityRegistry` under `domain-manager:people`.
   - Inactive domains completely skip people validation and overhead.
 
 ---
 
-## 5. Formal Conclusion
+## 6. Formal Conclusion
 
-Gate G3 (People) has satisfied all criteria specified in `Documentos/GATES/13_G3_PEOPLE.md` and `Documentos/99_DOMAIN_MANAGER_MASTER_SPECIFICATION_V1.md` (§13). Gate G3 is hereby declared **ACCEPTED**.
+Gate G3 (People) has satisfied all criteria specified in `Documentos/GATES/13_G3_PEOPLE.md` and `Documentos/99_DOMAIN_MANAGER_MASTER_SPECIFICATION_V1.md` (§13), along with all hardening requirements from the post-implementation security and architectural audit. Gate G3 is hereby declared **ACCEPTED**.

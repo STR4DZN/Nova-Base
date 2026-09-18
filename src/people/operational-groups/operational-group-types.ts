@@ -186,8 +186,7 @@ export function validateOperationalGroup(candidate: unknown): Result<Operational
   // Size calculation & derivation (DEC-1078, DEC-1079)
   let size: number;
   if (membershipMode === "explicit") {
-    // In explicit mode, size is strictly derived from members length
-    size = rawMembers.length;
+    size = typeof raw.size === "number" && Number.isSafeInteger(raw.size) && raw.size >= 0 ? raw.size : rawMembers.length;
   } else {
     // In abstract or partial mode, size is provided directly
     if (

@@ -45,7 +45,8 @@ export function getSourceCapacity(
   people: DomainPeopleData,
   sourceRef: string,
   workforceTypeId: string,
-  nowReal: number = Date.now()
+  nowReal: number = Date.now(),
+  nowWorld?: number
 ): SourceCapacityReport | null {
   // 1. Check if sourceRef is an OperationalGroup
   const opGroup = people.operationalGroups?.find((og) => og.id === sourceRef);
@@ -54,11 +55,11 @@ export function getSourceCapacity(
     const capacity = (opGroup.lifecycle === "active" && baseType === workforceTypeId) ? opGroup.size : 0;
 
     const committed = (people.assignments ?? [])
-      .filter((a) => a.sourceRef === sourceRef && a.workforceTypeId === workforceTypeId && a.status === "active")
+      .filter((a) => a.sourceRef === sourceRef && a.workforceTypeId === workforceTypeId && a.status === "active" && (nowWorld === undefined || a.endsAtWorld === undefined || a.endsAtWorld > nowWorld))
       .reduce((sum, a) => sum + a.amount, 0);
 
     const reserved = (people.reservations ?? [])
-      .filter((r) => r.sourceRef === sourceRef && r.workforceTypeId === workforceTypeId && r.status === "active" && (r.expiresAtReal === undefined || r.expiresAtReal >= nowReal))
+      .filter((r) => r.sourceRef === sourceRef && r.workforceTypeId === workforceTypeId && r.status === "active" && (r.expiresAtReal === undefined || r.expiresAtReal >= nowReal) && (nowWorld === undefined || r.expiresAtWorld === undefined || r.expiresAtWorld > nowWorld))
       .reduce((sum, r) => sum + r.amount, 0);
 
     return {
@@ -84,11 +85,11 @@ export function getSourceCapacity(
     const capacity = Math.max(0, contr - linkedDeduction);
 
     const committed = (people.assignments ?? [])
-      .filter((a) => a.sourceRef === sourceRef && a.workforceTypeId === workforceTypeId && a.status === "active")
+      .filter((a) => a.sourceRef === sourceRef && a.workforceTypeId === workforceTypeId && a.status === "active" && (nowWorld === undefined || a.endsAtWorld === undefined || a.endsAtWorld > nowWorld))
       .reduce((sum, a) => sum + a.amount, 0);
 
     const reserved = (people.reservations ?? [])
-      .filter((r) => r.sourceRef === sourceRef && r.workforceTypeId === workforceTypeId && r.status === "active" && (r.expiresAtReal === undefined || r.expiresAtReal >= nowReal))
+      .filter((r) => r.sourceRef === sourceRef && r.workforceTypeId === workforceTypeId && r.status === "active" && (r.expiresAtReal === undefined || r.expiresAtReal >= nowReal) && (nowWorld === undefined || r.expiresAtWorld === undefined || r.expiresAtWorld > nowWorld))
       .reduce((sum, r) => sum + r.amount, 0);
 
     return {
@@ -97,6 +98,29 @@ export function getSourceCapacity(
       reserved,
       available: capacity - committed - reserved
     };
+  }
+
+  // 3. Check if sourceRef is a Notable (DEC-1133)
+  if (isOpaqueId(sourceRef, "not")) {
+    const notable = people.notables?.find((n) => n.id === sourceRef);
+    if (notable) {
+      const capacity = 1;
+
+      const committed = (people.assignments ?? [])
+        .filter((a) => a.sourceRef === sourceRef && a.workforceTypeId === workforceTypeId && a.status === "active" && (nowWorld === undefined || a.endsAtWorld === undefined || a.endsAtWorld > nowWorld))
+        .reduce((sum, a) => sum + a.amount, 0);
+
+      const reserved = (people.reservations ?? [])
+        .filter((r) => r.sourceRef === sourceRef && r.workforceTypeId === workforceTypeId && r.status === "active" && (r.expiresAtReal === undefined || r.expiresAtReal >= nowReal) && (nowWorld === undefined || r.expiresAtWorld === undefined || r.expiresAtWorld > nowWorld))
+        .reduce((sum, r) => sum + r.amount, 0);
+
+      return {
+        capacity,
+        committed,
+        reserved,
+        available: capacity - committed - reserved
+      };
+    }
   }
 
   return null;
@@ -109,6 +133,9 @@ export interface CreateAssignmentPayload {
     readonly targetRef: string;
     readonly workforceTypeId: string;
     readonly amount: number;
+    readonly visibility?: "public" | "secret";
+    readonly startedAtWorld?: number;
+    readonly endsAtWorld?: number;
     readonly notes?: string;
   };
   readonly allowOvercommit?: boolean;
@@ -128,7 +155,10 @@ export interface CreateReservationPayload {
     readonly targetRef: string;
     readonly workforceTypeId: string;
     readonly amount: number;
+    readonly correlationId?: string;
+    readonly visibility?: "public" | "secret";
     readonly expiresAtReal?: number;
+    readonly expiresAtWorld?: number;
     readonly notes?: string;
   };
   readonly allowOvercommit?: boolean;
@@ -182,7 +212,6 @@ export function registerAssignmentCommandHandlers(
       const domainDoc = freshState.state as DomainDocument;
       const currentPeople = getDomainPeopleData(domainDoc.record);
       const input = ctx.command.payload.assignment;
-
       const newId = createOpaqueId("asg");
       const candidate = {
         id: newId,
@@ -190,21 +219,40 @@ export function registerAssignmentCommandHandlers(
         targetRef: input.targetRef,
         workforceTypeId: input.workforceTypeId,
         amount: input.amount,
-        createdAtReal: Date.now(),
+        status: "active" as const,
+        visibility: input.visibility,
+        startedAtWorld: input.startedAtWorld,
+        endsAtWorld: input.endsAtWorld,
         notes: input.notes
       };
 
-      const asgValidation = validateAssignment(candidate);
+      const asgValidation = validateAssignment(candidate, { validateTarget: true });
       if (!asgValidation.ok) {
         return asgValidation;
       }
       const newAsg = asgValidation.value;
 
+      // Check source existence (Audit Item 2.2)
+      const sourceCap = getSourceCapacity(
+        currentPeople,
+        newAsg.sourceRef,
+        newAsg.workforceTypeId,
+        Date.now(),
+        newAsg.startedAtWorld
+      );
+      if (sourceCap === null) {
+        return err(
+          createPublicError({
+            code: "DM_PEOPLE_SOURCE_NOT_FOUND",
+            category: "not-found",
+            message: `Source '${newAsg.sourceRef}' does not exist in domain '${domainDoc.name}'`
+          })
+        );
+      }
+
       // Check for overcommit unless GM override allowed (DEC-1033, DEC-1145)
       if (!ctx.command.payload.allowOvercommit) {
-        // DEC-1145: Source-specific capacity check
-        const sourceCap = getSourceCapacity(currentPeople, newAsg.sourceRef, newAsg.workforceTypeId);
-        if (sourceCap !== null && sourceCap.available < newAsg.amount) {
+        if (sourceCap.available < newAsg.amount) {
           return err(
             createPublicError({
               code: "DM_WORKFORCE_OVERCOMMIT",
@@ -470,15 +518,36 @@ export function registerAssignmentCommandHandlers(
         workforceTypeId: input.workforceTypeId,
         amount: input.amount,
         status: "active" as const,
+        correlationId: input.correlationId,
+        visibility: input.visibility,
         expiresAtReal: input.expiresAtReal,
+        expiresAtWorld: input.expiresAtWorld,
         notes: input.notes
       };
 
-      const resvValidation = validateReservation(candidate);
+      const resvValidation = validateReservation(candidate, { validateTarget: true });
       if (!resvValidation.ok) {
         return resvValidation;
       }
       const newResv = resvValidation.value;
+
+      // Check source existence (Audit Item 2.2)
+      const sourceCap = getSourceCapacity(
+        currentPeople,
+        newResv.sourceRef,
+        newResv.workforceTypeId,
+        Date.now(),
+        undefined
+      );
+      if (sourceCap === null) {
+        return err(
+          createPublicError({
+            code: "DM_PEOPLE_SOURCE_NOT_FOUND",
+            category: "not-found",
+            message: `Source '${newResv.sourceRef}' does not exist in domain '${domainDoc.name}'`
+          })
+        );
+      }
 
       const updatedReservations = Object.freeze([...(currentPeople.reservations ?? []), newResv]);
       const provisionalPeople: DomainPeopleData = {
@@ -488,9 +557,7 @@ export function registerAssignmentCommandHandlers(
 
       // Overcommit check (DEC-1125, DEC-1145)
       if (!ctx.command.payload.allowOvercommit) {
-        // DEC-1145: Source-specific capacity check
-        const sourceCap = getSourceCapacity(currentPeople, newResv.sourceRef, newResv.workforceTypeId, newResv.expiresAtReal);
-        if (sourceCap !== null && sourceCap.available < newResv.amount) {
+        if (sourceCap.available < newResv.amount) {
           return err(
             createPublicError({
               code: "DM_WORKFORCE_OVERCOMMIT",

@@ -448,7 +448,8 @@ export function validateDomainRole(
 export function evaluateRole(
   role: DomainRole,
   definitions: readonly RoleDefinition[] = DEFAULT_ROLE_DEFINITIONS,
-  operationalGroups?: readonly { id: string; members?: readonly string[]; lifecycle?: string }[]
+  operationalGroups?: readonly { id: string; members?: readonly string[]; lifecycle?: string }[],
+  enabledCapabilities?: readonly string[]
 ): RoleEvaluation {
   const definition = definitions.find((d) => d.id === role.definitionId);
   const effectiveLabel = role.customLabel ?? definition?.label ?? role.definitionId;
@@ -461,6 +462,20 @@ export function evaluateRole(
   const isUnderstaffed = occupantsCount < minOccupancy;
   let isRequirementSatisfied = !isUnderstaffed;
   let isValidGroupRole = true;
+
+  // Prerequisites check: if definition specifies prerequisites, all must be enabled in the domain
+  if (definition?.prerequisites && definition.prerequisites.length > 0) {
+    if (!enabledCapabilities) {
+      isRequirementSatisfied = false;
+    } else {
+      for (const prereq of definition.prerequisites) {
+        if (!enabledCapabilities.includes(prereq)) {
+          isRequirementSatisfied = false;
+          break;
+        }
+      }
+    }
+  }
 
   if (role.scope === "operational-group") {
     if (operationalGroups) {

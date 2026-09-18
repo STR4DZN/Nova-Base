@@ -287,13 +287,19 @@ export function registerOperationalGroupCommandHandlers(
       }
 
       const existing = currentPeople.operationalGroups[groupIndex];
+      const effectiveMode = update.membershipMode !== undefined ? update.membershipMode : existing.membershipMode;
+      const effectiveMembers = update.members !== undefined ? update.members : existing.members;
+      const effectiveSize = update.size !== undefined
+        ? update.size
+        : (effectiveMode === "explicit" ? effectiveMembers.length : existing.size);
+
       const mergedCandidate = {
         id: existing.id,
         name: update.name !== undefined ? update.name : existing.name,
         definitionId: existing.definitionId,
-        membershipMode: update.membershipMode !== undefined ? update.membershipMode : existing.membershipMode,
-        size: update.size !== undefined ? update.size : existing.size,
-        members: update.members !== undefined ? update.members : existing.members,
+        membershipMode: effectiveMode,
+        size: effectiveSize,
+        members: effectiveMembers,
         lifecycle: update.lifecycle !== undefined ? update.lifecycle : existing.lifecycle,
         visibility: update.visibility !== undefined ? update.visibility : existing.visibility,
         populationGroupId:

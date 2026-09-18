@@ -11,6 +11,21 @@ import type { OperationalGroup } from "../operational-groups/operational-group-t
 import { calculateWorkforce } from "../workforce/workforce-calculator.js";
 import type { WorkforceReport } from "../workforce/workforce-types.js";
 import type { Assignment, Reservation } from "../assignments/assignment-types.js";
+import { isEntityVisible } from "../../projection/people/people-projection-service.js";
+import type { ViewerIdentity } from "../../projection/viewer-identity.js";
+
+export interface PeopleRepositoryViewerOptions {
+  readonly viewer?: ViewerIdentity;
+  readonly viewerIsGm?: boolean;
+}
+
+function resolveRepoViewer(options: PeopleRepositoryViewerOptions): ViewerIdentity {
+  if (options.viewer) return options.viewer;
+  return {
+    userId: "repo-caller",
+    isGm: options.viewerIsGm ?? false
+  };
+}
 
 export class PeopleRepository {
   readonly #domainRepository: DomainRepository;
@@ -29,33 +44,50 @@ export class PeopleRepository {
   }
 
   async getPopulation(
-    domainUuid: string
+    domainUuid: string,
+    options: PeopleRepositoryViewerOptions = {}
   ): Promise<Result<{ state: PopulationState; resolution: PopulationResolution }>> {
     const peopleRes = await this.getPeopleData(domainUuid);
     if (!peopleRes.ok) {
       return peopleRes;
     }
+    const viewer = resolveRepoViewer(options);
     const { population, populationGroups } = peopleRes.value;
-    const resolution = calculatePopulation(population, populationGroups);
+    const visibleGroups = populationGroups.filter((g) => isEntityVisible(g, viewer));
+    let effectivePopState = population;
+    if (!isEntityVisible({ id: "population", visibility: population.visibility }, viewer)) {
+      effectivePopState = {
+        mode: "manual",
+        total: null,
+        precision: "unknown",
+        visibility: population.visibility
+      };
+    }
+    const resolution = calculatePopulation(effectivePopState, visibleGroups);
     return ok({
-      state: population,
+      state: effectivePopState,
       resolution
     });
   }
 
-  async getPopulationGroups(domainUuid: string): Promise<Result<readonly PopulationGroup[]>> {
+  async getPopulationGroups(
+    domainUuid: string,
+    options: PeopleRepositoryViewerOptions = {}
+  ): Promise<Result<readonly PopulationGroup[]>> {
     const peopleRes = await this.getPeopleData(domainUuid);
     if (!peopleRes.ok) {
       return peopleRes;
     }
-    return ok(peopleRes.value.populationGroups);
+    const viewer = resolveRepoViewer(options);
+    return ok(peopleRes.value.populationGroups.filter((g) => isEntityVisible(g, viewer)));
   }
 
   async getPopulationGroup(
     domainUuid: string,
-    groupId: string
+    groupId: string,
+    options: PeopleRepositoryViewerOptions = {}
   ): Promise<Result<PopulationGroup>> {
-    const groupsRes = await this.getPopulationGroups(domainUuid);
+    const groupsRes = await this.getPopulationGroups(domainUuid, options);
     if (!groupsRes.ok) {
       return groupsRes;
     }
@@ -74,23 +106,20 @@ export class PeopleRepository {
 
   async getNotables(
     domainUuid: string,
-    options: { viewerIsGm?: boolean } = {}
+    options: PeopleRepositoryViewerOptions = {}
   ): Promise<Result<readonly Notable[]>> {
     const peopleRes = await this.getPeopleData(domainUuid);
     if (!peopleRes.ok) {
       return peopleRes;
     }
-    const notables = peopleRes.value.notables;
-    if (options.viewerIsGm) {
-      return ok(notables);
-    }
-    return ok(notables.filter((n) => n.visibility !== "secret"));
+    const viewer = resolveRepoViewer(options);
+    return ok(peopleRes.value.notables.filter((n) => isEntityVisible(n, viewer)));
   }
 
   async getNotable(
     domainUuid: string,
     notableId: string,
-    options: { viewerIsGm?: boolean } = {}
+    options: PeopleRepositoryViewerOptions = {}
   ): Promise<Result<Notable>> {
     const notablesRes = await this.getNotables(domainUuid, options);
     if (!notablesRes.ok) {
@@ -113,7 +142,7 @@ export class PeopleRepository {
     domainUuid: string,
     notableId: string,
     actorResolver?: (uuid: string) => { name: string; img?: string } | null | undefined,
-    options: { viewerIsGm?: boolean } = {}
+    options: PeopleRepositoryViewerOptions = {}
   ): Promise<Result<NotableStatusReport>> {
     const notableRes = await this.getNotable(domainUuid, notableId, options);
     if (!notableRes.ok) {
@@ -121,25 +150,36 @@ export class PeopleRepository {
     }
     return ok(resolveNotableStatus(notableRes.value, actorResolver));
   }
+
   async getRoles(
     domainUuid: string,
-    options: { viewerIsGm?: boolean } = {}
+    options: PeopleRepositoryViewerOptions = {}
   ): Promise<Result<readonly DomainRole[]>> {
     const peopleRes = await this.getPeopleData(domainUuid);
     if (!peopleRes.ok) {
       return peopleRes;
     }
-    const roles = peopleRes.value.roles;
-    if (options.viewerIsGm) {
-      return ok(roles);
-    }
-    return ok(roles.filter((r) => r.visibility !== "secret"));
+    const viewer = resolveRepoViewer(options);
+    const hiddenNotableIds = new Set(
+      peopleRes.value.notables.filter((n) => !isEntityVisible(n, viewer)).map((n) => n.id)
+    );
+    const visibleRoles = peopleRes.value.roles
+      .filter((r) => isEntityVisible(r, viewer))
+      .map((r) => {
+        const visibleOccupants = r.occupants.filter((occId) => !hiddenNotableIds.has(occId));
+        if (visibleOccupants.length === r.occupants.length) return r;
+        return {
+          ...r,
+          occupants: Object.freeze(visibleOccupants)
+        };
+      });
+    return ok(visibleRoles);
   }
 
   async getRole(
     domainUuid: string,
     roleId: string,
-    options: { viewerIsGm?: boolean } = {}
+    options: PeopleRepositoryViewerOptions = {}
   ): Promise<Result<DomainRole>> {
     const rolesRes = await this.getRoles(domainUuid, options);
     if (!rolesRes.ok) {
@@ -160,23 +200,33 @@ export class PeopleRepository {
 
   async getOperationalGroups(
     domainUuid: string,
-    options: { viewerIsGm?: boolean } = {}
+    options: PeopleRepositoryViewerOptions = {}
   ): Promise<Result<readonly OperationalGroup[]>> {
     const peopleRes = await this.getPeopleData(domainUuid);
     if (!peopleRes.ok) {
       return peopleRes;
     }
-    const groups = peopleRes.value.operationalGroups;
-    if (options.viewerIsGm) {
-      return ok(groups);
-    }
-    return ok(groups.filter((g) => g.visibility !== "secret"));
+    const viewer = resolveRepoViewer(options);
+    const hiddenNotableIds = new Set(
+      peopleRes.value.notables.filter((n) => !isEntityVisible(n, viewer)).map((n) => n.id)
+    );
+    const visibleGroups = peopleRes.value.operationalGroups
+      .filter((g) => isEntityVisible(g, viewer))
+      .map((g) => {
+        const visibleMembers = g.members.filter((mId) => !hiddenNotableIds.has(mId));
+        if (visibleMembers.length === g.members.length) return g;
+        return {
+          ...g,
+          members: Object.freeze(visibleMembers)
+        };
+      });
+    return ok(visibleGroups);
   }
 
   async getOperationalGroup(
     domainUuid: string,
     groupId: string,
-    options: { viewerIsGm?: boolean } = {}
+    options: PeopleRepositoryViewerOptions = {}
   ): Promise<Result<OperationalGroup>> {
     const groupsRes = await this.getOperationalGroups(domainUuid, options);
     if (!groupsRes.ok) {
@@ -197,32 +247,98 @@ export class PeopleRepository {
 
   async getWorkforce(
     domainUuid: string,
-    nowReal?: number
+    options: { nowReal?: number; nowWorld?: number; viewer?: ViewerIdentity; viewerIsGm?: boolean } | number = {}
   ): Promise<Result<WorkforceReport>> {
     const peopleRes = await this.getPeopleData(domainUuid);
     if (!peopleRes.ok) {
       return peopleRes;
     }
-    return ok(calculateWorkforce(peopleRes.value, nowReal));
+    const optObj = typeof options === "number" ? { nowReal: options } : options;
+    const viewer = resolveRepoViewer(optObj);
+
+    if (viewer.isGm) {
+      return ok(calculateWorkforce(peopleRes.value, { nowReal: optObj.nowReal, nowWorld: optObj.nowWorld }));
+    }
+
+    const visibleGroups = peopleRes.value.populationGroups.filter((g) => isEntityVisible(g, viewer));
+    const hiddenNotableIds = new Set(peopleRes.value.notables.filter((n) => !isEntityVisible(n, viewer)).map((n) => n.id));
+    const visibleOpGroups = peopleRes.value.operationalGroups
+      .filter((g) => isEntityVisible(g, viewer))
+      .map((g) => {
+        const visibleMembers = g.members.filter((mId) => !hiddenNotableIds.has(mId));
+        if (visibleMembers.length === g.members.length) return g;
+        return { ...g, members: Object.freeze(visibleMembers) };
+      });
+
+    const hiddenPopGroupIds = new Set<string>(peopleRes.value.populationGroups.filter((g) => !isEntityVisible(g, viewer)).map((g) => g.id));
+    const hiddenOpGroupIds = new Set<string>(peopleRes.value.operationalGroups.filter((g) => !isEntityVisible(g, viewer)).map((g) => g.id));
+
+    const visibleAssignments = (peopleRes.value.assignments ?? []).filter((a) => {
+      if (!isEntityVisible(a, viewer)) return false;
+      if (hiddenPopGroupIds.has(a.sourceRef) || hiddenOpGroupIds.has(a.sourceRef) || hiddenNotableIds.has(a.sourceRef)) return false;
+      return true;
+    });
+
+    const visibleReservations = (peopleRes.value.reservations ?? []).filter((r) => {
+      if (!isEntityVisible(r, viewer)) return false;
+      if (hiddenPopGroupIds.has(r.sourceRef) || hiddenOpGroupIds.has(r.sourceRef) || hiddenNotableIds.has(r.sourceRef)) return false;
+      return true;
+    });
+
+    const projectedPeople: DomainPeopleData = {
+      ...peopleRes.value,
+      populationGroups: Object.freeze(visibleGroups),
+      operationalGroups: Object.freeze(visibleOpGroups),
+      assignments: Object.freeze(visibleAssignments),
+      reservations: Object.freeze(visibleReservations)
+    };
+
+    return ok(calculateWorkforce(projectedPeople, { nowReal: optObj.nowReal, nowWorld: optObj.nowWorld }));
   }
 
   async getAssignments(
-    domainUuid: string
+    domainUuid: string,
+    options: PeopleRepositoryViewerOptions = {}
   ): Promise<Result<readonly Assignment[]>> {
     const peopleRes = await this.getPeopleData(domainUuid);
     if (!peopleRes.ok) {
       return peopleRes;
     }
-    return ok(peopleRes.value.assignments ?? []);
+    const viewer = resolveRepoViewer(options);
+    if (viewer.isGm) {
+      return ok(peopleRes.value.assignments ?? []);
+    }
+    const hiddenNotableIds = new Set<string>(peopleRes.value.notables.filter((n) => !isEntityVisible(n, viewer)).map((n) => n.id));
+    const hiddenPopGroupIds = new Set<string>(peopleRes.value.populationGroups.filter((g) => !isEntityVisible(g, viewer)).map((g) => g.id));
+    const hiddenOpGroupIds = new Set<string>(peopleRes.value.operationalGroups.filter((g) => !isEntityVisible(g, viewer)).map((g) => g.id));
+
+    return ok((peopleRes.value.assignments ?? []).filter((a) => {
+      if (!isEntityVisible(a, viewer)) return false;
+      if (hiddenPopGroupIds.has(a.sourceRef) || hiddenOpGroupIds.has(a.sourceRef) || hiddenNotableIds.has(a.sourceRef)) return false;
+      return true;
+    }));
   }
 
   async getReservations(
-    domainUuid: string
+    domainUuid: string,
+    options: PeopleRepositoryViewerOptions = {}
   ): Promise<Result<readonly Reservation[]>> {
     const peopleRes = await this.getPeopleData(domainUuid);
     if (!peopleRes.ok) {
       return peopleRes;
     }
-    return ok(peopleRes.value.reservations ?? []);
+    const viewer = resolveRepoViewer(options);
+    if (viewer.isGm) {
+      return ok(peopleRes.value.reservations ?? []);
+    }
+    const hiddenNotableIds = new Set<string>(peopleRes.value.notables.filter((n) => !isEntityVisible(n, viewer)).map((n) => n.id));
+    const hiddenPopGroupIds = new Set<string>(peopleRes.value.populationGroups.filter((g) => !isEntityVisible(g, viewer)).map((g) => g.id));
+    const hiddenOpGroupIds = new Set<string>(peopleRes.value.operationalGroups.filter((g) => !isEntityVisible(g, viewer)).map((g) => g.id));
+
+    return ok((peopleRes.value.reservations ?? []).filter((r) => {
+      if (!isEntityVisible(r, viewer)) return false;
+      if (hiddenPopGroupIds.has(r.sourceRef) || hiddenOpGroupIds.has(r.sourceRef) || hiddenNotableIds.has(r.sourceRef)) return false;
+      return true;
+    }));
   }
 }

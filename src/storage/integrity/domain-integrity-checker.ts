@@ -5,6 +5,10 @@ import { validateDomainHierarchy, type DomainHierarchyNode } from "../../domains
 import { DOMAIN_SCHEMA_VERSION, type DomainRecord } from "../../domains/domain-schema.js";
 import { validateDomainRecord } from "../../domains/domain-validator.js";
 import { validateDomainPeopleData } from "../../people/people-data.js";
+import { DEFAULT_ROLE_DEFINITIONS } from "../../people/roles/role-types.js";
+import { DEFAULT_OPERATIONAL_GROUP_DEFINITIONS } from "../../people/operational-groups/operational-group-types.js";
+import { calculateWorkforce } from "../../people/workforce/workforce-calculator.js";
+import { defaultAssignmentTargetRegistry } from "../../people/assignments/assignment-types.js";
 
 export type DomainIntegritySeverity = "error" | "warning";
 
@@ -317,6 +321,99 @@ function addPeopleIntegrityIssues(
         { reservationId: resv.id, sourceRef: resv.sourceRef }
       ));
     }
+  }
+
+  // 6. Check Roles & OperationalGroups: Unknown definitions
+  const knownRoleDefIds = new Set(DEFAULT_ROLE_DEFINITIONS.map((d) => d.id));
+  for (const r of people.roles) {
+    if (!knownRoleDefIds.has(r.definitionId) && !r.definitionId.startsWith("custom:")) {
+      issues.push(issue(
+        "DM_PEOPLE_UNKNOWN_ROLE_DEFINITION",
+        "warning",
+        `Role '${r.id}' uses unrecognized definition '${r.definitionId}'`,
+        domainId,
+        { roleId: r.id, definitionId: r.definitionId }
+      ));
+    }
+  }
+
+  const knownGroupDefIds = new Set(DEFAULT_OPERATIONAL_GROUP_DEFINITIONS.map((d) => d.id));
+  for (const g of people.operationalGroups) {
+    if (!knownGroupDefIds.has(g.definitionId) && !g.definitionId.startsWith("custom:")) {
+      issues.push(issue(
+        "DM_PEOPLE_UNKNOWN_GROUP_DEFINITION",
+        "warning",
+        `Operational group '${g.id}' uses unrecognized definition '${g.definitionId}'`,
+        domainId,
+        { groupId: g.id, definitionId: g.definitionId }
+      ));
+    }
+  }
+
+  // 7. Check OperationalGroups: Explicit membership size mismatch
+  for (const g of people.operationalGroups) {
+    if (g.membershipMode === "explicit" && g.size !== g.members.length) {
+      issues.push(issue(
+        "DM_PEOPLE_EXPLICIT_MEMBERSHIP_MISMATCH",
+        "warning",
+        `Explicit operational group '${g.id}' (${g.name}) size (${g.size}) does not match member count (${g.members.length})`,
+        domainId,
+        { groupId: g.id, size: g.size, memberCount: g.members.length }
+      ));
+    }
+  }
+
+  // 8. Check Assignments & Reservations: targetRef validity
+  for (const a of people.assignments) {
+    if (!defaultAssignmentTargetRegistry.isValidTarget(a.targetRef)) {
+      issues.push(issue(
+        "DM_PEOPLE_DANGLING_TARGET_REF",
+        "warning",
+        `Assignment '${a.id}' references unrecognized target '${a.targetRef}'`,
+        domainId,
+        { assignmentId: a.id, targetRef: a.targetRef }
+      ));
+    }
+  }
+
+  for (const resv of people.reservations) {
+    if (!defaultAssignmentTargetRegistry.isValidTarget(resv.targetRef)) {
+      issues.push(issue(
+        "DM_PEOPLE_DANGLING_TARGET_REF",
+        "warning",
+        `Reservation '${resv.id}' references unrecognized target '${resv.targetRef}'`,
+        domainId,
+        { reservationId: resv.id, targetRef: resv.targetRef }
+      ));
+    }
+  }
+
+  // 9. Check Population: Indeterminate sumGroups
+  if (people.population.mode === "sumGroups") {
+    const hasIndeterminate = people.populationGroups.length === 0 || people.populationGroups.some(
+      (pg) => pg.count === null || pg.precision === "unknown"
+    );
+    if (hasIndeterminate) {
+      issues.push(issue(
+        "DM_PEOPLE_INDETERMINATE_SUM_GROUPS",
+        "warning",
+        "Population sumGroups mode contains groups with indeterminate or unknown counts",
+        domainId,
+        { groupCount: people.populationGroups.length }
+      ));
+    }
+  }
+
+  // 10. Check Workforce Overcommit
+  const wfReport = calculateWorkforce(people);
+  if (wfReport.isAnyOvercommitted) {
+    issues.push(issue(
+      "DM_PEOPLE_WORKFORCE_OVERCOMMIT",
+      "warning",
+      "One or more workforce types are overcommitted in the domain",
+      domainId,
+      { warnings: wfReport.warnings }
+    ));
   }
 }
 

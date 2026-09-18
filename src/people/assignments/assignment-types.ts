@@ -2,9 +2,11 @@ import { createPublicError } from "../../core/contracts/public-error.js";
 import { err, ok, type Result } from "../../core/contracts/result.js";
 import { isOpaqueId } from "../../core/identity/ids.js";
 
-export type AssignmentStatus = "active" | "completed" | "cancelled";
+export type AssignmentLifecycle = "active" | "ended";
+export type AssignmentStatus = "active" | "ended" | "completed" | "cancelled";
 export const ASSIGNMENT_STATUSES: readonly AssignmentStatus[] = Object.freeze([
   "active",
+  "ended",
   "completed",
   "cancelled"
 ]);
@@ -13,6 +15,53 @@ export function isAssignmentStatus(value: unknown): value is AssignmentStatus {
   return typeof value === "string" && ASSIGNMENT_STATUSES.includes(value as AssignmentStatus);
 }
 
+export function isAssignmentActive(status: AssignmentStatus): boolean {
+  return status === "active";
+}
+
+export type AssignmentTargetValidator = (targetRef: string) => boolean;
+
+export class AssignmentTargetRegistry {
+  readonly #allowedPrefixes = new Set<string>(["opg", "prj", "fac", "dom", "ext", "act", "loc", "djn", "tsk"]);
+  readonly #customValidators = new Map<string, AssignmentTargetValidator>();
+
+  registerPrefix(prefix: string, validator?: AssignmentTargetValidator): void {
+    this.#allowedPrefixes.add(prefix.toLowerCase());
+    if (validator) {
+      this.#customValidators.set(prefix.toLowerCase(), validator);
+    }
+  }
+
+  isValidTarget(targetRef: string): boolean {
+    if (!targetRef || typeof targetRef !== "string") return false;
+    const trimmed = targetRef.trim();
+    if (trimmed.length === 0) return false;
+
+    // Full Foundry document UUIDs
+    if (
+      trimmed.startsWith("JournalEntry.") ||
+      trimmed.startsWith("Scene.") ||
+      trimmed.startsWith("Actor.") ||
+      trimmed.startsWith("Item.")
+    ) {
+      return true;
+    }
+
+    const parts = trimmed.split("_");
+    if (parts.length >= 2) {
+      const prefix = parts[0].toLowerCase();
+      if (this.#customValidators.has(prefix)) {
+        return this.#customValidators.get(prefix)!(trimmed);
+      }
+      return this.#allowedPrefixes.has(prefix);
+    }
+
+    return false;
+  }
+}
+
+export const defaultAssignmentTargetRegistry = new AssignmentTargetRegistry();
+
 export interface Assignment {
   readonly id: string; // asg_<UUID>
   readonly sourceRef: string; // opg_*, pop_*, not_*
@@ -20,6 +69,7 @@ export interface Assignment {
   readonly workforceTypeId: string;
   readonly amount: number; // >= 1
   readonly status: AssignmentStatus;
+  readonly endedReason?: "completed" | "cancelled" | "expired" | string;
   readonly visibility?: "public" | "secret";
   readonly startedAtWorld?: number;
   readonly endsAtWorld?: number;
@@ -52,7 +102,10 @@ export interface Reservation {
   readonly notes?: string;
 }
 
-export function validateAssignment(candidate: unknown): Result<Assignment> {
+export function validateAssignment(
+  candidate: unknown,
+  options: { validateTarget?: boolean } = {}
+): Result<Assignment> {
   if (!candidate || typeof candidate !== "object") {
     return err(
       createPublicError({
@@ -95,6 +148,16 @@ export function validateAssignment(candidate: unknown): Result<Assignment> {
     );
   }
 
+  if (options.validateTarget && !defaultAssignmentTargetRegistry.isValidTarget(raw.targetRef.trim())) {
+    return err(
+      createPublicError({
+        code: "DM_ASSIGNMENT_INVALID_TARGET",
+        category: "validation",
+        message: `Target '${raw.targetRef}' is not a recognized target reference`
+      })
+    );
+  }
+
   if (typeof raw.workforceTypeId !== "string" || raw.workforceTypeId.trim().length === 0) {
     return err(
       createPublicError({
@@ -130,6 +193,20 @@ export function validateAssignment(candidate: unknown): Result<Assignment> {
         message: `Invalid assignment status: '${String(raw.status)}'`
       })
     );
+  }
+
+  let endedReason: string | undefined;
+  if (raw.endedReason !== undefined && raw.endedReason !== null) {
+    if (typeof raw.endedReason !== "string") {
+      return err(
+        createPublicError({
+          code: "DM_ASSIGNMENT_INVALID_ENDED_REASON",
+          category: "validation",
+          message: "endedReason must be a string"
+        })
+      );
+    }
+    endedReason = raw.endedReason.trim();
   }
 
   if (raw.visibility !== undefined && raw.visibility !== null) {
@@ -191,6 +268,7 @@ export function validateAssignment(candidate: unknown): Result<Assignment> {
     workforceTypeId: raw.workforceTypeId.trim(),
     amount: raw.amount,
     status,
+    endedReason,
     visibility: raw.visibility === "secret" ? "secret" : "public",
     startedAtWorld,
     endsAtWorld,
@@ -198,7 +276,10 @@ export function validateAssignment(candidate: unknown): Result<Assignment> {
   });
 }
 
-export function validateReservation(candidate: unknown): Result<Reservation> {
+export function validateReservation(
+  candidate: unknown,
+  options: { validateTarget?: boolean } = {}
+): Result<Reservation> {
   if (!candidate || typeof candidate !== "object") {
     return err(
       createPublicError({
@@ -237,6 +318,16 @@ export function validateReservation(candidate: unknown): Result<Reservation> {
         code: "DM_RESERVATION_INVALID_TARGET",
         category: "validation",
         message: "targetRef is required"
+      })
+    );
+  }
+
+  if (options.validateTarget && !defaultAssignmentTargetRegistry.isValidTarget(raw.targetRef.trim())) {
+    return err(
+      createPublicError({
+        code: "DM_RESERVATION_INVALID_TARGET",
+        category: "validation",
+        message: `Target '${raw.targetRef}' is not a recognized target reference`
       })
     );
   }

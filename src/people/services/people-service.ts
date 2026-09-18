@@ -2,10 +2,10 @@ import type { DomainReadRepository } from "../../storage/repositories/domain-rep
 import { PeopleRepository } from "../repositories/people-repository.js";
 import { PeopleProjectionService, type ViewerPeopleContext, type AdministrativePeopleContext } from "../../projection/people/people-projection-service.js";
 import { PeopleAggregationService, type PeopleAggregationQueryOptions, type PeopleAggregateResult } from "../../aggregation/people-aggregation.js";
-import type { ViewerIdentity } from "../../projection/viewer-identity.js";
+import { resolveCurrentViewer, type ViewerIdentity } from "../../projection/viewer-identity.js";
 import type { DomainPeopleData } from "../people-data.js";
 import type { PopulationGroup, PopulationResolution, PopulationState } from "../population/population-types.js";
-import type { Notable } from "../notables/notable-types.js";
+import type { Notable, NotableStatusReport } from "../notables/notable-types.js";
 import type { DomainRole, RoleDefinition } from "../roles/role-types.js";
 import type { OperationalGroup, OperationalGroupDefinition } from "../operational-groups/operational-group-types.js";
 import type { Assignment, Reservation } from "../assignments/assignment-types.js";
@@ -13,7 +13,7 @@ import type { WorkforceReport } from "../workforce/workforce-types.js";
 import type { DomainRecord } from "../../domains/domain-schema.js";
 import { resolvePeopleEffectiveCapabilities, type DomainEffectiveCapabilitiesReport } from "../../aggregation/people-grants.js";
 import { buildPeopleViewModel, type PeoplePresenterOptions, type PeopleSubsystemViewModel } from "../../ui/domain-patterns/people/people-presenter.js";
-import { renderPeopleSubsystemHtml, escapeHtml, escapeAttribute } from "../../ui/domain-patterns/people/people-view.js";
+import { renderPeopleSubsystemHtml } from "../../ui/domain-patterns/people/people-view.js";
 import { ok, type Result } from "../../core/contracts/result.js";
 
 export interface PeopleServiceOptions {
@@ -21,7 +21,120 @@ export interface PeopleServiceOptions {
   readonly groupDefinitions?: readonly OperationalGroupDefinition[];
 }
 
-export class PeopleService {
+export interface AdminPeopleApi {
+  getPeopleData(domainUuid: string): Promise<Result<DomainPeopleData>>;
+  readonly rawRepository: PeopleRepository;
+}
+
+export interface PublicPeopleApi {
+  getViewerContext(
+    domainUuid: string,
+    viewer?: Partial<ViewerIdentity>,
+    options?: { nowReal?: number; nowWorld?: number; domainCapabilities?: readonly string[] }
+  ): Promise<Result<ViewerPeopleContext | AdministrativePeopleContext>>;
+
+  getPopulation(
+    domainUuid: string,
+    viewer?: Partial<ViewerIdentity>
+  ): Promise<Result<{ state: PopulationState; resolution: PopulationResolution }>>;
+
+  getPopulationGroups(
+    domainUuid: string,
+    viewer?: Partial<ViewerIdentity>
+  ): Promise<Result<readonly PopulationGroup[]>>;
+
+  getPopulationGroup(
+    domainUuid: string,
+    groupId: string,
+    viewer?: Partial<ViewerIdentity>
+  ): Promise<Result<PopulationGroup>>;
+
+  getNotables(
+    domainUuid: string,
+    viewer?: Partial<ViewerIdentity>
+  ): Promise<Result<readonly Notable[]>>;
+
+  getNotable(
+    domainUuid: string,
+    notableId: string,
+    viewer?: Partial<ViewerIdentity>
+  ): Promise<Result<Notable>>;
+
+  getNotableStatus(
+    domainUuid: string,
+    notableId: string,
+    actorResolver?: (uuid: string) => { name: string; img?: string } | null | undefined,
+    viewer?: Partial<ViewerIdentity>
+  ): Promise<Result<NotableStatusReport>>;
+
+  getRoles(
+    domainUuid: string,
+    viewer?: Partial<ViewerIdentity>
+  ): Promise<Result<readonly DomainRole[]>>;
+
+  getRole(
+    domainUuid: string,
+    roleId: string,
+    viewer?: Partial<ViewerIdentity>
+  ): Promise<Result<DomainRole>>;
+
+  getOperationalGroups(
+    domainUuid: string,
+    viewer?: Partial<ViewerIdentity>
+  ): Promise<Result<readonly OperationalGroup[]>>;
+
+  getOperationalGroup(
+    domainUuid: string,
+    groupId: string,
+    viewer?: Partial<ViewerIdentity>
+  ): Promise<Result<OperationalGroup>>;
+
+  getWorkforce(
+    domainUuid: string,
+    viewer?: Partial<ViewerIdentity>,
+    options?: { nowReal?: number; nowWorld?: number } | number
+  ): Promise<Result<WorkforceReport>>;
+
+  getAssignments(
+    domainUuid: string,
+    viewer?: Partial<ViewerIdentity>,
+    options?: { nowReal?: number; nowWorld?: number }
+  ): Promise<Result<readonly Assignment[]>>;
+
+  getReservations(
+    domainUuid: string,
+    viewer?: Partial<ViewerIdentity>,
+    options?: { nowReal?: number; nowWorld?: number }
+  ): Promise<Result<readonly Reservation[]>>;
+
+  getAggregate(
+    rootDomainUuid: string,
+    options?: PeopleAggregationQueryOptions
+  ): Result<PeopleAggregateResult>;
+
+  getPeopleData(
+    domainUuid: string,
+    viewer?: Partial<ViewerIdentity>
+  ): Promise<Result<DomainPeopleData>>;
+
+  getEffectiveCapabilities(
+    domainInput: { record: DomainRecord } | DomainRecord,
+    roleDefinitions?: readonly RoleDefinition[],
+    operationalGroupDefinitions?: readonly OperationalGroupDefinition[]
+  ): DomainEffectiveCapabilitiesReport;
+
+  buildViewModel(
+    domainInput: { record: DomainRecord } | DomainRecord,
+    options: PeoplePresenterOptions
+  ): PeopleSubsystemViewModel;
+
+  renderSubsystemHtml(vm: PeopleSubsystemViewModel): string;
+
+  asAdmin(): AdminPeopleApi;
+  asAuthority(): AdminPeopleApi;
+}
+
+export class PeopleService implements PublicPeopleApi {
   readonly #repository: PeopleRepository;
   readonly #projection: PeopleProjectionService;
   readonly #aggregation: PeopleAggregationService;
@@ -35,15 +148,49 @@ export class PeopleService {
     this.#aggregation = new PeopleAggregationService(domains);
   }
 
-  async getPeopleData(domainUuid: string): Promise<Result<DomainPeopleData>> {
-    return this.#repository.getPeopleData(domainUuid);
+  asAdmin(): AdminPeopleApi {
+    return {
+      getPeopleData: (domainUuid: string) => this.#repository.getPeopleData(domainUuid),
+      rawRepository: this.#repository
+    };
+  }
+
+  asAuthority(): AdminPeopleApi {
+    return this.asAdmin();
+  }
+
+  async getPeopleData(
+    domainUuid: string,
+    callerViewer?: Partial<ViewerIdentity>
+  ): Promise<Result<DomainPeopleData>> {
+    const viewer = resolveCurrentViewer(callerViewer);
+    const rawRes = await this.#repository.getPeopleData(domainUuid);
+    if (!rawRes.ok) return rawRes;
+
+    if (viewer.isGm) {
+      return rawRes;
+    }
+
+    // Fail-safe projection: sanitize and redact secrets for non-GM caller
+    const projected = this.#projection.project(domainUuid, rawRes.value, viewer);
+    return ok({
+      schemaVersion: rawRes.value.schemaVersion,
+      population: projected.population.state,
+      populationGroups: projected.populationGroups,
+      notables: projected.notables,
+      roles: projected.roles,
+      operationalGroups: projected.operationalGroups,
+      assignments: projected.assignments,
+      reservations: projected.reservations
+    });
   }
 
   async getViewerContext(
     domainUuid: string,
-    viewer: ViewerIdentity,
-    options: { nowReal?: number; domainCapabilities?: readonly string[] } = {}
+    callerViewer?: Partial<ViewerIdentity>,
+    options: { nowReal?: number; nowWorld?: number; domainCapabilities?: readonly string[] } = {}
   ): Promise<Result<ViewerPeopleContext | AdministrativePeopleContext>> {
+    const viewer = resolveCurrentViewer(callerViewer);
     const dataRes = await this.#repository.getPeopleData(domainUuid);
     if (!dataRes.ok) return dataRes;
     return ok(this.#projection.project(domainUuid, dataRes.value, viewer, options));
@@ -51,87 +198,135 @@ export class PeopleService {
 
   async getPopulation(
     domainUuid: string,
-    viewer?: ViewerIdentity
+    callerViewer?: Partial<ViewerIdentity>
   ): Promise<Result<{ state: PopulationState; resolution: PopulationResolution }>> {
-    if (viewer && !viewer.isGm) {
-      const ctxRes = await this.getViewerContext(domainUuid, viewer);
-      if (!ctxRes.ok) return ctxRes;
-      return ok({
-        state: ctxRes.value.population.state,
-        resolution: ctxRes.value.population.resolution
-      });
-    }
-    return this.#repository.getPopulation(domainUuid);
+    const viewer = resolveCurrentViewer(callerViewer);
+    const ctxRes = await this.getViewerContext(domainUuid, viewer);
+    if (!ctxRes.ok) return ctxRes;
+    return ok({
+      state: ctxRes.value.population.state,
+      resolution: ctxRes.value.population.resolution
+    });
   }
 
   async getPopulationGroups(
     domainUuid: string,
-    viewer?: ViewerIdentity
+    callerViewer?: Partial<ViewerIdentity>
   ): Promise<Result<readonly PopulationGroup[]>> {
-    if (viewer && !viewer.isGm) {
-      const ctxRes = await this.getViewerContext(domainUuid, viewer);
-      if (!ctxRes.ok) return ctxRes;
-      return ok(ctxRes.value.populationGroups);
-    }
-    return this.#repository.getPopulationGroups(domainUuid);
+    const viewer = resolveCurrentViewer(callerViewer);
+    const ctxRes = await this.getViewerContext(domainUuid, viewer);
+    if (!ctxRes.ok) return ctxRes;
+    return ok(ctxRes.value.populationGroups);
+  }
+
+  async getPopulationGroup(
+    domainUuid: string,
+    groupId: string,
+    callerViewer?: Partial<ViewerIdentity>
+  ): Promise<Result<PopulationGroup>> {
+    const viewer = resolveCurrentViewer(callerViewer);
+    return this.#repository.getPopulationGroup(domainUuid, groupId, { viewer });
   }
 
   async getNotables(
     domainUuid: string,
-    viewer?: ViewerIdentity
+    callerViewer?: Partial<ViewerIdentity>
   ): Promise<Result<readonly Notable[]>> {
-    return this.#repository.getNotables(domainUuid, { viewerIsGm: viewer ? viewer.isGm : true });
+    const viewer = resolveCurrentViewer(callerViewer);
+    const ctxRes = await this.getViewerContext(domainUuid, viewer);
+    if (!ctxRes.ok) return ctxRes;
+    return ok(ctxRes.value.notables);
+  }
+
+  async getNotable(
+    domainUuid: string,
+    notableId: string,
+    callerViewer?: Partial<ViewerIdentity>
+  ): Promise<Result<Notable>> {
+    const viewer = resolveCurrentViewer(callerViewer);
+    return this.#repository.getNotable(domainUuid, notableId, { viewer });
+  }
+
+  async getNotableStatus(
+    domainUuid: string,
+    notableId: string,
+    actorResolver?: (uuid: string) => { name: string; img?: string } | null | undefined,
+    callerViewer?: Partial<ViewerIdentity>
+  ): Promise<Result<NotableStatusReport>> {
+    const viewer = resolveCurrentViewer(callerViewer);
+    return this.#repository.getNotableStatus(domainUuid, notableId, actorResolver, { viewer });
   }
 
   async getRoles(
     domainUuid: string,
-    viewer?: ViewerIdentity
+    callerViewer?: Partial<ViewerIdentity>
   ): Promise<Result<readonly DomainRole[]>> {
-    return this.#repository.getRoles(domainUuid, { viewerIsGm: viewer ? viewer.isGm : true });
+    const viewer = resolveCurrentViewer(callerViewer);
+    const ctxRes = await this.getViewerContext(domainUuid, viewer);
+    if (!ctxRes.ok) return ctxRes;
+    return ok(ctxRes.value.roles);
+  }
+
+  async getRole(
+    domainUuid: string,
+    roleId: string,
+    callerViewer?: Partial<ViewerIdentity>
+  ): Promise<Result<DomainRole>> {
+    const viewer = resolveCurrentViewer(callerViewer);
+    return this.#repository.getRole(domainUuid, roleId, { viewer });
   }
 
   async getOperationalGroups(
     domainUuid: string,
-    viewer?: ViewerIdentity
+    callerViewer?: Partial<ViewerIdentity>
   ): Promise<Result<readonly OperationalGroup[]>> {
-    return this.#repository.getOperationalGroups(domainUuid, { viewerIsGm: viewer ? viewer.isGm : true });
+    const viewer = resolveCurrentViewer(callerViewer);
+    const ctxRes = await this.getViewerContext(domainUuid, viewer);
+    if (!ctxRes.ok) return ctxRes;
+    return ok(ctxRes.value.operationalGroups);
+  }
+
+  async getOperationalGroup(
+    domainUuid: string,
+    groupId: string,
+    callerViewer?: Partial<ViewerIdentity>
+  ): Promise<Result<OperationalGroup>> {
+    const viewer = resolveCurrentViewer(callerViewer);
+    return this.#repository.getOperationalGroup(domainUuid, groupId, { viewer });
   }
 
   async getWorkforce(
     domainUuid: string,
-    viewer?: ViewerIdentity,
-    nowReal?: number
+    callerViewer?: Partial<ViewerIdentity>,
+    options?: { nowReal?: number; nowWorld?: number } | number
   ): Promise<Result<WorkforceReport>> {
-    if (viewer && !viewer.isGm) {
-      const ctxRes = await this.getViewerContext(domainUuid, viewer, { nowReal });
-      if (!ctxRes.ok) return ctxRes;
-      return ok(ctxRes.value.workforce);
-    }
-    return this.#repository.getWorkforce(domainUuid, nowReal);
+    const viewer = resolveCurrentViewer(callerViewer);
+    const optObj = typeof options === "number" ? { nowReal: options } : options;
+    const ctxRes = await this.getViewerContext(domainUuid, viewer, optObj);
+    if (!ctxRes.ok) return ctxRes;
+    return ok(ctxRes.value.workforce);
   }
 
   async getAssignments(
     domainUuid: string,
-    viewer?: ViewerIdentity
+    callerViewer?: Partial<ViewerIdentity>,
+    options?: { nowReal?: number; nowWorld?: number }
   ): Promise<Result<readonly Assignment[]>> {
-    if (viewer && !viewer.isGm) {
-      const ctxRes = await this.getViewerContext(domainUuid, viewer);
-      if (!ctxRes.ok) return ctxRes;
-      return ok(ctxRes.value.assignments);
-    }
-    return this.#repository.getAssignments(domainUuid);
+    const viewer = resolveCurrentViewer(callerViewer);
+    const ctxRes = await this.getViewerContext(domainUuid, viewer, options);
+    if (!ctxRes.ok) return ctxRes;
+    return ok(ctxRes.value.assignments);
   }
 
   async getReservations(
     domainUuid: string,
-    viewer?: ViewerIdentity
+    callerViewer?: Partial<ViewerIdentity>,
+    options?: { nowReal?: number; nowWorld?: number }
   ): Promise<Result<readonly Reservation[]>> {
-    if (viewer && !viewer.isGm) {
-      const ctxRes = await this.getViewerContext(domainUuid, viewer);
-      if (!ctxRes.ok) return ctxRes;
-      return ok(ctxRes.value.reservations);
-    }
-    return this.#repository.getReservations(domainUuid);
+    const viewer = resolveCurrentViewer(callerViewer);
+    const ctxRes = await this.getViewerContext(domainUuid, viewer, options);
+    if (!ctxRes.ok) return ctxRes;
+    return ok(ctxRes.value.reservations);
   }
 
   getAggregate(

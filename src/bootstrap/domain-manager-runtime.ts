@@ -26,7 +26,7 @@ import { registerNotableCommandHandlers } from "../people/commands/notable-comma
 import { registerRoleCommandHandlers } from "../people/commands/role-commands.js";
 import { registerOperationalGroupCommandHandlers } from "../people/commands/operational-group-commands.js";
 import { registerAssignmentCommandHandlers } from "../people/commands/assignment-commands.js";
-import { PeopleService } from "../people/services/people-service.js";
+import { PeopleService, type AdminPeopleApi, type PublicPeopleApi } from "../people/services/people-service.js";
 import {
   G2DiagnosticsProvider,
   type G2DiagnosticsSnapshot
@@ -51,7 +51,10 @@ export interface DomainManagerRuntime {
   readonly recovery: RecoveryService;
   readonly transactionStore: TransactionStore;
   readonly diagnostics: G2DiagnosticsProvider;
-  readonly people: PeopleService;
+  readonly people: PublicPeopleApi;
+  readonly admin: {
+    readonly people: AdminPeopleApi;
+  };
   destroy(): void;
 }
 
@@ -151,6 +154,9 @@ export function composeDomainManagerRuntime(
     transactionStore,
     diagnostics,
     people,
+    admin: Object.freeze({
+      people: people.asAdmin()
+    }),
     destroy: () => {
       commandBus.destroy();
       if ("destroy" in transport && typeof (transport as any).destroy === "function") {

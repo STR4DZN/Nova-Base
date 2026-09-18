@@ -37,15 +37,20 @@
     - **Capability Grant Resolver**: arquitetura extensível com `CapabilityResolver` e suporte a `RoleGrantPolicy` (`exists`, `occupied`, `requirementsSatisfied`, `keepGrantWhenInactive`).
     - **Workforce Roundtrip**: `workforceContributions` persistidas e validadas em `PopulationGroup`.
     - **Source-Specific Overcommit**: bloqueio de sobrealocação por fonte (`DM_WORKFORCE_OVERCOMMIT`, DEC-1145) com override administrativo.
-    - **UI Security**: sanitização contra injeção de HTML/XSS via `escapeHtml` e `escapeAttribute`.
-    - **Integrity Diagnostics**: varredura fail-closed de schema corrompido e detecção de referências órfãs (`DM_PEOPLE_DANGLING_NOTABLE_REF`, `DM_PEOPLE_DANGLING_GROUP_REF`, etc.).
+    - **Public People API Segregation & Viewer Clamping (Audit Item 1 & 5)**: Segregated `PublicPeopleApi` e `AdminPeopleApi` em `runtime.people`, clamp de viewer chamador via `resolveCurrentViewer()`. Acesso raw proibido para não-GM, visibilidade restrita fail-closed com stripping profundo de ocupantes/membros.
+    - **Assignment Contracts & Notable Capacity (Audit Item 2)**: `AssignmentTargetRegistry` com validação de target, capacidade individual de Notável (= 1, DEC-1133), validação de existência da fonte e expiração por tempo de mundo (`endsAtWorld`, `expiresAtWorld`).
+    - **People UI Application Controller (Audit Item 3)**: `PeopleApplicationController` implementado gerenciando abas, seleção, carregamento de view models, despacho de comandos e renderização.
+    - **Role Prerequisites Verification (Audit Item 4)**: Avaliação de pré-requisitos de papéis contra capacidades habilitadas do domínio em `evaluateRole()`.
+    - **Diagnostics & Authoritative Repair Tool (Audit Item 6)**: 6 novos diagnósticos de integridade (`DM_PEOPLE_UNKNOWN_ROLE_DEFINITION`, `DM_PEOPLE_UNKNOWN_GROUP_DEFINITION`, `DM_PEOPLE_EXPLICIT_MEMBERSHIP_MISMATCH`, `DM_PEOPLE_DANGLING_TARGET_REF`, `DM_PEOPLE_INDETERMINATE_SUM_GROUPS`, `DM_PEOPLE_WORKFORCE_OVERCOMMIT`) e ferramenta de reparo autoritativo `PeopleRepairTool`.
+    - **Aggregation Unknown Contributors (Audit Item 7)**: Adicionado campo `unknownContributors: readonly string[]` conforme DEC-1184.
+    - **Operational Group Explicit Sizing Fix (Audit Item 8)**: Derivação automática de `size` a partir do comprimento de `members` quando no modo explícito.
 
 ## Evidência local Gate G3
 
 | Verificação | Resultado |
 |---|---|
 | TypeScript strict (`node ./node_modules/typescript/bin/tsc --noEmit`) | PASS (0 erros) |
-| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 298/298 (0 falhas) |
+| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 305/305 (0 falhas) |
 | Relatório de Aceitação | Concluído (`docs/GATE_G3_ACCEPTANCE_REPORT.md`) |
 | Regressões G2 | 0 (todos os 233 testes de base preservados e passando) |
 

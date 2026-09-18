@@ -1,4 +1,5 @@
 import type { DomainPeopleData } from "../people-data.js";
+import { isOpaqueId } from "../../core/identity/ids.js";
 import {
   DEFAULT_WORKFORCE_TYPES,
   type WorkforceContributionProvenance,
@@ -19,11 +20,19 @@ export function resolveOperationalGroupWorkforceType(definitionId: string): stri
   }
 }
 
+export interface WorkforceCalculationOptions {
+  readonly nowReal?: number;
+  readonly nowWorld?: number;
+}
+
 export function calculateWorkforce(
   people: DomainPeopleData,
-  nowReal: number = Date.now(),
+  timeOrOptions?: number | WorkforceCalculationOptions,
   availableTypes: readonly WorkforceType[] = DEFAULT_WORKFORCE_TYPES
 ): WorkforceReport {
+  const nowReal = typeof timeOrOptions === "number" ? timeOrOptions : (timeOrOptions?.nowReal ?? Date.now());
+  const nowWorld = typeof timeOrOptions === "object" ? timeOrOptions?.nowWorld : undefined;
+
   const typeMap = new Map<string, {
     capacity: number;
     committed: number;
@@ -117,23 +126,70 @@ export function calculateWorkforce(
     }
   }
 
-  // 3. Committed workforce from Active Assignments
+  // 3. Committed workforce from Active Assignments (with world-time consideration)
   const assignments = people.assignments ?? [];
+  const notableMap = new Map((people.notables ?? []).map((n) => [n.id, n]));
+  const notableContributedCapacity = new Set<string>();
+
   for (const asg of assignments) {
     if (asg.status === "active") {
+      if (nowWorld !== undefined && asg.endsAtWorld !== undefined && asg.endsAtWorld <= nowWorld) {
+        continue;
+      }
+      if (nowWorld !== undefined && asg.startedAtWorld !== undefined && asg.startedAtWorld > nowWorld) {
+        continue;
+      }
+
+      // If source is a notable, account for their specialist capacity (DEC-1133)
+      if (isOpaqueId(asg.sourceRef, "not")) {
+        const notable = notableMap.get(asg.sourceRef);
+        if (notable && !notableContributedCapacity.has(asg.sourceRef)) {
+          notableContributedCapacity.add(asg.sourceRef);
+          const capEntry = ensureType(asg.workforceTypeId);
+          capEntry.capacity += 1;
+          capEntry.contributions.push({
+            sourceId: notable.id,
+            sourceType: "notable",
+            sourceName: notable.name ?? notable.id,
+            amount: 1
+          });
+        }
+      }
+
       const entry = ensureType(asg.workforceTypeId);
       entry.committed += asg.amount;
     }
   }
 
-  // 4. Reserved workforce from Active Reservations (checking expiration, DEC-1125)
+  // 4. Reserved workforce from Active Reservations (checking real & world expiration, DEC-1125)
   const reservations = people.reservations ?? [];
   for (const resv of reservations) {
     if (resv.status === "active") {
-      // If reservation expired, it does not hold workforce
+      // If reservation expired by real time, it does not hold workforce
       if (resv.expiresAtReal !== undefined && resv.expiresAtReal < nowReal) {
         continue;
       }
+      // If reservation expired by world time, it does not hold workforce
+      if (nowWorld !== undefined && resv.expiresAtWorld !== undefined && resv.expiresAtWorld <= nowWorld) {
+        continue;
+      }
+
+      // If source is a notable, account for their specialist capacity (DEC-1133)
+      if (isOpaqueId(resv.sourceRef, "not")) {
+        const notable = notableMap.get(resv.sourceRef);
+        if (notable && !notableContributedCapacity.has(resv.sourceRef)) {
+          notableContributedCapacity.add(resv.sourceRef);
+          const capEntry = ensureType(resv.workforceTypeId);
+          capEntry.capacity += 1;
+          capEntry.contributions.push({
+            sourceId: notable.id,
+            sourceType: "notable",
+            sourceName: notable.name ?? notable.id,
+            amount: 1
+          });
+        }
+      }
+
       const entry = ensureType(resv.workforceTypeId);
       entry.reserved += resv.amount;
     }

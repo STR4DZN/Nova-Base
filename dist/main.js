@@ -1151,7 +1151,7 @@ function validateDomainRole(candidate, definitions = DEFAULT_ROLE_DEFINITIONS) {
     tags
   });
 }
-function evaluateRole(role, definitions = DEFAULT_ROLE_DEFINITIONS, operationalGroups) {
+function evaluateRole(role, definitions = DEFAULT_ROLE_DEFINITIONS, operationalGroups, enabledCapabilities) {
   const definition = definitions.find((d) => d.id === role.definitionId);
   const effectiveLabel = role.customLabel ?? definition?.label ?? role.definitionId;
   const occupantsCount = role.occupants.length;
@@ -1161,6 +1161,18 @@ function evaluateRole(role, definitions = DEFAULT_ROLE_DEFINITIONS, operationalG
   const isUnderstaffed = occupantsCount < minOccupancy;
   let isRequirementSatisfied = !isUnderstaffed;
   let isValidGroupRole = true;
+  if (definition?.prerequisites && definition.prerequisites.length > 0) {
+    if (!enabledCapabilities) {
+      isRequirementSatisfied = false;
+    } else {
+      for (const prereq of definition.prerequisites) {
+        if (!enabledCapabilities.includes(prereq)) {
+          isRequirementSatisfied = false;
+          break;
+        }
+      }
+    }
+  }
   if (role.scope === "operational-group") {
     if (operationalGroups) {
       const group = operationalGroups.find((g) => g.id === role.operationalGroupId);
@@ -1319,7 +1331,7 @@ function validateOperationalGroup(candidate) {
   }
   let size;
   if (membershipMode === "explicit") {
-    size = rawMembers.length;
+    size = typeof raw.size === "number" && Number.isSafeInteger(raw.size) && raw.size >= 0 ? raw.size : rawMembers.length;
   } else {
     if (typeof raw.size !== "number" || !Number.isSafeInteger(raw.size) || raw.size < 0) {
       return err(
@@ -1423,12 +1435,41 @@ function validateOperationalGroup(candidate) {
 // src/people/assignments/assignment-types.ts
 var ASSIGNMENT_STATUSES = Object.freeze([
   "active",
+  "ended",
   "completed",
   "cancelled"
 ]);
 function isAssignmentStatus(value) {
   return typeof value === "string" && ASSIGNMENT_STATUSES.includes(value);
 }
+var AssignmentTargetRegistry = class {
+  #allowedPrefixes = /* @__PURE__ */ new Set(["opg", "prj", "fac", "dom", "ext", "act", "loc", "djn", "tsk"]);
+  #customValidators = /* @__PURE__ */ new Map();
+  registerPrefix(prefix, validator) {
+    this.#allowedPrefixes.add(prefix.toLowerCase());
+    if (validator) {
+      this.#customValidators.set(prefix.toLowerCase(), validator);
+    }
+  }
+  isValidTarget(targetRef) {
+    if (!targetRef || typeof targetRef !== "string") return false;
+    const trimmed = targetRef.trim();
+    if (trimmed.length === 0) return false;
+    if (trimmed.startsWith("JournalEntry.") || trimmed.startsWith("Scene.") || trimmed.startsWith("Actor.") || trimmed.startsWith("Item.")) {
+      return true;
+    }
+    const parts = trimmed.split("_");
+    if (parts.length >= 2) {
+      const prefix = parts[0].toLowerCase();
+      if (this.#customValidators.has(prefix)) {
+        return this.#customValidators.get(prefix)(trimmed);
+      }
+      return this.#allowedPrefixes.has(prefix);
+    }
+    return false;
+  }
+};
+var defaultAssignmentTargetRegistry = new AssignmentTargetRegistry();
 var RESERVATION_STATUSES = Object.freeze([
   "active",
   "claimed",
@@ -1438,7 +1479,7 @@ var RESERVATION_STATUSES = Object.freeze([
 function isReservationStatus(value) {
   return typeof value === "string" && RESERVATION_STATUSES.includes(value);
 }
-function validateAssignment(candidate) {
+function validateAssignment(candidate, options = {}) {
   if (!candidate || typeof candidate !== "object") {
     return err(
       createPublicError({
@@ -1476,6 +1517,15 @@ function validateAssignment(candidate) {
       })
     );
   }
+  if (options.validateTarget && !defaultAssignmentTargetRegistry.isValidTarget(raw.targetRef.trim())) {
+    return err(
+      createPublicError({
+        code: "DM_ASSIGNMENT_INVALID_TARGET",
+        category: "validation",
+        message: `Target '${raw.targetRef}' is not a recognized target reference`
+      })
+    );
+  }
   if (typeof raw.workforceTypeId !== "string" || raw.workforceTypeId.trim().length === 0) {
     return err(
       createPublicError({
@@ -1503,6 +1553,19 @@ function validateAssignment(candidate) {
         message: `Invalid assignment status: '${String(raw.status)}'`
       })
     );
+  }
+  let endedReason;
+  if (raw.endedReason !== void 0 && raw.endedReason !== null) {
+    if (typeof raw.endedReason !== "string") {
+      return err(
+        createPublicError({
+          code: "DM_ASSIGNMENT_INVALID_ENDED_REASON",
+          category: "validation",
+          message: "endedReason must be a string"
+        })
+      );
+    }
+    endedReason = raw.endedReason.trim();
   }
   if (raw.visibility !== void 0 && raw.visibility !== null) {
     if (raw.visibility !== "public" && raw.visibility !== "secret") {
@@ -1559,13 +1622,14 @@ function validateAssignment(candidate) {
     workforceTypeId: raw.workforceTypeId.trim(),
     amount: raw.amount,
     status,
+    endedReason,
     visibility: raw.visibility === "secret" ? "secret" : "public",
     startedAtWorld,
     endsAtWorld,
     notes: typeof raw.notes === "string" ? raw.notes.trim() : void 0
   });
 }
-function validateReservation(candidate) {
+function validateReservation(candidate, options = {}) {
   if (!candidate || typeof candidate !== "object") {
     return err(
       createPublicError({
@@ -1600,6 +1664,15 @@ function validateReservation(candidate) {
         code: "DM_RESERVATION_INVALID_TARGET",
         category: "validation",
         message: "targetRef is required"
+      })
+    );
+  }
+  if (options.validateTarget && !defaultAssignmentTargetRegistry.isValidTarget(raw.targetRef.trim())) {
+    return err(
+      createPublicError({
+        code: "DM_RESERVATION_INVALID_TARGET",
+        category: "validation",
+        message: `Target '${raw.targetRef}' is not a recognized target reference`
       })
     );
   }
@@ -2366,6 +2439,188 @@ var DomainIndex = class _DomainIndex {
 // src/domains/domain-schema.ts
 var DOMAIN_SCHEMA_VERSION = 1;
 
+// src/people/workforce/workforce-calculator.ts
+function resolveOperationalGroupWorkforceType(definitionId) {
+  switch (definitionId) {
+    case "domain-manager:labor-squad":
+      return "general";
+    case "domain-manager:militia":
+    case "domain-manager:scout-patrol":
+      return "military";
+    default:
+      return "general";
+  }
+}
+function calculateWorkforce(people, timeOrOptions, availableTypes = DEFAULT_WORKFORCE_TYPES) {
+  const nowReal = typeof timeOrOptions === "number" ? timeOrOptions : timeOrOptions?.nowReal ?? Date.now();
+  const nowWorld = typeof timeOrOptions === "object" ? timeOrOptions?.nowWorld : void 0;
+  const typeMap = /* @__PURE__ */ new Map();
+  for (const t of availableTypes) {
+    typeMap.set(t.id, {
+      capacity: 0,
+      committed: 0,
+      reserved: 0,
+      contributions: []
+    });
+  }
+  function ensureType(typeId) {
+    let entry = typeMap.get(typeId);
+    if (!entry) {
+      entry = {
+        capacity: 0,
+        committed: 0,
+        reserved: 0,
+        contributions: []
+      };
+      typeMap.set(typeId, entry);
+    }
+    return entry;
+  }
+  const warnings = [];
+  const populationGroupLinkedDeductions = /* @__PURE__ */ new Map();
+  const opGroups = people.operationalGroups ?? [];
+  for (const og of opGroups) {
+    if (og.lifecycle !== "active") {
+      continue;
+    }
+    const typeId = resolveOperationalGroupWorkforceType(og.definitionId);
+    const entry = ensureType(typeId);
+    entry.capacity += og.size;
+    entry.contributions.push({
+      sourceId: og.id,
+      sourceType: "operational-group",
+      sourceName: og.name,
+      amount: og.size
+    });
+    if (og.populationGroupId) {
+      const prev = populationGroupLinkedDeductions.get(og.populationGroupId) ?? 0;
+      populationGroupLinkedDeductions.set(og.populationGroupId, prev + og.size);
+    }
+  }
+  const popGroups = people.populationGroups ?? [];
+  for (const pg of popGroups) {
+    const contributions = pg.workforceContributions;
+    if (contributions && Array.isArray(contributions)) {
+      for (const c of contributions) {
+        if (typeof c.workforceTypeId === "string" && typeof c.amount === "number" && c.amount > 0) {
+          const entry = ensureType(c.workforceTypeId);
+          const linkedDeduction = populationGroupLinkedDeductions.get(pg.id) ?? 0;
+          const netContribution = Math.max(0, c.amount - linkedDeduction);
+          if (netContribution < c.amount) {
+            warnings.push(
+              `PopulationGroup '${pg.name}' workforce contribution of ${c.amount} reduced to ${netContribution} to prevent double-counting linked operational groups.`
+            );
+          }
+          if (netContribution > 0) {
+            entry.capacity += netContribution;
+            entry.contributions.push({
+              sourceId: pg.id,
+              sourceType: "population-group",
+              sourceName: pg.name,
+              amount: netContribution,
+              deductedFromLinked: netContribution < c.amount
+            });
+          }
+        }
+      }
+    }
+  }
+  const assignments = people.assignments ?? [];
+  const notableMap = new Map((people.notables ?? []).map((n) => [n.id, n]));
+  const notableContributedCapacity = /* @__PURE__ */ new Set();
+  for (const asg of assignments) {
+    if (asg.status === "active") {
+      if (nowWorld !== void 0 && asg.endsAtWorld !== void 0 && asg.endsAtWorld <= nowWorld) {
+        continue;
+      }
+      if (nowWorld !== void 0 && asg.startedAtWorld !== void 0 && asg.startedAtWorld > nowWorld) {
+        continue;
+      }
+      if (isOpaqueId(asg.sourceRef, "not")) {
+        const notable = notableMap.get(asg.sourceRef);
+        if (notable && !notableContributedCapacity.has(asg.sourceRef)) {
+          notableContributedCapacity.add(asg.sourceRef);
+          const capEntry = ensureType(asg.workforceTypeId);
+          capEntry.capacity += 1;
+          capEntry.contributions.push({
+            sourceId: notable.id,
+            sourceType: "notable",
+            sourceName: notable.name ?? notable.id,
+            amount: 1
+          });
+        }
+      }
+      const entry = ensureType(asg.workforceTypeId);
+      entry.committed += asg.amount;
+    }
+  }
+  const reservations = people.reservations ?? [];
+  for (const resv of reservations) {
+    if (resv.status === "active") {
+      if (resv.expiresAtReal !== void 0 && resv.expiresAtReal < nowReal) {
+        continue;
+      }
+      if (nowWorld !== void 0 && resv.expiresAtWorld !== void 0 && resv.expiresAtWorld <= nowWorld) {
+        continue;
+      }
+      if (isOpaqueId(resv.sourceRef, "not")) {
+        const notable = notableMap.get(resv.sourceRef);
+        if (notable && !notableContributedCapacity.has(resv.sourceRef)) {
+          notableContributedCapacity.add(resv.sourceRef);
+          const capEntry = ensureType(resv.workforceTypeId);
+          capEntry.capacity += 1;
+          capEntry.contributions.push({
+            sourceId: notable.id,
+            sourceType: "notable",
+            sourceName: notable.name ?? notable.id,
+            amount: 1
+          });
+        }
+      }
+      const entry = ensureType(resv.workforceTypeId);
+      entry.reserved += resv.amount;
+    }
+  }
+  const typesRecord = {};
+  let totalCapacity = 0;
+  let totalCommitted = 0;
+  let totalReserved = 0;
+  let totalAvailable = 0;
+  let isAnyOvercommitted = false;
+  for (const [typeId, data] of typeMap.entries()) {
+    const available = data.capacity - data.committed - data.reserved;
+    const isOvercommitted = available < 0;
+    if (isOvercommitted) {
+      isAnyOvercommitted = true;
+      warnings.push(
+        `Workforce type '${typeId}' is overcommitted: capacity=${data.capacity}, committed=${data.committed}, reserved=${data.reserved}, available=${available}`
+      );
+    }
+    typesRecord[typeId] = {
+      workforceTypeId: typeId,
+      capacity: data.capacity,
+      committed: data.committed,
+      reserved: data.reserved,
+      available,
+      isOvercommitted,
+      contributions: Object.freeze([...data.contributions])
+    };
+    totalCapacity += data.capacity;
+    totalCommitted += data.committed;
+    totalReserved += data.reserved;
+    totalAvailable += available;
+  }
+  return {
+    types: Object.freeze(typesRecord),
+    totalCapacity,
+    totalCommitted,
+    totalReserved,
+    totalAvailable,
+    isAnyOvercommitted,
+    warnings: Object.freeze(warnings)
+  };
+}
+
 // src/storage/integrity/domain-integrity-checker.ts
 function issue(code, severity, message, domainId, details) {
   return { code, severity, message, domainId, details };
@@ -2596,6 +2851,87 @@ function addPeopleIntegrityIssues(record, domainId, issues) {
         { reservationId: resv.id, sourceRef: resv.sourceRef }
       ));
     }
+  }
+  const knownRoleDefIds = new Set(DEFAULT_ROLE_DEFINITIONS.map((d) => d.id));
+  for (const r of people.roles) {
+    if (!knownRoleDefIds.has(r.definitionId) && !r.definitionId.startsWith("custom:")) {
+      issues.push(issue(
+        "DM_PEOPLE_UNKNOWN_ROLE_DEFINITION",
+        "warning",
+        `Role '${r.id}' uses unrecognized definition '${r.definitionId}'`,
+        domainId,
+        { roleId: r.id, definitionId: r.definitionId }
+      ));
+    }
+  }
+  const knownGroupDefIds = new Set(DEFAULT_OPERATIONAL_GROUP_DEFINITIONS.map((d) => d.id));
+  for (const g of people.operationalGroups) {
+    if (!knownGroupDefIds.has(g.definitionId) && !g.definitionId.startsWith("custom:")) {
+      issues.push(issue(
+        "DM_PEOPLE_UNKNOWN_GROUP_DEFINITION",
+        "warning",
+        `Operational group '${g.id}' uses unrecognized definition '${g.definitionId}'`,
+        domainId,
+        { groupId: g.id, definitionId: g.definitionId }
+      ));
+    }
+  }
+  for (const g of people.operationalGroups) {
+    if (g.membershipMode === "explicit" && g.size !== g.members.length) {
+      issues.push(issue(
+        "DM_PEOPLE_EXPLICIT_MEMBERSHIP_MISMATCH",
+        "warning",
+        `Explicit operational group '${g.id}' (${g.name}) size (${g.size}) does not match member count (${g.members.length})`,
+        domainId,
+        { groupId: g.id, size: g.size, memberCount: g.members.length }
+      ));
+    }
+  }
+  for (const a of people.assignments) {
+    if (!defaultAssignmentTargetRegistry.isValidTarget(a.targetRef)) {
+      issues.push(issue(
+        "DM_PEOPLE_DANGLING_TARGET_REF",
+        "warning",
+        `Assignment '${a.id}' references unrecognized target '${a.targetRef}'`,
+        domainId,
+        { assignmentId: a.id, targetRef: a.targetRef }
+      ));
+    }
+  }
+  for (const resv of people.reservations) {
+    if (!defaultAssignmentTargetRegistry.isValidTarget(resv.targetRef)) {
+      issues.push(issue(
+        "DM_PEOPLE_DANGLING_TARGET_REF",
+        "warning",
+        `Reservation '${resv.id}' references unrecognized target '${resv.targetRef}'`,
+        domainId,
+        { reservationId: resv.id, targetRef: resv.targetRef }
+      ));
+    }
+  }
+  if (people.population.mode === "sumGroups") {
+    const hasIndeterminate = people.populationGroups.length === 0 || people.populationGroups.some(
+      (pg) => pg.count === null || pg.precision === "unknown"
+    );
+    if (hasIndeterminate) {
+      issues.push(issue(
+        "DM_PEOPLE_INDETERMINATE_SUM_GROUPS",
+        "warning",
+        "Population sumGroups mode contains groups with indeterminate or unknown counts",
+        domainId,
+        { groupCount: people.populationGroups.length }
+      ));
+    }
+  }
+  const wfReport = calculateWorkforce(people);
+  if (wfReport.isAnyOvercommitted) {
+    issues.push(issue(
+      "DM_PEOPLE_WORKFORCE_OVERCOMMIT",
+      "warning",
+      "One or more workforce types are overcommitted in the domain",
+      domainId,
+      { warnings: wfReport.warnings }
+    ));
   }
 }
 function addSchemaIssues(document, expectedSchemaVersion, capabilityRegistry, issues, hierarchyNodes) {
@@ -7745,13 +8081,16 @@ function registerOperationalGroupCommandHandlers(registry, coordinator, domains)
         );
       }
       const existing = currentPeople.operationalGroups[groupIndex];
+      const effectiveMode = update.membershipMode !== void 0 ? update.membershipMode : existing.membershipMode;
+      const effectiveMembers = update.members !== void 0 ? update.members : existing.members;
+      const effectiveSize = update.size !== void 0 ? update.size : effectiveMode === "explicit" ? effectiveMembers.length : existing.size;
       const mergedCandidate = {
         id: existing.id,
         name: update.name !== void 0 ? update.name : existing.name,
         definitionId: existing.definitionId,
-        membershipMode: update.membershipMode !== void 0 ? update.membershipMode : existing.membershipMode,
-        size: update.size !== void 0 ? update.size : existing.size,
-        members: update.members !== void 0 ? update.members : existing.members,
+        membershipMode: effectiveMode,
+        size: effectiveSize,
+        members: effectiveMembers,
         lifecycle: update.lifecycle !== void 0 ? update.lifecycle : existing.lifecycle,
         visibility: update.visibility !== void 0 ? update.visibility : existing.visibility,
         populationGroupId: update.populationGroupId === null ? void 0 : update.populationGroupId !== void 0 ? update.populationGroupId : existing.populationGroupId,
@@ -7997,155 +8336,14 @@ function registerOperationalGroupCommandHandlers(registry, coordinator, domains)
   });
 }
 
-// src/people/workforce/workforce-calculator.ts
-function resolveOperationalGroupWorkforceType(definitionId) {
-  switch (definitionId) {
-    case "domain-manager:labor-squad":
-      return "general";
-    case "domain-manager:militia":
-    case "domain-manager:scout-patrol":
-      return "military";
-    default:
-      return "general";
-  }
-}
-function calculateWorkforce(people, nowReal = Date.now(), availableTypes = DEFAULT_WORKFORCE_TYPES) {
-  const typeMap = /* @__PURE__ */ new Map();
-  for (const t of availableTypes) {
-    typeMap.set(t.id, {
-      capacity: 0,
-      committed: 0,
-      reserved: 0,
-      contributions: []
-    });
-  }
-  function ensureType(typeId) {
-    let entry = typeMap.get(typeId);
-    if (!entry) {
-      entry = {
-        capacity: 0,
-        committed: 0,
-        reserved: 0,
-        contributions: []
-      };
-      typeMap.set(typeId, entry);
-    }
-    return entry;
-  }
-  const warnings = [];
-  const populationGroupLinkedDeductions = /* @__PURE__ */ new Map();
-  const opGroups = people.operationalGroups ?? [];
-  for (const og of opGroups) {
-    if (og.lifecycle !== "active") {
-      continue;
-    }
-    const typeId = resolveOperationalGroupWorkforceType(og.definitionId);
-    const entry = ensureType(typeId);
-    entry.capacity += og.size;
-    entry.contributions.push({
-      sourceId: og.id,
-      sourceType: "operational-group",
-      sourceName: og.name,
-      amount: og.size
-    });
-    if (og.populationGroupId) {
-      const prev = populationGroupLinkedDeductions.get(og.populationGroupId) ?? 0;
-      populationGroupLinkedDeductions.set(og.populationGroupId, prev + og.size);
-    }
-  }
-  const popGroups = people.populationGroups ?? [];
-  for (const pg of popGroups) {
-    const contributions = pg.workforceContributions;
-    if (contributions && Array.isArray(contributions)) {
-      for (const c of contributions) {
-        if (typeof c.workforceTypeId === "string" && typeof c.amount === "number" && c.amount > 0) {
-          const entry = ensureType(c.workforceTypeId);
-          const linkedDeduction = populationGroupLinkedDeductions.get(pg.id) ?? 0;
-          const netContribution = Math.max(0, c.amount - linkedDeduction);
-          if (netContribution < c.amount) {
-            warnings.push(
-              `PopulationGroup '${pg.name}' workforce contribution of ${c.amount} reduced to ${netContribution} to prevent double-counting linked operational groups.`
-            );
-          }
-          if (netContribution > 0) {
-            entry.capacity += netContribution;
-            entry.contributions.push({
-              sourceId: pg.id,
-              sourceType: "population-group",
-              sourceName: pg.name,
-              amount: netContribution,
-              deductedFromLinked: netContribution < c.amount
-            });
-          }
-        }
-      }
-    }
-  }
-  const assignments = people.assignments ?? [];
-  for (const asg of assignments) {
-    if (asg.status === "active") {
-      const entry = ensureType(asg.workforceTypeId);
-      entry.committed += asg.amount;
-    }
-  }
-  const reservations = people.reservations ?? [];
-  for (const resv of reservations) {
-    if (resv.status === "active") {
-      if (resv.expiresAtReal !== void 0 && resv.expiresAtReal < nowReal) {
-        continue;
-      }
-      const entry = ensureType(resv.workforceTypeId);
-      entry.reserved += resv.amount;
-    }
-  }
-  const typesRecord = {};
-  let totalCapacity = 0;
-  let totalCommitted = 0;
-  let totalReserved = 0;
-  let totalAvailable = 0;
-  let isAnyOvercommitted = false;
-  for (const [typeId, data] of typeMap.entries()) {
-    const available = data.capacity - data.committed - data.reserved;
-    const isOvercommitted = available < 0;
-    if (isOvercommitted) {
-      isAnyOvercommitted = true;
-      warnings.push(
-        `Workforce type '${typeId}' is overcommitted: capacity=${data.capacity}, committed=${data.committed}, reserved=${data.reserved}, available=${available}`
-      );
-    }
-    typesRecord[typeId] = {
-      workforceTypeId: typeId,
-      capacity: data.capacity,
-      committed: data.committed,
-      reserved: data.reserved,
-      available,
-      isOvercommitted,
-      contributions: Object.freeze([...data.contributions])
-    };
-    totalCapacity += data.capacity;
-    totalCommitted += data.committed;
-    totalReserved += data.reserved;
-    totalAvailable += available;
-  }
-  return {
-    types: Object.freeze(typesRecord),
-    totalCapacity,
-    totalCommitted,
-    totalReserved,
-    totalAvailable,
-    isAnyOvercommitted,
-    warnings: Object.freeze(warnings)
-  };
-}
-
 // src/people/commands/assignment-commands.ts
-function getSourceCapacity(people, sourceRef, workforceTypeId, nowReal = Date.now()) {
+function getSourceCapacity(people, sourceRef, workforceTypeId, nowReal = Date.now(), nowWorld) {
   const opGroup = people.operationalGroups?.find((og) => og.id === sourceRef);
   if (opGroup) {
     const baseType = resolveOperationalGroupWorkforceType(opGroup.definitionId);
     const capacity = opGroup.lifecycle === "active" && baseType === workforceTypeId ? opGroup.size : 0;
-    const committed = (people.assignments ?? []).filter((a) => a.sourceRef === sourceRef && a.workforceTypeId === workforceTypeId && a.status === "active").reduce((sum, a) => sum + a.amount, 0);
-    const reserved = (people.reservations ?? []).filter((r) => r.sourceRef === sourceRef && r.workforceTypeId === workforceTypeId && r.status === "active" && (r.expiresAtReal === void 0 || r.expiresAtReal >= nowReal)).reduce((sum, r) => sum + r.amount, 0);
+    const committed = (people.assignments ?? []).filter((a) => a.sourceRef === sourceRef && a.workforceTypeId === workforceTypeId && a.status === "active" && (nowWorld === void 0 || a.endsAtWorld === void 0 || a.endsAtWorld > nowWorld)).reduce((sum, a) => sum + a.amount, 0);
+    const reserved = (people.reservations ?? []).filter((r) => r.sourceRef === sourceRef && r.workforceTypeId === workforceTypeId && r.status === "active" && (r.expiresAtReal === void 0 || r.expiresAtReal >= nowReal) && (nowWorld === void 0 || r.expiresAtWorld === void 0 || r.expiresAtWorld > nowWorld)).reduce((sum, r) => sum + r.amount, 0);
     return {
       capacity,
       committed,
@@ -8158,14 +8356,28 @@ function getSourceCapacity(people, sourceRef, workforceTypeId, nowReal = Date.no
     const contr = (popGroup.workforceContributions ?? []).filter((c) => c.workforceTypeId === workforceTypeId).reduce((sum, c) => sum + c.amount, 0);
     const linkedDeduction = (people.operationalGroups ?? []).filter((og) => og.populationGroupId === popGroup.id && og.lifecycle === "active" && resolveOperationalGroupWorkforceType(og.definitionId) === workforceTypeId).reduce((sum, og) => sum + og.size, 0);
     const capacity = Math.max(0, contr - linkedDeduction);
-    const committed = (people.assignments ?? []).filter((a) => a.sourceRef === sourceRef && a.workforceTypeId === workforceTypeId && a.status === "active").reduce((sum, a) => sum + a.amount, 0);
-    const reserved = (people.reservations ?? []).filter((r) => r.sourceRef === sourceRef && r.workforceTypeId === workforceTypeId && r.status === "active" && (r.expiresAtReal === void 0 || r.expiresAtReal >= nowReal)).reduce((sum, r) => sum + r.amount, 0);
+    const committed = (people.assignments ?? []).filter((a) => a.sourceRef === sourceRef && a.workforceTypeId === workforceTypeId && a.status === "active" && (nowWorld === void 0 || a.endsAtWorld === void 0 || a.endsAtWorld > nowWorld)).reduce((sum, a) => sum + a.amount, 0);
+    const reserved = (people.reservations ?? []).filter((r) => r.sourceRef === sourceRef && r.workforceTypeId === workforceTypeId && r.status === "active" && (r.expiresAtReal === void 0 || r.expiresAtReal >= nowReal) && (nowWorld === void 0 || r.expiresAtWorld === void 0 || r.expiresAtWorld > nowWorld)).reduce((sum, r) => sum + r.amount, 0);
     return {
       capacity,
       committed,
       reserved,
       available: capacity - committed - reserved
     };
+  }
+  if (isOpaqueId(sourceRef, "not")) {
+    const notable = people.notables?.find((n) => n.id === sourceRef);
+    if (notable) {
+      const capacity = 1;
+      const committed = (people.assignments ?? []).filter((a) => a.sourceRef === sourceRef && a.workforceTypeId === workforceTypeId && a.status === "active" && (nowWorld === void 0 || a.endsAtWorld === void 0 || a.endsAtWorld > nowWorld)).reduce((sum, a) => sum + a.amount, 0);
+      const reserved = (people.reservations ?? []).filter((r) => r.sourceRef === sourceRef && r.workforceTypeId === workforceTypeId && r.status === "active" && (r.expiresAtReal === void 0 || r.expiresAtReal >= nowReal) && (nowWorld === void 0 || r.expiresAtWorld === void 0 || r.expiresAtWorld > nowWorld)).reduce((sum, r) => sum + r.amount, 0);
+      return {
+        capacity,
+        committed,
+        reserved,
+        available: capacity - committed - reserved
+      };
+    }
   }
   return null;
 }
@@ -8206,17 +8418,35 @@ function registerAssignmentCommandHandlers(registry, coordinator, domains) {
         targetRef: input.targetRef,
         workforceTypeId: input.workforceTypeId,
         amount: input.amount,
-        createdAtReal: Date.now(),
+        status: "active",
+        visibility: input.visibility,
+        startedAtWorld: input.startedAtWorld,
+        endsAtWorld: input.endsAtWorld,
         notes: input.notes
       };
-      const asgValidation = validateAssignment(candidate);
+      const asgValidation = validateAssignment(candidate, { validateTarget: true });
       if (!asgValidation.ok) {
         return asgValidation;
       }
       const newAsg = asgValidation.value;
+      const sourceCap = getSourceCapacity(
+        currentPeople,
+        newAsg.sourceRef,
+        newAsg.workforceTypeId,
+        Date.now(),
+        newAsg.startedAtWorld
+      );
+      if (sourceCap === null) {
+        return err(
+          createPublicError({
+            code: "DM_PEOPLE_SOURCE_NOT_FOUND",
+            category: "not-found",
+            message: `Source '${newAsg.sourceRef}' does not exist in domain '${domainDoc.name}'`
+          })
+        );
+      }
       if (!ctx.command.payload.allowOvercommit) {
-        const sourceCap = getSourceCapacity(currentPeople, newAsg.sourceRef, newAsg.workforceTypeId);
-        if (sourceCap !== null && sourceCap.available < newAsg.amount) {
+        if (sourceCap.available < newAsg.amount) {
           return err(
             createPublicError({
               code: "DM_WORKFORCE_OVERCOMMIT",
@@ -8457,22 +8687,40 @@ function registerAssignmentCommandHandlers(registry, coordinator, domains) {
         workforceTypeId: input.workforceTypeId,
         amount: input.amount,
         status: "active",
+        correlationId: input.correlationId,
+        visibility: input.visibility,
         expiresAtReal: input.expiresAtReal,
+        expiresAtWorld: input.expiresAtWorld,
         notes: input.notes
       };
-      const resvValidation = validateReservation(candidate);
+      const resvValidation = validateReservation(candidate, { validateTarget: true });
       if (!resvValidation.ok) {
         return resvValidation;
       }
       const newResv = resvValidation.value;
+      const sourceCap = getSourceCapacity(
+        currentPeople,
+        newResv.sourceRef,
+        newResv.workforceTypeId,
+        Date.now(),
+        void 0
+      );
+      if (sourceCap === null) {
+        return err(
+          createPublicError({
+            code: "DM_PEOPLE_SOURCE_NOT_FOUND",
+            category: "not-found",
+            message: `Source '${newResv.sourceRef}' does not exist in domain '${domainDoc.name}'`
+          })
+        );
+      }
       const updatedReservations = Object.freeze([...currentPeople.reservations ?? [], newResv]);
       const provisionalPeople = {
         ...currentPeople,
         reservations: updatedReservations
       };
       if (!ctx.command.payload.allowOvercommit) {
-        const sourceCap = getSourceCapacity(currentPeople, newResv.sourceRef, newResv.workforceTypeId, newResv.expiresAtReal);
-        if (sourceCap !== null && sourceCap.available < newResv.amount) {
+        if (sourceCap.available < newResv.amount) {
           return err(
             createPublicError({
               code: "DM_WORKFORCE_OVERCOMMIT",
@@ -8775,170 +9023,6 @@ function calculatePopulation(state, groups) {
   }
 }
 
-// src/people/repositories/people-repository.ts
-var PeopleRepository = class {
-  #domainRepository;
-  constructor(domainRepository) {
-    this.#domainRepository = domainRepository;
-  }
-  async getPeopleData(domainUuid) {
-    const id = domainUuid.startsWith("JournalEntry.") ? domainUuid.slice("JournalEntry.".length) : domainUuid;
-    const domainRes = await this.#domainRepository.read(id);
-    if (!domainRes.ok) {
-      return domainRes;
-    }
-    return tryGetDomainPeopleData(domainRes.value.record);
-  }
-  async getPopulation(domainUuid) {
-    const peopleRes = await this.getPeopleData(domainUuid);
-    if (!peopleRes.ok) {
-      return peopleRes;
-    }
-    const { population, populationGroups } = peopleRes.value;
-    const resolution = calculatePopulation(population, populationGroups);
-    return ok({
-      state: population,
-      resolution
-    });
-  }
-  async getPopulationGroups(domainUuid) {
-    const peopleRes = await this.getPeopleData(domainUuid);
-    if (!peopleRes.ok) {
-      return peopleRes;
-    }
-    return ok(peopleRes.value.populationGroups);
-  }
-  async getPopulationGroup(domainUuid, groupId) {
-    const groupsRes = await this.getPopulationGroups(domainUuid);
-    if (!groupsRes.ok) {
-      return groupsRes;
-    }
-    const found = groupsRes.value.find((g) => g.id === groupId);
-    if (!found) {
-      return err(
-        createPublicError({
-          code: "DM_POPULATION_GROUP_NOT_FOUND",
-          category: "not-found",
-          message: `PopulationGroup '${groupId}' not found in domain '${domainUuid}'`
-        })
-      );
-    }
-    return ok(found);
-  }
-  async getNotables(domainUuid, options = {}) {
-    const peopleRes = await this.getPeopleData(domainUuid);
-    if (!peopleRes.ok) {
-      return peopleRes;
-    }
-    const notables = peopleRes.value.notables;
-    if (options.viewerIsGm) {
-      return ok(notables);
-    }
-    return ok(notables.filter((n) => n.visibility !== "secret"));
-  }
-  async getNotable(domainUuid, notableId, options = {}) {
-    const notablesRes = await this.getNotables(domainUuid, options);
-    if (!notablesRes.ok) {
-      return notablesRes;
-    }
-    const found = notablesRes.value.find((n) => n.id === notableId);
-    if (!found) {
-      return err(
-        createPublicError({
-          code: "DM_NOTABLE_NOT_FOUND",
-          category: "not-found",
-          message: `Notable '${notableId}' not found in domain '${domainUuid}'`
-        })
-      );
-    }
-    return ok(found);
-  }
-  async getNotableStatus(domainUuid, notableId, actorResolver, options = {}) {
-    const notableRes = await this.getNotable(domainUuid, notableId, options);
-    if (!notableRes.ok) {
-      return notableRes;
-    }
-    return ok(resolveNotableStatus(notableRes.value, actorResolver));
-  }
-  async getRoles(domainUuid, options = {}) {
-    const peopleRes = await this.getPeopleData(domainUuid);
-    if (!peopleRes.ok) {
-      return peopleRes;
-    }
-    const roles = peopleRes.value.roles;
-    if (options.viewerIsGm) {
-      return ok(roles);
-    }
-    return ok(roles.filter((r) => r.visibility !== "secret"));
-  }
-  async getRole(domainUuid, roleId, options = {}) {
-    const rolesRes = await this.getRoles(domainUuid, options);
-    if (!rolesRes.ok) {
-      return rolesRes;
-    }
-    const found = rolesRes.value.find((r) => r.id === roleId);
-    if (!found) {
-      return err(
-        createPublicError({
-          code: "DM_ROLE_NOT_FOUND",
-          category: "not-found",
-          message: `Role '${roleId}' not found in domain '${domainUuid}'`
-        })
-      );
-    }
-    return ok(found);
-  }
-  async getOperationalGroups(domainUuid, options = {}) {
-    const peopleRes = await this.getPeopleData(domainUuid);
-    if (!peopleRes.ok) {
-      return peopleRes;
-    }
-    const groups = peopleRes.value.operationalGroups;
-    if (options.viewerIsGm) {
-      return ok(groups);
-    }
-    return ok(groups.filter((g) => g.visibility !== "secret"));
-  }
-  async getOperationalGroup(domainUuid, groupId, options = {}) {
-    const groupsRes = await this.getOperationalGroups(domainUuid, options);
-    if (!groupsRes.ok) {
-      return groupsRes;
-    }
-    const found = groupsRes.value.find((g) => g.id === groupId);
-    if (!found) {
-      return err(
-        createPublicError({
-          code: "DM_OPERATIONAL_GROUP_NOT_FOUND",
-          category: "not-found",
-          message: `OperationalGroup '${groupId}' not found in domain '${domainUuid}'`
-        })
-      );
-    }
-    return ok(found);
-  }
-  async getWorkforce(domainUuid, nowReal) {
-    const peopleRes = await this.getPeopleData(domainUuid);
-    if (!peopleRes.ok) {
-      return peopleRes;
-    }
-    return ok(calculateWorkforce(peopleRes.value, nowReal));
-  }
-  async getAssignments(domainUuid) {
-    const peopleRes = await this.getPeopleData(domainUuid);
-    if (!peopleRes.ok) {
-      return peopleRes;
-    }
-    return ok(peopleRes.value.assignments ?? []);
-  }
-  async getReservations(domainUuid) {
-    const peopleRes = await this.getPeopleData(domainUuid);
-    if (!peopleRes.ok) {
-      return peopleRes;
-    }
-    return ok(peopleRes.value.reservations ?? []);
-  }
-};
-
 // src/aggregation/capability-resolver.ts
 var ExplicitDomainCapabilityProvider = class {
   id = "domain-explicit";
@@ -8983,7 +9067,8 @@ var PeopleRoleCapabilityProvider = class {
           isGranted = role.occupants.length > 0;
           break;
         case "requirementsSatisfied": {
-          const evalResult = evaluateRole(role, roleDefs, people.operationalGroups);
+          const explicitCaps = record?.definition?.capabilities?.enabled ?? [];
+          const evalResult = evaluateRole(role, roleDefs, people.operationalGroups, explicitCaps);
           isGranted = evalResult.isRequirementSatisfied && evalResult.isValidGroupRole !== false;
           break;
         }
@@ -9099,6 +9184,22 @@ function createDefaultCapabilityResolver() {
 }
 
 // src/projection/people/people-projection-service.ts
+function isEntityVisible(entity, viewer) {
+  if (viewer.isGm) {
+    return true;
+  }
+  const vis = entity.visibility ?? "public";
+  if (vis === "secret") {
+    return false;
+  }
+  if (vis === "restricted") {
+    if (!viewer.allowedRestrictedRefs || !entity.id) {
+      return false;
+    }
+    return viewer.allowedRestrictedRefs.includes(entity.id);
+  }
+  return true;
+}
 var PeopleProjectionService = class {
   #roleDefinitions;
   #groupDefinitions;
@@ -9114,7 +9215,7 @@ var PeopleProjectionService = class {
   }
   #projectAdministrative(domainUuid, rawPeople, viewer, options) {
     const popRes = calculatePopulation(rawPeople.population, rawPeople.populationGroups);
-    const workforce = calculateWorkforce(rawPeople, options.nowReal);
+    const workforce = calculateWorkforce(rawPeople, { nowReal: options.nowReal, nowWorld: options.nowWorld });
     const resolver = createDefaultCapabilityResolver();
     const capabilities = resolver.resolveEffectiveCapabilities({
       domainUuid,
@@ -9157,54 +9258,55 @@ var PeopleProjectionService = class {
     });
   }
   #projectViewer(domainUuid, rawPeople, viewer, options) {
-    const visiblePopGroups = rawPeople.populationGroups.filter((g) => g.visibility !== "secret");
-    const secretGroupIds = new Set(
-      rawPeople.populationGroups.filter((g) => g.visibility === "secret").map((g) => g.id)
+    const visiblePopGroups = rawPeople.populationGroups.filter((g) => isEntityVisible(g, viewer));
+    const hiddenPopGroupIds = new Set(
+      rawPeople.populationGroups.filter((g) => !isEntityVisible(g, viewer)).map((g) => g.id)
     );
-    const visibleNotables = rawPeople.notables.filter((n) => n.visibility !== "secret");
-    const secretNotableIds = new Set(
-      rawPeople.notables.filter((n) => n.visibility === "secret").map((n) => n.id)
+    const visibleNotables = rawPeople.notables.filter((n) => isEntityVisible(n, viewer));
+    const hiddenNotableIds = new Set(
+      rawPeople.notables.filter((n) => !isEntityVisible(n, viewer)).map((n) => n.id)
     );
-    const visibleRoles = rawPeople.roles.filter((r) => r.visibility !== "secret").map((r) => {
-      const visibleOccupants = r.occupants.filter((occId) => !secretNotableIds.has(occId));
+    const visibleRoles = rawPeople.roles.filter((r) => isEntityVisible(r, viewer)).map((r) => {
+      const visibleOccupants = r.occupants.filter((occId) => !hiddenNotableIds.has(occId));
       if (visibleOccupants.length === r.occupants.length) return r;
       return {
         ...r,
         occupants: Object.freeze(visibleOccupants)
       };
     });
-    const visibleOpGroups = rawPeople.operationalGroups.filter((g) => g.visibility !== "secret").map((g) => {
-      const visibleMembers = g.members.filter((mId) => !secretNotableIds.has(mId));
+    const visibleOpGroups = rawPeople.operationalGroups.filter((g) => isEntityVisible(g, viewer)).map((g) => {
+      const visibleMembers = g.members.filter((mId) => !hiddenNotableIds.has(mId));
       if (visibleMembers.length === g.members.length) return g;
       return {
         ...g,
         members: Object.freeze(visibleMembers)
       };
     });
-    const secretOpGroupIds = new Set(
-      rawPeople.operationalGroups.filter((g) => g.visibility === "secret").map((g) => g.id)
+    const hiddenOpGroupIds = new Set(
+      rawPeople.operationalGroups.filter((g) => !isEntityVisible(g, viewer)).map((g) => g.id)
     );
     const visibleAssignments = (rawPeople.assignments ?? []).filter((a) => {
-      if (a.visibility === "secret") return false;
-      if (secretGroupIds.has(a.sourceRef)) return false;
-      if (secretOpGroupIds.has(a.sourceRef)) return false;
-      if (secretNotableIds.has(a.sourceRef)) return false;
+      if (!isEntityVisible(a, viewer)) return false;
+      if (hiddenPopGroupIds.has(a.sourceRef)) return false;
+      if (hiddenOpGroupIds.has(a.sourceRef)) return false;
+      if (hiddenNotableIds.has(a.sourceRef)) return false;
       return true;
     });
     const visibleReservations = (rawPeople.reservations ?? []).filter((r) => {
-      if (r.visibility === "secret") return false;
-      if (secretGroupIds.has(r.sourceRef)) return false;
-      if (secretOpGroupIds.has(r.sourceRef)) return false;
-      if (secretNotableIds.has(r.sourceRef)) return false;
+      if (!isEntityVisible(r, viewer)) return false;
+      if (hiddenPopGroupIds.has(r.sourceRef)) return false;
+      if (hiddenOpGroupIds.has(r.sourceRef)) return false;
+      if (hiddenNotableIds.has(r.sourceRef)) return false;
       return true;
     });
     let projectedPopState = rawPeople.population;
-    if (rawPeople.population.visibility === "secret") {
+    const isPopStateVisible = isEntityVisible({ id: "population", visibility: rawPeople.population.visibility }, viewer);
+    if (!isPopStateVisible) {
       projectedPopState = {
         mode: "manual",
         total: null,
         precision: "unknown",
-        visibility: "secret"
+        visibility: rawPeople.population.visibility
       };
     }
     const popRes = calculatePopulation(projectedPopState, visiblePopGroups);
@@ -9218,7 +9320,7 @@ var PeopleProjectionService = class {
       assignments: Object.freeze(visibleAssignments),
       reservations: Object.freeze(visibleReservations)
     };
-    const workforce = calculateWorkforce(projectedPeopleData, options.nowReal);
+    const workforce = calculateWorkforce(projectedPeopleData, { nowReal: options.nowReal, nowWorld: options.nowWorld });
     const resolver = createDefaultCapabilityResolver();
     const capabilities = resolver.resolveEffectiveCapabilities({
       domainUuid,
@@ -9252,6 +9354,285 @@ var PeopleProjectionService = class {
   }
 };
 
+// src/people/repositories/people-repository.ts
+function resolveRepoViewer(options) {
+  if (options.viewer) return options.viewer;
+  return {
+    userId: "repo-caller",
+    isGm: options.viewerIsGm ?? false
+  };
+}
+var PeopleRepository = class {
+  #domainRepository;
+  constructor(domainRepository) {
+    this.#domainRepository = domainRepository;
+  }
+  async getPeopleData(domainUuid) {
+    const id = domainUuid.startsWith("JournalEntry.") ? domainUuid.slice("JournalEntry.".length) : domainUuid;
+    const domainRes = await this.#domainRepository.read(id);
+    if (!domainRes.ok) {
+      return domainRes;
+    }
+    return tryGetDomainPeopleData(domainRes.value.record);
+  }
+  async getPopulation(domainUuid, options = {}) {
+    const peopleRes = await this.getPeopleData(domainUuid);
+    if (!peopleRes.ok) {
+      return peopleRes;
+    }
+    const viewer = resolveRepoViewer(options);
+    const { population, populationGroups } = peopleRes.value;
+    const visibleGroups = populationGroups.filter((g) => isEntityVisible(g, viewer));
+    let effectivePopState = population;
+    if (!isEntityVisible({ id: "population", visibility: population.visibility }, viewer)) {
+      effectivePopState = {
+        mode: "manual",
+        total: null,
+        precision: "unknown",
+        visibility: population.visibility
+      };
+    }
+    const resolution = calculatePopulation(effectivePopState, visibleGroups);
+    return ok({
+      state: effectivePopState,
+      resolution
+    });
+  }
+  async getPopulationGroups(domainUuid, options = {}) {
+    const peopleRes = await this.getPeopleData(domainUuid);
+    if (!peopleRes.ok) {
+      return peopleRes;
+    }
+    const viewer = resolveRepoViewer(options);
+    return ok(peopleRes.value.populationGroups.filter((g) => isEntityVisible(g, viewer)));
+  }
+  async getPopulationGroup(domainUuid, groupId, options = {}) {
+    const groupsRes = await this.getPopulationGroups(domainUuid, options);
+    if (!groupsRes.ok) {
+      return groupsRes;
+    }
+    const found = groupsRes.value.find((g) => g.id === groupId);
+    if (!found) {
+      return err(
+        createPublicError({
+          code: "DM_POPULATION_GROUP_NOT_FOUND",
+          category: "not-found",
+          message: `PopulationGroup '${groupId}' not found in domain '${domainUuid}'`
+        })
+      );
+    }
+    return ok(found);
+  }
+  async getNotables(domainUuid, options = {}) {
+    const peopleRes = await this.getPeopleData(domainUuid);
+    if (!peopleRes.ok) {
+      return peopleRes;
+    }
+    const viewer = resolveRepoViewer(options);
+    return ok(peopleRes.value.notables.filter((n) => isEntityVisible(n, viewer)));
+  }
+  async getNotable(domainUuid, notableId, options = {}) {
+    const notablesRes = await this.getNotables(domainUuid, options);
+    if (!notablesRes.ok) {
+      return notablesRes;
+    }
+    const found = notablesRes.value.find((n) => n.id === notableId);
+    if (!found) {
+      return err(
+        createPublicError({
+          code: "DM_NOTABLE_NOT_FOUND",
+          category: "not-found",
+          message: `Notable '${notableId}' not found in domain '${domainUuid}'`
+        })
+      );
+    }
+    return ok(found);
+  }
+  async getNotableStatus(domainUuid, notableId, actorResolver, options = {}) {
+    const notableRes = await this.getNotable(domainUuid, notableId, options);
+    if (!notableRes.ok) {
+      return notableRes;
+    }
+    return ok(resolveNotableStatus(notableRes.value, actorResolver));
+  }
+  async getRoles(domainUuid, options = {}) {
+    const peopleRes = await this.getPeopleData(domainUuid);
+    if (!peopleRes.ok) {
+      return peopleRes;
+    }
+    const viewer = resolveRepoViewer(options);
+    const hiddenNotableIds = new Set(
+      peopleRes.value.notables.filter((n) => !isEntityVisible(n, viewer)).map((n) => n.id)
+    );
+    const visibleRoles = peopleRes.value.roles.filter((r) => isEntityVisible(r, viewer)).map((r) => {
+      const visibleOccupants = r.occupants.filter((occId) => !hiddenNotableIds.has(occId));
+      if (visibleOccupants.length === r.occupants.length) return r;
+      return {
+        ...r,
+        occupants: Object.freeze(visibleOccupants)
+      };
+    });
+    return ok(visibleRoles);
+  }
+  async getRole(domainUuid, roleId, options = {}) {
+    const rolesRes = await this.getRoles(domainUuid, options);
+    if (!rolesRes.ok) {
+      return rolesRes;
+    }
+    const found = rolesRes.value.find((r) => r.id === roleId);
+    if (!found) {
+      return err(
+        createPublicError({
+          code: "DM_ROLE_NOT_FOUND",
+          category: "not-found",
+          message: `Role '${roleId}' not found in domain '${domainUuid}'`
+        })
+      );
+    }
+    return ok(found);
+  }
+  async getOperationalGroups(domainUuid, options = {}) {
+    const peopleRes = await this.getPeopleData(domainUuid);
+    if (!peopleRes.ok) {
+      return peopleRes;
+    }
+    const viewer = resolveRepoViewer(options);
+    const hiddenNotableIds = new Set(
+      peopleRes.value.notables.filter((n) => !isEntityVisible(n, viewer)).map((n) => n.id)
+    );
+    const visibleGroups = peopleRes.value.operationalGroups.filter((g) => isEntityVisible(g, viewer)).map((g) => {
+      const visibleMembers = g.members.filter((mId) => !hiddenNotableIds.has(mId));
+      if (visibleMembers.length === g.members.length) return g;
+      return {
+        ...g,
+        members: Object.freeze(visibleMembers)
+      };
+    });
+    return ok(visibleGroups);
+  }
+  async getOperationalGroup(domainUuid, groupId, options = {}) {
+    const groupsRes = await this.getOperationalGroups(domainUuid, options);
+    if (!groupsRes.ok) {
+      return groupsRes;
+    }
+    const found = groupsRes.value.find((g) => g.id === groupId);
+    if (!found) {
+      return err(
+        createPublicError({
+          code: "DM_OPERATIONAL_GROUP_NOT_FOUND",
+          category: "not-found",
+          message: `OperationalGroup '${groupId}' not found in domain '${domainUuid}'`
+        })
+      );
+    }
+    return ok(found);
+  }
+  async getWorkforce(domainUuid, options = {}) {
+    const peopleRes = await this.getPeopleData(domainUuid);
+    if (!peopleRes.ok) {
+      return peopleRes;
+    }
+    const optObj = typeof options === "number" ? { nowReal: options } : options;
+    const viewer = resolveRepoViewer(optObj);
+    if (viewer.isGm) {
+      return ok(calculateWorkforce(peopleRes.value, { nowReal: optObj.nowReal, nowWorld: optObj.nowWorld }));
+    }
+    const visibleGroups = peopleRes.value.populationGroups.filter((g) => isEntityVisible(g, viewer));
+    const hiddenNotableIds = new Set(peopleRes.value.notables.filter((n) => !isEntityVisible(n, viewer)).map((n) => n.id));
+    const visibleOpGroups = peopleRes.value.operationalGroups.filter((g) => isEntityVisible(g, viewer)).map((g) => {
+      const visibleMembers = g.members.filter((mId) => !hiddenNotableIds.has(mId));
+      if (visibleMembers.length === g.members.length) return g;
+      return { ...g, members: Object.freeze(visibleMembers) };
+    });
+    const hiddenPopGroupIds = new Set(peopleRes.value.populationGroups.filter((g) => !isEntityVisible(g, viewer)).map((g) => g.id));
+    const hiddenOpGroupIds = new Set(peopleRes.value.operationalGroups.filter((g) => !isEntityVisible(g, viewer)).map((g) => g.id));
+    const visibleAssignments = (peopleRes.value.assignments ?? []).filter((a) => {
+      if (!isEntityVisible(a, viewer)) return false;
+      if (hiddenPopGroupIds.has(a.sourceRef) || hiddenOpGroupIds.has(a.sourceRef) || hiddenNotableIds.has(a.sourceRef)) return false;
+      return true;
+    });
+    const visibleReservations = (peopleRes.value.reservations ?? []).filter((r) => {
+      if (!isEntityVisible(r, viewer)) return false;
+      if (hiddenPopGroupIds.has(r.sourceRef) || hiddenOpGroupIds.has(r.sourceRef) || hiddenNotableIds.has(r.sourceRef)) return false;
+      return true;
+    });
+    const projectedPeople = {
+      ...peopleRes.value,
+      populationGroups: Object.freeze(visibleGroups),
+      operationalGroups: Object.freeze(visibleOpGroups),
+      assignments: Object.freeze(visibleAssignments),
+      reservations: Object.freeze(visibleReservations)
+    };
+    return ok(calculateWorkforce(projectedPeople, { nowReal: optObj.nowReal, nowWorld: optObj.nowWorld }));
+  }
+  async getAssignments(domainUuid, options = {}) {
+    const peopleRes = await this.getPeopleData(domainUuid);
+    if (!peopleRes.ok) {
+      return peopleRes;
+    }
+    const viewer = resolveRepoViewer(options);
+    if (viewer.isGm) {
+      return ok(peopleRes.value.assignments ?? []);
+    }
+    const hiddenNotableIds = new Set(peopleRes.value.notables.filter((n) => !isEntityVisible(n, viewer)).map((n) => n.id));
+    const hiddenPopGroupIds = new Set(peopleRes.value.populationGroups.filter((g) => !isEntityVisible(g, viewer)).map((g) => g.id));
+    const hiddenOpGroupIds = new Set(peopleRes.value.operationalGroups.filter((g) => !isEntityVisible(g, viewer)).map((g) => g.id));
+    return ok((peopleRes.value.assignments ?? []).filter((a) => {
+      if (!isEntityVisible(a, viewer)) return false;
+      if (hiddenPopGroupIds.has(a.sourceRef) || hiddenOpGroupIds.has(a.sourceRef) || hiddenNotableIds.has(a.sourceRef)) return false;
+      return true;
+    }));
+  }
+  async getReservations(domainUuid, options = {}) {
+    const peopleRes = await this.getPeopleData(domainUuid);
+    if (!peopleRes.ok) {
+      return peopleRes;
+    }
+    const viewer = resolveRepoViewer(options);
+    if (viewer.isGm) {
+      return ok(peopleRes.value.reservations ?? []);
+    }
+    const hiddenNotableIds = new Set(peopleRes.value.notables.filter((n) => !isEntityVisible(n, viewer)).map((n) => n.id));
+    const hiddenPopGroupIds = new Set(peopleRes.value.populationGroups.filter((g) => !isEntityVisible(g, viewer)).map((g) => g.id));
+    const hiddenOpGroupIds = new Set(peopleRes.value.operationalGroups.filter((g) => !isEntityVisible(g, viewer)).map((g) => g.id));
+    return ok((peopleRes.value.reservations ?? []).filter((r) => {
+      if (!isEntityVisible(r, viewer)) return false;
+      if (hiddenPopGroupIds.has(r.sourceRef) || hiddenOpGroupIds.has(r.sourceRef) || hiddenNotableIds.has(r.sourceRef)) return false;
+      return true;
+    }));
+  }
+};
+
+// src/projection/viewer-identity.ts
+var globalCurrentUserProvider = null;
+function resolveCurrentViewer(callerSuppliedViewer, customProvider) {
+  const provider = customProvider ?? globalCurrentUserProvider ?? (() => {
+    const user = globalThis.game?.user;
+    if (user) {
+      return { id: String(user.id ?? "anonymous"), isGM: Boolean(user.isGM) };
+    }
+    return null;
+  });
+  const current = provider();
+  if (current) {
+    const realIsGm = Boolean(current.isGM ?? current.isGm);
+    const realUserId = String(current.id ?? current.userId ?? "anonymous");
+    const effectiveIsGm = realIsGm ? callerSuppliedViewer?.isGm ?? true : false;
+    const effectiveUserId = callerSuppliedViewer?.userId ?? realUserId;
+    const effectiveAllowedRestrictedRefs = callerSuppliedViewer?.allowedRestrictedRefs ?? current.allowedRestrictedRefs;
+    return Object.freeze({
+      userId: effectiveUserId,
+      isGm: effectiveIsGm,
+      allowedRestrictedRefs: effectiveAllowedRestrictedRefs
+    });
+  }
+  return Object.freeze({
+    userId: callerSuppliedViewer?.userId ?? "anonymous",
+    isGm: callerSuppliedViewer?.isGm === true,
+    allowedRestrictedRefs: callerSuppliedViewer?.allowedRestrictedRefs
+  });
+}
+
 // src/aggregation/people-aggregation.ts
 var PeopleAggregationService = class {
   #domains;
@@ -9265,7 +9646,7 @@ var PeopleAggregationService = class {
       return rootDocRes;
     }
     const recursive = options.recursive ?? true;
-    const viewer = options.viewer ?? { userId: "system-authority", isGm: true };
+    const viewer = resolveCurrentViewer(options.viewer);
     const projectionService = new PeopleProjectionService({
       roleDefinitions: options.roleDefinitions,
       groupDefinitions: options.groupDefinitions
@@ -9273,6 +9654,7 @@ var PeopleAggregationService = class {
     const warnings = [];
     const visitedUuids = /* @__PURE__ */ new Set();
     const domainBreakdown = [];
+    const unknownContributors = [];
     let hasEstimated = false;
     let hasUnknown = false;
     let hasNull = false;
@@ -9289,11 +9671,14 @@ var PeopleAggregationService = class {
         current.doc.uuid,
         people,
         viewer,
-        { nowReal: options.nowReal }
+        { nowReal: options.nowReal, nowWorld: options.nowWorld }
       );
       const popRes = projected.population.resolution;
       if (popRes.precision === "estimated") hasEstimated = true;
-      if (popRes.precision === "unknown") hasUnknown = true;
+      if (popRes.precision === "unknown" || popRes.total === null) {
+        hasUnknown = true;
+        unknownContributors.push(current.doc.uuid);
+      }
       if (popRes.total === null) hasNull = true;
       const wfCap = {};
       for (const [typeId, res] of Object.entries(projected.workforce.types)) {
@@ -9374,6 +9759,7 @@ var PeopleAggregationService = class {
       totalPopulation,
       ownPopulation,
       descendantPopulation,
+      unknownContributors: Object.freeze(unknownContributors),
       domainBreakdown: Object.freeze(domainBreakdown),
       workforceSummary: {
         ownCapacity: Object.freeze(ownWorkforce),
@@ -9572,65 +9958,111 @@ var PeopleService = class {
     });
     this.#aggregation = new PeopleAggregationService(domains);
   }
-  async getPeopleData(domainUuid) {
-    return this.#repository.getPeopleData(domainUuid);
+  asAdmin() {
+    return {
+      getPeopleData: (domainUuid) => this.#repository.getPeopleData(domainUuid),
+      rawRepository: this.#repository
+    };
   }
-  async getViewerContext(domainUuid, viewer, options = {}) {
+  asAuthority() {
+    return this.asAdmin();
+  }
+  async getPeopleData(domainUuid, callerViewer) {
+    const viewer = resolveCurrentViewer(callerViewer);
+    const rawRes = await this.#repository.getPeopleData(domainUuid);
+    if (!rawRes.ok) return rawRes;
+    if (viewer.isGm) {
+      return rawRes;
+    }
+    const projected = this.#projection.project(domainUuid, rawRes.value, viewer);
+    return ok({
+      schemaVersion: rawRes.value.schemaVersion,
+      population: projected.population.state,
+      populationGroups: projected.populationGroups,
+      notables: projected.notables,
+      roles: projected.roles,
+      operationalGroups: projected.operationalGroups,
+      assignments: projected.assignments,
+      reservations: projected.reservations
+    });
+  }
+  async getViewerContext(domainUuid, callerViewer, options = {}) {
+    const viewer = resolveCurrentViewer(callerViewer);
     const dataRes = await this.#repository.getPeopleData(domainUuid);
     if (!dataRes.ok) return dataRes;
     return ok(this.#projection.project(domainUuid, dataRes.value, viewer, options));
   }
-  async getPopulation(domainUuid, viewer) {
-    if (viewer && !viewer.isGm) {
-      const ctxRes = await this.getViewerContext(domainUuid, viewer);
-      if (!ctxRes.ok) return ctxRes;
-      return ok({
-        state: ctxRes.value.population.state,
-        resolution: ctxRes.value.population.resolution
-      });
-    }
-    return this.#repository.getPopulation(domainUuid);
+  async getPopulation(domainUuid, callerViewer) {
+    const viewer = resolveCurrentViewer(callerViewer);
+    const ctxRes = await this.getViewerContext(domainUuid, viewer);
+    if (!ctxRes.ok) return ctxRes;
+    return ok({
+      state: ctxRes.value.population.state,
+      resolution: ctxRes.value.population.resolution
+    });
   }
-  async getPopulationGroups(domainUuid, viewer) {
-    if (viewer && !viewer.isGm) {
-      const ctxRes = await this.getViewerContext(domainUuid, viewer);
-      if (!ctxRes.ok) return ctxRes;
-      return ok(ctxRes.value.populationGroups);
-    }
-    return this.#repository.getPopulationGroups(domainUuid);
+  async getPopulationGroups(domainUuid, callerViewer) {
+    const viewer = resolveCurrentViewer(callerViewer);
+    const ctxRes = await this.getViewerContext(domainUuid, viewer);
+    if (!ctxRes.ok) return ctxRes;
+    return ok(ctxRes.value.populationGroups);
   }
-  async getNotables(domainUuid, viewer) {
-    return this.#repository.getNotables(domainUuid, { viewerIsGm: viewer ? viewer.isGm : true });
+  async getPopulationGroup(domainUuid, groupId, callerViewer) {
+    const viewer = resolveCurrentViewer(callerViewer);
+    return this.#repository.getPopulationGroup(domainUuid, groupId, { viewer });
   }
-  async getRoles(domainUuid, viewer) {
-    return this.#repository.getRoles(domainUuid, { viewerIsGm: viewer ? viewer.isGm : true });
+  async getNotables(domainUuid, callerViewer) {
+    const viewer = resolveCurrentViewer(callerViewer);
+    const ctxRes = await this.getViewerContext(domainUuid, viewer);
+    if (!ctxRes.ok) return ctxRes;
+    return ok(ctxRes.value.notables);
   }
-  async getOperationalGroups(domainUuid, viewer) {
-    return this.#repository.getOperationalGroups(domainUuid, { viewerIsGm: viewer ? viewer.isGm : true });
+  async getNotable(domainUuid, notableId, callerViewer) {
+    const viewer = resolveCurrentViewer(callerViewer);
+    return this.#repository.getNotable(domainUuid, notableId, { viewer });
   }
-  async getWorkforce(domainUuid, viewer, nowReal) {
-    if (viewer && !viewer.isGm) {
-      const ctxRes = await this.getViewerContext(domainUuid, viewer, { nowReal });
-      if (!ctxRes.ok) return ctxRes;
-      return ok(ctxRes.value.workforce);
-    }
-    return this.#repository.getWorkforce(domainUuid, nowReal);
+  async getNotableStatus(domainUuid, notableId, actorResolver, callerViewer) {
+    const viewer = resolveCurrentViewer(callerViewer);
+    return this.#repository.getNotableStatus(domainUuid, notableId, actorResolver, { viewer });
   }
-  async getAssignments(domainUuid, viewer) {
-    if (viewer && !viewer.isGm) {
-      const ctxRes = await this.getViewerContext(domainUuid, viewer);
-      if (!ctxRes.ok) return ctxRes;
-      return ok(ctxRes.value.assignments);
-    }
-    return this.#repository.getAssignments(domainUuid);
+  async getRoles(domainUuid, callerViewer) {
+    const viewer = resolveCurrentViewer(callerViewer);
+    const ctxRes = await this.getViewerContext(domainUuid, viewer);
+    if (!ctxRes.ok) return ctxRes;
+    return ok(ctxRes.value.roles);
   }
-  async getReservations(domainUuid, viewer) {
-    if (viewer && !viewer.isGm) {
-      const ctxRes = await this.getViewerContext(domainUuid, viewer);
-      if (!ctxRes.ok) return ctxRes;
-      return ok(ctxRes.value.reservations);
-    }
-    return this.#repository.getReservations(domainUuid);
+  async getRole(domainUuid, roleId, callerViewer) {
+    const viewer = resolveCurrentViewer(callerViewer);
+    return this.#repository.getRole(domainUuid, roleId, { viewer });
+  }
+  async getOperationalGroups(domainUuid, callerViewer) {
+    const viewer = resolveCurrentViewer(callerViewer);
+    const ctxRes = await this.getViewerContext(domainUuid, viewer);
+    if (!ctxRes.ok) return ctxRes;
+    return ok(ctxRes.value.operationalGroups);
+  }
+  async getOperationalGroup(domainUuid, groupId, callerViewer) {
+    const viewer = resolveCurrentViewer(callerViewer);
+    return this.#repository.getOperationalGroup(domainUuid, groupId, { viewer });
+  }
+  async getWorkforce(domainUuid, callerViewer, options) {
+    const viewer = resolveCurrentViewer(callerViewer);
+    const optObj = typeof options === "number" ? { nowReal: options } : options;
+    const ctxRes = await this.getViewerContext(domainUuid, viewer, optObj);
+    if (!ctxRes.ok) return ctxRes;
+    return ok(ctxRes.value.workforce);
+  }
+  async getAssignments(domainUuid, callerViewer, options) {
+    const viewer = resolveCurrentViewer(callerViewer);
+    const ctxRes = await this.getViewerContext(domainUuid, viewer, options);
+    if (!ctxRes.ok) return ctxRes;
+    return ok(ctxRes.value.assignments);
+  }
+  async getReservations(domainUuid, callerViewer, options) {
+    const viewer = resolveCurrentViewer(callerViewer);
+    const ctxRes = await this.getViewerContext(domainUuid, viewer, options);
+    if (!ctxRes.ok) return ctxRes;
+    return ok(ctxRes.value.reservations);
   }
   getAggregate(rootDomainUuid, options = {}) {
     return this.#aggregation.queryPeopleAggregate(rootDomainUuid, options);
@@ -9787,6 +10219,9 @@ function composeDomainManagerRuntime(options = {}) {
     transactionStore,
     diagnostics,
     people,
+    admin: Object.freeze({
+      people: people.asAdmin()
+    }),
     destroy: () => {
       commandBus.destroy();
       if ("destroy" in transport && typeof transport.destroy === "function") {

@@ -83,7 +83,8 @@ export class PeopleRoleCapabilityProvider implements CapabilityGrantProvider {
           isGranted = role.occupants.length > 0;
           break;
         case "requirementsSatisfied": {
-          const evalResult = evaluateRole(role, roleDefs, people.operationalGroups);
+          const explicitCaps = record?.definition?.capabilities?.enabled ?? [];
+          const evalResult = evaluateRole(role, roleDefs, people.operationalGroups, explicitCaps);
           isGranted = evalResult.isRequirementSatisfied && evalResult.isValidGroupRole !== false;
           break;
         }

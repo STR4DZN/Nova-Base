@@ -42,6 +42,26 @@ export interface AdministrativePeopleContext extends ViewerPeopleContext {
   };
 }
 
+export function isEntityVisible(
+  entity: { readonly id?: string; readonly visibility?: "public" | "restricted" | "secret" },
+  viewer: ViewerIdentity
+): boolean {
+  if (viewer.isGm) {
+    return true;
+  }
+  const vis = entity.visibility ?? "public";
+  if (vis === "secret") {
+    return false;
+  }
+  if (vis === "restricted") {
+    if (!viewer.allowedRestrictedRefs || !entity.id) {
+      return false;
+    }
+    return viewer.allowedRestrictedRefs.includes(entity.id);
+  }
+  return true;
+}
+
 export class PeopleProjectionService {
   readonly #roleDefinitions: readonly RoleDefinition[];
   readonly #groupDefinitions: readonly OperationalGroupDefinition[];
@@ -58,7 +78,7 @@ export class PeopleProjectionService {
     domainUuid: string,
     rawPeople: DomainPeopleData,
     viewer: ViewerIdentity,
-    options: { nowReal?: number; domainCapabilities?: readonly string[] } = {}
+    options: { nowReal?: number; nowWorld?: number; domainCapabilities?: readonly string[] } = {}
   ): ViewerPeopleContext | AdministrativePeopleContext {
     if (viewer.isGm) {
       return this.#projectAdministrative(domainUuid, rawPeople, viewer, options);
@@ -70,10 +90,10 @@ export class PeopleProjectionService {
     domainUuid: string,
     rawPeople: DomainPeopleData,
     viewer: ViewerIdentity,
-    options: { nowReal?: number; domainCapabilities?: readonly string[] }
+    options: { nowReal?: number; nowWorld?: number; domainCapabilities?: readonly string[] }
   ): AdministrativePeopleContext {
     const popRes = calculatePopulation(rawPeople.population, rawPeople.populationGroups);
-    const workforce = calculateWorkforce(rawPeople, options.nowReal);
+    const workforce = calculateWorkforce(rawPeople, { nowReal: options.nowReal, nowWorld: options.nowWorld });
     const resolver = createDefaultCapabilityResolver();
     const capabilities = resolver.resolveEffectiveCapabilities({
       domainUuid,
@@ -122,25 +142,25 @@ export class PeopleProjectionService {
     domainUuid: string,
     rawPeople: DomainPeopleData,
     viewer: ViewerIdentity,
-    options: { nowReal?: number; domainCapabilities?: readonly string[] }
+    options: { nowReal?: number; nowWorld?: number; domainCapabilities?: readonly string[] }
   ): ViewerPeopleContext {
-    // 1. Filter secret PopulationGroups
-    const visiblePopGroups = rawPeople.populationGroups.filter((g) => g.visibility !== "secret");
-    const secretGroupIds = new Set<string>(
-      rawPeople.populationGroups.filter((g) => g.visibility === "secret").map((g) => g.id)
+    // 1. Filter PopulationGroups using fail-closed visibility
+    const visiblePopGroups = rawPeople.populationGroups.filter((g) => isEntityVisible(g, viewer));
+    const hiddenPopGroupIds = new Set<string>(
+      rawPeople.populationGroups.filter((g) => !isEntityVisible(g, viewer)).map((g) => g.id)
     );
 
-    // 2. Filter secret Notables
-    const visibleNotables = rawPeople.notables.filter((n) => n.visibility !== "secret");
-    const secretNotableIds = new Set<string>(
-      rawPeople.notables.filter((n) => n.visibility === "secret").map((n) => n.id)
+    // 2. Filter Notables using fail-closed visibility
+    const visibleNotables = rawPeople.notables.filter((n) => isEntityVisible(n, viewer));
+    const hiddenNotableIds = new Set<string>(
+      rawPeople.notables.filter((n) => !isEntityVisible(n, viewer)).map((n) => n.id)
     );
 
-    // 3. Filter secret Roles and remove secret occupants
+    // 3. Deep projection of Roles: filter non-visible roles, and strip hidden occupants
     const visibleRoles: DomainRole[] = rawPeople.roles
-      .filter((r) => r.visibility !== "secret")
+      .filter((r) => isEntityVisible(r, viewer))
       .map((r) => {
-        const visibleOccupants = r.occupants.filter((occId) => !secretNotableIds.has(occId));
+        const visibleOccupants = r.occupants.filter((occId) => !hiddenNotableIds.has(occId));
         if (visibleOccupants.length === r.occupants.length) return r;
         return {
           ...r,
@@ -148,46 +168,47 @@ export class PeopleProjectionService {
         };
       });
 
-    // 4. Filter secret OperationalGroups and remove secret members
+    // 4. Deep projection of OperationalGroups: filter non-visible groups, and strip hidden members
     const visibleOpGroups: OperationalGroup[] = rawPeople.operationalGroups
-      .filter((g) => g.visibility !== "secret")
+      .filter((g) => isEntityVisible(g, viewer))
       .map((g) => {
-        const visibleMembers = g.members.filter((mId) => !secretNotableIds.has(mId));
+        const visibleMembers = g.members.filter((mId) => !hiddenNotableIds.has(mId));
         if (visibleMembers.length === g.members.length) return g;
         return {
           ...g,
           members: Object.freeze(visibleMembers)
         };
       });
-    const secretOpGroupIds = new Set<string>(
-      rawPeople.operationalGroups.filter((g) => g.visibility === "secret").map((g) => g.id)
+    const hiddenOpGroupIds = new Set<string>(
+      rawPeople.operationalGroups.filter((g) => !isEntityVisible(g, viewer)).map((g) => g.id)
     );
 
-    // 5. Filter secret Assignments & Reservations (or pointing to secret sources)
+    // 5. Filter Assignments & Reservations (hidden visibility or pointing to hidden sources)
     const visibleAssignments = (rawPeople.assignments ?? []).filter((a) => {
-      if (a.visibility === "secret") return false;
-      if (secretGroupIds.has(a.sourceRef)) return false;
-      if (secretOpGroupIds.has(a.sourceRef)) return false;
-      if (secretNotableIds.has(a.sourceRef)) return false;
+      if (!isEntityVisible(a, viewer)) return false;
+      if (hiddenPopGroupIds.has(a.sourceRef)) return false;
+      if (hiddenOpGroupIds.has(a.sourceRef)) return false;
+      if (hiddenNotableIds.has(a.sourceRef)) return false;
       return true;
     });
 
     const visibleReservations = (rawPeople.reservations ?? []).filter((r) => {
-      if (r.visibility === "secret") return false;
-      if (secretGroupIds.has(r.sourceRef)) return false;
-      if (secretOpGroupIds.has(r.sourceRef)) return false;
-      if (secretNotableIds.has(r.sourceRef)) return false;
+      if (!isEntityVisible(r, viewer)) return false;
+      if (hiddenPopGroupIds.has(r.sourceRef)) return false;
+      if (hiddenOpGroupIds.has(r.sourceRef)) return false;
+      if (hiddenNotableIds.has(r.sourceRef)) return false;
       return true;
     });
 
-    // 6. Population projection: if state itself is secret, redact completely
+    // 6. Population projection: if state itself is not visible, redact completely
     let projectedPopState = rawPeople.population;
-    if (rawPeople.population.visibility === "secret") {
+    const isPopStateVisible = isEntityVisible({ id: "population", visibility: rawPeople.population.visibility }, viewer);
+    if (!isPopStateVisible) {
       projectedPopState = {
         mode: "manual",
         total: null,
         precision: "unknown",
-        visibility: "secret"
+        visibility: rawPeople.population.visibility
       };
     }
 
@@ -207,7 +228,7 @@ export class PeopleProjectionService {
     };
 
     // Derived workforce computed strictly on projected visible data
-    const workforce = calculateWorkforce(projectedPeopleData, options.nowReal);
+    const workforce = calculateWorkforce(projectedPeopleData, { nowReal: options.nowReal, nowWorld: options.nowWorld });
 
     // Derived capabilities computed strictly on projected visible data
     const resolver = createDefaultCapabilityResolver();

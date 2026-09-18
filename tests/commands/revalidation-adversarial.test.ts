@@ -1231,7 +1231,7 @@ test("Ciclo 2 - Concurrency=10: cancellation/timeout does not leave permits or l
       const lockKey = "domain:contested";
       const acquired = await lockManager.acquireLocks({ keys: [lockKey], ownerId: ctx.command.commandId, timeoutMs: 1000 });
       assert.equal(acquired.ok, true);
-      await new Promise((r) => setTimeout(r, 60));
+      await new Promise((r) => setTimeout(r, 120));
       if (acquired.ok) acquired.value.release();
       return ok({ holder: "done" });
     }
@@ -1243,7 +1243,7 @@ test("Ciclo 2 - Concurrency=10: cancellation/timeout does not leave permits or l
     visibility: "public",
     handler: async (ctx) => {
       const lockKey = "domain:contested";
-      const acquired = await lockManager.acquireLocks({ keys: [lockKey], ownerId: ctx.command.commandId, timeoutMs: 20 });
+      const acquired = await lockManager.acquireLocks({ keys: [lockKey], ownerId: ctx.command.commandId, timeoutMs: 40 });
       if (!acquired.ok) {
         return err(acquired.error);
       }
