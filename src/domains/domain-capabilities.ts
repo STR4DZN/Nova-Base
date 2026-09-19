@@ -3,6 +3,9 @@ import { createPublicError, type Warning } from "../core/contracts/public-error.
 import type { DomainCapabilities } from "./domain-schema.js";
 import { validateDomainPeopleData } from "../people/people-data.js";
 import { validateDomainEconomyData } from "../economy/economy-data.js";
+import { validateDomainProjectsData } from "../projects/project-data.js";
+import { validateDomainFacilitiesData } from "../facilities/facility-data.js";
+import { validateDomainDowntimeData } from "../downtime/downtime-data.js";
 
 export type CapabilityConfigValidator = (config: unknown) => Result<void>;
 
@@ -204,6 +207,36 @@ export function createDefaultCapabilityRegistry(): CapabilityRegistry {
     validateConfig: (config) => {
       if (config === undefined || config === null) return ok(undefined);
       const res = validateDomainEconomyData(config);
+      return res.ok ? ok(undefined) : err(res.error);
+    }
+  });
+  registry.register({
+    id: "domain-manager:projects",
+    label: "Projects & Construction",
+    functional: true,
+    validateConfig: (config) => {
+      if (config === undefined || config === null) return ok(undefined);
+      const res = validateDomainProjectsData(config);
+      return res.ok ? ok(undefined) : err(res.error);
+    }
+  });
+  registry.register({
+    id: "domain-manager:facilities",
+    label: "Facilities & Installations",
+    functional: true,
+    validateConfig: (config) => {
+      if (config === undefined || config === null) return ok(undefined);
+      const res = validateDomainFacilitiesData(config);
+      return res.ok ? ok(undefined) : err(res.error);
+    }
+  });
+  registry.register({
+    id: "domain-manager:downtime",
+    label: "Downtime Activities",
+    functional: true,
+    validateConfig: (config) => {
+      if (config === undefined || config === null) return ok(undefined);
+      const res = validateDomainDowntimeData(config);
       return res.ok ? ok(undefined) : err(res.error);
     }
   });

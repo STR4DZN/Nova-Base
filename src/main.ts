@@ -115,5 +115,8 @@ export {
 } from "./economy/providers/provider-registry.js";
 export { ThresholdService } from "./economy/thresholds/threshold-service.js";
 export { EconomyApplication, EconomyApplicationController } from "./ui/domain-patterns/economy/economy-app.js";
+export { ProjectsApplication, ProjectsApplicationController } from "./ui/domain-patterns/projects/project-app.js";
+export { FacilitiesApplication, FacilitiesApplicationController } from "./ui/domain-patterns/facilities/facility-app.js";
+export { DowntimeApplication, DowntimeApplicationController } from "./ui/domain-patterns/downtime/downtime-app.js";
 export type { PublicModuleApi } from "./bootstrap/domain-manager-runtime.js";
 

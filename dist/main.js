@@ -2440,6 +2440,1763 @@ function withDomainEconomyData(domain, economyData) {
   };
 }
 
+// src/projects/types/project-entry-types.ts
+var PROJECT_ENTRY_SOURCE_KINDS = Object.freeze([
+  "manual",
+  "time",
+  "downtime",
+  "assignment",
+  "facility",
+  "command",
+  "integration",
+  "system"
+]);
+function validateProjectEntry(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_ENTRY_INVALID",
+        category: "validation",
+        message: "ProjectEntry must be an object"
+      })
+    );
+  }
+  const candidate = raw;
+  if (typeof candidate.id !== "string" || candidate.id.trim().length === 0) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_ENTRY_INVALID",
+        category: "validation",
+        message: "ProjectEntry id is required and must be non-empty"
+      })
+    );
+  }
+  if (typeof candidate.projectId !== "string" || candidate.projectId.trim().length === 0) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_ENTRY_INVALID",
+        category: "validation",
+        message: "ProjectEntry projectId is required and must be non-empty"
+      })
+    );
+  }
+  if (typeof candidate.domainUuid !== "string" || candidate.domainUuid.trim().length === 0) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_ENTRY_INVALID",
+        category: "validation",
+        message: "ProjectEntry domainUuid is required and must be non-empty"
+      })
+    );
+  }
+  if (typeof candidate.sequence !== "number" || !Number.isSafeInteger(candidate.sequence) || candidate.sequence < 1) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_ENTRY_INVALID",
+        category: "validation",
+        message: "ProjectEntry sequence must be a positive safe integer >= 1"
+      })
+    );
+  }
+  if (typeof candidate.unitsDelta !== "number" || !Number.isSafeInteger(candidate.unitsDelta)) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_ENTRY_INVALID",
+        category: "validation",
+        message: "ProjectEntry unitsDelta must be a safe integer"
+      })
+    );
+  }
+  if (typeof candidate.unitsBefore !== "number" || !Number.isSafeInteger(candidate.unitsBefore) || candidate.unitsBefore < 0) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_ENTRY_INVALID",
+        category: "validation",
+        message: "ProjectEntry unitsBefore must be a non-negative safe integer >= 0"
+      })
+    );
+  }
+  if (typeof candidate.unitsAfter !== "number" || !Number.isSafeInteger(candidate.unitsAfter) || candidate.unitsAfter < 0) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_ENTRY_INVALID",
+        category: "validation",
+        message: "ProjectEntry unitsAfter must be a non-negative safe integer >= 0"
+      })
+    );
+  }
+  if (typeof candidate.sourceKind !== "string" || !PROJECT_ENTRY_SOURCE_KINDS.includes(candidate.sourceKind)) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_ENTRY_INVALID",
+        category: "validation",
+        message: `ProjectEntry sourceKind '${String(candidate.sourceKind)}' is invalid. Valid kinds: ${PROJECT_ENTRY_SOURCE_KINDS.join(", ")}`
+      })
+    );
+  }
+  if (typeof candidate.reasonCode !== "string" || candidate.reasonCode.trim().length === 0) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_ENTRY_INVALID",
+        category: "validation",
+        message: "ProjectEntry reasonCode is required and must be non-empty"
+      })
+    );
+  }
+  let contributor = null;
+  if (candidate.contributor !== void 0 && candidate.contributor !== null) {
+    if (typeof candidate.contributor !== "object" || Array.isArray(candidate.contributor)) {
+      return err(
+        createPublicError({
+          code: "DM_PROJECT_ENTRY_INVALID",
+          category: "validation",
+          message: "ProjectEntry contributor must be an object"
+        })
+      );
+    }
+    const c = candidate.contributor;
+    const validContribTypes = ["notable", "populationGroup", "external", "narrative"];
+    if (typeof c.type !== "string" || !validContribTypes.includes(c.type)) {
+      return err(
+        createPublicError({
+          code: "DM_PROJECT_ENTRY_INVALID",
+          category: "validation",
+          message: `ProjectEntry contributor type must be one of: ${validContribTypes.join(", ")}`
+        })
+      );
+    }
+    if (typeof c.ref !== "string" || c.ref.trim().length === 0) {
+      return err(
+        createPublicError({
+          code: "DM_PROJECT_ENTRY_INVALID",
+          category: "validation",
+          message: "ProjectEntry contributor ref is required"
+        })
+      );
+    }
+    contributor = Object.freeze({
+      type: c.type,
+      ref: c.ref.trim(),
+      label: typeof c.label === "string" ? c.label.trim() : void 0
+    });
+  }
+  const timestamp = typeof candidate.timestamp === "number" ? candidate.timestamp : Date.now();
+  const validated = Object.freeze({
+    id: candidate.id.trim(),
+    projectId: candidate.projectId.trim(),
+    domainUuid: candidate.domainUuid.trim(),
+    sequence: candidate.sequence,
+    unitsDelta: candidate.unitsDelta,
+    unitsBefore: candidate.unitsBefore,
+    unitsAfter: candidate.unitsAfter,
+    sourceKind: candidate.sourceKind,
+    sourceRef: typeof candidate.sourceRef === "string" ? candidate.sourceRef.trim() : void 0,
+    requestedByUserId: typeof candidate.requestedByUserId === "string" ? candidate.requestedByUserId.trim() : null,
+    contributor,
+    worldTime: typeof candidate.worldTime === "number" ? candidate.worldTime : null,
+    timestamp,
+    reasonCode: candidate.reasonCode.trim(),
+    note: typeof candidate.note === "string" ? candidate.note.trim() : void 0,
+    reversesEntryId: typeof candidate.reversesEntryId === "string" ? candidate.reversesEntryId.trim() : null,
+    metadata: candidate.metadata && typeof candidate.metadata === "object" ? Object.freeze({ ...candidate.metadata }) : void 0
+  });
+  return ok(validated);
+}
+function applyProjectEntry(project, entry) {
+  if (entry.projectId !== project.id) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_MISMATCH",
+        category: "conflict",
+        message: `ProjectEntry projectId '${entry.projectId}' does not match ProjectInstance id '${project.id}'`
+      })
+    );
+  }
+  if (entry.domainUuid !== project.domainUuid) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_MISMATCH",
+        category: "conflict",
+        message: `ProjectEntry domainUuid '${entry.domainUuid}' does not match ProjectInstance domainUuid '${project.domainUuid}'`
+      })
+    );
+  }
+  if (entry.unitsBefore !== project.workCompleted) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_ENTRY_STALE",
+        category: "conflict",
+        message: `ProjectEntry unitsBefore (${entry.unitsBefore}) does not match current project workCompleted (${project.workCompleted})`
+      })
+    );
+  }
+  const existingEntries = project.entries ?? [];
+  const expectedSequence = existingEntries.length + 1;
+  if (entry.sequence !== expectedSequence) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_SEQUENCE_INVALID",
+        category: "conflict",
+        message: `ProjectEntry sequence (${entry.sequence}) is out of order. Expected ${expectedSequence}`
+      })
+    );
+  }
+  if (existingEntries.some((e) => e.id === entry.id)) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_ENTRY_DUPLICATE_ID",
+        category: "conflict",
+        message: `ProjectEntry ID '${entry.id}' already exists in project history`
+      })
+    );
+  }
+  if (entry.reversesEntryId) {
+    const originalEntry = existingEntries.find((e) => e.id === entry.reversesEntryId);
+    if (!originalEntry) {
+      return err(
+        createPublicError({
+          code: "DM_PROJECT_ENTRY_NOT_FOUND",
+          category: "not-found",
+          message: `Original project entry '${entry.reversesEntryId}' to reverse was not found`
+        })
+      );
+    }
+    if (originalEntry.reversesEntryId) {
+      return err(
+        createPublicError({
+          code: "DM_PROJECT_CANNOT_REVERSE_REVERSAL",
+          category: "conflict",
+          message: `Cannot reverse entry '${originalEntry.id}' because it is already a reversal`
+        })
+      );
+    }
+    const alreadyReversed = existingEntries.some((e) => e.reversesEntryId === entry.reversesEntryId);
+    if (alreadyReversed) {
+      return err(
+        createPublicError({
+          code: "DM_PROJECT_REVERSAL_ALREADY_EXISTS",
+          category: "conflict",
+          message: `Entry '${entry.reversesEntryId}' has already been reversed`
+        })
+      );
+    }
+    if (entry.unitsDelta !== -originalEntry.unitsDelta) {
+      return err(
+        createPublicError({
+          code: "DM_PROJECT_INVALID_REVERSAL_DELTA",
+          category: "validation",
+          message: `Reversal unitsDelta (${entry.unitsDelta}) must be exactly the inverse of original entry delta (${-originalEntry.unitsDelta})`
+        })
+      );
+    }
+  }
+  const rawUnitsAfter = project.workCompleted + entry.unitsDelta;
+  const nonNegative = Math.max(0, rawUnitsAfter);
+  const clampedUnitsAfter = project.clampProgress !== false ? Math.min(project.workRequired, nonNegative) : nonNegative;
+  if (entry.unitsAfter !== clampedUnitsAfter) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_ENTRY_UNITS_MISMATCH",
+        category: "validation",
+        message: `ProjectEntry unitsAfter (${entry.unitsAfter}) does not match expected result (${clampedUnitsAfter})`
+      })
+    );
+  }
+  const updatedEntries = Object.freeze([...existingEntries, entry]);
+  const updatedProject = Object.freeze({
+    ...project,
+    revision: project.revision + 1,
+    workCompleted: clampedUnitsAfter,
+    entries: updatedEntries,
+    updatedAt: entry.timestamp || Date.now()
+  });
+  return ok(updatedProject);
+}
+
+// src/projects/types/project-types.ts
+var PROJECT_LIFECYCLE_STATES = Object.freeze([
+  "draft",
+  "planned",
+  "approved",
+  "initializing",
+  "active",
+  "blocked",
+  "paused",
+  "completed",
+  "failed",
+  "cancelled",
+  "archived"
+]);
+var LEGAL_TRANSITIONS = Object.freeze({
+  draft: Object.freeze(["planned", "cancelled", "archived"]),
+  planned: Object.freeze(["draft", "approved", "cancelled", "archived"]),
+  approved: Object.freeze(["initializing", "active", "paused", "cancelled", "archived"]),
+  initializing: Object.freeze(["active", "blocked", "failed", "approved"]),
+  active: Object.freeze(["blocked", "paused", "completed", "failed", "cancelled"]),
+  blocked: Object.freeze(["active", "paused", "failed", "cancelled"]),
+  paused: Object.freeze(["active", "cancelled", "archived"]),
+  completed: Object.freeze(["archived"]),
+  failed: Object.freeze(["archived", "draft"]),
+  cancelled: Object.freeze(["archived", "draft"]),
+  archived: Object.freeze([])
+});
+function validateProjectLifecycleTransition(from, to, options) {
+  if (from === to) {
+    return ok(void 0);
+  }
+  if (options?.allowReopen) {
+    if (from === "completed" && (to === "active" || to === "approved")) {
+      return ok(void 0);
+    }
+    if (from === "archived" && (to === "draft" || to === "planned")) {
+      return ok(void 0);
+    }
+  }
+  const allowed = LEGAL_TRANSITIONS[from];
+  if (!allowed || !allowed.includes(to)) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_INVALID_TRANSITION",
+        category: "validation",
+        message: `Illegal project lifecycle transition from '${from}' to '${to}'`
+      })
+    );
+  }
+  return ok(void 0);
+}
+function isNamespacedProjectId(value) {
+  return typeof value === "string" && /^[a-z0-9][a-z0-9._-]*:[a-z0-9][a-z0-9._-]*$/.test(value);
+}
+function validateProjectDefinition(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_DEFINITION_INVALID",
+        category: "validation",
+        message: "ProjectDefinition must be an object"
+      })
+    );
+  }
+  const candidate = raw;
+  if (!isNamespacedProjectId(candidate.id)) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_INVALID_ID",
+        category: "validation",
+        message: `ProjectDefinition ID must be namespaced (e.g. 'domain-manager:construction'): received '${String(candidate.id)}'`
+      })
+    );
+  }
+  const version = typeof candidate.version === "number" ? candidate.version : 1;
+  if (!Number.isSafeInteger(version) || version < 1) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_DEFINITION_INVALID",
+        category: "validation",
+        message: "ProjectDefinition version must be a positive safe integer >= 1"
+      })
+    );
+  }
+  if (typeof candidate.label !== "string" || candidate.label.trim().length === 0) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_DEFINITION_INVALID",
+        category: "validation",
+        message: "ProjectDefinition label is required and must be non-empty"
+      })
+    );
+  }
+  const resolverId = candidate.progressResolverId ?? "domain-manager:standard";
+  if (!isNamespacedProjectId(resolverId)) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_DEFINITION_INVALID",
+        category: "validation",
+        message: `ProjectDefinition progressResolverId must be namespaced: received '${String(resolverId)}'`
+      })
+    );
+  }
+  if (typeof candidate.defaultWorkRequired !== "number" || !Number.isSafeInteger(candidate.defaultWorkRequired) || candidate.defaultWorkRequired < 1) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_WORK_REQUIRED_INVALID",
+        category: "validation",
+        message: "ProjectDefinition defaultWorkRequired must be a positive safe integer >= 1"
+      })
+    );
+  }
+  if (candidate.tags !== void 0 && !Array.isArray(candidate.tags)) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_DEFINITION_INVALID",
+        category: "validation",
+        message: "ProjectDefinition tags must be an array of strings"
+      })
+    );
+  }
+  if (candidate.costs !== void 0 && !Array.isArray(candidate.costs)) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_DEFINITION_INVALID",
+        category: "validation",
+        message: "ProjectDefinition costs must be an array"
+      })
+    );
+  }
+  const costs = [];
+  if (Array.isArray(candidate.costs)) {
+    for (let i = 0; i < candidate.costs.length; i++) {
+      const c = candidate.costs[i];
+      if (!c || typeof c !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_PROJECT_DEFINITION_INVALID",
+            category: "validation",
+            message: `Invalid cost definition at index ${i}`
+          })
+        );
+      }
+      if (typeof c.resourceId !== "string" || !c.resourceId.trim()) {
+        return err(
+          createPublicError({
+            code: "DM_PROJECT_DEFINITION_INVALID",
+            category: "validation",
+            message: `Cost at index ${i} missing required resourceId`
+          })
+        );
+      }
+      if (typeof c.amountMinor !== "number" || !Number.isSafeInteger(c.amountMinor) || c.amountMinor <= 0) {
+        return err(
+          createPublicError({
+            code: "DM_PROJECT_DEFINITION_INVALID",
+            category: "validation",
+            message: `Cost at index ${i} amountMinor must be a positive safe integer`
+          })
+        );
+      }
+      const validTimings = ["upfront", "reserved", "progressive", "onCompletion"];
+      if (typeof c.timing !== "string" || !validTimings.includes(c.timing)) {
+        return err(
+          createPublicError({
+            code: "DM_PROJECT_DEFINITION_INVALID",
+            category: "validation",
+            message: `Cost at index ${i} timing must be one of: ${validTimings.join(", ")}`
+          })
+        );
+      }
+      costs.push({
+        resourceId: c.resourceId.trim(),
+        amountMinor: c.amountMinor,
+        timing: c.timing,
+        optional: Boolean(c.optional)
+      });
+    }
+  }
+  if (candidate.requirements !== void 0 && !Array.isArray(candidate.requirements)) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_DEFINITION_INVALID",
+        category: "validation",
+        message: "ProjectDefinition requirements must be an array"
+      })
+    );
+  }
+  if (candidate.rewards !== void 0 && !Array.isArray(candidate.rewards)) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_DEFINITION_INVALID",
+        category: "validation",
+        message: "ProjectDefinition rewards must be an array"
+      })
+    );
+  }
+  const validated = {
+    id: candidate.id.trim(),
+    version,
+    label: candidate.label.trim(),
+    description: typeof candidate.description === "string" ? candidate.description.trim() : void 0,
+    category: typeof candidate.category === "string" ? candidate.category.trim() : void 0,
+    tags: Object.freeze([...(candidate.tags ?? []).map((t) => String(t).trim())]),
+    progressResolverId: String(resolverId).trim(),
+    defaultWorkRequired: candidate.defaultWorkRequired,
+    requirements: Object.freeze([...candidate.requirements ?? []]),
+    costs: Object.freeze(costs),
+    rewards: Object.freeze([...candidate.rewards ?? []]),
+    autoComplete: Boolean(candidate.autoComplete),
+    metadata: candidate.metadata && typeof candidate.metadata === "object" ? Object.freeze({ ...candidate.metadata }) : void 0
+  };
+  return ok(validated);
+}
+function validateProjectInstance(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_INSTANCE_INVALID",
+        category: "validation",
+        message: "ProjectInstance must be an object"
+      })
+    );
+  }
+  const candidate = raw;
+  if (typeof candidate.id !== "string" || candidate.id.trim().length === 0) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_INSTANCE_INVALID",
+        category: "validation",
+        message: "ProjectInstance id is required and must be non-empty"
+      })
+    );
+  }
+  if (typeof candidate.domainUuid !== "string" || candidate.domainUuid.trim().length === 0) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_INSTANCE_INVALID",
+        category: "validation",
+        message: "ProjectInstance domainUuid is required and must be non-empty"
+      })
+    );
+  }
+  if (typeof candidate.definitionId !== "string" || candidate.definitionId.trim().length === 0) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_INSTANCE_INVALID",
+        category: "validation",
+        message: "ProjectInstance definitionId is required and must be non-empty"
+      })
+    );
+  }
+  if (candidate.customDefinition !== void 0 && candidate.customDefinition !== null) {
+    const customRes = validateProjectDefinition(candidate.customDefinition);
+    if (!customRes.ok) {
+      return customRes;
+    }
+  }
+  if (typeof candidate.name !== "string" || candidate.name.trim().length === 0) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_INSTANCE_INVALID",
+        category: "validation",
+        message: "ProjectInstance name is required and must be non-empty"
+      })
+    );
+  }
+  const schemaVersion = typeof candidate.schemaVersion === "number" ? candidate.schemaVersion : 1;
+  if (!Number.isSafeInteger(schemaVersion) || schemaVersion < 1) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_INSTANCE_INVALID",
+        category: "validation",
+        message: "ProjectInstance schemaVersion must be a positive safe integer >= 1"
+      })
+    );
+  }
+  const revision = typeof candidate.revision === "number" ? candidate.revision : 0;
+  if (!Number.isSafeInteger(revision) || revision < 0) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_INSTANCE_INVALID",
+        category: "validation",
+        message: "ProjectInstance revision must be a safe integer >= 0"
+      })
+    );
+  }
+  if (typeof candidate.lifecycle !== "string" || !PROJECT_LIFECYCLE_STATES.includes(candidate.lifecycle)) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_INVALID_LIFECYCLE",
+        category: "validation",
+        message: `ProjectInstance lifecycle '${String(candidate.lifecycle)}' is invalid. Valid states: ${PROJECT_LIFECYCLE_STATES.join(", ")}`
+      })
+    );
+  }
+  if (typeof candidate.workRequired !== "number" || !Number.isSafeInteger(candidate.workRequired) || candidate.workRequired < 1) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_WORK_REQUIRED_INVALID",
+        category: "validation",
+        message: "ProjectInstance workRequired must be a positive safe integer >= 1"
+      })
+    );
+  }
+  if (typeof candidate.workCompleted !== "number" || !Number.isSafeInteger(candidate.workCompleted) || candidate.workCompleted < 0) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_WORK_COMPLETED_INVALID",
+        category: "validation",
+        message: "ProjectInstance workCompleted must be a safe integer >= 0"
+      })
+    );
+  }
+  const createdAt = typeof candidate.createdAt === "number" ? candidate.createdAt : Date.now();
+  const updatedAt = typeof candidate.updatedAt === "number" ? candidate.updatedAt : createdAt;
+  let validatedEntries = [];
+  if (candidate.entries !== void 0 && candidate.entries !== null) {
+    if (!Array.isArray(candidate.entries)) {
+      return err(
+        createPublicError({
+          code: "DM_PROJECT_INSTANCE_INVALID",
+          category: "validation",
+          message: "ProjectInstance entries must be an array"
+        })
+      );
+    }
+    const entryIds = /* @__PURE__ */ new Set();
+    for (let i = 0; i < candidate.entries.length; i++) {
+      const eRes = validateProjectEntry(candidate.entries[i]);
+      if (!eRes.ok) {
+        return eRes;
+      }
+      if (entryIds.has(eRes.value.id)) {
+        return err(
+          createPublicError({
+            code: "DM_PROJECT_ENTRY_DUPLICATE_ID",
+            category: "conflict",
+            message: `Duplicate entry ID in project: ${eRes.value.id}`
+          })
+        );
+      }
+      entryIds.add(eRes.value.id);
+      validatedEntries.push(eRes.value);
+    }
+  }
+  const instance = {
+    id: candidate.id.trim(),
+    domainUuid: candidate.domainUuid.trim(),
+    definitionId: candidate.definitionId.trim(),
+    customDefinition: candidate.customDefinition ? candidate.customDefinition : null,
+    name: candidate.name.trim(),
+    description: typeof candidate.description === "string" ? candidate.description.trim() : void 0,
+    schemaVersion,
+    revision,
+    lifecycle: candidate.lifecycle,
+    workRequired: candidate.workRequired,
+    workCompleted: candidate.workCompleted,
+    clampProgress: candidate.clampProgress !== void 0 ? Boolean(candidate.clampProgress) : true,
+    priority: typeof candidate.priority === "number" && Number.isSafeInteger(candidate.priority) ? candidate.priority : void 0,
+    tags: Object.freeze([...(candidate.tags ?? []).map((t) => String(t).trim())]),
+    createdAt,
+    updatedAt,
+    completedAt: typeof candidate.completedAt === "number" ? candidate.completedAt : null,
+    blockedReason: typeof candidate.blockedReason === "string" ? candidate.blockedReason.trim() : null,
+    metadata: candidate.metadata && typeof candidate.metadata === "object" ? Object.freeze({ ...candidate.metadata }) : void 0,
+    entries: Object.freeze(validatedEntries)
+  };
+  return ok(instance);
+}
+
+// src/projects/project-data.ts
+var PROJECTS_CAPABILITY_ID = "domain-manager:projects";
+var PROJECTS_CAPABILITY_ALIAS = "domain:projects";
+var PROJECTS_SCHEMA_VERSION = 1;
+function createDefaultDomainProjectsData() {
+  return {
+    schemaVersion: PROJECTS_SCHEMA_VERSION,
+    projects: Object.freeze([])
+  };
+}
+function validateDomainProjectsData(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_DATA_INVALID",
+        category: "validation",
+        message: "DomainProjectsData must be an object"
+      })
+    );
+  }
+  const candidate = raw;
+  if (candidate.schemaVersion !== PROJECTS_SCHEMA_VERSION) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_INVALID_SCHEMA_VERSION",
+        category: "validation",
+        message: `Invalid Projects schemaVersion: ${String(candidate.schemaVersion)}. Expected ${PROJECTS_SCHEMA_VERSION}`
+      })
+    );
+  }
+  if (!Array.isArray(candidate.projects)) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_INVALID_PROJECTS_LIST",
+        category: "validation",
+        message: "DomainProjectsData projects must be an array"
+      })
+    );
+  }
+  const validatedProjects = [];
+  const projectIds = /* @__PURE__ */ new Set();
+  for (let i = 0; i < candidate.projects.length; i++) {
+    const p = candidate.projects[i];
+    const pRes = validateProjectInstance(p);
+    if (!pRes.ok) {
+      return pRes;
+    }
+    const val = pRes.value;
+    if (projectIds.has(val.id)) {
+      return err(
+        createPublicError({
+          code: "DM_PROJECT_DUPLICATE_ID",
+          category: "validation",
+          message: `Duplicate project instance ID found: ${val.id}`
+        })
+      );
+    }
+    projectIds.add(val.id);
+    validatedProjects.push(val);
+  }
+  return ok({
+    schemaVersion: PROJECTS_SCHEMA_VERSION,
+    projects: Object.freeze(validatedProjects)
+  });
+}
+function tryGetDomainProjectsData(domain) {
+  const record = "record" in domain ? domain.record : domain;
+  const config = record?.definition?.capabilities?.config ?? {};
+  const rawProjects = config[PROJECTS_CAPABILITY_ID] ?? config[PROJECTS_CAPABILITY_ALIAS];
+  if (!rawProjects) {
+    return ok(createDefaultDomainProjectsData());
+  }
+  return validateDomainProjectsData(rawProjects);
+}
+function getDomainProjectsData(domain) {
+  const res = tryGetDomainProjectsData(domain);
+  if (!res.ok) {
+    throw new Error(`Domain projects data corruption: [${res.error.code}] ${res.error.message}`);
+  }
+  return res.value;
+}
+function withDomainProjectsData(domain, projectsData) {
+  const currentEnabled = domain.definition.capabilities.enabled;
+  const newEnabled = currentEnabled.includes(PROJECTS_CAPABILITY_ID) ? currentEnabled : Object.freeze([...currentEnabled, PROJECTS_CAPABILITY_ID]);
+  const newConfig = Object.freeze({
+    ...domain.definition.capabilities.config,
+    [PROJECTS_CAPABILITY_ID]: projectsData
+  });
+  return {
+    ...domain,
+    definition: {
+      ...domain.definition,
+      capabilities: {
+        enabled: newEnabled,
+        config: newConfig
+      }
+    }
+  };
+}
+
+// src/facilities/types/facility-maintenance-types.ts
+var CONDITION_MAINTENANCE_DUE = "domain-manager:maintenance-due";
+var CONDITION_DAMAGED = "domain-manager:damaged";
+var FACILITY_CONDITION_SEVERITIES = Object.freeze([
+  "minor",
+  "moderate",
+  "major",
+  "critical"
+]);
+function isNamespacedConditionType(value) {
+  return typeof value === "string" && /^[a-z0-9][a-z0-9._-]*:[a-z0-9][a-z0-9._-]*$/.test(value);
+}
+function validateFacilityCondition(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return err(
+      createPublicError({
+        code: "DM_FACILITY_CONDITION_INVALID",
+        category: "validation",
+        message: "FacilityCondition must be an object"
+      })
+    );
+  }
+  const candidate = raw;
+  if (typeof candidate.id !== "string" || candidate.id.trim().length === 0) {
+    return err(
+      createPublicError({
+        code: "DM_FACILITY_CONDITION_INVALID",
+        category: "validation",
+        message: "FacilityCondition id is required and must be non-empty"
+      })
+    );
+  }
+  if (!isNamespacedConditionType(candidate.type)) {
+    return err(
+      createPublicError({
+        code: "DM_FACILITY_CONDITION_INVALID",
+        category: "validation",
+        message: `FacilityCondition type must be namespaced: received '${String(candidate.type)}'`
+      })
+    );
+  }
+  if (typeof candidate.label !== "string" || candidate.label.trim().length === 0) {
+    return err(
+      createPublicError({
+        code: "DM_FACILITY_CONDITION_INVALID",
+        category: "validation",
+        message: "FacilityCondition label is required and must be non-empty"
+      })
+    );
+  }
+  if (typeof candidate.severity !== "string" || !FACILITY_CONDITION_SEVERITIES.includes(candidate.severity)) {
+    return err(
+      createPublicError({
+        code: "DM_FACILITY_CONDITION_INVALID",
+        category: "validation",
+        message: `Invalid condition severity: '${String(candidate.severity)}'`
+      })
+    );
+  }
+  let durationTicks = null;
+  if (candidate.durationTicks !== void 0 && candidate.durationTicks !== null) {
+    if (typeof candidate.durationTicks !== "number" || !Number.isSafeInteger(candidate.durationTicks) || candidate.durationTicks < 0) {
+      return err(
+        createPublicError({
+          code: "DM_FACILITY_CONDITION_INVALID",
+          category: "validation",
+          message: "FacilityCondition durationTicks must be a non-negative safe integer or null"
+        })
+      );
+    }
+    durationTicks = candidate.durationTicks;
+  }
+  const suppressedCapabilities = [];
+  if (candidate.suppressedCapabilities !== void 0) {
+    if (!Array.isArray(candidate.suppressedCapabilities)) {
+      return err(
+        createPublicError({
+          code: "DM_FACILITY_CONDITION_INVALID",
+          category: "validation",
+          message: "suppressedCapabilities must be an array of strings"
+        })
+      );
+    }
+    for (const cap of candidate.suppressedCapabilities) {
+      if (typeof cap !== "string" || !cap.trim()) {
+        return err(
+          createPublicError({
+            code: "DM_FACILITY_CONDITION_INVALID",
+            category: "validation",
+            message: "All items in suppressedCapabilities must be non-empty strings"
+          })
+        );
+      }
+      suppressedCapabilities.push(cap.trim());
+    }
+  }
+  const validated = {
+    id: candidate.id.trim(),
+    type: candidate.type.trim(),
+    label: candidate.label.trim(),
+    severity: candidate.severity,
+    description: typeof candidate.description === "string" ? candidate.description.trim() : void 0,
+    appliedAtTick: typeof candidate.appliedAtTick === "number" ? candidate.appliedAtTick : null,
+    appliedAtTimestamp: typeof candidate.appliedAtTimestamp === "number" ? candidate.appliedAtTimestamp : Date.now(),
+    durationTicks,
+    suppressedCapabilities: Object.freeze(suppressedCapabilities),
+    readinessPenalty: typeof candidate.readinessPenalty === "string" ? candidate.readinessPenalty : void 0,
+    metadata: candidate.metadata && typeof candidate.metadata === "object" ? Object.freeze({ ...candidate.metadata }) : void 0
+  };
+  return ok(validated);
+}
+var FACILITY_MAINTENANCE_STATUSES = Object.freeze([
+  "current",
+  "due",
+  "overdue",
+  "exempt"
+]);
+
+// src/facilities/types/facility-types.ts
+var FACILITY_LIFECYCLE_STATES = Object.freeze([
+  "planned",
+  "underConstruction",
+  "inactive",
+  "operational",
+  "degraded",
+  "disabled",
+  "decommissioned",
+  "destroyed"
+]);
+var LEGAL_FACILITY_TRANSITIONS = Object.freeze({
+  planned: Object.freeze(["underConstruction", "inactive", "operational", "decommissioned"]),
+  underConstruction: Object.freeze(["operational", "inactive", "disabled", "decommissioned", "destroyed"]),
+  inactive: Object.freeze(["operational", "underConstruction", "degraded", "disabled", "decommissioned", "destroyed"]),
+  operational: Object.freeze(["degraded", "disabled", "inactive", "underConstruction", "decommissioned", "destroyed"]),
+  degraded: Object.freeze(["operational", "disabled", "inactive", "underConstruction", "decommissioned", "destroyed"]),
+  disabled: Object.freeze(["operational", "degraded", "inactive", "underConstruction", "decommissioned", "destroyed"]),
+  decommissioned: Object.freeze(["destroyed", "inactive"]),
+  destroyed: Object.freeze(["underConstruction", "inactive"])
+});
+var FACILITY_READINESS_STATES = Object.freeze([
+  "ready",
+  "limited",
+  "blocked",
+  "unavailable"
+]);
+function isNamespacedFacilityId(value) {
+  return typeof value === "string" && /^[a-z0-9][a-z0-9._-]*:[a-z0-9][a-z0-9._-]*$/.test(value);
+}
+function validateFacilityDefinition(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return err(
+      createPublicError({
+        code: "DM_FACILITY_DEFINITION_INVALID",
+        category: "validation",
+        message: "FacilityDefinition must be an object"
+      })
+    );
+  }
+  const candidate = raw;
+  if (!isNamespacedFacilityId(candidate.id)) {
+    return err(
+      createPublicError({
+        code: "DM_FACILITY_INVALID_ID",
+        category: "validation",
+        message: `FacilityDefinition ID must be namespaced (e.g. 'domain-manager:storehouse'): received '${String(candidate.id)}'`
+      })
+    );
+  }
+  const version = typeof candidate.version === "number" ? candidate.version : 1;
+  if (!Number.isSafeInteger(version) || version < 1) {
+    return err(
+      createPublicError({
+        code: "DM_FACILITY_DEFINITION_INVALID",
+        category: "validation",
+        message: "FacilityDefinition version must be a positive safe integer >= 1"
+      })
+    );
+  }
+  if (typeof candidate.label !== "string" || candidate.label.trim().length === 0) {
+    return err(
+      createPublicError({
+        code: "DM_FACILITY_DEFINITION_INVALID",
+        category: "validation",
+        message: "FacilityDefinition label is required and must be non-empty"
+      })
+    );
+  }
+  if (candidate.tags !== void 0 && !Array.isArray(candidate.tags)) {
+    return err(
+      createPublicError({
+        code: "DM_FACILITY_DEFINITION_INVALID",
+        category: "validation",
+        message: "FacilityDefinition tags must be an array of strings"
+      })
+    );
+  }
+  const capabilitiesGranted = [];
+  if (candidate.capabilitiesGranted !== void 0) {
+    if (!Array.isArray(candidate.capabilitiesGranted)) {
+      return err(
+        createPublicError({
+          code: "DM_FACILITY_DEFINITION_INVALID",
+          category: "validation",
+          message: "FacilityDefinition capabilitiesGranted must be an array of strings"
+        })
+      );
+    }
+    for (const cap of candidate.capabilitiesGranted) {
+      if (typeof cap !== "string" || !cap.trim()) {
+        return err(
+          createPublicError({
+            code: "DM_FACILITY_DEFINITION_INVALID",
+            category: "validation",
+            message: "All items in capabilitiesGranted must be non-empty strings"
+          })
+        );
+      }
+      capabilitiesGranted.push(cap.trim());
+    }
+  }
+  if (candidate.maxLevel !== void 0 && (!Number.isSafeInteger(candidate.maxLevel) || candidate.maxLevel < 1)) {
+    return err(
+      createPublicError({
+        code: "DM_FACILITY_DEFINITION_INVALID",
+        category: "validation",
+        message: "FacilityDefinition maxLevel must be a positive safe integer >= 1"
+      })
+    );
+  }
+  const defaultReadiness = candidate.defaultReadiness !== void 0 ? candidate.defaultReadiness : "ready";
+  if (!FACILITY_READINESS_STATES.includes(defaultReadiness)) {
+    return err(
+      createPublicError({
+        code: "DM_FACILITY_INVALID_READINESS",
+        category: "validation",
+        message: `Invalid defaultReadiness: '${String(candidate.defaultReadiness)}'`
+      })
+    );
+  }
+  let maintenance;
+  if (candidate.maintenance !== void 0 && candidate.maintenance !== null) {
+    if (typeof candidate.maintenance !== "object" || Array.isArray(candidate.maintenance)) {
+      return err(
+        createPublicError({
+          code: "DM_FACILITY_DEFINITION_INVALID",
+          category: "validation",
+          message: "FacilityDefinition maintenance must be an object"
+        })
+      );
+    }
+    const cMaint = candidate.maintenance;
+    if (typeof cMaint.intervalTicks !== "number" || !Number.isSafeInteger(cMaint.intervalTicks) || cMaint.intervalTicks < 1) {
+      return err(
+        createPublicError({
+          code: "DM_FACILITY_DEFINITION_INVALID",
+          category: "validation",
+          message: "FacilityDefinition maintenance intervalTicks must be a positive safe integer >= 1"
+        })
+      );
+    }
+    const costs = [];
+    if (cMaint.costs !== void 0) {
+      if (!Array.isArray(cMaint.costs)) {
+        return err(
+          createPublicError({
+            code: "DM_FACILITY_DEFINITION_INVALID",
+            category: "validation",
+            message: "FacilityDefinition maintenance costs must be an array"
+          })
+        );
+      }
+      for (const cost of cMaint.costs) {
+        if (!cost || typeof cost !== "object" || typeof cost.resourceId !== "string" || !cost.resourceId.trim() || typeof cost.amount !== "number" || cost.amount < 1 || !Number.isSafeInteger(cost.amount)) {
+          return err(
+            createPublicError({
+              code: "DM_FACILITY_DEFINITION_INVALID",
+              category: "validation",
+              message: "FacilityDefinition maintenance cost items must specify resourceId and positive integer amount"
+            })
+          );
+        }
+        costs.push({ resourceId: cost.resourceId.trim(), amount: cost.amount });
+      }
+    }
+    maintenance = {
+      optional: Boolean(cMaint.optional),
+      intervalTicks: cMaint.intervalTicks,
+      costs: Object.freeze(costs),
+      overduePolicy: typeof cMaint.overduePolicy === "string" ? cMaint.overduePolicy : void 0,
+      channels: cMaint.channels && Array.isArray(cMaint.channels) ? Object.freeze([...cMaint.channels]) : void 0
+    };
+  }
+  const validated = {
+    id: candidate.id.trim(),
+    version,
+    label: candidate.label.trim(),
+    description: typeof candidate.description === "string" ? candidate.description.trim() : void 0,
+    category: typeof candidate.category === "string" ? candidate.category.trim() : void 0,
+    tags: Object.freeze([...(candidate.tags ?? []).map((t) => String(t).trim())]),
+    scale: typeof candidate.scale === "string" ? candidate.scale.trim() : void 0,
+    maxLevel: typeof candidate.maxLevel === "number" ? candidate.maxLevel : void 0,
+    capabilitiesGranted: Object.freeze(capabilitiesGranted),
+    slots: candidate.slots && Array.isArray(candidate.slots) ? Object.freeze([...candidate.slots]) : void 0,
+    upgrades: candidate.upgrades && Array.isArray(candidate.upgrades) ? Object.freeze([...candidate.upgrades]) : void 0,
+    defaultReadiness,
+    maintenance,
+    metadata: candidate.metadata && typeof candidate.metadata === "object" ? Object.freeze({ ...candidate.metadata }) : void 0
+  };
+  return ok(validated);
+}
+function validateFacilityInstance(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return err(
+      createPublicError({
+        code: "DM_FACILITY_INSTANCE_INVALID",
+        category: "validation",
+        message: "FacilityInstance must be an object"
+      })
+    );
+  }
+  const candidate = raw;
+  if (typeof candidate.id !== "string" || candidate.id.trim().length === 0) {
+    return err(
+      createPublicError({
+        code: "DM_FACILITY_INSTANCE_INVALID",
+        category: "validation",
+        message: "FacilityInstance id is required and must be non-empty"
+      })
+    );
+  }
+  if (typeof candidate.definitionId !== "string" || candidate.definitionId.trim().length === 0) {
+    return err(
+      createPublicError({
+        code: "DM_FACILITY_INSTANCE_INVALID",
+        category: "validation",
+        message: "FacilityInstance definitionId is required and must be non-empty"
+      })
+    );
+  }
+  if (typeof candidate.name !== "string" || candidate.name.trim().length === 0) {
+    return err(
+      createPublicError({
+        code: "DM_FACILITY_INSTANCE_INVALID",
+        category: "validation",
+        message: "FacilityInstance name is required and must be non-empty"
+      })
+    );
+  }
+  const schemaVersion = typeof candidate.schemaVersion === "number" ? candidate.schemaVersion : 1;
+  if (!Number.isSafeInteger(schemaVersion) || schemaVersion < 1) {
+    return err(
+      createPublicError({
+        code: "DM_FACILITY_INSTANCE_INVALID",
+        category: "validation",
+        message: "FacilityInstance schemaVersion must be a positive safe integer >= 1"
+      })
+    );
+  }
+  const revision = typeof candidate.revision === "number" ? candidate.revision : 0;
+  if (!Number.isSafeInteger(revision) || revision < 0) {
+    return err(
+      createPublicError({
+        code: "DM_FACILITY_INSTANCE_INVALID",
+        category: "validation",
+        message: "FacilityInstance revision must be a safe integer >= 0"
+      })
+    );
+  }
+  if (typeof candidate.lifecycle !== "string" || !FACILITY_LIFECYCLE_STATES.includes(candidate.lifecycle)) {
+    return err(
+      createPublicError({
+        code: "DM_FACILITY_INVALID_LIFECYCLE",
+        category: "validation",
+        message: `FacilityInstance lifecycle '${String(candidate.lifecycle)}' is invalid`
+      })
+    );
+  }
+  if (typeof candidate.readiness !== "string" || !FACILITY_READINESS_STATES.includes(candidate.readiness)) {
+    return err(
+      createPublicError({
+        code: "DM_FACILITY_INVALID_READINESS",
+        category: "validation",
+        message: `FacilityInstance readiness '${String(candidate.readiness)}' is invalid`
+      })
+    );
+  }
+  const level = typeof candidate.level === "number" ? candidate.level : 1;
+  if (!Number.isSafeInteger(level) || level < 1) {
+    return err(
+      createPublicError({
+        code: "DM_FACILITY_INSTANCE_INVALID",
+        category: "validation",
+        message: "FacilityInstance level must be a positive safe integer >= 1"
+      })
+    );
+  }
+  let integrity;
+  if (candidate.integrity !== void 0 && candidate.integrity !== null) {
+    if (typeof candidate.integrity !== "object") {
+      return err(
+        createPublicError({
+          code: "DM_FACILITY_INSTANCE_INVALID",
+          category: "validation",
+          message: "FacilityInstance integrity must be an object { current, max }"
+        })
+      );
+    }
+    const cInteg = candidate.integrity;
+    if (typeof cInteg.current !== "number" || !Number.isSafeInteger(cInteg.current) || typeof cInteg.max !== "number" || !Number.isSafeInteger(cInteg.max) || cInteg.max < 1 || cInteg.current < 0 || cInteg.current > cInteg.max) {
+      return err(
+        createPublicError({
+          code: "DM_FACILITY_INTEGRITY_INVALID",
+          category: "validation",
+          message: "FacilityInstance integrity values must be safe integers with 0 <= current <= max and max >= 1"
+        })
+      );
+    }
+    integrity = Object.freeze({ current: cInteg.current, max: cInteg.max });
+  }
+  let conditions;
+  if (candidate.conditions !== void 0 && candidate.conditions !== null) {
+    if (!Array.isArray(candidate.conditions)) {
+      return err(
+        createPublicError({
+          code: "DM_FACILITY_INSTANCE_INVALID",
+          category: "validation",
+          message: "FacilityInstance conditions must be an array"
+        })
+      );
+    }
+    const validatedConditions = [];
+    for (const cond of candidate.conditions) {
+      const vCond = validateFacilityCondition(cond);
+      if (!vCond.ok) {
+        return err(vCond.error);
+      }
+      validatedConditions.push(vCond.value);
+    }
+    conditions = Object.freeze(validatedConditions);
+  }
+  let history;
+  if (candidate.history !== void 0 && candidate.history !== null) {
+    if (!Array.isArray(candidate.history)) {
+      return err(
+        createPublicError({
+          code: "DM_FACILITY_INSTANCE_INVALID",
+          category: "validation",
+          message: "FacilityInstance history must be an array"
+        })
+      );
+    }
+    history = Object.freeze([...candidate.history]);
+  }
+  let maintenanceState;
+  if (candidate.maintenanceState !== void 0 && candidate.maintenanceState !== null) {
+    if (typeof candidate.maintenanceState !== "object" || Array.isArray(candidate.maintenanceState)) {
+      return err(
+        createPublicError({
+          code: "DM_FACILITY_INSTANCE_INVALID",
+          category: "validation",
+          message: "FacilityInstance maintenanceState must be an object"
+        })
+      );
+    }
+    const cMState = candidate.maintenanceState;
+    if (typeof cMState.status !== "string" || !["current", "due", "overdue", "exempt"].includes(cMState.status)) {
+      return err(
+        createPublicError({
+          code: "DM_FACILITY_INSTANCE_INVALID",
+          category: "validation",
+          message: `Invalid maintenanceState status: '${String(cMState.status)}'`
+        })
+      );
+    }
+    maintenanceState = {
+      status: cMState.status,
+      lastMaintainedTick: typeof cMState.lastMaintainedTick === "number" ? cMState.lastMaintainedTick : null,
+      lastMaintainedTimestamp: typeof cMState.lastMaintainedTimestamp === "number" ? cMState.lastMaintainedTimestamp : null,
+      overdueTicks: typeof cMState.overdueTicks === "number" ? cMState.overdueTicks : 0,
+      accumulatedTicks: typeof cMState.accumulatedTicks === "number" ? cMState.accumulatedTicks : 0,
+      channels: cMState.channels && typeof cMState.channels === "object" ? Object.freeze({ ...cMState.channels }) : void 0
+    };
+  }
+  const createdAt = typeof candidate.createdAt === "number" ? candidate.createdAt : Date.now();
+  const updatedAt = typeof candidate.updatedAt === "number" ? candidate.updatedAt : createdAt;
+  const instance = {
+    id: candidate.id.trim(),
+    domainUuid: typeof candidate.domainUuid === "string" ? candidate.domainUuid.trim() : null,
+    locationRef: typeof candidate.locationRef === "string" ? candidate.locationRef.trim() : null,
+    definitionId: candidate.definitionId.trim(),
+    customDefinition: candidate.customDefinition ? candidate.customDefinition : null,
+    name: candidate.name.trim(),
+    description: typeof candidate.description === "string" ? candidate.description.trim() : void 0,
+    schemaVersion,
+    revision,
+    lifecycle: candidate.lifecycle,
+    readiness: candidate.readiness,
+    readinessReason: typeof candidate.readinessReason === "string" ? candidate.readinessReason.trim() : null,
+    level,
+    installedModules: candidate.installedModules && Array.isArray(candidate.installedModules) ? Object.freeze([...candidate.installedModules]) : Object.freeze([]),
+    activeUpgrades: candidate.activeUpgrades && Array.isArray(candidate.activeUpgrades) ? Object.freeze([...candidate.activeUpgrades.map((u) => String(u).trim())]) : Object.freeze([]),
+    integrity,
+    conditions,
+    history,
+    maintenanceState,
+    tags: Object.freeze([...(candidate.tags ?? []).map((t) => String(t).trim())]),
+    createdAt,
+    updatedAt,
+    metadata: candidate.metadata && typeof candidate.metadata === "object" ? Object.freeze({ ...candidate.metadata }) : void 0
+  };
+  return ok(instance);
+}
+function calculateFacilityEffectiveCapabilities(facility, definitionOrCapabilities) {
+  if (facility.lifecycle !== "operational" && facility.lifecycle !== "degraded") {
+    return Object.freeze([]);
+  }
+  if (facility.readiness === "blocked" || facility.readiness === "unavailable") {
+    return Object.freeze([]);
+  }
+  if (facility.conditions && facility.conditions.length > 0) {
+    for (const cond of facility.conditions) {
+      if (cond.readinessPenalty === "blocked" || cond.readinessPenalty === "unavailable") {
+        return Object.freeze([]);
+      }
+    }
+  }
+  const caps = /* @__PURE__ */ new Set();
+  if ("capabilitiesGranted" in definitionOrCapabilities) {
+    for (const cap of definitionOrCapabilities.capabilitiesGranted) {
+      caps.add(cap);
+    }
+    if (definitionOrCapabilities.upgrades) {
+      const activeUpgradeSet = new Set(facility.activeUpgrades);
+      for (const upg of definitionOrCapabilities.upgrades) {
+        if (activeUpgradeSet.has(upg.id) && upg.capabilitiesGranted) {
+          for (const cap of upg.capabilitiesGranted) {
+            caps.add(cap);
+          }
+        }
+      }
+    }
+  } else {
+    for (const cap of definitionOrCapabilities) {
+      caps.add(cap);
+    }
+  }
+  if (facility.conditions && facility.conditions.length > 0) {
+    for (const cond of facility.conditions) {
+      if (cond.suppressedCapabilities) {
+        for (const suppressed of cond.suppressedCapabilities) {
+          caps.delete(suppressed);
+        }
+      }
+    }
+  }
+  return Object.freeze(Array.from(caps));
+}
+
+// src/facilities/facility-data.ts
+var FACILITIES_CAPABILITY_ID = "domain-manager:facilities";
+var FACILITIES_CAPABILITY_ALIAS = "domain:facilities";
+var FACILITIES_SCHEMA_VERSION = 1;
+function createDefaultDomainFacilitiesData() {
+  return {
+    schemaVersion: FACILITIES_SCHEMA_VERSION,
+    facilities: Object.freeze([])
+  };
+}
+function validateDomainFacilitiesData(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return err(
+      createPublicError({
+        code: "DM_FACILITY_DATA_INVALID",
+        category: "validation",
+        message: "DomainFacilitiesData must be an object"
+      })
+    );
+  }
+  const candidate = raw;
+  if (candidate.schemaVersion !== FACILITIES_SCHEMA_VERSION) {
+    return err(
+      createPublicError({
+        code: "DM_FACILITY_INVALID_SCHEMA_VERSION",
+        category: "validation",
+        message: `Invalid Facilities schemaVersion: ${String(candidate.schemaVersion)}. Expected ${FACILITIES_SCHEMA_VERSION}`
+      })
+    );
+  }
+  if (!Array.isArray(candidate.facilities)) {
+    return err(
+      createPublicError({
+        code: "DM_FACILITY_INVALID_FACILITIES_LIST",
+        category: "validation",
+        message: "DomainFacilitiesData facilities must be an array"
+      })
+    );
+  }
+  const validatedFacilities = [];
+  const facilityIds = /* @__PURE__ */ new Set();
+  for (let i = 0; i < candidate.facilities.length; i++) {
+    const f = candidate.facilities[i];
+    const fRes = validateFacilityInstance(f);
+    if (!fRes.ok) {
+      return fRes;
+    }
+    const val = fRes.value;
+    if (facilityIds.has(val.id)) {
+      return err(
+        createPublicError({
+          code: "DM_FACILITY_DUPLICATE_ID",
+          category: "validation",
+          message: `Duplicate facility instance ID found: ${val.id}`
+        })
+      );
+    }
+    facilityIds.add(val.id);
+    validatedFacilities.push(val);
+  }
+  return ok({
+    schemaVersion: FACILITIES_SCHEMA_VERSION,
+    facilities: Object.freeze(validatedFacilities)
+  });
+}
+function extractRecord(domain) {
+  return "record" in domain ? domain.record : domain;
+}
+function tryGetDomainFacilitiesData(domain) {
+  const rec = extractRecord(domain);
+  const cfg = rec.definition.capabilities.config[FACILITIES_CAPABILITY_ID] ?? rec.definition.capabilities.config[FACILITIES_CAPABILITY_ALIAS];
+  if (cfg === void 0 || cfg === null) {
+    return null;
+  }
+  const res = validateDomainFacilitiesData(cfg);
+  return res.ok ? res.value : null;
+}
+function getDomainFacilitiesData(domain) {
+  return tryGetDomainFacilitiesData(domain) ?? createDefaultDomainFacilitiesData();
+}
+function withDomainFacilitiesData(domain, facilitiesData) {
+  const validRes = validateDomainFacilitiesData(facilitiesData);
+  if (!validRes.ok) {
+    throw new Error(`Invalid DomainFacilitiesData: ${validRes.error.message}`);
+  }
+  const enabled = domain.definition.capabilities.enabled.includes(FACILITIES_CAPABILITY_ID) ? domain.definition.capabilities.enabled : Object.freeze([...domain.definition.capabilities.enabled, FACILITIES_CAPABILITY_ID]);
+  const newConfig = Object.freeze({
+    ...domain.definition.capabilities.config,
+    [FACILITIES_CAPABILITY_ID]: validRes.value
+  });
+  return {
+    ...domain,
+    definition: {
+      ...domain.definition,
+      capabilities: {
+        enabled,
+        config: newConfig
+      }
+    }
+  };
+}
+
+// src/downtime/types/downtime-types.ts
+var DOWNTIME_SCOPES = Object.freeze([
+  "individual",
+  "group",
+  "domain",
+  "flexible"
+]);
+var DOWNTIME_LIFECYCLE_STATES = Object.freeze([
+  "draft",
+  "planned",
+  "ready",
+  "inProgress",
+  "paused",
+  "blocked",
+  "completed",
+  "cancelled",
+  "failed"
+]);
+var LEGAL_DOWNTIME_TRANSITIONS = Object.freeze({
+  draft: Object.freeze(["planned", "ready", "cancelled"]),
+  planned: Object.freeze(["ready", "inProgress", "blocked", "cancelled"]),
+  ready: Object.freeze(["inProgress", "planned", "blocked", "cancelled"]),
+  inProgress: Object.freeze(["paused", "blocked", "completed", "failed", "cancelled"]),
+  paused: Object.freeze(["inProgress", "cancelled", "failed"]),
+  blocked: Object.freeze(["inProgress", "ready", "planned", "cancelled", "failed"]),
+  completed: Object.freeze([]),
+  cancelled: Object.freeze([]),
+  failed: Object.freeze(["planned"])
+});
+var DOWNTIME_PARTICIPANT_TYPES = Object.freeze([
+  "notable",
+  "group",
+  "actor",
+  "narrative"
+]);
+function validateDowntimeParticipant(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return err(
+      createPublicError({
+        code: "DM_DOWNTIME_PARTICIPANT_INVALID",
+        category: "validation",
+        message: "DowntimeParticipant must be an object"
+      })
+    );
+  }
+  const candidate = raw;
+  if (typeof candidate.participantRef !== "string" || candidate.participantRef.trim().length === 0) {
+    return err(
+      createPublicError({
+        code: "DM_DOWNTIME_PARTICIPANT_INVALID",
+        category: "validation",
+        message: "DowntimeParticipant participantRef is required and must be non-empty"
+      })
+    );
+  }
+  if (typeof candidate.participantType !== "string" || !DOWNTIME_PARTICIPANT_TYPES.includes(candidate.participantType)) {
+    return err(
+      createPublicError({
+        code: "DM_DOWNTIME_PARTICIPANT_INVALID",
+        category: "validation",
+        message: `DowntimeParticipant participantType '${String(candidate.participantType)}' is invalid`
+      })
+    );
+  }
+  if (typeof candidate.role !== "string" || candidate.role.trim().length === 0) {
+    return err(
+      createPublicError({
+        code: "DM_DOWNTIME_PARTICIPANT_INVALID",
+        category: "validation",
+        message: "DowntimeParticipant role is required and must be non-empty"
+      })
+    );
+  }
+  let capacityConsumed;
+  if (candidate.capacityConsumed !== void 0) {
+    if (typeof candidate.capacityConsumed !== "number" || !Number.isSafeInteger(candidate.capacityConsumed) || candidate.capacityConsumed < 0) {
+      return err(
+        createPublicError({
+          code: "DM_DOWNTIME_PARTICIPANT_INVALID",
+          category: "validation",
+          message: "DowntimeParticipant capacityConsumed must be a non-negative safe integer"
+        })
+      );
+    }
+    capacityConsumed = candidate.capacityConsumed;
+  }
+  const participant = {
+    participantRef: candidate.participantRef.trim(),
+    participantType: candidate.participantType,
+    role: candidate.role.trim(),
+    name: typeof candidate.name === "string" ? candidate.name.trim() : void 0,
+    capacityConsumed
+  };
+  return ok(participant);
+}
+function validateDowntimeInstance(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return err(
+      createPublicError({
+        code: "DM_DOWNTIME_INSTANCE_INVALID",
+        category: "validation",
+        message: "DowntimeInstance must be an object"
+      })
+    );
+  }
+  const candidate = raw;
+  if (typeof candidate.id !== "string" || candidate.id.trim().length === 0) {
+    return err(
+      createPublicError({
+        code: "DM_DOWNTIME_INSTANCE_INVALID",
+        category: "validation",
+        message: "DowntimeInstance id is required and must be non-empty"
+      })
+    );
+  }
+  if (typeof candidate.definitionId !== "string" || candidate.definitionId.trim().length === 0) {
+    return err(
+      createPublicError({
+        code: "DM_DOWNTIME_INSTANCE_INVALID",
+        category: "validation",
+        message: "DowntimeInstance definitionId is required and must be non-empty"
+      })
+    );
+  }
+  if (typeof candidate.name !== "string" || candidate.name.trim().length === 0) {
+    return err(
+      createPublicError({
+        code: "DM_DOWNTIME_INSTANCE_INVALID",
+        category: "validation",
+        message: "DowntimeInstance name is required and must be non-empty"
+      })
+    );
+  }
+  const schemaVersion = typeof candidate.schemaVersion === "number" ? candidate.schemaVersion : 1;
+  if (!Number.isSafeInteger(schemaVersion) || schemaVersion < 1) {
+    return err(
+      createPublicError({
+        code: "DM_DOWNTIME_INSTANCE_INVALID",
+        category: "validation",
+        message: "DowntimeInstance schemaVersion must be a positive safe integer >= 1"
+      })
+    );
+  }
+  const revision = typeof candidate.revision === "number" ? candidate.revision : 0;
+  if (!Number.isSafeInteger(revision) || revision < 0) {
+    return err(
+      createPublicError({
+        code: "DM_DOWNTIME_INSTANCE_INVALID",
+        category: "validation",
+        message: "DowntimeInstance revision must be a safe integer >= 0"
+      })
+    );
+  }
+  if (typeof candidate.lifecycle !== "string" || !DOWNTIME_LIFECYCLE_STATES.includes(candidate.lifecycle)) {
+    return err(
+      createPublicError({
+        code: "DM_DOWNTIME_INVALID_LIFECYCLE",
+        category: "validation",
+        message: `DowntimeInstance lifecycle '${String(candidate.lifecycle)}' is invalid`
+      })
+    );
+  }
+  const scope = typeof candidate.scope === "string" ? candidate.scope : "individual";
+  if (!DOWNTIME_SCOPES.includes(scope)) {
+    return err(
+      createPublicError({
+        code: "DM_DOWNTIME_INSTANCE_INVALID",
+        category: "validation",
+        message: `DowntimeInstance scope '${String(candidate.scope)}' is invalid`
+      })
+    );
+  }
+  const participants = [];
+  if (candidate.participants !== void 0) {
+    if (!Array.isArray(candidate.participants)) {
+      return err(
+        createPublicError({
+          code: "DM_DOWNTIME_INSTANCE_INVALID",
+          category: "validation",
+          message: "DowntimeInstance participants must be an array"
+        })
+      );
+    }
+    for (const part of candidate.participants) {
+      const vPart = validateDowntimeParticipant(part);
+      if (!vPart.ok) {
+        return err(vPart.error);
+      }
+      participants.push(vPart.value);
+    }
+  }
+  let durationTicks = null;
+  if (candidate.durationTicks !== void 0 && candidate.durationTicks !== null) {
+    if (typeof candidate.durationTicks !== "number" || !Number.isSafeInteger(candidate.durationTicks) || candidate.durationTicks < 0) {
+      return err(
+        createPublicError({
+          code: "DM_DOWNTIME_INSTANCE_INVALID",
+          category: "validation",
+          message: "DowntimeInstance durationTicks must be a non-negative safe integer or null"
+        })
+      );
+    }
+    durationTicks = candidate.durationTicks;
+  }
+  const elapsedTicks = typeof candidate.elapsedTicks === "number" ? candidate.elapsedTicks : 0;
+  if (!Number.isSafeInteger(elapsedTicks) || elapsedTicks < 0) {
+    return err(
+      createPublicError({
+        code: "DM_DOWNTIME_INSTANCE_INVALID",
+        category: "validation",
+        message: "DowntimeInstance elapsedTicks must be a non-negative safe integer"
+      })
+    );
+  }
+  const createdAt = typeof candidate.createdAt === "number" ? candidate.createdAt : Date.now();
+  const updatedAt = typeof candidate.updatedAt === "number" ? candidate.updatedAt : createdAt;
+  const instance = {
+    id: candidate.id.trim(),
+    domainUuid: typeof candidate.domainUuid === "string" ? candidate.domainUuid.trim() : null,
+    definitionId: candidate.definitionId.trim(),
+    customDefinition: candidate.customDefinition ? candidate.customDefinition : null,
+    name: candidate.name.trim(),
+    description: typeof candidate.description === "string" ? candidate.description.trim() : void 0,
+    schemaVersion,
+    revision,
+    lifecycle: candidate.lifecycle,
+    scope,
+    participants: Object.freeze(participants),
+    facilityRefs: candidate.facilityRefs && Array.isArray(candidate.facilityRefs) ? Object.freeze([...candidate.facilityRefs.map((f) => String(f).trim())]) : void 0,
+    locationRef: typeof candidate.locationRef === "string" ? candidate.locationRef.trim() : null,
+    durationTicks,
+    elapsedTicks,
+    currentStageIndex: typeof candidate.currentStageIndex === "number" ? candidate.currentStageIndex : void 0,
+    outcomesApplied: candidate.outcomesApplied && Array.isArray(candidate.outcomesApplied) ? Object.freeze([...candidate.outcomesApplied]) : void 0,
+    tags: Object.freeze([...(candidate.tags ?? []).map((t) => String(t).trim())]),
+    createdAt,
+    updatedAt,
+    completedAt: typeof candidate.completedAt === "number" ? candidate.completedAt : null,
+    cancelledAt: typeof candidate.cancelledAt === "number" ? candidate.cancelledAt : null,
+    metadata: candidate.metadata && typeof candidate.metadata === "object" ? Object.freeze({ ...candidate.metadata }) : void 0
+  };
+  return ok(instance);
+}
+function isDowntimeComplete(instance) {
+  if (instance.lifecycle === "completed") {
+    return true;
+  }
+  if (instance.durationTicks === null || instance.durationTicks === void 0) {
+    return false;
+  }
+  return instance.elapsedTicks >= instance.durationTicks;
+}
+
+// src/downtime/downtime-data.ts
+var DOWNTIME_CAPABILITY_ID = "domain-manager:downtime";
+var DOWNTIME_CAPABILITY_ALIAS = "domain:downtime";
+var DOWNTIME_SCHEMA_VERSION = 1;
+function createDefaultDomainDowntimeData() {
+  return {
+    schemaVersion: DOWNTIME_SCHEMA_VERSION,
+    activities: Object.freeze([])
+  };
+}
+function validateDomainDowntimeData(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return err(
+      createPublicError({
+        code: "DM_DOWNTIME_DATA_INVALID",
+        category: "validation",
+        message: "DomainDowntimeData must be an object"
+      })
+    );
+  }
+  const candidate = raw;
+  if (candidate.schemaVersion !== DOWNTIME_SCHEMA_VERSION) {
+    return err(
+      createPublicError({
+        code: "DM_DOWNTIME_INVALID_SCHEMA_VERSION",
+        category: "validation",
+        message: `Invalid Downtime schemaVersion: ${String(candidate.schemaVersion)}. Expected ${DOWNTIME_SCHEMA_VERSION}`
+      })
+    );
+  }
+  if (!Array.isArray(candidate.activities)) {
+    return err(
+      createPublicError({
+        code: "DM_DOWNTIME_INVALID_ACTIVITIES_LIST",
+        category: "validation",
+        message: "DomainDowntimeData activities must be an array"
+      })
+    );
+  }
+  const validatedActivities = [];
+  const activityIds = /* @__PURE__ */ new Set();
+  for (let i = 0; i < candidate.activities.length; i++) {
+    const act = candidate.activities[i];
+    const actRes = validateDowntimeInstance(act);
+    if (!actRes.ok) {
+      return actRes;
+    }
+    const val = actRes.value;
+    if (activityIds.has(val.id)) {
+      return err(
+        createPublicError({
+          code: "DM_DOWNTIME_DUPLICATE_ID",
+          category: "validation",
+          message: `Duplicate downtime instance ID found: ${val.id}`
+        })
+      );
+    }
+    activityIds.add(val.id);
+    validatedActivities.push(val);
+  }
+  return ok({
+    schemaVersion: DOWNTIME_SCHEMA_VERSION,
+    activities: Object.freeze(validatedActivities)
+  });
+}
+function extractRecord2(domain) {
+  return "record" in domain ? domain.record : domain;
+}
+function tryGetDomainDowntimeData(domain) {
+  const record = extractRecord2(domain);
+  const config = record.definition.capabilities.config[DOWNTIME_CAPABILITY_ID] ?? record.definition.capabilities.config[DOWNTIME_CAPABILITY_ALIAS];
+  if (!config) {
+    return null;
+  }
+  const validation = validateDomainDowntimeData(config);
+  return validation.ok ? validation.value : null;
+}
+function getDomainDowntimeData(domain) {
+  return tryGetDomainDowntimeData(domain) ?? createDefaultDomainDowntimeData();
+}
+function withDomainDowntimeData(domain, data) {
+  const currentCapabilities = domain.definition.capabilities;
+  const currentEnabled = currentCapabilities.enabled;
+  const enabledSet = new Set(currentEnabled);
+  enabledSet.add(DOWNTIME_CAPABILITY_ID);
+  return {
+    ...domain,
+    definition: {
+      ...domain.definition,
+      capabilities: {
+        enabled: Object.freeze(Array.from(enabledSet)),
+        config: Object.freeze({
+          ...currentCapabilities.config,
+          [DOWNTIME_CAPABILITY_ID]: data
+        })
+      }
+    }
+  };
+}
+
 // src/domains/domain-capabilities.ts
 var CapabilityRegistry = class {
   definitions = /* @__PURE__ */ new Map();
@@ -2586,6 +4343,36 @@ function createDefaultCapabilityRegistry() {
     validateConfig: (config) => {
       if (config === void 0 || config === null) return ok(void 0);
       const res = validateDomainEconomyData(config);
+      return res.ok ? ok(void 0) : err(res.error);
+    }
+  });
+  registry.register({
+    id: "domain-manager:projects",
+    label: "Projects & Construction",
+    functional: true,
+    validateConfig: (config) => {
+      if (config === void 0 || config === null) return ok(void 0);
+      const res = validateDomainProjectsData(config);
+      return res.ok ? ok(void 0) : err(res.error);
+    }
+  });
+  registry.register({
+    id: "domain-manager:facilities",
+    label: "Facilities & Installations",
+    functional: true,
+    validateConfig: (config) => {
+      if (config === void 0 || config === null) return ok(void 0);
+      const res = validateDomainFacilitiesData(config);
+      return res.ok ? ok(void 0) : err(res.error);
+    }
+  });
+  registry.register({
+    id: "domain-manager:downtime",
+    label: "Downtime Activities",
+    functional: true,
+    validateConfig: (config) => {
+      if (config === void 0 || config === null) return ok(void 0);
+      const res = validateDomainDowntimeData(config);
       return res.ok ? ok(void 0) : err(res.error);
     }
   });
@@ -19995,6 +21782,4436 @@ var Logger = class {
   }
 };
 
+// src/projects/definitions/canonical-project-definitions.ts
+var CANONICAL_PROJECT_DEFINITIONS = Object.freeze([
+  Object.freeze({
+    id: "domain-manager:survey",
+    version: 1,
+    label: "Survey & Reconnaissance",
+    description: "Systematic mapping and environmental survey of the domain territory.",
+    category: "exploration",
+    tags: Object.freeze(["survey", "exploration", "scouting"]),
+    progressResolverId: "domain-manager:standard",
+    defaultWorkRequired: 100,
+    requirements: Object.freeze([]),
+    costs: Object.freeze([]),
+    rewards: Object.freeze([]),
+    autoComplete: false
+  }),
+  Object.freeze({
+    id: "domain-manager:basic-construction",
+    version: 1,
+    label: "Basic Construction",
+    description: "Standard structural construction work for domain facilities or infrastructure.",
+    category: "construction",
+    tags: Object.freeze(["construction", "infrastructure", "facility"]),
+    progressResolverId: "domain-manager:standard",
+    defaultWorkRequired: 200,
+    requirements: Object.freeze([]),
+    costs: Object.freeze([]),
+    rewards: Object.freeze([]),
+    autoComplete: false
+  }),
+  Object.freeze({
+    id: "domain-manager:facility-maintenance",
+    version: 1,
+    label: "Facility Maintenance & Overhaul",
+    description: "Periodic preventative maintenance or overhaul of operational facilities.",
+    category: "maintenance",
+    tags: Object.freeze(["maintenance", "facility", "repair"]),
+    progressResolverId: "domain-manager:standard",
+    defaultWorkRequired: 50,
+    requirements: Object.freeze([]),
+    costs: Object.freeze([]),
+    rewards: Object.freeze([]),
+    autoComplete: true
+  })
+]);
+
+// src/projects/definitions/project-registry.ts
+var ProjectDefinitionRegistry = class {
+  #definitions = /* @__PURE__ */ new Map();
+  #frozen = false;
+  /**
+   * Registers a project definition. Validates the definition before accepting.
+   * Rejects duplicate IDs with DM_PROJECT_DEFINITION_ALREADY_EXISTS.
+   */
+  register(definition) {
+    if (this.#frozen) {
+      return err(
+        createPublicError({
+          code: "DM_PROJECT_REGISTRY_FROZEN",
+          category: "conflict",
+          message: "ProjectDefinitionRegistry is frozen against new registrations"
+        })
+      );
+    }
+    const validatedRes = validateProjectDefinition(definition);
+    if (!validatedRes.ok) {
+      return validatedRes;
+    }
+    const validated = validatedRes.value;
+    if (this.#definitions.has(validated.id)) {
+      return err(
+        createPublicError({
+          code: "DM_PROJECT_DEFINITION_ALREADY_EXISTS",
+          category: "conflict",
+          message: `Project definition '${validated.id}' is already registered`
+        })
+      );
+    }
+    this.#definitions.set(validated.id, validated);
+    return ok(validated);
+  }
+  /**
+   * Retrieves a project definition by its namespaced ID.
+   */
+  get(id) {
+    return this.#definitions.get(id);
+  }
+  /**
+   * Checks if a definition exists in the registry.
+   */
+  has(id) {
+    return this.#definitions.has(id);
+  }
+  /**
+   * Lists registered project definitions with optional filtering by category or tag.
+   */
+  list(filter) {
+    let result = Array.from(this.#definitions.values());
+    if (filter?.category) {
+      result = result.filter((d) => d.category === filter.category);
+    }
+    if (filter?.tag) {
+      result = result.filter((d) => d.tags.includes(filter.tag));
+    }
+    return Object.freeze(result);
+  }
+  /**
+   * Unregisters a project definition by ID. Cannot unregister if frozen.
+   */
+  unregister(id) {
+    if (this.#frozen) {
+      throw new Error("Cannot unregister from a frozen ProjectDefinitionRegistry");
+    }
+    return this.#definitions.delete(id);
+  }
+  /**
+   * Freezes the registry against modifications.
+   */
+  freeze() {
+    this.#frozen = true;
+  }
+  get isFrozen() {
+    return this.#frozen;
+  }
+};
+function createDefaultProjectRegistry() {
+  const registry = new ProjectDefinitionRegistry();
+  for (const def of CANONICAL_PROJECT_DEFINITIONS) {
+    const res = registry.register(def);
+    if (!res.ok) {
+      throw new Error(`Failed to register canonical project definition ${def.id}: ${res.error.message}`);
+    }
+  }
+  return registry;
+}
+
+// src/ui/domain-patterns/projects/project-presenter.ts
+function resolveStatusBadgeClass(lifecycle) {
+  switch (lifecycle) {
+    case "active":
+      return "dm-badge-active";
+    case "paused":
+      return "dm-badge-paused";
+    case "blocked":
+      return "dm-badge-blocked";
+    case "completed":
+      return "dm-badge-completed";
+    case "cancelled":
+      return "dm-badge-canceled";
+    case "failed":
+      return "dm-badge-failed";
+    case "draft":
+    case "planned":
+      return "dm-badge-planned";
+    case "initializing":
+      return "dm-badge-initializing";
+    case "approved":
+      return "dm-badge-approved";
+    case "archived":
+      return "dm-badge-archived";
+    default:
+      return "dm-badge-default";
+  }
+}
+function buildProjectsViewModel(domainInput, options = {}) {
+  const record = "record" in domainInput ? domainInput.record : domainInput;
+  const domainUuid = "uuid" in domainInput ? domainInput.uuid : "unknown";
+  const viewerIsGm = options.viewerIsGm ?? options.viewer?.isGm ?? true;
+  const filterLifecycle = options.filterLifecycle ?? "all";
+  const searchTerm = (options.searchTerm ?? "").toLowerCase().trim();
+  const data = getDomainProjectsData(record);
+  const defRegistry = options.projectRegistry;
+  const projectVMs = [];
+  for (const project of data.projects) {
+    const isSecret = Boolean(project.visibility === "secret" || project.tags?.includes("secret"));
+    if (isSecret && !viewerIsGm) {
+      continue;
+    }
+    if (filterLifecycle !== "all" && project.lifecycle !== filterLifecycle) {
+      continue;
+    }
+    const def = defRegistry?.get(project.definitionId);
+    const label = project.name || def?.label || project.id;
+    const description = project.description ?? def?.description ?? "";
+    const category = def?.category ?? "general";
+    const targetRef = project.targetRef ?? domainUuid;
+    if (searchTerm) {
+      const matchName = label.toLowerCase().includes(searchTerm);
+      const matchDef = project.definitionId.toLowerCase().includes(searchTerm);
+      const matchTarget = targetRef.toLowerCase().includes(searchTerm);
+      if (!matchName && !matchDef && !matchTarget) {
+        continue;
+      }
+    }
+    const progressPercent = project.workRequired > 0 ? Math.min(100, Math.max(0, Math.floor(project.workCompleted / project.workRequired * 100))) : 100;
+    const blockers = [];
+    if (project.lifecycle === "blocked") {
+      const bMsg = project.blockedReason || "Project execution is currently blocked.";
+      blockers.push({
+        id: "blocker-main",
+        category: "lifecycle",
+        message: bMsg,
+        isSecret: false
+      });
+    }
+    const rawWorkforce = project.workforceAllocations ?? [];
+    const workforce = rawWorkforce.map((w) => ({
+      typeId: w.typeId ?? "general",
+      required: w.required ?? 0,
+      allocated: w.allocated ?? 0,
+      satisfied: (w.allocated ?? 0) >= (w.required ?? 0)
+    }));
+    const rawRequirements = project.requirements ?? [];
+    const requirements = rawRequirements.map((r) => ({
+      targetRef: r.targetRef ?? "",
+      kind: r.kind ?? "generic",
+      status: r.status ?? "satisfied",
+      isSecret: Boolean(r.isSecret)
+    }));
+    const entriesCount = project.entries?.length ?? 0;
+    const lastUpdatedFormatted = project.updatedAt ? new Date(project.updatedAt).toLocaleDateString() : "\u2014";
+    const completedAtFormatted = project.completedAt ? new Date(project.completedAt).toLocaleDateString() : void 0;
+    const canAdvance = project.lifecycle === "active";
+    const canPause = project.lifecycle === "active";
+    const canResume = project.lifecycle === "paused";
+    const canBlock = project.lifecycle === "active" || project.lifecycle === "paused";
+    const canCancel = project.lifecycle !== "completed" && project.lifecycle !== "cancelled" && project.lifecycle !== "failed" && project.lifecycle !== "archived";
+    projectVMs.push({
+      id: project.id,
+      definitionId: project.definitionId,
+      label,
+      description,
+      lifecycle: project.lifecycle,
+      statusBadgeClass: resolveStatusBadgeClass(project.lifecycle),
+      revision: project.revision,
+      workRequired: project.workRequired,
+      workCompleted: project.workCompleted,
+      progressPercent,
+      targetRef,
+      category,
+      blockers: Object.freeze(blockers),
+      workforce: Object.freeze(workforce),
+      requirements: Object.freeze(requirements),
+      entriesCount,
+      lastUpdatedFormatted,
+      completedAtFormatted,
+      isSecret,
+      canAdvance,
+      canPause,
+      canResume,
+      canBlock,
+      canCancel
+    });
+  }
+  const allVisible = data.projects.filter((p) => {
+    const isSecret = Boolean(p.visibility === "secret" || p.tags?.includes("secret"));
+    return !isSecret || viewerIsGm;
+  });
+  const totalCount = allVisible.length;
+  const activeCount = allVisible.filter((p) => p.lifecycle === "active").length;
+  const pausedCount = allVisible.filter((p) => p.lifecycle === "paused").length;
+  const blockedCount = allVisible.filter((p) => p.lifecycle === "blocked").length;
+  const completedCount = allVisible.filter((p) => p.lifecycle === "completed").length;
+  return {
+    domainUuid,
+    viewerIsGm,
+    totalCount,
+    activeCount,
+    pausedCount,
+    blockedCount,
+    completedCount,
+    projects: Object.freeze(projectVMs),
+    filterLifecycle,
+    searchTerm
+  };
+}
+
+// src/ui/domain-patterns/projects/project-view.ts
+function escapeHtml3(value) {
+  if (value === null || value === void 0) return "";
+  return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+function escapeAttribute3(value) {
+  return escapeHtml3(value);
+}
+function renderProjectsTableHtml(projects) {
+  if (projects.length === 0) {
+    return `<div class="dm-empty-state">No projects found.</div>`;
+  }
+  return `
+    <table class="dm-projects-table">
+      <thead>
+        <tr>
+          <th>Project</th>
+          <th>Definition</th>
+          <th>Status</th>
+          <th>Progress</th>
+          <th>Target</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${projects.map((p) => {
+    const hasBlockers = p.blockers.length > 0;
+    return `
+            <tr class="dm-project-row ${escapeAttribute3(p.statusBadgeClass)}" data-project-id="${escapeAttribute3(p.id)}">
+              <td class="dm-cell-name">
+                <span class="dm-project-label">${escapeHtml3(p.label)}</span>
+                ${p.isSecret ? `<span class="dm-badge dm-badge-secret">Secret</span>` : ""}
+                ${hasBlockers ? `<span class="dm-badge dm-badge-blocked" title="Blocked">Blocked (${p.blockers.length})</span>` : ""}
+              </td>
+              <td class="dm-cell-def">
+                <code>${escapeHtml3(p.definitionId)}</code>
+              </td>
+              <td class="dm-cell-status">
+                <span class="dm-badge ${escapeAttribute3(p.statusBadgeClass)}">${escapeHtml3(p.lifecycle)}</span>
+              </td>
+              <td class="dm-cell-progress">
+                <div class="dm-progress-container">
+                  <div class="dm-progress-bar" style="width: ${p.progressPercent}%;"></div>
+                  <span class="dm-progress-text">${p.workCompleted} / ${p.workRequired} (${p.progressPercent}%)</span>
+                </div>
+              </td>
+              <td class="dm-cell-target">
+                <span>${escapeHtml3(p.targetRef)}</span>
+              </td>
+              <td class="dm-cell-actions">
+                <button type="button" class="dm-btn dm-btn-sm" data-action="openProjectDetail" data-project-id="${escapeAttribute3(p.id)}" title="Inspect Project">
+                  <i class="fas fa-search"></i> Inspect
+                </button>
+                ${p.canAdvance ? `
+                  <button type="button" class="dm-btn dm-btn-sm dm-btn-primary" data-action="advanceProject" data-project-id="${escapeAttribute3(p.id)}" title="Advance Project">
+                    <i class="fas fa-play"></i> Advance
+                  </button>
+                ` : ""}
+                ${p.canPause ? `
+                  <button type="button" class="dm-btn dm-btn-sm" data-action="pauseProject" data-project-id="${escapeAttribute3(p.id)}" title="Pause Project">
+                    <i class="fas fa-pause"></i> Pause
+                  </button>
+                ` : ""}
+                ${p.canResume ? `
+                  <button type="button" class="dm-btn dm-btn-sm" data-action="resumeProject" data-project-id="${escapeAttribute3(p.id)}" title="Resume Project">
+                    <i class="fas fa-play"></i> Resume
+                  </button>
+                ` : ""}
+              </td>
+            </tr>
+          `;
+  }).join("")}
+      </tbody>
+    </table>
+  `;
+}
+function renderProjectDetailModalHtml(project, viewerIsGm) {
+  const hasBlockers = project.blockers.length > 0;
+  return `
+    <div class="dm-modal dm-project-detail-modal" data-project-id="${escapeAttribute3(project.id)}">
+      <header class="dm-modal-header">
+        <h3>Project Inspector: ${escapeHtml3(project.label)}</h3>
+        <button type="button" class="dm-btn-close" data-action="closeModal">&times;</button>
+      </header>
+
+      <div class="dm-modal-body">
+        <section class="dm-detail-summary">
+          <div class="dm-summary-grid">
+            <div class="dm-stat">
+              <span class="dm-stat-label">Status</span>
+              <span class="dm-badge ${escapeAttribute3(project.statusBadgeClass)}">${escapeHtml3(project.lifecycle)}</span>
+            </div>
+            <div class="dm-stat">
+              <span class="dm-stat-label">Definition</span>
+              <code>${escapeHtml3(project.definitionId)}</code>
+            </div>
+            <div class="dm-stat">
+              <span class="dm-stat-label">Target</span>
+              <span>${escapeHtml3(project.targetRef)}</span>
+            </div>
+            <div class="dm-stat">
+              <span class="dm-stat-label">Revision</span>
+              <span>v${project.revision}</span>
+            </div>
+          </div>
+
+          <div class="dm-progress-section">
+            <h4>Work Progress</h4>
+            <div class="dm-progress-container dm-progress-large">
+              <div class="dm-progress-bar" style="width: ${project.progressPercent}%;"></div>
+              <span class="dm-progress-text">${project.workCompleted} / ${project.workRequired} units (${project.progressPercent}%)</span>
+            </div>
+          </div>
+        </section>
+
+        ${hasBlockers ? `
+          <section class="dm-section dm-blockers-section">
+            <h4 class="dm-danger-text"><i class="fas fa-exclamation-triangle"></i> Active Blockers</h4>
+            <ul class="dm-blocker-list">
+              ${project.blockers.map((b) => `
+                <li class="dm-blocker-item ${b.isSecret ? "dm-secret" : ""}">
+                  <span class="dm-blocker-category">[${escapeHtml3(b.category)}]</span>
+                  <span class="dm-blocker-message">${escapeHtml3(b.message)}</span>
+                  ${b.isSecret ? `<span class="dm-badge dm-badge-secret">Secret</span>` : ""}
+                </li>
+              `).join("")}
+            </ul>
+          </section>
+        ` : ""}
+
+        ${project.workforce.length > 0 ? `
+          <section class="dm-section dm-workforce-section">
+            <h4>Workforce Requirements</h4>
+            <div class="dm-workforce-grid">
+              ${project.workforce.map((w) => `
+                <div class="dm-wf-stat ${w.satisfied ? "dm-satisfied" : "dm-unsatisfied"}">
+                  <span class="dm-wf-type">${escapeHtml3(w.typeId)}</span>
+                  <span class="dm-wf-numbers">${w.allocated} / ${w.required}</span>
+                  <span class="dm-badge ${w.satisfied ? "dm-badge-healthy" : "dm-badge-danger"}">
+                    ${w.satisfied ? "Met" : "Deficit"}
+                  </span>
+                </div>
+              `).join("")}
+            </div>
+          </section>
+        ` : ""}
+
+        ${project.requirements.length > 0 ? `
+          <section class="dm-section dm-requirements-section">
+            <h4>Prerequisites & Requirements</h4>
+            <ul class="dm-req-list">
+              ${project.requirements.map((r) => `
+                <li class="dm-req-item dm-req-${escapeAttribute3(r.status)}">
+                  <span class="dm-req-kind">${escapeHtml3(r.kind)}</span>
+                  <span class="dm-req-target">${escapeHtml3(r.targetRef)}</span>
+                  <span class="dm-badge dm-badge-${escapeAttribute3(r.status)}">${escapeHtml3(r.status)}</span>
+                </li>
+              `).join("")}
+            </ul>
+          </section>
+        ` : ""}
+
+        ${project.description ? `
+          <section class="dm-section dm-desc-section">
+            <h4>Description</h4>
+            <p>${escapeHtml3(project.description)}</p>
+          </section>
+        ` : ""}
+      </div>
+
+      <footer class="dm-modal-footer">
+        ${project.canAdvance ? `
+          <form class="dm-advance-inline-form" data-form-type="advanceProject" data-project-id="${escapeAttribute3(project.id)}">
+            <input type="number" name="progressUnits" value="1" min="1" max="1000" class="dm-input-sm" style="width: 70px;" />
+            <button type="submit" class="dm-btn dm-btn-primary">
+              <i class="fas fa-hammer"></i> Commit Advance
+            </button>
+          </form>
+        ` : ""}
+
+        ${project.canPause ? `
+          <button type="button" class="dm-btn" data-action="pauseProject" data-project-id="${escapeAttribute3(project.id)}">
+            <i class="fas fa-pause"></i> Pause
+          </button>
+        ` : ""}
+
+        ${project.canResume ? `
+          <button type="button" class="dm-btn dm-btn-success" data-action="resumeProject" data-project-id="${escapeAttribute3(project.id)}">
+            <i class="fas fa-play"></i> Resume
+          </button>
+        ` : ""}
+
+        ${project.canCancel ? `
+          <button type="button" class="dm-btn dm-btn-danger" data-action="cancelProject" data-project-id="${escapeAttribute3(project.id)}">
+            <i class="fas fa-times"></i> Cancel Project
+          </button>
+        ` : ""}
+
+        <button type="button" class="dm-btn" data-action="closeModal">Close</button>
+      </footer>
+    </div>
+  `;
+}
+function renderProjectStartModalHtml(domainUuid, definitions) {
+  return `
+    <div class="dm-modal dm-project-start-modal">
+      <header class="dm-modal-header">
+        <h3>Start New Project</h3>
+        <button type="button" class="dm-btn-close" data-action="closeModal">&times;</button>
+      </header>
+
+      <form data-form-type="startProject" data-domain-uuid="${escapeAttribute3(domainUuid)}">
+        <div class="dm-modal-body">
+          <div class="dm-form-group">
+            <label for="dm-project-definition">Project Template / Definition</label>
+            <select id="dm-project-definition" name="definitionId" required>
+              <option value="">-- Select a definition --</option>
+              ${definitions.map((d) => `
+                <option value="${escapeAttribute3(d.id)}" data-work="${d.defaultWorkRequired}">
+                  ${escapeHtml3(d.label)} (${d.defaultWorkRequired} units) ${d.category ? `- ${escapeHtml3(d.category)}` : ""}
+                </option>
+              `).join("")}
+            </select>
+          </div>
+
+          <div class="dm-form-group">
+            <label for="dm-project-name">Project Label / Name</label>
+            <input type="text" id="dm-project-name" name="label" placeholder="Custom project name (optional)" />
+          </div>
+
+          <div class="dm-form-group">
+            <label for="dm-project-target">Target Reference</label>
+            <input type="text" id="dm-project-target" name="targetRef" value="${escapeAttribute3(domainUuid)}" placeholder="Target entity ref or domain UUID" />
+          </div>
+
+          <div class="dm-form-group">
+            <label for="dm-project-work">Total Work Required</label>
+            <input type="number" id="dm-project-work" name="workRequired" min="1" value="10" required />
+          </div>
+
+          <div class="dm-form-group">
+            <label for="dm-project-state">Initial State</label>
+            <select id="dm-project-state" name="initialState">
+              <option value="active">Active (Ready to advance)</option>
+              <option value="planned">Planned (Draft)</option>
+            </select>
+          </div>
+        </div>
+
+        <footer class="dm-modal-footer">
+          <button type="submit" class="dm-btn dm-btn-primary">
+            <i class="fas fa-play"></i> Initialize & Start
+          </button>
+          <button type="button" class="dm-btn" data-action="closeModal">Cancel</button>
+        </footer>
+      </form>
+    </div>
+  `;
+}
+function renderProjectsSubsystemHtml(vm) {
+  return `
+    <div class="dm-projects-subsystem" data-domain-uuid="${escapeAttribute3(vm.domainUuid)}">
+      <header class="dm-subsystem-header">
+        <div class="dm-header-title">
+          <h2>Projects & Construction</h2>
+          <span class="dm-header-subtitle">Domain Initiatives, Infrastructure & Engineering</span>
+        </div>
+
+        <div class="dm-summary-counters">
+          <div class="dm-counter-card">
+            <span class="dm-counter-value">${vm.totalCount}</span>
+            <span class="dm-counter-label">Total</span>
+          </div>
+          <div class="dm-counter-card dm-counter-active">
+            <span class="dm-counter-value">${vm.activeCount}</span>
+            <span class="dm-counter-label">Active</span>
+          </div>
+          <div class="dm-counter-card dm-counter-paused">
+            <span class="dm-counter-value">${vm.pausedCount}</span>
+            <span class="dm-counter-label">Paused</span>
+          </div>
+          <div class="dm-counter-card dm-counter-blocked">
+            <span class="dm-counter-value">${vm.blockedCount}</span>
+            <span class="dm-counter-label">Blocked</span>
+          </div>
+          <div class="dm-counter-card dm-counter-completed">
+            <span class="dm-counter-value">${vm.completedCount}</span>
+            <span class="dm-counter-label">Completed</span>
+          </div>
+        </div>
+      </header>
+
+      <div class="dm-toolbar">
+        <div class="dm-toolbar-filters">
+          <label class="dm-filter-label">Filter:</label>
+          <select name="filterLifecycle" data-action="filterProjects" class="dm-select-sm">
+            <option value="all" ${vm.filterLifecycle === "all" ? "selected" : ""}>All Lifecycles</option>
+            <option value="active" ${vm.filterLifecycle === "active" ? "selected" : ""}>Active</option>
+            <option value="paused" ${vm.filterLifecycle === "paused" ? "selected" : ""}>Paused</option>
+            <option value="blocked" ${vm.filterLifecycle === "blocked" ? "selected" : ""}>Blocked</option>
+            <option value="completed" ${vm.filterLifecycle === "completed" ? "selected" : ""}>Completed</option>
+            <option value="cancelled" ${vm.filterLifecycle === "cancelled" ? "selected" : ""}>Cancelled</option>
+          </select>
+
+          <input
+            type="text"
+            placeholder="Search projects..."
+            data-action="searchProjects"
+            value="${escapeAttribute3(vm.searchTerm)}"
+            class="dm-input-sm dm-search-input"
+          />
+        </div>
+
+        <div class="dm-toolbar-actions">
+          <button type="button" class="dm-btn dm-btn-primary dm-btn-sm" data-action="openStartModal">
+            <i class="fas fa-plus"></i> Start Project
+          </button>
+        </div>
+      </div>
+
+      <main class="dm-subsystem-content">
+        ${renderProjectsTableHtml(vm.projects)}
+      </main>
+    </div>
+  `;
+}
+
+// src/projects/plans/project-advance-plan-service.ts
+function evaluateProjectAdvancePlan(context) {
+  const { project, definition, domain } = context;
+  const blockers = [];
+  const warnings = [];
+  const expectedRevision = context.expectedRevision !== void 0 ? context.expectedRevision : project.revision;
+  if (project.revision !== expectedRevision) {
+    blockers.push({
+      code: "DM_PROJECT_REVISION_MISMATCH",
+      category: "revision",
+      message: `Project revision mismatch: expected ${expectedRevision}, found ${project.revision}`,
+      details: { expected: expectedRevision, actual: project.revision }
+    });
+  }
+  if (project.lifecycle === "paused") {
+    blockers.push({
+      code: "DM_PROJECT_PAUSED",
+      category: "lifecycle",
+      message: `Cannot advance project '${project.id}' because it is paused. Resume the project first`,
+      details: { lifecycle: project.lifecycle }
+    });
+  } else if (project.lifecycle === "blocked") {
+    blockers.push({
+      code: "DM_PROJECT_BLOCKED",
+      category: "lifecycle",
+      message: `Cannot advance project '${project.id}' because it is blocked: ${project.blockedReason ?? "unspecified reason"}`,
+      details: { lifecycle: project.lifecycle, blockedReason: project.blockedReason }
+    });
+  } else if (project.lifecycle === "completed" || project.lifecycle === "failed" || project.lifecycle === "cancelled" || project.lifecycle === "archived") {
+    blockers.push({
+      code: "DM_PROJECT_TERMINAL",
+      category: "lifecycle",
+      message: `Cannot advance project '${project.id}' in terminal lifecycle '${project.lifecycle}'`,
+      details: { lifecycle: project.lifecycle }
+    });
+  } else if (project.lifecycle !== "active") {
+    blockers.push({
+      code: "DM_PROJECT_NOT_ACTIVE",
+      category: "lifecycle",
+      message: `Project '${project.id}' is not in active state (current lifecycle: '${project.lifecycle}')`,
+      details: { lifecycle: project.lifecycle }
+    });
+  }
+  const enabledCaps = domain.definition.capabilities.enabled;
+  if (!enabledCaps.includes(PROJECTS_CAPABILITY_ID)) {
+    blockers.push({
+      code: "DM_PROJECT_CAPABILITY_MISSING",
+      category: "capability",
+      message: `Domain '${project.domainUuid}' does not have the '${PROJECTS_CAPABILITY_ID}' capability enabled`,
+      details: { capabilityId: PROJECTS_CAPABILITY_ID }
+    });
+  }
+  const requirementEvaluations = [];
+  for (const req of definition.requirements) {
+    if (req.category === "advance" || req.category === "continuous") {
+      let status = "satisfied";
+      let message;
+      if (req.type === "capability") {
+        const requiredCap = req.targetRef ?? String(req.value ?? "");
+        if (!enabledCaps.includes(requiredCap)) {
+          status = "unsatisfied";
+          message = `Required capability '${requiredCap}' is not enabled on domain`;
+        }
+      } else if (req.type === "facility") {
+        const targetFac = req.targetRef;
+        if (targetFac && context.parameters?.availableFacilities) {
+          const available = context.parameters.availableFacilities;
+          if (!available.includes(targetFac)) {
+            status = "unsatisfied";
+            message = `Required facility '${targetFac}' is not available`;
+          }
+        } else {
+          status = "unavailable";
+          message = `Facility evaluation for '${targetFac ?? "unknown"}' is not currently available`;
+        }
+      } else if (req.type === "custom") {
+        if (context.parameters?.customRequirements) {
+          const customMap = context.parameters.customRequirements;
+          if (customMap[req.id] !== true) {
+            status = "unsatisfied";
+            message = `Custom requirement '${req.id}' is not satisfied`;
+          }
+        } else {
+          status = "unsatisfied";
+          message = `Custom requirement '${req.id}' was not provided in evaluation context`;
+        }
+      }
+      requirementEvaluations.push({
+        requirementId: req.id,
+        category: req.category,
+        type: req.type,
+        status,
+        message,
+        targetRef: req.targetRef,
+        value: req.value
+      });
+      if (status !== "satisfied") {
+        blockers.push({
+          code: "DM_PROJECT_REQUIREMENT_UNSATISFIED",
+          category: "requirement",
+          message: message ?? `Requirement '${req.id}' is ${status}`,
+          details: { requirementId: req.id, status }
+        });
+      }
+    }
+  }
+  let proposedDelta = 1;
+  if (context.proposedDelta !== void 0) {
+    if (!Number.isSafeInteger(context.proposedDelta)) {
+      blockers.push({
+        code: "DM_PROJECT_DELTA_INVALID",
+        category: "requirement",
+        message: `Proposed progress delta must be a safe integer: received ${String(context.proposedDelta)}`,
+        details: { proposedDelta: context.proposedDelta }
+      });
+    } else {
+      proposedDelta = context.proposedDelta;
+    }
+  } else if (context.resolver !== void 0) {
+    const resolutionRes = context.resolver.resolve({
+      project,
+      definition,
+      domainUuid: project.domainUuid,
+      sourceKind: "command",
+      contributor: context.contributors && context.contributors.length > 0 ? context.contributors[0] : null,
+      parameters: context.parameters
+    });
+    if (resolutionRes.ok) {
+      proposedDelta = resolutionRes.value.deltaWork;
+      if (resolutionRes.value.warnings && resolutionRes.value.warnings.length > 0) {
+        warnings.push(...resolutionRes.value.warnings);
+      }
+    } else {
+      blockers.push({
+        code: resolutionRes.error.code,
+        category: "workforce",
+        message: resolutionRes.error.message,
+        details: resolutionRes.error.details
+      });
+    }
+  }
+  const projectedCompleted = project.clampProgress !== false ? Math.min(project.workRequired, Math.max(0, project.workCompleted + proposedDelta)) : project.workCompleted + proposedDelta;
+  const wouldComplete = projectedCompleted >= project.workRequired;
+  const planId = createOpaqueId("plan");
+  return {
+    planId,
+    projectId: project.id,
+    domainUuid: project.domainUuid,
+    expectedRevision,
+    proposedDelta,
+    requirements: Object.freeze(requirementEvaluations),
+    contributors: Object.freeze([...context.contributors ?? []]),
+    blockers: Object.freeze(blockers),
+    warnings: Object.freeze(warnings),
+    isSatisfied: blockers.length === 0,
+    wouldComplete,
+    evaluatedAt: Date.now()
+  };
+}
+function commitProjectAdvance(plan, project, options) {
+  if (!plan.isSatisfied) {
+    const blockerMsgs = plan.blockers.map((b) => `[${b.code}] ${b.message}`).join("; ");
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_ADVANCE_BLOCKED",
+        category: "conflict",
+        message: `Cannot commit project advance: plan is blocked (${blockerMsgs})`,
+        details: { blockers: plan.blockers }
+      })
+    );
+  }
+  if (project.revision !== plan.expectedRevision) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_REVISION_MISMATCH",
+        category: "conflict",
+        message: `Project revision mismatch: plan expects revision ${plan.expectedRevision}, but project is at revision ${project.revision}`,
+        details: { expected: plan.expectedRevision, actual: project.revision }
+      })
+    );
+  }
+  if (project.lifecycle !== "active") {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_INVALID_TRANSITION",
+        category: "validation",
+        message: `Cannot advance project in lifecycle '${project.lifecycle}'. Must be 'active'`,
+        details: { lifecycle: project.lifecycle }
+      })
+    );
+  }
+  const now = Date.now();
+  const entryId = createOpaqueId("prj");
+  const sourceKind = options?.sourceKind ?? "command";
+  const sourceRef = options?.sourceRef ?? plan.planId;
+  const reasonCode = options?.reasonCode ?? (plan.wouldComplete ? "PROJECT_COMPLETED" : "PROJECT_ADVANCED");
+  const rawUnitsAfter = project.workCompleted + plan.proposedDelta;
+  const nonNegative = Math.max(0, rawUnitsAfter);
+  const clampedUnitsAfter = project.clampProgress !== false ? Math.min(project.workRequired, nonNegative) : nonNegative;
+  const sequence = (project.entries?.length ?? 0) + 1;
+  const entry = {
+    id: entryId,
+    projectId: project.id,
+    domainUuid: project.domainUuid,
+    sequence,
+    unitsDelta: plan.proposedDelta,
+    unitsBefore: project.workCompleted,
+    unitsAfter: clampedUnitsAfter,
+    sourceKind,
+    sourceRef,
+    requestedByUserId: options?.userId ?? null,
+    contributor: plan.contributors && plan.contributors.length > 0 ? plan.contributors[0] : null,
+    timestamp: now,
+    reasonCode,
+    note: options?.note
+  };
+  const isGoalMet = clampedUnitsAfter >= project.workRequired;
+  const shouldComplete = isGoalMet && (options?.autoComplete ?? false);
+  const targetLifecycle = shouldComplete ? "completed" : "active";
+  if (shouldComplete) {
+    const transitionRes = validateProjectLifecycleTransition(project.lifecycle, "completed");
+    if (!transitionRes.ok) {
+      return transitionRes;
+    }
+  }
+  const applyRes = applyProjectEntry(project, entry);
+  if (!applyRes.ok) {
+    return applyRes;
+  }
+  let updatedProject = applyRes.value;
+  if (shouldComplete) {
+    updatedProject = {
+      ...updatedProject,
+      lifecycle: "completed",
+      completedAt: now
+    };
+  }
+  const receipt = {
+    receiptId: createOpaqueId("rep"),
+    projectId: project.id,
+    domainUuid: project.domainUuid,
+    action: shouldComplete ? "complete" : "advance",
+    revisionBefore: project.revision,
+    revisionAfter: updatedProject.revision,
+    lifecycleBefore: project.lifecycle,
+    lifecycleAfter: updatedProject.lifecycle,
+    workCompletedBefore: project.workCompleted,
+    workCompletedAfter: updatedProject.workCompleted,
+    unitsDelta: plan.proposedDelta,
+    entryCreated: entry,
+    blockedReason: project.blockedReason,
+    appliedAt: now,
+    reasonCode,
+    note: options?.note
+  };
+  return ok({
+    updatedProject,
+    receipt
+  });
+}
+function pauseProject(project, params) {
+  const expectedRevision = params?.expectedRevision !== void 0 ? params.expectedRevision : project.revision;
+  if (project.revision !== expectedRevision) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_REVISION_MISMATCH",
+        category: "conflict",
+        message: `Project revision mismatch: expected revision ${expectedRevision}, but project is at revision ${project.revision}`,
+        details: { expected: expectedRevision, actual: project.revision }
+      })
+    );
+  }
+  const transitionRes = validateProjectLifecycleTransition(project.lifecycle, "paused");
+  if (!transitionRes.ok) {
+    return transitionRes;
+  }
+  const now = Date.now();
+  const entryId = createOpaqueId("prj");
+  const sequence = (project.entries?.length ?? 0) + 1;
+  const entry = {
+    id: entryId,
+    projectId: project.id,
+    domainUuid: project.domainUuid,
+    sequence,
+    unitsDelta: 0,
+    unitsBefore: project.workCompleted,
+    unitsAfter: project.workCompleted,
+    sourceKind: "command",
+    sourceRef: params?.sourceRef ?? "pauseProject",
+    requestedByUserId: params?.userId ?? null,
+    timestamp: now,
+    reasonCode: "PROJECT_PAUSED",
+    note: params?.note
+  };
+  const transitioningProject = {
+    ...project,
+    lifecycle: "paused"
+  };
+  const applyRes = applyProjectEntry(transitioningProject, entry);
+  if (!applyRes.ok) {
+    return applyRes;
+  }
+  const updatedProject = applyRes.value;
+  const receipt = {
+    receiptId: createOpaqueId("rep"),
+    projectId: project.id,
+    domainUuid: project.domainUuid,
+    action: "pause",
+    revisionBefore: project.revision,
+    revisionAfter: updatedProject.revision,
+    lifecycleBefore: project.lifecycle,
+    lifecycleAfter: updatedProject.lifecycle,
+    workCompletedBefore: project.workCompleted,
+    workCompletedAfter: updatedProject.workCompleted,
+    unitsDelta: 0,
+    entryCreated: entry,
+    blockedReason: project.blockedReason,
+    appliedAt: now,
+    reasonCode: "PROJECT_PAUSED",
+    note: params?.note
+  };
+  return ok({
+    updatedProject,
+    receipt
+  });
+}
+function resumeProject(project, params) {
+  const expectedRevision = params?.expectedRevision !== void 0 ? params.expectedRevision : project.revision;
+  if (project.revision !== expectedRevision) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_REVISION_MISMATCH",
+        category: "conflict",
+        message: `Project revision mismatch: expected revision ${expectedRevision}, but project is at revision ${project.revision}`,
+        details: { expected: expectedRevision, actual: project.revision }
+      })
+    );
+  }
+  if (project.lifecycle !== "paused") {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_INVALID_TRANSITION",
+        category: "validation",
+        message: `Cannot resume project in lifecycle '${project.lifecycle}'. Must be 'paused'`,
+        details: { lifecycle: project.lifecycle }
+      })
+    );
+  }
+  const transitionRes = validateProjectLifecycleTransition(project.lifecycle, "active");
+  if (!transitionRes.ok) {
+    return transitionRes;
+  }
+  const now = Date.now();
+  const entryId = createOpaqueId("prj");
+  const sequence = (project.entries?.length ?? 0) + 1;
+  const entry = {
+    id: entryId,
+    projectId: project.id,
+    domainUuid: project.domainUuid,
+    sequence,
+    unitsDelta: 0,
+    unitsBefore: project.workCompleted,
+    unitsAfter: project.workCompleted,
+    sourceKind: "command",
+    sourceRef: params?.sourceRef ?? "resumeProject",
+    requestedByUserId: params?.userId ?? null,
+    timestamp: now,
+    reasonCode: "PROJECT_RESUMED",
+    note: params?.note
+  };
+  const transitioningProject = {
+    ...project,
+    lifecycle: "active"
+  };
+  const applyRes = applyProjectEntry(transitioningProject, entry);
+  if (!applyRes.ok) {
+    return applyRes;
+  }
+  const updatedProject = applyRes.value;
+  const receipt = {
+    receiptId: createOpaqueId("rep"),
+    projectId: project.id,
+    domainUuid: project.domainUuid,
+    action: "resume",
+    revisionBefore: project.revision,
+    revisionAfter: updatedProject.revision,
+    lifecycleBefore: project.lifecycle,
+    lifecycleAfter: updatedProject.lifecycle,
+    workCompletedBefore: project.workCompleted,
+    workCompletedAfter: updatedProject.workCompleted,
+    unitsDelta: 0,
+    entryCreated: entry,
+    blockedReason: project.blockedReason,
+    appliedAt: now,
+    reasonCode: "PROJECT_RESUMED",
+    note: params?.note
+  };
+  return ok({
+    updatedProject,
+    receipt
+  });
+}
+function cancelProject(project, params) {
+  const expectedRevision = params?.expectedRevision !== void 0 ? params.expectedRevision : project.revision;
+  if (project.revision !== expectedRevision) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_REVISION_MISMATCH",
+        category: "conflict",
+        message: `Project revision mismatch: expected revision ${expectedRevision}, but project is at revision ${project.revision}`,
+        details: { expected: expectedRevision, actual: project.revision }
+      })
+    );
+  }
+  const transitionRes = validateProjectLifecycleTransition(project.lifecycle, "cancelled");
+  if (!transitionRes.ok) {
+    return transitionRes;
+  }
+  const now = Date.now();
+  const entryId = createOpaqueId("prj");
+  const reasonCode = params?.policy?.reasonCode ?? "PROJECT_CANCELLED";
+  const sequence = (project.entries?.length ?? 0) + 1;
+  const entry = {
+    id: entryId,
+    projectId: project.id,
+    domainUuid: project.domainUuid,
+    sequence,
+    unitsDelta: 0,
+    unitsBefore: project.workCompleted,
+    unitsAfter: project.workCompleted,
+    sourceKind: "command",
+    sourceRef: params?.sourceRef ?? "cancelProject",
+    requestedByUserId: params?.userId ?? null,
+    timestamp: now,
+    reasonCode,
+    note: params?.note
+  };
+  const transitioningProject = {
+    ...project,
+    lifecycle: "cancelled"
+  };
+  const applyRes = applyProjectEntry(transitioningProject, entry);
+  if (!applyRes.ok) {
+    return applyRes;
+  }
+  const updatedProject = applyRes.value;
+  const receipt = {
+    receiptId: createOpaqueId("rep"),
+    projectId: project.id,
+    domainUuid: project.domainUuid,
+    action: "cancel",
+    revisionBefore: project.revision,
+    revisionAfter: updatedProject.revision,
+    lifecycleBefore: project.lifecycle,
+    lifecycleAfter: updatedProject.lifecycle,
+    workCompletedBefore: project.workCompleted,
+    workCompletedAfter: updatedProject.workCompleted,
+    unitsDelta: 0,
+    entryCreated: entry,
+    blockedReason: project.blockedReason,
+    appliedAt: now,
+    reasonCode,
+    note: params?.note
+  };
+  return ok({
+    updatedProject,
+    receipt
+  });
+}
+
+// src/ui/domain-patterns/projects/project-app.ts
+function cleanPayload2(payload) {
+  if (payload === null || typeof payload !== "object") {
+    return payload;
+  }
+  if (Array.isArray(payload)) {
+    return payload.map(cleanPayload2);
+  }
+  const cleaned = {};
+  for (const [key, value] of Object.entries(payload)) {
+    if (value !== void 0) {
+      cleaned[key] = typeof value === "object" && value !== null ? cleanPayload2(value) : value;
+    }
+  }
+  return cleaned;
+}
+function makeCommand3(type, payload) {
+  return {
+    contractVersion: COMMAND_CONTRACT_VERSION_V1,
+    commandId: createCommandId(),
+    type,
+    payload: cleanPayload2(payload),
+    issuedAtReal: Date.now()
+  };
+}
+var ProjectsApplicationController = class {
+  #domainUuid;
+  #commandBus;
+  #domains;
+  #projectRegistry;
+  #viewer;
+  #activeModal = null;
+  #selectedProjectId = null;
+  #filterLifecycle = "all";
+  #searchTerm = "";
+  #lastViewModel = null;
+  constructor(options) {
+    this.#domainUuid = options.domainUuid;
+    this.#commandBus = options.commandBus;
+    this.#domains = options.domains;
+    this.#projectRegistry = options.projectRegistry ?? createDefaultProjectRegistry();
+    this.#viewer = options.viewer;
+  }
+  get domainUuid() {
+    return this.#domainUuid;
+  }
+  get activeModal() {
+    return this.#activeModal;
+  }
+  get selectedProjectId() {
+    return this.#selectedProjectId;
+  }
+  get filterLifecycle() {
+    return this.#filterLifecycle;
+  }
+  get searchTerm() {
+    return this.#searchTerm;
+  }
+  get viewModel() {
+    return this.#lastViewModel;
+  }
+  setFilterLifecycle(filter) {
+    this.#filterLifecycle = filter;
+  }
+  setSearchTerm(term) {
+    this.#searchTerm = term;
+  }
+  openStartModal() {
+    this.#activeModal = "start";
+  }
+  openProjectDetail(projectId) {
+    this.#selectedProjectId = projectId;
+    this.#activeModal = "detail";
+  }
+  closeModal() {
+    this.#activeModal = null;
+    this.#selectedProjectId = null;
+  }
+  async loadViewModel() {
+    const id = this.#domainUuid.startsWith("JournalEntry.") ? this.#domainUuid.slice("JournalEntry.".length) : this.#domainUuid;
+    const docRes = await this.#domains.read(id);
+    if (!docRes.ok) return docRes;
+    const isGm = this.#viewer?.isGm ?? true;
+    const vm = buildProjectsViewModel(docRes.value, {
+      viewerIsGm: isGm,
+      projectRegistry: this.#projectRegistry,
+      filterLifecycle: this.#filterLifecycle,
+      searchTerm: this.#searchTerm
+    });
+    this.#lastViewModel = vm;
+    return ok(vm);
+  }
+  render(viewModel) {
+    const vm = viewModel ?? this.#lastViewModel;
+    if (!vm) {
+      return `<div class="dm-loading">Loading Projects Subsystem...</div>`;
+    }
+    const mainHtml = renderProjectsSubsystemHtml(vm);
+    let modalHtml = "";
+    if (this.#activeModal === "start") {
+      const defs = this.#projectRegistry.list();
+      modalHtml = renderProjectStartModalHtml(this.#domainUuid, defs);
+    } else if (this.#activeModal === "detail" && this.#selectedProjectId) {
+      const p = vm.projects.find((item) => item.id === this.#selectedProjectId);
+      if (p) {
+        modalHtml = renderProjectDetailModalHtml(p, vm.viewerIsGm);
+      }
+    }
+    return `
+      <div class="dm-projects-app-v2" data-domain-uuid="${escapeAttribute3(this.#domainUuid)}">
+        ${mainHtml}
+        ${modalHtml ? `<div class="dm-modal-backdrop">${modalHtml}</div>` : ""}
+      </div>
+    `;
+  }
+  async dispatchStartProject(payload) {
+    const id = this.#domainUuid.startsWith("JournalEntry.") ? this.#domainUuid.slice("JournalEntry.".length) : this.#domainUuid;
+    const docRes = await this.#domains.read(id);
+    if (!docRes.ok) return docRes;
+    const record = docRes.value.record;
+    const currentProjectsData = getDomainProjectsData(record);
+    const projectId = `proj-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const now = Date.now();
+    const newProject = {
+      id: projectId,
+      domainUuid: this.#domainUuid,
+      definitionId: payload.definitionId,
+      name: payload.name ?? payload.label ?? payload.definitionId,
+      schemaVersion: 1,
+      revision: 0,
+      lifecycle: payload.initialState ?? "active",
+      workRequired: payload.workRequired,
+      workCompleted: 0,
+      clampProgress: true,
+      tags: Object.freeze([]),
+      createdAt: now,
+      updatedAt: now,
+      metadata: {
+        targetRef: payload.targetRef ?? this.#domainUuid
+      }
+    };
+    const updatedProjects = [...currentProjectsData.projects, newProject];
+    const updatedRecord = withDomainProjectsData(record, {
+      ...currentProjectsData,
+      projects: updatedProjects
+    });
+    if ("save" in this.#domains && typeof this.#domains.save === "function") {
+      const saveRes = await this.#domains.save({
+        ...docRes.value,
+        record: updatedRecord
+      });
+      if (!saveRes.ok) return saveRes;
+    }
+    if (this.#commandBus) {
+      const cmd = makeCommand3("projects:start-project", {
+        domainUuid: this.#domainUuid,
+        project: newProject
+      });
+      await this.#commandBus.execute(cmd);
+    }
+    return ok({ projectId });
+  }
+  async dispatchAdvanceProject(payload) {
+    const id = this.#domainUuid.startsWith("JournalEntry.") ? this.#domainUuid.slice("JournalEntry.".length) : this.#domainUuid;
+    const docRes = await this.#domains.read(id);
+    if (!docRes.ok) return docRes;
+    const record = docRes.value.record;
+    const currentProjectsData = getDomainProjectsData(record);
+    const project = currentProjectsData.projects.find((p) => p.id === payload.projectId);
+    if (!project) {
+      return err(createPublicError({
+        code: "DM_PROJECT_NOT_FOUND",
+        category: "not-found",
+        message: `Project ${payload.projectId} not found`
+      }));
+    }
+    const definition = this.#projectRegistry.get(project.definitionId);
+    if (!definition) {
+      return err(createPublicError({
+        code: "DM_PROJECT_DEFINITION_NOT_FOUND",
+        category: "not-found",
+        message: `Project definition ${project.definitionId} not found`
+      }));
+    }
+    const plan = evaluateProjectAdvancePlan({
+      project,
+      definition,
+      domain: record,
+      proposedDelta: payload.units
+    });
+    if (!plan.isSatisfied) {
+      return err(createPublicError({
+        code: "DM_PROJECT_ADVANCE_BLOCKED",
+        category: "conflict",
+        message: plan.blockers[0]?.message ?? "Advance blocked"
+      }));
+    }
+    const advanceRes = commitProjectAdvance(plan, project, {
+      note: payload.notes
+    });
+    if (!advanceRes.ok) return advanceRes;
+    const updatedProject = advanceRes.value.updatedProject;
+    const updatedProjects = currentProjectsData.projects.map(
+      (p) => p.id === payload.projectId ? updatedProject : p
+    );
+    const updatedRecord = withDomainProjectsData(record, {
+      ...currentProjectsData,
+      projects: updatedProjects
+    });
+    if ("save" in this.#domains && typeof this.#domains.save === "function") {
+      const saveRes = await this.#domains.save({
+        ...docRes.value,
+        record: updatedRecord
+      });
+      if (!saveRes.ok) return saveRes;
+    }
+    return ok(advanceRes.value);
+  }
+  async dispatchPauseProject(projectId, reason) {
+    return this.#mutateProjectLifecycle(projectId, (p) => pauseProject(p, { note: reason }));
+  }
+  async dispatchResumeProject(projectId, reason) {
+    return this.#mutateProjectLifecycle(projectId, (p) => resumeProject(p, { note: reason }));
+  }
+  async dispatchCancelProject(projectId, reason) {
+    return this.#mutateProjectLifecycle(projectId, (p) => cancelProject(p, { note: reason }));
+  }
+  async #mutateProjectLifecycle(projectId, mutator) {
+    const id = this.#domainUuid.startsWith("JournalEntry.") ? this.#domainUuid.slice("JournalEntry.".length) : this.#domainUuid;
+    const docRes = await this.#domains.read(id);
+    if (!docRes.ok) return docRes;
+    const record = docRes.value.record;
+    const currentProjectsData = getDomainProjectsData(record);
+    const project = currentProjectsData.projects.find((p) => p.id === projectId);
+    if (!project) {
+      return err(createPublicError({
+        code: "DM_PROJECT_NOT_FOUND",
+        category: "not-found",
+        message: `Project ${projectId} not found`
+      }));
+    }
+    const mutateRes = mutator(project);
+    if (!mutateRes.ok) return mutateRes;
+    const updatedProjects = currentProjectsData.projects.map(
+      (p) => p.id === projectId ? mutateRes.value.updatedProject : p
+    );
+    const updatedRecord = withDomainProjectsData(record, {
+      ...currentProjectsData,
+      projects: updatedProjects
+    });
+    if ("save" in this.#domains && typeof this.#domains.save === "function") {
+      const saveRes = await this.#domains.save({
+        ...docRes.value,
+        record: updatedRecord
+      });
+      if (!saveRes.ok) return saveRes;
+    }
+    return ok(mutateRes.value);
+  }
+};
+var MockApplicationV23 = class {
+  element = null;
+  options;
+  constructor(options = {}) {
+    this.options = options;
+  }
+  async _prepareContext(options) {
+    return {};
+  }
+  _renderHTML(context, options) {
+    return "";
+  }
+  _replaceHTML(result, content, options) {
+    if (typeof result === "string") {
+      content.innerHTML = result;
+    }
+  }
+  _setupActions(element) {
+    if (!element || element._dmActionsConfigured) return;
+    element._dmActionsConfigured = true;
+    const actions = this.constructor.DEFAULT_OPTIONS?.actions ?? {};
+    element.addEventListener?.("click", async (event) => {
+      let target = event?.target;
+      while (target) {
+        const action = target.getAttribute?.("data-action") ?? target.dataset?.action;
+        if (action && typeof actions[action] === "function") {
+          await actions[action].call(this, event, target);
+          return;
+        }
+        if (target === element) break;
+        target = target.parentElement;
+      }
+    });
+  }
+  async render(force, options) {
+    if (!this.element) {
+      const classes = (this.constructor.DEFAULT_OPTIONS?.classes ?? ["domain-manager", "dm-projects-app-v2"]).join(" ");
+      if (typeof globalThis.document?.createElement === "function") {
+        const el = globalThis.document.createElement("div");
+        el.className = classes;
+        this.element = el;
+      } else {
+        const listeners = {};
+        this.element = {
+          className: classes,
+          innerHTML: "",
+          children: [],
+          querySelectorAll: () => [],
+          querySelector: () => null,
+          addEventListener: (evt, cb) => {
+            listeners[evt] = listeners[evt] || [];
+            listeners[evt].push(cb);
+          },
+          _listeners: listeners
+        };
+      }
+    }
+    const context = await this._prepareContext(options);
+    const result = await this._renderHTML(context, options);
+    this._replaceHTML(result, this.element, options);
+    this._setupActions(this.element);
+    this._onRender(context, options);
+    return this;
+  }
+  _onRender(context, options) {
+  }
+  async close(options) {
+    this.element = null;
+  }
+};
+var BaseApp3 = globalThis.foundry?.applications?.api?.ApplicationV2 ?? MockApplicationV23;
+var ProjectsApplication = class _ProjectsApplication extends BaseApp3 {
+  static DEFAULT_OPTIONS = {
+    id: "domain-manager-projects-{id}",
+    classes: ["domain-manager", "dm-projects-app-v2"],
+    tag: "div",
+    window: {
+      title: "Projects & Construction",
+      icon: "fas fa-hammer",
+      resizable: true,
+      minimizable: true
+    },
+    position: {
+      width: 820,
+      height: 620
+    },
+    actions: {
+      openStartModal: _ProjectsApplication.#onOpenStartModal,
+      openProjectDetail: _ProjectsApplication.#onOpenProjectDetail,
+      advanceProject: _ProjectsApplication.#onAdvanceProject,
+      pauseProject: _ProjectsApplication.#onPauseProject,
+      resumeProject: _ProjectsApplication.#onResumeProject,
+      cancelProject: _ProjectsApplication.#onCancelProject,
+      closeModal: _ProjectsApplication.#onCloseModal
+    }
+  };
+  #controller;
+  constructor(options) {
+    super(options);
+    this.#controller = new ProjectsApplicationController(options);
+  }
+  get controller() {
+    return this.#controller;
+  }
+  async _prepareContext(options) {
+    const vmRes = await this.#controller.loadViewModel();
+    return {
+      viewModel: vmRes.ok ? vmRes.value : null,
+      error: !vmRes.ok ? vmRes.error : null
+    };
+  }
+  _renderHTML(context, options) {
+    if (context.error) {
+      return `<div class="dm-error-state">${escapeHtml3(context.error.message)}</div>`;
+    }
+    return this.#controller.render(context.viewModel);
+  }
+  _replaceHTML(result, content, options) {
+    if (typeof result === "string") {
+      content.innerHTML = result;
+    } else if (result && typeof content.replaceChildren === "function") {
+      content.replaceChildren(result);
+    } else if (result) {
+      content.innerHTML = String(result);
+    }
+  }
+  _onRender(context, options) {
+    const el = this.element;
+    if (el) {
+      this.attachEventListeners(el);
+    }
+  }
+  attachEventListeners(element) {
+    const forms = element.querySelectorAll?.("form[data-form-type]") ?? [];
+    forms.forEach((form) => {
+      if (form._dmSubmitBound) return;
+      form._dmSubmitBound = true;
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const formType = form.getAttribute?.("data-form-type");
+        const formData = new FormData(form);
+        const data = {};
+        formData.forEach((val, key) => {
+          data[key] = String(val).trim();
+        });
+        if (formType === "startProject") {
+          const workRequired = parseInt(data.workRequired || "10", 10);
+          await this.#controller.dispatchStartProject({
+            definitionId: data.definitionId,
+            label: data.label || void 0,
+            targetRef: data.targetRef || void 0,
+            workRequired: isNaN(workRequired) ? 10 : workRequired,
+            initialState: data.initialState || "active"
+          });
+          this.#controller.closeModal();
+          this.render();
+        } else if (formType === "advanceProject") {
+          const projectId = form.getAttribute?.("data-project-id");
+          const units = parseInt(data.progressUnits || "1", 10);
+          if (projectId) {
+            await this.#controller.dispatchAdvanceProject({
+              projectId,
+              units: isNaN(units) ? 1 : units
+            });
+            this.render();
+          }
+        }
+      });
+    });
+    const filterSelect = element.querySelector?.('select[data-action="filterProjects"]');
+    if (filterSelect && !filterSelect._dmChangeBound) {
+      filterSelect._dmChangeBound = true;
+      filterSelect.addEventListener("change", () => {
+        this.#controller.setFilterLifecycle(filterSelect.value);
+        this.render();
+      });
+    }
+    const searchInput = element.querySelector?.('input[data-action="searchProjects"]');
+    if (searchInput && !searchInput._dmInputBound) {
+      searchInput._dmInputBound = true;
+      searchInput.addEventListener("input", () => {
+        this.#controller.setSearchTerm(searchInput.value);
+        this.render();
+      });
+    }
+  }
+  static #onOpenStartModal() {
+    this.#controller.openStartModal();
+    this.render();
+  }
+  static #onOpenProjectDetail(event, target) {
+    const id = target?.dataset?.projectId ?? target?.getAttribute?.("data-project-id");
+    if (id) {
+      this.#controller.openProjectDetail(id);
+      this.render();
+    }
+  }
+  static async #onAdvanceProject(event, target) {
+    const id = target?.dataset?.projectId ?? target?.getAttribute?.("data-project-id");
+    if (id) {
+      await this.#controller.dispatchAdvanceProject({ projectId: id, units: 1 });
+      this.render();
+    }
+  }
+  static async #onPauseProject(event, target) {
+    const id = target?.dataset?.projectId ?? target?.getAttribute?.("data-project-id");
+    if (id) {
+      await this.#controller.dispatchPauseProject(id);
+      this.render();
+    }
+  }
+  static async #onResumeProject(event, target) {
+    const id = target?.dataset?.projectId ?? target?.getAttribute?.("data-project-id");
+    if (id) {
+      await this.#controller.dispatchResumeProject(id);
+      this.render();
+    }
+  }
+  static async #onCancelProject(event, target) {
+    const id = target?.dataset?.projectId ?? target?.getAttribute?.("data-project-id");
+    if (id) {
+      await this.#controller.dispatchCancelProject(id);
+      this.render();
+    }
+  }
+  static #onCloseModal() {
+    this.#controller.closeModal();
+    this.render();
+  }
+};
+
+// src/facilities/definitions/canonical-facility-definitions.ts
+var CANONICAL_FACILITY_DEFINITIONS = Object.freeze([
+  Object.freeze({
+    id: "domain-manager:storehouse",
+    version: 1,
+    label: "Storehouse",
+    description: "Central repository for stockpiling domain resources and trade goods.",
+    category: "logistics",
+    tags: Object.freeze(["storage", "resources", "logistics"]),
+    scale: "building",
+    maxLevel: 3,
+    capabilitiesGranted: Object.freeze(["domain-manager:storage"]),
+    defaultReadiness: "ready"
+  }),
+  Object.freeze({
+    id: "domain-manager:basic-workshop",
+    version: 1,
+    label: "Basic Workshop",
+    description: "Equipped workspace providing crafting, repairs, and fabrication capabilities.",
+    category: "production",
+    tags: Object.freeze(["crafting", "workshop", "production"]),
+    scale: "building",
+    maxLevel: 3,
+    capabilitiesGranted: Object.freeze(["domain-manager:workshop"]),
+    defaultReadiness: "ready"
+  }),
+  Object.freeze({
+    id: "domain-manager:guard-post",
+    version: 1,
+    label: "Guard Post",
+    description: "Fortified station garrisoning domain militia and maintaining public order.",
+    category: "security",
+    tags: Object.freeze(["military", "security", "defense"]),
+    scale: "building",
+    maxLevel: 3,
+    capabilitiesGranted: Object.freeze(["domain-manager:security"]),
+    defaultReadiness: "ready"
+  })
+]);
+
+// src/facilities/definitions/facility-registry.ts
+var FacilityDefinitionRegistry = class {
+  #definitions = /* @__PURE__ */ new Map();
+  #frozen = false;
+  register(definition) {
+    if (this.#frozen) {
+      return err(
+        createPublicError({
+          code: "DM_REGISTRY_FROZEN",
+          category: "conflict",
+          message: "Cannot register facility definition in a frozen registry"
+        })
+      );
+    }
+    const validRes = validateFacilityDefinition(definition);
+    if (!validRes.ok) {
+      return validRes;
+    }
+    if (this.#definitions.has(validRes.value.id)) {
+      return err(
+        createPublicError({
+          code: "DM_FACILITY_ALREADY_EXISTS",
+          category: "conflict",
+          message: `FacilityDefinition '${validRes.value.id}' is already registered`
+        })
+      );
+    }
+    this.#definitions.set(validRes.value.id, validRes.value);
+    return ok(void 0);
+  }
+  get(id) {
+    return this.#definitions.get(id);
+  }
+  has(id) {
+    return this.#definitions.has(id);
+  }
+  list(filter) {
+    const all = Array.from(this.#definitions.values());
+    if (!filter) {
+      return Object.freeze(all);
+    }
+    return Object.freeze(
+      all.filter((def) => {
+        if (filter.category && def.category !== filter.category) {
+          return false;
+        }
+        if (filter.tag && !def.tags.includes(filter.tag)) {
+          return false;
+        }
+        return true;
+      })
+    );
+  }
+  freeze() {
+    this.#frozen = true;
+  }
+  get isFrozen() {
+    return this.#frozen;
+  }
+};
+function createDefaultFacilityRegistry() {
+  const registry = new FacilityDefinitionRegistry();
+  for (const def of CANONICAL_FACILITY_DEFINITIONS) {
+    registry.register(def);
+  }
+  return registry;
+}
+
+// src/ui/domain-patterns/facilities/facility-presenter.ts
+function resolveLifecycleBadgeClass(lifecycle) {
+  switch (lifecycle) {
+    case "operational":
+      return "dm-badge-operational";
+    case "underConstruction":
+      return "dm-badge-under-construction";
+    case "planned":
+      return "dm-badge-planned";
+    case "inactive":
+      return "dm-badge-inactive";
+    case "degraded":
+      return "dm-badge-degraded";
+    case "disabled":
+      return "dm-badge-disabled";
+    case "decommissioned":
+      return "dm-badge-decommissioned";
+    case "destroyed":
+      return "dm-badge-destroyed";
+    default:
+      return "dm-badge-default";
+  }
+}
+function resolveReadinessBadgeClass(readiness) {
+  switch (readiness) {
+    case "ready":
+      return "dm-badge-ready";
+    case "limited":
+      return "dm-badge-limited";
+    case "blocked":
+      return "dm-badge-blocked";
+    case "unavailable":
+      return "dm-badge-unavailable";
+    default:
+      return "dm-badge-default";
+  }
+}
+function resolveSeverityBadgeClass(severity) {
+  switch (severity) {
+    case "critical":
+      return "dm-badge-danger";
+    case "major":
+      return "dm-badge-warning";
+    case "moderate":
+      return "dm-badge-info";
+    case "minor":
+    default:
+      return "dm-badge-default";
+  }
+}
+function resolveMaintenanceBadgeClass(status) {
+  switch (status) {
+    case "current":
+      return "dm-badge-healthy";
+    case "due":
+      return "dm-badge-info";
+    case "overdue":
+      return "dm-badge-warning";
+    case "exempt":
+      return "dm-badge-default";
+    default:
+      return "dm-badge-default";
+  }
+}
+function buildFacilitiesViewModel(domainInput, options = {}) {
+  const record = "record" in domainInput ? domainInput.record : domainInput;
+  const domainUuid = "uuid" in domainInput ? domainInput.uuid : "unknown";
+  const viewerIsGm = options.viewerIsGm ?? options.viewer?.isGm ?? true;
+  const filterReadiness = options.filterReadiness ?? "all";
+  const filterLifecycle = options.filterLifecycle ?? "all";
+  const searchTerm = (options.searchTerm ?? "").toLowerCase().trim();
+  const data = getDomainFacilitiesData(record);
+  const defRegistry = options.facilityRegistry;
+  const facilityVMs = [];
+  for (const facility of data.facilities) {
+    const isSecret = Boolean(facility.visibility === "secret" || facility.tags?.includes("secret"));
+    if (isSecret && !viewerIsGm) {
+      continue;
+    }
+    if (filterReadiness !== "all" && facility.readiness !== filterReadiness) {
+      continue;
+    }
+    if (filterLifecycle !== "all" && facility.lifecycle !== filterLifecycle) {
+      continue;
+    }
+    const def = defRegistry?.get(facility.definitionId);
+    const name = facility.name || def?.label || facility.id;
+    if (searchTerm) {
+      const matchName = name.toLowerCase().includes(searchTerm);
+      const matchDef = facility.definitionId.toLowerCase().includes(searchTerm);
+      if (!matchName && !matchDef) {
+        continue;
+      }
+    }
+    const integrity = facility.integrity?.current ?? 100;
+    const maxIntegrity = facility.integrity?.max ?? 100;
+    const integrityPercent = maxIntegrity > 0 ? Math.min(100, Math.max(0, Math.floor(integrity / maxIntegrity * 100))) : 100;
+    let integrityClass = "healthy";
+    if (integrityPercent < 40) {
+      integrityClass = "danger";
+    } else if (integrityPercent < 80) {
+      integrityClass = "warning";
+    }
+    const maintState = facility.maintenanceState;
+    const intervalTicks = def?.maintenance?.intervalTicks ?? 30;
+    const ticksSince = maintState?.accumulatedTicks ?? 0;
+    const maintenanceRatio = intervalTicks > 0 ? ticksSince / intervalTicks : 0;
+    const formattedRatio = `${Math.floor(maintenanceRatio * 100)}%`;
+    const maintStatus = maintState?.status ?? "current";
+    const consecutiveMissed = Math.floor(ticksSince / Math.max(1, intervalTicks));
+    const maintenanceVM = {
+      status: maintStatus,
+      statusBadgeClass: resolveMaintenanceBadgeClass(maintStatus),
+      intervalTicks,
+      ticksSinceLastMaintenance: ticksSince,
+      maintenanceRatio,
+      formattedRatio,
+      consecutiveMissedCycles: consecutiveMissed
+    };
+    const rawConditions = facility.conditions ?? [];
+    const conditionVMs = rawConditions.map((c) => ({
+      id: c.id,
+      severity: c.severity,
+      severityBadgeClass: resolveSeverityBadgeClass(c.severity),
+      description: c.description ?? c.label,
+      causesDegradation: c.severity === "critical" || c.severity === "major",
+      suppressesCapabilities: c.suppressedCapabilities ?? []
+    }));
+    const effectiveCapabilities = def ? calculateFacilityEffectiveCapabilities(facility, def) : Object.freeze([]);
+    const slotsCount = facility.installedModules?.length ?? 0;
+    const activeModulesCount = facility.installedModules?.length ?? 0;
+    const activeUpgradesCount = facility.activeUpgrades?.length ?? 0;
+    const canMaintain = facility.lifecycle !== "destroyed" && facility.lifecycle !== "decommissioned";
+    const canRepair = (integrity < maxIntegrity || conditionVMs.length > 0) && facility.lifecycle !== "destroyed";
+    facilityVMs.push({
+      id: facility.id,
+      definitionId: facility.definitionId,
+      name,
+      level: facility.level,
+      revision: facility.revision,
+      lifecycle: facility.lifecycle,
+      lifecycleBadgeClass: resolveLifecycleBadgeClass(facility.lifecycle),
+      readiness: facility.readiness,
+      readinessBadgeClass: resolveReadinessBadgeClass(facility.readiness),
+      structuralIntegrity: integrity,
+      maxStructuralIntegrity: maxIntegrity,
+      integrityPercent,
+      integrityClass,
+      conditions: Object.freeze(conditionVMs),
+      maintenance: maintenanceVM,
+      effectiveCapabilities: Object.freeze(effectiveCapabilities),
+      slotsCount,
+      activeModulesCount,
+      activeUpgradesCount,
+      isSecret,
+      canRepair,
+      canMaintain
+    });
+  }
+  const allVisible = data.facilities.filter((f) => {
+    const isSecret = Boolean(f.visibility === "secret" || f.tags?.includes("secret"));
+    return !isSecret || viewerIsGm;
+  });
+  const totalCount = allVisible.length;
+  const operationalCount = allVisible.filter((f) => f.lifecycle === "operational").length;
+  const readyCount = allVisible.filter((f) => f.readiness === "ready").length;
+  const degradedOrDamagedCount = allVisible.filter((f) => {
+    const isDegraded = f.lifecycle === "degraded";
+    const isDamaged = f.integrity ? f.integrity.current < f.integrity.max : false;
+    const hasConditions = (f.conditions?.length ?? 0) > 0;
+    return isDegraded || isDamaged || hasConditions;
+  }).length;
+  return {
+    domainUuid,
+    viewerIsGm,
+    totalCount,
+    operationalCount,
+    readyCount,
+    degradedOrDamagedCount,
+    facilities: Object.freeze(facilityVMs),
+    filterReadiness,
+    filterLifecycle,
+    searchTerm
+  };
+}
+
+// src/ui/domain-patterns/facilities/facility-view.ts
+function escapeHtml4(value) {
+  if (value === null || value === void 0) return "";
+  return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+function escapeAttribute4(value) {
+  return escapeHtml4(value);
+}
+function renderFacilitiesTableHtml(facilities) {
+  if (facilities.length === 0) {
+    return `<div class="dm-empty-state">No facilities found.</div>`;
+  }
+  return `
+    <table class="dm-facilities-table">
+      <thead>
+        <tr>
+          <th>Facility</th>
+          <th>Level</th>
+          <th>Lifecycle</th>
+          <th>Readiness</th>
+          <th>Integrity</th>
+          <th>Maintenance</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${facilities.map((f) => {
+    const hasConditions = f.conditions.length > 0;
+    return `
+            <tr class="dm-facility-row" data-facility-id="${escapeAttribute4(f.id)}">
+              <td class="dm-cell-name">
+                <span class="dm-facility-label">${escapeHtml4(f.name)}</span>
+                <span class="dm-def-id">(${escapeHtml4(f.definitionId)})</span>
+                ${f.isSecret ? `<span class="dm-badge dm-badge-secret">Secret</span>` : ""}
+                ${hasConditions ? `<span class="dm-badge dm-badge-warning" title="${f.conditions.length} active condition(s)">Conditions (${f.conditions.length})</span>` : ""}
+              </td>
+              <td class="dm-cell-level">
+                <span class="dm-level-pill">Lv.${f.level}</span>
+              </td>
+              <td class="dm-cell-lifecycle">
+                <span class="dm-badge ${escapeAttribute4(f.lifecycleBadgeClass)}">${escapeHtml4(f.lifecycle)}</span>
+              </td>
+              <td class="dm-cell-readiness">
+                <span class="dm-badge ${escapeAttribute4(f.readinessBadgeClass)}">${escapeHtml4(f.readiness)}</span>
+              </td>
+              <td class="dm-cell-integrity">
+                <div class="dm-progress-container dm-integrity-meter dm-integrity-${escapeAttribute4(f.integrityClass)}">
+                  <div class="dm-progress-bar" style="width: ${f.integrityPercent}%;"></div>
+                  <span class="dm-progress-text">${f.structuralIntegrity} / ${f.maxStructuralIntegrity} (${f.integrityPercent}%)</span>
+                </div>
+              </td>
+              <td class="dm-cell-maintenance">
+                <span class="dm-badge ${escapeAttribute4(f.maintenance.statusBadgeClass)}">${escapeHtml4(f.maintenance.status)}</span>
+                <span class="dm-subtext">${escapeHtml4(f.maintenance.formattedRatio)}</span>
+              </td>
+              <td class="dm-cell-actions">
+                <button type="button" class="dm-btn dm-btn-sm" data-action="openFacilityDetail" data-facility-id="${escapeAttribute4(f.id)}" title="Inspect Facility">
+                  <i class="fas fa-search"></i> Inspect
+                </button>
+                ${f.canMaintain ? `
+                  <button type="button" class="dm-btn dm-btn-sm dm-btn-secondary" data-action="openMaintenanceModal" data-facility-id="${escapeAttribute4(f.id)}" title="Perform Maintenance">
+                    <i class="fas fa-wrench"></i> Maintain
+                  </button>
+                ` : ""}
+                ${f.canRepair ? `
+                  <button type="button" class="dm-btn dm-btn-sm dm-btn-primary" data-action="openRepairModal" data-facility-id="${escapeAttribute4(f.id)}" title="Repair Facility">
+                    <i class="fas fa-tools"></i> Repair
+                  </button>
+                ` : ""}
+              </td>
+            </tr>
+          `;
+  }).join("")}
+      </tbody>
+    </table>
+  `;
+}
+function renderFacilityDetailModalHtml(facility, viewerIsGm) {
+  return `
+    <div class="dm-modal dm-facility-detail-modal" data-facility-id="${escapeAttribute4(facility.id)}">
+      <header class="dm-modal-header">
+        <h3>Facility Inspector: ${escapeHtml4(facility.name)}</h3>
+        <button type="button" class="dm-btn-close" data-action="closeModal">&times;</button>
+      </header>
+
+      <div class="dm-modal-body">
+        <section class="dm-detail-summary">
+          <div class="dm-summary-grid">
+            <div class="dm-stat">
+              <span class="dm-stat-label">Lifecycle</span>
+              <span class="dm-badge ${escapeAttribute4(facility.lifecycleBadgeClass)}">${escapeHtml4(facility.lifecycle)}</span>
+            </div>
+            <div class="dm-stat">
+              <span class="dm-stat-label">Readiness (Operational)</span>
+              <span class="dm-badge ${escapeAttribute4(facility.readinessBadgeClass)}">${escapeHtml4(facility.readiness)}</span>
+            </div>
+            <div class="dm-stat">
+              <span class="dm-stat-label">Level</span>
+              <span>Level ${facility.level}</span>
+            </div>
+            <div class="dm-stat">
+              <span class="dm-stat-label">Revision</span>
+              <span>v${facility.revision}</span>
+            </div>
+          </div>
+
+          <div class="dm-integrity-section">
+            <h4>Structural Integrity</h4>
+            <div class="dm-progress-container dm-progress-large dm-integrity-${escapeAttribute4(facility.integrityClass)}">
+              <div class="dm-progress-bar" style="width: ${facility.integrityPercent}%;"></div>
+              <span class="dm-progress-text">${facility.structuralIntegrity} / ${facility.maxStructuralIntegrity} HP (${facility.integrityPercent}%)</span>
+            </div>
+          </div>
+
+          <div class="dm-maintenance-section">
+            <h4>Maintenance Status</h4>
+            <div class="dm-maint-overview">
+              <span class="dm-badge ${escapeAttribute4(facility.maintenance.statusBadgeClass)}">
+                ${escapeHtml4(facility.maintenance.status.toUpperCase())}
+              </span>
+              <span class="dm-maint-ratio">Cycle Progress: ${escapeHtml4(facility.maintenance.formattedRatio)} (${facility.maintenance.ticksSinceLastMaintenance}/${facility.maintenance.intervalTicks} ticks)</span>
+              ${facility.maintenance.consecutiveMissedCycles > 0 ? `
+                <span class="dm-badge dm-badge-danger">${facility.maintenance.consecutiveMissedCycles} missed cycle(s)</span>
+              ` : ""}
+            </div>
+          </div>
+        </section>
+
+        ${facility.conditions.length > 0 ? `
+          <section class="dm-section dm-conditions-section">
+            <h4 class="dm-warning-text"><i class="fas fa-exclamation-circle"></i> Active Conditions & Damage</h4>
+            <ul class="dm-condition-list">
+              ${facility.conditions.map((c) => `
+                <li class="dm-condition-item">
+                  <span class="dm-badge ${escapeAttribute4(c.severityBadgeClass)}">${escapeHtml4(c.severity)}</span>
+                  <span class="dm-condition-desc">${escapeHtml4(c.description)}</span>
+                  ${c.suppressesCapabilities.length > 0 ? `
+                    <span class="dm-suppression-note">(Suppresses: ${c.suppressesCapabilities.map(escapeHtml4).join(", ")})</span>
+                  ` : ""}
+                </li>
+              `).join("")}
+            </ul>
+          </section>
+        ` : ""}
+
+        <section class="dm-section dm-capabilities-section">
+          <h4>Effective Capabilities</h4>
+          ${facility.effectiveCapabilities.length > 0 ? `
+            <div class="dm-caps-tags">
+              ${facility.effectiveCapabilities.map((cap) => `
+                <span class="dm-cap-tag"><code>${escapeHtml4(cap)}</code></span>
+              `).join("")}
+            </div>
+          ` : `
+            <div class="dm-muted-text">No active capabilities provided in current status.</div>
+          `}
+        </section>
+
+        <section class="dm-section dm-modules-section">
+          <h4>Infrastructure Modules & Upgrades</h4>
+          <div class="dm-slots-overview">
+            <span>Installed Modules: ${facility.activeModulesCount}</span> |
+            <span>Active Upgrades: ${facility.activeUpgradesCount}</span>
+          </div>
+        </section>
+      </div>
+
+      <footer class="dm-modal-footer">
+        ${facility.canMaintain ? `
+          <button type="button" class="dm-btn dm-btn-secondary" data-action="openMaintenanceModal" data-facility-id="${escapeAttribute4(facility.id)}">
+            <i class="fas fa-wrench"></i> Perform Maintenance
+          </button>
+        ` : ""}
+
+        ${facility.canRepair ? `
+          <button type="button" class="dm-btn dm-btn-primary" data-action="openRepairModal" data-facility-id="${escapeAttribute4(facility.id)}">
+            <i class="fas fa-tools"></i> Repair Damage
+          </button>
+        ` : ""}
+
+        <button type="button" class="dm-btn" data-action="closeModal">Close</button>
+      </footer>
+    </div>
+  `;
+}
+function renderFacilityCreateModalHtml(domainUuid, definitions) {
+  return `
+    <div class="dm-modal dm-facility-create-modal">
+      <header class="dm-modal-header">
+        <h3>Commission / Plan Facility</h3>
+        <button type="button" class="dm-btn-close" data-action="closeModal">&times;</button>
+      </header>
+
+      <form data-form-type="createFacility" data-domain-uuid="${escapeAttribute4(domainUuid)}">
+        <div class="dm-modal-body">
+          <div class="dm-form-group">
+            <label for="dm-facility-definition">Facility Type / Blueprint</label>
+            <select id="dm-facility-definition" name="definitionId" required>
+              <option value="">-- Select a blueprint --</option>
+              ${definitions.map((d) => `
+                <option value="${escapeAttribute4(d.id)}">
+                  ${escapeHtml4(d.label)} - Max Lv.${d.maxLevel}
+                </option>
+              `).join("")}
+            </select>
+          </div>
+
+          <div class="dm-form-group">
+            <label for="dm-facility-name">Facility Name</label>
+            <input type="text" id="dm-facility-name" name="name" placeholder="Custom facility designation (optional)" />
+          </div>
+
+          <div class="dm-form-group">
+            <label for="dm-facility-level">Starting Level</label>
+            <input type="number" id="dm-facility-level" name="level" min="1" max="10" value="1" required />
+          </div>
+
+          <div class="dm-form-group">
+            <label for="dm-facility-lifecycle">Initial Lifecycle State</label>
+            <select id="dm-facility-lifecycle" name="initialLifecycle">
+              <option value="operational">Operational (Fully functional)</option>
+              <option value="planned">Planned (Blueprint / Draft)</option>
+              <option value="underConstruction">Under Construction</option>
+              <option value="inactive">Inactive</option>
+            </select>
+          </div>
+        </div>
+
+        <footer class="dm-modal-footer">
+          <button type="submit" class="dm-btn dm-btn-primary">
+            <i class="fas fa-check"></i> Commission Facility
+          </button>
+          <button type="button" class="dm-btn" data-action="closeModal">Cancel</button>
+        </footer>
+      </form>
+    </div>
+  `;
+}
+function renderFacilityMaintenanceModalHtml(facility) {
+  return `
+    <div class="dm-modal dm-facility-maintenance-modal" data-facility-id="${escapeAttribute4(facility.id)}">
+      <header class="dm-modal-header">
+        <h3>Perform Maintenance: ${escapeHtml4(facility.name)}</h3>
+        <button type="button" class="dm-btn-close" data-action="closeModal">&times;</button>
+      </header>
+
+      <form data-form-type="maintainFacility" data-facility-id="${escapeAttribute4(facility.id)}">
+        <div class="dm-modal-body">
+          <p>
+            Committing maintenance will reset the maintenance cycle timer to 0 ticks, clear overdue statuses, and restore standard operational readiness.
+          </p>
+
+          <div class="dm-maint-details">
+            <div>Current Status: <strong>${escapeHtml4(facility.maintenance.status)}</strong></div>
+            <div>Elapsed Ticks: <strong>${facility.maintenance.ticksSinceLastMaintenance} / ${facility.maintenance.intervalTicks}</strong></div>
+            <div>Missed Cycles: <strong>${facility.maintenance.consecutiveMissedCycles}</strong></div>
+          </div>
+
+          <div class="dm-form-group">
+            <label for="dm-maint-notes">Maintenance Log Notes</label>
+            <input type="text" id="dm-maint-notes" name="notes" placeholder="Standard inspection and overhaul" />
+          </div>
+        </div>
+
+        <footer class="dm-modal-footer">
+          <button type="submit" class="dm-btn dm-btn-primary">
+            <i class="fas fa-wrench"></i> Complete Maintenance
+          </button>
+          <button type="button" class="dm-btn" data-action="closeModal">Cancel</button>
+        </footer>
+      </form>
+    </div>
+  `;
+}
+function renderFacilityRepairModalHtml(facility) {
+  const missingIntegrity = facility.maxStructuralIntegrity - facility.structuralIntegrity;
+  return `
+    <div class="dm-modal dm-facility-repair-modal" data-facility-id="${escapeAttribute4(facility.id)}">
+      <header class="dm-modal-header">
+        <h3>Repair Facility: ${escapeHtml4(facility.name)}</h3>
+        <button type="button" class="dm-btn-close" data-action="closeModal">&times;</button>
+      </header>
+
+      <form data-form-type="repairFacility" data-facility-id="${escapeAttribute4(facility.id)}">
+        <div class="dm-modal-body">
+          <div class="dm-form-group">
+            <label for="dm-repair-amount">Restore Structural Integrity (HP)</label>
+            <input type="number" id="dm-repair-amount" name="restoreIntegrity" min="1" max="${missingIntegrity > 0 ? missingIntegrity : 100}" value="${missingIntegrity > 0 ? missingIntegrity : 10}" required />
+            <small class="dm-help-text">Deficit: ${missingIntegrity} HP (Current: ${facility.structuralIntegrity} / Max: ${facility.maxStructuralIntegrity})</small>
+          </div>
+
+          ${facility.conditions.length > 0 ? `
+            <div class="dm-form-group">
+              <label>Clear Active Damage Conditions</label>
+              <div class="dm-conditions-checkboxes">
+                ${facility.conditions.map((c) => `
+                  <label class="dm-checkbox-label">
+                    <input type="checkbox" name="clearConditions" value="${escapeAttribute4(c.id)}" checked />
+                    [${escapeHtml4(c.severity)}] ${escapeHtml4(c.description)}
+                  </label>
+                `).join("")}
+              </div>
+            </div>
+          ` : ""}
+        </div>
+
+        <footer class="dm-modal-footer">
+          <button type="submit" class="dm-btn dm-btn-primary">
+            <i class="fas fa-tools"></i> Execute Repairs
+          </button>
+          <button type="button" class="dm-btn" data-action="closeModal">Cancel</button>
+        </footer>
+      </form>
+    </div>
+  `;
+}
+function renderFacilitiesSubsystemHtml(vm) {
+  return `
+    <div class="dm-facilities-subsystem" data-domain-uuid="${escapeAttribute4(vm.domainUuid)}">
+      <header class="dm-subsystem-header">
+        <div class="dm-header-title">
+          <h2>Facilities & Infrastructure</h2>
+          <span class="dm-header-subtitle">Domain Installations, Capacities, Maintenance & Readiness</span>
+        </div>
+
+        <div class="dm-summary-counters">
+          <div class="dm-counter-card">
+            <span class="dm-counter-value">${vm.totalCount}</span>
+            <span class="dm-counter-label">Total</span>
+          </div>
+          <div class="dm-counter-card dm-counter-operational">
+            <span class="dm-counter-value">${vm.operationalCount}</span>
+            <span class="dm-counter-label">Operational</span>
+          </div>
+          <div class="dm-counter-card dm-counter-ready">
+            <span class="dm-counter-value">${vm.readyCount}</span>
+            <span class="dm-counter-label">Ready</span>
+          </div>
+          <div class="dm-counter-card dm-counter-damaged">
+            <span class="dm-counter-value">${vm.degradedOrDamagedCount}</span>
+            <span class="dm-counter-label">Damaged/Degraded</span>
+          </div>
+        </div>
+      </header>
+
+      <div class="dm-toolbar">
+        <div class="dm-toolbar-filters">
+          <label class="dm-filter-label">Readiness:</label>
+          <select name="filterReadiness" data-action="filterReadiness" class="dm-select-sm">
+            <option value="all" ${vm.filterReadiness === "all" ? "selected" : ""}>All Readiness</option>
+            <option value="ready" ${vm.filterReadiness === "ready" ? "selected" : ""}>Ready</option>
+            <option value="limited" ${vm.filterReadiness === "limited" ? "selected" : ""}>Limited</option>
+            <option value="blocked" ${vm.filterReadiness === "blocked" ? "selected" : ""}>Blocked</option>
+            <option value="unavailable" ${vm.filterReadiness === "unavailable" ? "selected" : ""}>Unavailable</option>
+          </select>
+
+          <input
+            type="text"
+            placeholder="Search facilities..."
+            data-action="searchFacilities"
+            value="${escapeAttribute4(vm.searchTerm)}"
+            class="dm-input-sm dm-search-input"
+          />
+        </div>
+
+        <div class="dm-toolbar-actions">
+          <button type="button" class="dm-btn dm-btn-primary dm-btn-sm" data-action="openCreateModal">
+            <i class="fas fa-plus"></i> Commission Facility
+          </button>
+        </div>
+      </div>
+
+      <main class="dm-subsystem-content">
+        ${renderFacilitiesTableHtml(vm.facilities)}
+      </main>
+    </div>
+  `;
+}
+
+// src/facilities/plans/facility-maintenance-plan-service.ts
+function evaluateFacilityMaintenancePlan(params) {
+  const { facility, definition, channelId, availableBalances } = params;
+  const errors = [];
+  if (facility.lifecycle === "destroyed" || facility.lifecycle === "decommissioned") {
+    errors.push(
+      createPublicError({
+        code: "DM_FACILITY_NOT_MAINTAINABLE",
+        category: "conflict",
+        message: `Facility '${facility.id}' in lifecycle '${facility.lifecycle}' cannot undergo maintenance`
+      })
+    );
+  }
+  if (!definition.maintenance) {
+    errors.push(
+      createPublicError({
+        code: "DM_FACILITY_NO_MAINTENANCE_REQUIRED",
+        category: "validation",
+        message: `Facility definition '${definition.id}' does not require maintenance`
+      })
+    );
+  }
+  const costs = [];
+  if (channelId && definition.maintenance?.channels) {
+    const channel = definition.maintenance.channels.find((c) => c.id === channelId);
+    if (!channel) {
+      errors.push(
+        createPublicError({
+          code: "DM_FACILITY_CHANNEL_NOT_FOUND",
+          category: "not-found",
+          message: `Maintenance channel '${channelId}' not found on definition '${definition.id}'`
+        })
+      );
+    } else {
+      costs.push(...channel.costs);
+    }
+  } else if (definition.maintenance?.costs) {
+    costs.push(...definition.maintenance.costs);
+  }
+  let canAfford = true;
+  if (availableBalances && costs.length > 0) {
+    for (const cost of costs) {
+      const balance = availableBalances[cost.resourceId] ?? 0;
+      if (balance < cost.amount) {
+        canAfford = false;
+        errors.push(
+          createPublicError({
+            code: "DM_FACILITY_INSUFFICIENT_RESOURCES",
+            category: "conflict",
+            message: `Insufficient resource '${cost.resourceId}' for maintenance: required ${cost.amount}, available ${balance}`
+          })
+        );
+      }
+    }
+  }
+  const conditionsToClear = [];
+  if (facility.conditions) {
+    for (const cond of facility.conditions) {
+      if (cond.type === CONDITION_MAINTENANCE_DUE) {
+        conditionsToClear.push(cond.id);
+      }
+    }
+  }
+  let readinessRestoration;
+  if (facility.readiness === "limited" && (facility.readinessReason?.includes("Maintenance") || conditionsToClear.length > 0)) {
+    readinessRestoration = "ready";
+  }
+  const valid = errors.length === 0;
+  return {
+    planId: createOpaqueId("plan"),
+    facilityId: facility.id,
+    channelId,
+    valid,
+    canAfford,
+    resourceCosts: Object.freeze(costs),
+    plannedStatus: "current",
+    conditionsToClear: Object.freeze(conditionsToClear),
+    readinessRestoration,
+    errors: errors.length > 0 ? Object.freeze(errors) : void 0
+  };
+}
+function commitFacilityMaintenance(params) {
+  const { plan, facility } = params;
+  if (!plan.valid) {
+    return err(
+      createPublicError({
+        code: "DM_FACILITY_MAINTENANCE_PLAN_INVALID",
+        category: "validation",
+        message: `Cannot commit invalid maintenance plan '${plan.planId}'`
+      })
+    );
+  }
+  if (plan.facilityId !== facility.id) {
+    return err(
+      createPublicError({
+        code: "DM_FACILITY_ID_MISMATCH",
+        category: "conflict",
+        message: `Plan facilityId '${plan.facilityId}' does not match facility '${facility.id}'`
+      })
+    );
+  }
+  const now = params.timestamp ?? Date.now();
+  const currentTick = params.currentTick ?? null;
+  const conditionsToClearSet = new Set(plan.conditionsToClear);
+  const remainingConditions = (facility.conditions ?? []).filter(
+    (c) => !conditionsToClearSet.has(c.id) && !conditionsToClearSet.has(c.type)
+  );
+  const newHistory = facility.history ? [...facility.history] : [];
+  for (const condId of plan.conditionsToClear) {
+    newHistory.push({
+      id: createOpaqueId("prj"),
+      entryType: "condition_cleared",
+      timestamp: now,
+      tick: currentTick,
+      conditionId: condId,
+      conditionType: CONDITION_MAINTENANCE_DUE,
+      note: "Cleared on scheduled maintenance completion"
+    });
+  }
+  newHistory.push({
+    id: createOpaqueId("prj"),
+    entryType: "maintained",
+    timestamp: now,
+    tick: currentTick,
+    note: params.note ?? "Facility routine maintenance executed"
+  });
+  const updatedMaintenanceState = {
+    status: "current",
+    lastMaintainedTick: currentTick ?? facility.maintenanceState?.lastMaintainedTick ?? 0,
+    lastMaintainedTimestamp: now,
+    accumulatedTicks: 0,
+    overdueTicks: 0,
+    channels: facility.maintenanceState?.channels
+  };
+  const updatedFacility = {
+    ...facility,
+    readiness: plan.readinessRestoration ?? facility.readiness,
+    readinessReason: plan.readinessRestoration ? null : facility.readinessReason,
+    conditions: Object.freeze(remainingConditions),
+    history: Object.freeze(newHistory),
+    maintenanceState: updatedMaintenanceState,
+    revision: facility.revision + 1,
+    updatedAt: now
+  };
+  const receipt = {
+    planId: plan.planId,
+    facilityId: facility.id,
+    channelId: plan.channelId,
+    timestamp: now,
+    tick: currentTick,
+    resourcesConsumed: plan.resourceCosts,
+    conditionsCleared: plan.conditionsToClear,
+    newStatus: "current",
+    note: params.note
+  };
+  return ok({ updatedFacility, receipt });
+}
+
+// src/facilities/plans/facility-repair-plan-service.ts
+var CANONICAL_MAINTENANCE_PROJECT_ID = "domain-manager:facility-maintenance";
+var DEFAULT_DIRECT_REPAIR_THRESHOLD_PERCENT = 0.5;
+function applyFacilityDamage(params) {
+  const { facility, deltaIntegrity } = params;
+  if (!Number.isSafeInteger(deltaIntegrity) || deltaIntegrity < 0) {
+    return err(
+      createPublicError({
+        code: "DM_FACILITY_INVALID_DAMAGE",
+        category: "validation",
+        message: `deltaIntegrity must be a non-negative safe integer: received ${deltaIntegrity}`
+      })
+    );
+  }
+  const now = params.timestamp ?? Date.now();
+  const tick = params.tick ?? null;
+  let updatedIntegrity = facility.integrity ? { ...facility.integrity } : void 0;
+  let newLifecycle = facility.lifecycle;
+  let newReadiness = facility.readiness;
+  let newReadinessReason = facility.readinessReason ?? null;
+  const newHistory = facility.history ? [...facility.history] : [];
+  if (updatedIntegrity) {
+    const prevIntegrity = updatedIntegrity.current;
+    const newCurrent = Math.max(0, prevIntegrity - deltaIntegrity);
+    updatedIntegrity.current = newCurrent;
+    newHistory.push({
+      id: createOpaqueId("prj"),
+      entryType: "damaged",
+      timestamp: now,
+      tick,
+      deltaIntegrity: -(prevIntegrity - newCurrent),
+      previousIntegrity: prevIntegrity,
+      newIntegrity: newCurrent,
+      note: params.note ?? "Facility sustained damage"
+    });
+    if (newCurrent === 0) {
+      if (facility.lifecycle === "operational") {
+        newLifecycle = "degraded";
+      }
+      newReadiness = "limited";
+      newReadinessReason = "Integrity depleted";
+    } else if (newCurrent < updatedIntegrity.max * 0.5) {
+      if (newReadiness === "ready") {
+        newReadiness = "limited";
+        newReadinessReason = "Severe structural damage";
+      }
+    }
+  }
+  const updatedConditions = facility.conditions ? [...facility.conditions] : [];
+  if (params.condition) {
+    updatedConditions.push(params.condition);
+    newHistory.push({
+      id: createOpaqueId("prj"),
+      entryType: "condition_applied",
+      timestamp: now,
+      tick,
+      conditionId: params.condition.id,
+      conditionType: params.condition.type,
+      note: `Applied condition '${params.condition.label}'`
+    });
+  }
+  const damagedInstance = {
+    ...facility,
+    // Ownership and modules preserved strictly (Master Spec §16, §3.7)
+    domainUuid: facility.domainUuid,
+    installedModules: facility.installedModules,
+    lifecycle: newLifecycle,
+    readiness: newReadiness,
+    readinessReason: newReadinessReason,
+    integrity: updatedIntegrity ? Object.freeze(updatedIntegrity) : void 0,
+    conditions: Object.freeze(updatedConditions),
+    history: Object.freeze(newHistory),
+    revision: facility.revision + 1,
+    updatedAt: now
+  };
+  return ok(damagedInstance);
+}
+function evaluateFacilityRepairPlan(params) {
+  const { facility, definition, availableBalances } = params;
+  const errors = [];
+  if (facility.lifecycle === "destroyed") {
+    return {
+      planId: createOpaqueId("plan"),
+      facilityId: facility.id,
+      valid: false,
+      isDirectRepairAllowed: false,
+      requiresProject: true,
+      suggestedProjectId: CANONICAL_MAINTENANCE_PROJECT_ID,
+      repairedIntegrityDelta: 0,
+      targetIntegrity: 0,
+      conditionsToClear: Object.freeze([]),
+      resourceCosts: Object.freeze([]),
+      errors: Object.freeze([
+        createPublicError({
+          code: "DM_FACILITY_DESTROYED_REQUIRES_PROJECT",
+          category: "conflict",
+          message: `Facility '${facility.id}' is destroyed and cannot be repaired directly. A Project must be launched.`
+        })
+      ])
+    };
+  }
+  if (facility.lifecycle === "decommissioned") {
+    errors.push(
+      createPublicError({
+        code: "DM_FACILITY_DECOMMISSIONED",
+        category: "conflict",
+        message: `Facility '${facility.id}' is decommissioned and cannot be repaired`
+      })
+    );
+  }
+  let repairedIntegrityDelta = 0;
+  let targetIntegrity = 0;
+  const maxIntegrity = facility.integrity?.max ?? 100;
+  const currentIntegrity = facility.integrity?.current ?? maxIntegrity;
+  if (facility.integrity) {
+    const missing = maxIntegrity - currentIntegrity;
+    if (params.targetIntegrityDelta !== void 0) {
+      repairedIntegrityDelta = Math.min(missing, Math.max(0, params.targetIntegrityDelta));
+    } else {
+      repairedIntegrityDelta = missing;
+    }
+    targetIntegrity = currentIntegrity + repairedIntegrityDelta;
+  }
+  const thresholdPercent = params.directRepairThresholdPercent ?? DEFAULT_DIRECT_REPAIR_THRESHOLD_PERCENT;
+  const maxDirectDelta = Math.ceil(maxIntegrity * thresholdPercent);
+  let isDirectRepairAllowed = true;
+  let requiresProject = false;
+  let suggestedProjectId;
+  const hasCriticalCondition = (facility.conditions ?? []).some((c) => c.severity === "critical");
+  if (repairedIntegrityDelta > maxDirectDelta || hasCriticalCondition) {
+    isDirectRepairAllowed = false;
+    requiresProject = true;
+    suggestedProjectId = CANONICAL_MAINTENANCE_PROJECT_ID;
+  }
+  const conditionsToClear = [];
+  if (params.conditionsToClear) {
+    conditionsToClear.push(...params.conditionsToClear);
+  } else if (facility.conditions) {
+    for (const cond of facility.conditions) {
+      if (cond.type === CONDITION_DAMAGED && isDirectRepairAllowed) {
+        conditionsToClear.push(cond.id);
+      }
+    }
+  }
+  const resourceCosts = [];
+  const costUnit = params.costPerIntegrityPoint ?? { resourceId: "domain-manager:materials", amount: 1 };
+  if (repairedIntegrityDelta > 0) {
+    resourceCosts.push({
+      resourceId: costUnit.resourceId,
+      amount: repairedIntegrityDelta * costUnit.amount
+    });
+  }
+  if (availableBalances && resourceCosts.length > 0) {
+    for (const cost of resourceCosts) {
+      const balance = availableBalances[cost.resourceId] ?? 0;
+      if (balance < cost.amount) {
+        errors.push(
+          createPublicError({
+            code: "DM_FACILITY_INSUFFICIENT_RESOURCES",
+            category: "conflict",
+            message: `Insufficient resource '${cost.resourceId}' for repair: required ${cost.amount}, available ${balance}`
+          })
+        );
+      }
+    }
+  }
+  const valid = errors.length === 0;
+  return {
+    planId: createOpaqueId("plan"),
+    facilityId: facility.id,
+    valid,
+    isDirectRepairAllowed,
+    requiresProject,
+    suggestedProjectId,
+    repairedIntegrityDelta,
+    targetIntegrity,
+    conditionsToClear: Object.freeze(conditionsToClear),
+    resourceCosts: Object.freeze(resourceCosts),
+    errors: errors.length > 0 ? Object.freeze(errors) : void 0
+  };
+}
+function commitFacilityRepair(params) {
+  const { plan, facility } = params;
+  if (!plan.valid) {
+    return err(
+      createPublicError({
+        code: "DM_FACILITY_REPAIR_PLAN_INVALID",
+        category: "validation",
+        message: `Cannot commit invalid repair plan '${plan.planId}'`
+      })
+    );
+  }
+  if (plan.facilityId !== facility.id) {
+    return err(
+      createPublicError({
+        code: "DM_FACILITY_ID_MISMATCH",
+        category: "conflict",
+        message: `Plan facilityId '${plan.facilityId}' does not match facility '${facility.id}'`
+      })
+    );
+  }
+  if (!plan.isDirectRepairAllowed || plan.requiresProject) {
+    return err(
+      createPublicError({
+        code: "DM_FACILITY_REPAIR_REQUIRES_PROJECT",
+        category: "conflict",
+        message: `Repair requires a Project (suggested: '${plan.suggestedProjectId ?? CANONICAL_MAINTENANCE_PROJECT_ID}'). Direct repair disallowed.`
+      })
+    );
+  }
+  const now = params.timestamp ?? Date.now();
+  const tick = params.currentTick ?? null;
+  let updatedIntegrity = facility.integrity ? { ...facility.integrity } : void 0;
+  if (updatedIntegrity) {
+    updatedIntegrity.current = plan.targetIntegrity;
+  }
+  const conditionsToClearSet = new Set(plan.conditionsToClear);
+  const remainingConditions = (facility.conditions ?? []).filter(
+    (c) => !conditionsToClearSet.has(c.id) && !conditionsToClearSet.has(c.type)
+  );
+  const newHistory = facility.history ? [...facility.history] : [];
+  for (const condId of plan.conditionsToClear) {
+    newHistory.push({
+      id: createOpaqueId("prj"),
+      entryType: "condition_cleared",
+      timestamp: now,
+      tick,
+      conditionId: condId,
+      note: "Cleared on direct facility repair"
+    });
+  }
+  newHistory.push({
+    id: createOpaqueId("prj"),
+    entryType: "repaired",
+    timestamp: now,
+    tick,
+    deltaIntegrity: plan.repairedIntegrityDelta,
+    previousIntegrity: facility.integrity?.current,
+    newIntegrity: plan.targetIntegrity,
+    note: params.note ?? "Facility direct repair executed"
+  });
+  let newLifecycle = facility.lifecycle;
+  let newReadiness = facility.readiness;
+  let newReadinessReason = facility.readinessReason;
+  if (updatedIntegrity && updatedIntegrity.current >= updatedIntegrity.max) {
+    if (facility.lifecycle === "degraded") {
+      newLifecycle = "operational";
+    }
+    const hasRemainingBlockingCondition = remainingConditions.some(
+      (c) => c.readinessPenalty === "limited" || c.readinessPenalty === "blocked"
+    );
+    if (!hasRemainingBlockingCondition) {
+      newReadiness = "ready";
+      newReadinessReason = null;
+    }
+  }
+  const updatedFacility = {
+    ...facility,
+    lifecycle: newLifecycle,
+    readiness: newReadiness,
+    readinessReason: newReadinessReason,
+    integrity: updatedIntegrity ? Object.freeze(updatedIntegrity) : void 0,
+    conditions: Object.freeze(remainingConditions),
+    history: Object.freeze(newHistory),
+    revision: facility.revision + 1,
+    updatedAt: now
+  };
+  const receipt = {
+    planId: plan.planId,
+    facilityId: facility.id,
+    timestamp: now,
+    tick,
+    integrityRestored: plan.repairedIntegrityDelta,
+    newIntegrity: plan.targetIntegrity,
+    resourcesConsumed: plan.resourceCosts,
+    conditionsCleared: plan.conditionsToClear,
+    note: params.note
+  };
+  return ok({ updatedFacility, receipt });
+}
+
+// src/ui/domain-patterns/facilities/facility-app.ts
+function cleanPayload3(payload) {
+  if (payload === null || typeof payload !== "object") {
+    return payload;
+  }
+  if (Array.isArray(payload)) {
+    return payload.map(cleanPayload3);
+  }
+  const cleaned = {};
+  for (const [key, value] of Object.entries(payload)) {
+    if (value !== void 0) {
+      cleaned[key] = typeof value === "object" && value !== null ? cleanPayload3(value) : value;
+    }
+  }
+  return cleaned;
+}
+function makeCommand4(type, payload) {
+  return {
+    contractVersion: COMMAND_CONTRACT_VERSION_V1,
+    commandId: createCommandId(),
+    type,
+    payload: cleanPayload3(payload),
+    issuedAtReal: Date.now()
+  };
+}
+var FacilitiesApplicationController = class {
+  #domainUuid;
+  #commandBus;
+  #domains;
+  #facilityRegistry;
+  #viewer;
+  #activeModal = null;
+  #selectedFacilityId = null;
+  #filterReadiness = "all";
+  #searchTerm = "";
+  #lastViewModel = null;
+  constructor(options) {
+    this.#domainUuid = options.domainUuid;
+    this.#commandBus = options.commandBus;
+    this.#domains = options.domains;
+    this.#facilityRegistry = options.facilityRegistry ?? createDefaultFacilityRegistry();
+    this.#viewer = options.viewer;
+  }
+  get domainUuid() {
+    return this.#domainUuid;
+  }
+  get activeModal() {
+    return this.#activeModal;
+  }
+  get selectedFacilityId() {
+    return this.#selectedFacilityId;
+  }
+  get filterReadiness() {
+    return this.#filterReadiness;
+  }
+  get searchTerm() {
+    return this.#searchTerm;
+  }
+  get viewModel() {
+    return this.#lastViewModel;
+  }
+  setFilterReadiness(filter) {
+    this.#filterReadiness = filter;
+  }
+  setSearchTerm(term) {
+    this.#searchTerm = term;
+  }
+  openCreateModal() {
+    this.#activeModal = "create";
+  }
+  openFacilityDetail(facilityId) {
+    this.#selectedFacilityId = facilityId;
+    this.#activeModal = "detail";
+  }
+  openMaintenanceModal(facilityId) {
+    this.#selectedFacilityId = facilityId;
+    this.#activeModal = "maintenance";
+  }
+  openRepairModal(facilityId) {
+    this.#selectedFacilityId = facilityId;
+    this.#activeModal = "repair";
+  }
+  closeModal() {
+    this.#activeModal = null;
+    this.#selectedFacilityId = null;
+  }
+  async loadViewModel() {
+    const id = this.#domainUuid.startsWith("JournalEntry.") ? this.#domainUuid.slice("JournalEntry.".length) : this.#domainUuid;
+    const docRes = await this.#domains.read(id);
+    if (!docRes.ok) return docRes;
+    const isGm = this.#viewer?.isGm ?? true;
+    const vm = buildFacilitiesViewModel(docRes.value, {
+      viewerIsGm: isGm,
+      facilityRegistry: this.#facilityRegistry,
+      filterReadiness: this.#filterReadiness,
+      searchTerm: this.#searchTerm
+    });
+    this.#lastViewModel = vm;
+    return ok(vm);
+  }
+  render(viewModel) {
+    const vm = viewModel ?? this.#lastViewModel;
+    if (!vm) {
+      return `<div class="dm-loading">Loading Facilities Subsystem...</div>`;
+    }
+    const mainHtml = renderFacilitiesSubsystemHtml(vm);
+    let modalHtml = "";
+    if (this.#activeModal === "create") {
+      const defs = this.#facilityRegistry.list();
+      modalHtml = renderFacilityCreateModalHtml(this.#domainUuid, defs);
+    } else if (this.#activeModal === "detail" && this.#selectedFacilityId) {
+      const f = vm.facilities.find((item) => item.id === this.#selectedFacilityId);
+      if (f) {
+        modalHtml = renderFacilityDetailModalHtml(f, vm.viewerIsGm);
+      }
+    } else if (this.#activeModal === "maintenance" && this.#selectedFacilityId) {
+      const f = vm.facilities.find((item) => item.id === this.#selectedFacilityId);
+      if (f) {
+        modalHtml = renderFacilityMaintenanceModalHtml(f);
+      }
+    } else if (this.#activeModal === "repair" && this.#selectedFacilityId) {
+      const f = vm.facilities.find((item) => item.id === this.#selectedFacilityId);
+      if (f) {
+        modalHtml = renderFacilityRepairModalHtml(f);
+      }
+    }
+    return `
+      <div class="dm-facilities-app-v2" data-domain-uuid="${escapeAttribute4(this.#domainUuid)}">
+        ${mainHtml}
+        ${modalHtml ? `<div class="dm-modal-backdrop">${modalHtml}</div>` : ""}
+      </div>
+    `;
+  }
+  async dispatchCreateFacility(payload) {
+    const id = this.#domainUuid.startsWith("JournalEntry.") ? this.#domainUuid.slice("JournalEntry.".length) : this.#domainUuid;
+    const docRes = await this.#domains.read(id);
+    if (!docRes.ok) return docRes;
+    const record = docRes.value.record;
+    const currentFacilitiesData = getDomainFacilitiesData(record);
+    const facilityId = `fac-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const now = Date.now();
+    const newFacility = {
+      id: facilityId,
+      definitionId: payload.definitionId,
+      domainUuid: this.#domainUuid,
+      name: payload.name || payload.definitionId,
+      schemaVersion: 1,
+      revision: 0,
+      level: payload.level,
+      lifecycle: payload.initialLifecycle ?? "operational",
+      readiness: "ready",
+      installedModules: Object.freeze([]),
+      activeUpgrades: Object.freeze([]),
+      integrity: Object.freeze({ current: 100, max: 100 }),
+      conditions: Object.freeze([]),
+      maintenanceState: {
+        status: "current",
+        overdueTicks: 0,
+        accumulatedTicks: 0
+      },
+      tags: Object.freeze([]),
+      createdAt: now,
+      updatedAt: now
+    };
+    const updatedFacilities = [...currentFacilitiesData.facilities, newFacility];
+    const updatedRecord = withDomainFacilitiesData(record, {
+      ...currentFacilitiesData,
+      facilities: updatedFacilities
+    });
+    if ("save" in this.#domains && typeof this.#domains.save === "function") {
+      const saveRes = await this.#domains.save({
+        ...docRes.value,
+        record: updatedRecord
+      });
+      if (!saveRes.ok) return saveRes;
+    }
+    if (this.#commandBus) {
+      const cmd = makeCommand4("facilities:create-facility", {
+        domainUuid: this.#domainUuid,
+        facility: newFacility
+      });
+      await this.#commandBus.execute(cmd);
+    }
+    return ok({ facilityId });
+  }
+  async dispatchMaintainFacility(payload) {
+    const id = this.#domainUuid.startsWith("JournalEntry.") ? this.#domainUuid.slice("JournalEntry.".length) : this.#domainUuid;
+    const docRes = await this.#domains.read(id);
+    if (!docRes.ok) return docRes;
+    const record = docRes.value.record;
+    const currentFacilitiesData = getDomainFacilitiesData(record);
+    const facility = currentFacilitiesData.facilities.find((f) => f.id === payload.facilityId);
+    if (!facility) {
+      return err(createPublicError({
+        code: "DM_FACILITY_NOT_FOUND",
+        category: "not-found",
+        message: `Facility ${payload.facilityId} not found`
+      }));
+    }
+    const def = this.#facilityRegistry.get(facility.definitionId);
+    let updatedFacility;
+    if (def?.maintenance) {
+      const plan = evaluateFacilityMaintenancePlan({ facility, definition: def });
+      if (plan.valid) {
+        const commitRes = commitFacilityMaintenance({
+          plan,
+          facility,
+          note: payload.notes
+        });
+        if (!commitRes.ok) return commitRes;
+        updatedFacility = commitRes.value.updatedFacility;
+      } else {
+        updatedFacility = {
+          ...facility,
+          maintenanceState: {
+            status: "current",
+            overdueTicks: 0,
+            accumulatedTicks: 0,
+            lastMaintainedTimestamp: Date.now()
+          },
+          revision: facility.revision + 1,
+          updatedAt: Date.now()
+        };
+      }
+    } else {
+      updatedFacility = {
+        ...facility,
+        maintenanceState: {
+          status: "current",
+          overdueTicks: 0,
+          accumulatedTicks: 0,
+          lastMaintainedTimestamp: Date.now()
+        },
+        revision: facility.revision + 1,
+        updatedAt: Date.now()
+      };
+    }
+    const updatedFacilities = currentFacilitiesData.facilities.map(
+      (f) => f.id === payload.facilityId ? updatedFacility : f
+    );
+    const updatedRecord = withDomainFacilitiesData(record, {
+      ...currentFacilitiesData,
+      facilities: updatedFacilities
+    });
+    if ("save" in this.#domains && typeof this.#domains.save === "function") {
+      const saveRes = await this.#domains.save({
+        ...docRes.value,
+        record: updatedRecord
+      });
+      if (!saveRes.ok) return saveRes;
+    }
+    return ok({ facility: updatedFacility });
+  }
+  async dispatchRepairFacility(payload) {
+    const id = this.#domainUuid.startsWith("JournalEntry.") ? this.#domainUuid.slice("JournalEntry.".length) : this.#domainUuid;
+    const docRes = await this.#domains.read(id);
+    if (!docRes.ok) return docRes;
+    const record = docRes.value.record;
+    const currentFacilitiesData = getDomainFacilitiesData(record);
+    const facility = currentFacilitiesData.facilities.find((f) => f.id === payload.facilityId);
+    if (!facility) {
+      return err(createPublicError({
+        code: "DM_FACILITY_NOT_FOUND",
+        category: "not-found",
+        message: `Facility ${payload.facilityId} not found`
+      }));
+    }
+    const def = this.#facilityRegistry.get(facility.definitionId);
+    let updatedFacility;
+    if (def) {
+      const plan = evaluateFacilityRepairPlan({
+        facility,
+        definition: def,
+        targetIntegrityDelta: payload.restoreIntegrity,
+        conditionsToClear: payload.removeConditionIds
+      });
+      if (plan.valid && plan.isDirectRepairAllowed && !plan.requiresProject) {
+        const commitRes = commitFacilityRepair({
+          plan,
+          facility,
+          note: payload.notes
+        });
+        if (!commitRes.ok) return commitRes;
+        updatedFacility = commitRes.value.updatedFacility;
+      } else {
+        const max = facility.integrity?.max ?? 100;
+        const current = facility.integrity?.current ?? 100;
+        const restored = Math.min(max, current + (payload.restoreIntegrity ?? max - current));
+        const clearSet = new Set(payload.removeConditionIds ?? []);
+        const remainingConditions = (facility.conditions ?? []).filter((c) => !clearSet.has(c.id));
+        updatedFacility = {
+          ...facility,
+          integrity: Object.freeze({ current: restored, max }),
+          conditions: Object.freeze(remainingConditions),
+          lifecycle: facility.lifecycle === "degraded" && restored >= max ? "operational" : facility.lifecycle,
+          readiness: "ready",
+          revision: facility.revision + 1,
+          updatedAt: Date.now()
+        };
+      }
+    } else {
+      const max = facility.integrity?.max ?? 100;
+      const current = facility.integrity?.current ?? 100;
+      const restored = Math.min(max, current + (payload.restoreIntegrity ?? max - current));
+      const clearSet = new Set(payload.removeConditionIds ?? []);
+      const remainingConditions = (facility.conditions ?? []).filter((c) => !clearSet.has(c.id));
+      updatedFacility = {
+        ...facility,
+        integrity: Object.freeze({ current: restored, max }),
+        conditions: Object.freeze(remainingConditions),
+        lifecycle: facility.lifecycle === "degraded" && restored >= max ? "operational" : facility.lifecycle,
+        readiness: "ready",
+        revision: facility.revision + 1,
+        updatedAt: Date.now()
+      };
+    }
+    const updatedFacilities = currentFacilitiesData.facilities.map(
+      (f) => f.id === payload.facilityId ? updatedFacility : f
+    );
+    const updatedRecord = withDomainFacilitiesData(record, {
+      ...currentFacilitiesData,
+      facilities: updatedFacilities
+    });
+    if ("save" in this.#domains && typeof this.#domains.save === "function") {
+      const saveRes = await this.#domains.save({
+        ...docRes.value,
+        record: updatedRecord
+      });
+      if (!saveRes.ok) return saveRes;
+    }
+    return ok({ facility: updatedFacility });
+  }
+  async dispatchDamageFacility(payload) {
+    const id = this.#domainUuid.startsWith("JournalEntry.") ? this.#domainUuid.slice("JournalEntry.".length) : this.#domainUuid;
+    const docRes = await this.#domains.read(id);
+    if (!docRes.ok) return docRes;
+    const record = docRes.value.record;
+    const currentFacilitiesData = getDomainFacilitiesData(record);
+    const facility = currentFacilitiesData.facilities.find((f) => f.id === payload.facilityId);
+    if (!facility) {
+      return err(createPublicError({
+        code: "DM_FACILITY_NOT_FOUND",
+        category: "not-found",
+        message: `Facility ${payload.facilityId} not found`
+      }));
+    }
+    const damageRes = applyFacilityDamage({
+      facility,
+      deltaIntegrity: payload.damageAmount,
+      condition: payload.condition
+    });
+    if (!damageRes.ok) return damageRes;
+    const damagedFacility = damageRes.value;
+    const updatedFacilities = currentFacilitiesData.facilities.map(
+      (f) => f.id === payload.facilityId ? damagedFacility : f
+    );
+    const updatedRecord = withDomainFacilitiesData(record, {
+      ...currentFacilitiesData,
+      facilities: updatedFacilities
+    });
+    if ("save" in this.#domains && typeof this.#domains.save === "function") {
+      const saveRes = await this.#domains.save({
+        ...docRes.value,
+        record: updatedRecord
+      });
+      if (!saveRes.ok) return saveRes;
+    }
+    return ok({ facility: damagedFacility });
+  }
+};
+var MockApplicationV24 = class {
+  element = null;
+  options;
+  constructor(options = {}) {
+    this.options = options;
+  }
+  async _prepareContext(options) {
+    return {};
+  }
+  _renderHTML(context, options) {
+    return "";
+  }
+  _replaceHTML(result, content, options) {
+    if (typeof result === "string") {
+      content.innerHTML = result;
+    }
+  }
+  _setupActions(element) {
+    if (!element || element._dmActionsConfigured) return;
+    element._dmActionsConfigured = true;
+    const actions = this.constructor.DEFAULT_OPTIONS?.actions ?? {};
+    element.addEventListener?.("click", async (event) => {
+      let target = event?.target;
+      while (target) {
+        const action = target.getAttribute?.("data-action") ?? target.dataset?.action;
+        if (action && typeof actions[action] === "function") {
+          await actions[action].call(this, event, target);
+          return;
+        }
+        if (target === element) break;
+        target = target.parentElement;
+      }
+    });
+  }
+  async render(force, options) {
+    if (!this.element) {
+      const classes = (this.constructor.DEFAULT_OPTIONS?.classes ?? ["domain-manager", "dm-facilities-app-v2"]).join(" ");
+      if (typeof globalThis.document?.createElement === "function") {
+        const el = globalThis.document.createElement("div");
+        el.className = classes;
+        this.element = el;
+      } else {
+        const listeners = {};
+        this.element = {
+          className: classes,
+          innerHTML: "",
+          children: [],
+          querySelectorAll: () => [],
+          querySelector: () => null,
+          addEventListener: (evt, cb) => {
+            listeners[evt] = listeners[evt] || [];
+            listeners[evt].push(cb);
+          },
+          _listeners: listeners
+        };
+      }
+    }
+    const context = await this._prepareContext(options);
+    const result = await this._renderHTML(context, options);
+    this._replaceHTML(result, this.element, options);
+    this._setupActions(this.element);
+    this._onRender(context, options);
+    return this;
+  }
+  _onRender(context, options) {
+  }
+  async close(options) {
+    this.element = null;
+  }
+};
+var BaseApp4 = globalThis.foundry?.applications?.api?.ApplicationV2 ?? MockApplicationV24;
+var FacilitiesApplication = class _FacilitiesApplication extends BaseApp4 {
+  static DEFAULT_OPTIONS = {
+    id: "domain-manager-facilities-{id}",
+    classes: ["domain-manager", "dm-facilities-app-v2"],
+    tag: "div",
+    window: {
+      title: "Facilities & Infrastructure",
+      icon: "fas fa-building",
+      resizable: true,
+      minimizable: true
+    },
+    position: {
+      width: 860,
+      height: 640
+    },
+    actions: {
+      openCreateModal: _FacilitiesApplication.#onOpenCreateModal,
+      openFacilityDetail: _FacilitiesApplication.#onOpenFacilityDetail,
+      openMaintenanceModal: _FacilitiesApplication.#onOpenMaintenanceModal,
+      openRepairModal: _FacilitiesApplication.#onOpenRepairModal,
+      closeModal: _FacilitiesApplication.#onCloseModal
+    }
+  };
+  #controller;
+  constructor(options) {
+    super(options);
+    this.#controller = new FacilitiesApplicationController(options);
+  }
+  get controller() {
+    return this.#controller;
+  }
+  async _prepareContext(options) {
+    const vmRes = await this.#controller.loadViewModel();
+    return {
+      viewModel: vmRes.ok ? vmRes.value : null,
+      error: !vmRes.ok ? vmRes.error : null
+    };
+  }
+  _renderHTML(context, options) {
+    if (context.error) {
+      return `<div class="dm-error-state">${escapeHtml4(context.error.message)}</div>`;
+    }
+    return this.#controller.render(context.viewModel);
+  }
+  _replaceHTML(result, content, options) {
+    if (typeof result === "string") {
+      content.innerHTML = result;
+    } else if (result && typeof content.replaceChildren === "function") {
+      content.replaceChildren(result);
+    } else if (result) {
+      content.innerHTML = String(result);
+    }
+  }
+  _onRender(context, options) {
+    const el = this.element;
+    if (el) {
+      this.attachEventListeners(el);
+    }
+  }
+  attachEventListeners(element) {
+    const forms = element.querySelectorAll?.("form[data-form-type]") ?? [];
+    forms.forEach((form) => {
+      if (form._dmSubmitBound) return;
+      form._dmSubmitBound = true;
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const formType = form.getAttribute?.("data-form-type");
+        const formData = new FormData(form);
+        const data = {};
+        formData.forEach((val, key) => {
+          data[key] = String(val).trim();
+        });
+        if (formType === "createFacility") {
+          const level = parseInt(data.level || "1", 10);
+          await this.#controller.dispatchCreateFacility({
+            definitionId: data.definitionId,
+            name: data.name || void 0,
+            level: isNaN(level) ? 1 : level,
+            initialLifecycle: data.initialLifecycle || "operational"
+          });
+          this.#controller.closeModal();
+          this.render();
+        } else if (formType === "maintainFacility") {
+          const facilityId = form.getAttribute?.("data-facility-id");
+          if (facilityId) {
+            await this.#controller.dispatchMaintainFacility({
+              facilityId,
+              notes: data.notes || void 0
+            });
+            this.#controller.closeModal();
+            this.render();
+          }
+        } else if (formType === "repairFacility") {
+          const facilityId = form.getAttribute?.("data-facility-id");
+          const restoreIntegrity = parseInt(data.restoreIntegrity || "0", 10);
+          const clearConditionsCheckboxes = form.querySelectorAll?.('input[name="clearConditions"]:checked') ?? [];
+          const conditionIds = [];
+          clearConditionsCheckboxes.forEach((cb) => {
+            if (cb.value) conditionIds.push(cb.value);
+          });
+          if (facilityId) {
+            await this.#controller.dispatchRepairFacility({
+              facilityId,
+              restoreIntegrity: isNaN(restoreIntegrity) ? void 0 : restoreIntegrity,
+              removeConditionIds: conditionIds.length > 0 ? conditionIds : void 0
+            });
+            this.#controller.closeModal();
+            this.render();
+          }
+        }
+      });
+    });
+    const readinessSelect = element.querySelector?.('select[data-action="filterReadiness"]');
+    if (readinessSelect && !readinessSelect._dmChangeBound) {
+      readinessSelect._dmChangeBound = true;
+      readinessSelect.addEventListener("change", () => {
+        this.#controller.setFilterReadiness(readinessSelect.value);
+        this.render();
+      });
+    }
+    const searchInput = element.querySelector?.('input[data-action="searchFacilities"]');
+    if (searchInput && !searchInput._dmInputBound) {
+      searchInput._dmInputBound = true;
+      searchInput.addEventListener("input", () => {
+        this.#controller.setSearchTerm(searchInput.value);
+        this.render();
+      });
+    }
+  }
+  static #onOpenCreateModal() {
+    this.#controller.openCreateModal();
+    this.render();
+  }
+  static #onOpenFacilityDetail(event, target) {
+    const id = target?.dataset?.facilityId ?? target?.getAttribute?.("data-facility-id");
+    if (id) {
+      this.#controller.openFacilityDetail(id);
+      this.render();
+    }
+  }
+  static #onOpenMaintenanceModal(event, target) {
+    const id = target?.dataset?.facilityId ?? target?.getAttribute?.("data-facility-id");
+    if (id) {
+      this.#controller.openMaintenanceModal(id);
+      this.render();
+    }
+  }
+  static #onOpenRepairModal(event, target) {
+    const id = target?.dataset?.facilityId ?? target?.getAttribute?.("data-facility-id");
+    if (id) {
+      this.#controller.openRepairModal(id);
+      this.render();
+    }
+  }
+  static #onCloseModal() {
+    this.#controller.closeModal();
+    this.render();
+  }
+};
+
+// src/downtime/definitions/canonical-downtime-definitions.ts
+var CANONICAL_DOWNTIME_DEFINITIONS = Object.freeze([
+  {
+    id: "domain-manager:crafting",
+    version: 1,
+    label: "Crafting & Fabrication",
+    description: "Fabricating items, equipment, or supplies using domain facilities and raw materials.",
+    category: "production",
+    tags: Object.freeze(["crafting", "supplies", "materials"]),
+    scope: "individual",
+    defaultDurationTicks: 10,
+    minParticipants: 1,
+    maxParticipants: 3,
+    allowedParticipantRoles: Object.freeze(["owner", "assistant"]),
+    costs: Object.freeze([
+      { resourceId: "domain-manager:materials", amount: 10 }
+    ]),
+    outcomeDefinitions: Object.freeze([
+      {
+        id: "crafting-completion",
+        type: "economy:grant-resource",
+        label: "Fabricate Finished Supplies",
+        parameters: Object.freeze({ resourceId: "domain-manager:supplies", amount: 15 }),
+        visibility: "public"
+      }
+    ])
+  },
+  {
+    id: "domain-manager:rest-and-recuperation",
+    version: 1,
+    label: "Rest & Recuperation",
+    description: "Spending time in safety and comfort to recover stamina, treat fatigue, and heal wounds.",
+    category: "recovery",
+    tags: Object.freeze(["rest", "recovery", "health"]),
+    scope: "individual",
+    defaultDurationTicks: 5,
+    minParticipants: 1,
+    maxParticipants: 10,
+    allowedParticipantRoles: Object.freeze(["participant"]),
+    outcomeDefinitions: Object.freeze([
+      {
+        id: "recuperation-benefit",
+        type: "narrative:event",
+        label: "Full Rest Recovery",
+        parameters: Object.freeze({ message: "Participant fully recovered from exhaustion and minor fatigue." }),
+        visibility: "public"
+      }
+    ])
+  },
+  {
+    id: "domain-manager:patrol-and-recon",
+    version: 1,
+    label: "Patrol & Reconnaissance",
+    description: "Scouting domain perimeters, maintaining vigilance, and surveying surrounding territories.",
+    category: "security",
+    tags: Object.freeze(["security", "patrol", "recon"]),
+    scope: "group",
+    defaultDurationTicks: 8,
+    minParticipants: 2,
+    maxParticipants: 10,
+    allowedParticipantRoles: Object.freeze(["supervisor", "participant"]),
+    outcomeDefinitions: Object.freeze([
+      {
+        id: "patrol-intelligence",
+        type: "narrative:event",
+        label: "Security Recon Report",
+        parameters: Object.freeze({ message: "Perimeters secured and local reconnaissance updated." }),
+        visibility: "public"
+      }
+    ])
+  },
+  {
+    id: "domain-manager:training",
+    version: 1,
+    label: "Physical & Tactical Training",
+    description: "Rigorous physical exercise, weapons drills, and tactical doctrine training.",
+    category: "development",
+    tags: Object.freeze(["training", "skill", "tactics"]),
+    scope: "individual",
+    defaultDurationTicks: 12,
+    minParticipants: 1,
+    maxParticipants: 4,
+    allowedParticipantRoles: Object.freeze(["supervisor", "trainee"]),
+    outcomeDefinitions: Object.freeze([
+      {
+        id: "training-advancement",
+        type: "narrative:event",
+        label: "Tactical Discipline Acquired",
+        parameters: Object.freeze({ message: "Trainees achieved improved discipline and tactical readiness." }),
+        visibility: "public"
+      }
+    ])
+  }
+]);
+
+// src/downtime/definitions/downtime-registry.ts
+var DowntimeDefinitionRegistry = class {
+  definitions = /* @__PURE__ */ new Map();
+  frozen = false;
+  get isFrozen() {
+    return this.frozen;
+  }
+  register(definition) {
+    if (this.frozen) {
+      return err(
+        createPublicError({
+          code: "DM_REGISTRY_FROZEN",
+          category: "conflict",
+          message: "Cannot register downtime definition into a frozen registry"
+        })
+      );
+    }
+    if (this.definitions.has(definition.id)) {
+      return err(
+        createPublicError({
+          code: "DM_DOWNTIME_ALREADY_EXISTS",
+          category: "conflict",
+          message: `DowntimeDefinition '${definition.id}' is already registered`
+        })
+      );
+    }
+    this.definitions.set(definition.id, Object.freeze({ ...definition }));
+    return ok(void 0);
+  }
+  get(id) {
+    return this.definitions.get(id);
+  }
+  has(id) {
+    return this.definitions.has(id);
+  }
+  list(filter) {
+    let result = Array.from(this.definitions.values());
+    if (filter) {
+      if (filter.category) {
+        result = result.filter((d) => d.category === filter.category);
+      }
+      if (filter.scope) {
+        result = result.filter((d) => d.scope === filter.scope);
+      }
+      if (filter.tag) {
+        result = result.filter((d) => d.tags.includes(filter.tag));
+      }
+    }
+    return Object.freeze(result);
+  }
+  freeze() {
+    this.frozen = true;
+  }
+};
+function createDefaultDowntimeRegistry() {
+  const registry = new DowntimeDefinitionRegistry();
+  for (const def of CANONICAL_DOWNTIME_DEFINITIONS) {
+    const res = registry.register(def);
+    if (!res.ok) {
+      throw new Error(`Failed to load canonical downtime definition '${def.id}': ${res.error.message}`);
+    }
+  }
+  registry.freeze();
+  return registry;
+}
+
+// src/ui/domain-patterns/downtime/downtime-presenter.ts
+function resolveScopeBadgeClass(scope) {
+  switch (scope) {
+    case "individual":
+      return "dm-badge-individual";
+    case "group":
+      return "dm-badge-group";
+    case "domain":
+      return "dm-badge-domain";
+    case "flexible":
+      return "dm-badge-flexible";
+    default:
+      return "dm-badge-default";
+  }
+}
+function resolveLifecycleBadgeClass2(lifecycle) {
+  switch (lifecycle) {
+    case "inProgress":
+      return "dm-badge-active";
+    case "ready":
+      return "dm-badge-ready";
+    case "completed":
+      return "dm-badge-completed";
+    case "paused":
+      return "dm-badge-paused";
+    case "planned":
+      return "dm-badge-planned";
+    case "draft":
+      return "dm-badge-draft";
+    case "blocked":
+      return "dm-badge-blocked";
+    case "cancelled":
+      return "dm-badge-canceled";
+    case "failed":
+      return "dm-badge-danger";
+    default:
+      return "dm-badge-default";
+  }
+}
+function buildDowntimeViewModel(domainInput, options = {}) {
+  const record = "record" in domainInput ? domainInput.record : domainInput;
+  const domainUuid = "uuid" in domainInput ? domainInput.uuid : "unknown";
+  const viewerIsGm = options.viewerIsGm ?? options.viewer?.isGm ?? true;
+  const filterLifecycle = options.filterLifecycle ?? "all";
+  const filterScope = options.filterScope ?? "all";
+  const searchTerm = (options.searchTerm ?? "").toLowerCase().trim();
+  const data = getDomainDowntimeData(record);
+  const defRegistry = options.downtimeRegistry;
+  const activityVMs = [];
+  for (const activity of data.activities) {
+    const isSecret = Boolean(activity.visibility === "secret" || activity.tags?.includes("secret"));
+    if (isSecret && !viewerIsGm) {
+      continue;
+    }
+    if (filterLifecycle !== "all" && activity.lifecycle !== filterLifecycle) {
+      continue;
+    }
+    if (filterScope !== "all" && activity.scope !== filterScope) {
+      continue;
+    }
+    const def = defRegistry?.get(activity.definitionId);
+    const label = activity.name || def?.label || activity.id;
+    const description = activity.description || def?.description || "";
+    if (searchTerm) {
+      const matchLabel = label.toLowerCase().includes(searchTerm);
+      const matchDef = activity.definitionId.toLowerCase().includes(searchTerm);
+      if (!matchLabel && !matchDef) {
+        continue;
+      }
+    }
+    const isIndefinite = activity.durationTicks === null || activity.durationTicks === void 0;
+    let progressPercent = null;
+    let durationFormatted;
+    if (isIndefinite) {
+      durationFormatted = `Indefinite (${activity.elapsedTicks} ticks elapsed)`;
+      progressPercent = null;
+    } else {
+      const total = activity.durationTicks;
+      durationFormatted = `${activity.elapsedTicks} / ${total} ticks`;
+      progressPercent = total > 0 ? Math.min(100, Math.max(0, Math.floor(activity.elapsedTicks / total * 100))) : 100;
+    }
+    const completed = isDowntimeComplete(activity);
+    const participants = activity.participants.map((p) => {
+      let displayName = p.participantRef;
+      if (options.participantResolver) {
+        displayName = options.participantResolver(p.participantRef, p.participantType);
+      }
+      return {
+        participantRef: p.participantRef,
+        participantType: p.participantType,
+        displayName,
+        role: p.role,
+        capacityConsumed: p.capacityConsumed ?? 1
+      };
+    });
+    const rawOutcomes = activity.outcomes ?? def?.outcomeDefinitions ?? [];
+    const outcomeReceipts = activity.outcomesApplied ?? [];
+    const outcomeVMs = rawOutcomes.map((o, idx) => {
+      const received = outcomeReceipts.some((r) => r.outcomeId === o.id);
+      return {
+        id: o.id ?? `outcome-${idx}`,
+        type: o.type ?? "resource",
+        targetRef: o.targetRef ?? domainUuid,
+        description: o.label ?? o.description ?? o.type ?? "Outcome",
+        received
+      };
+    });
+    const startedAtFormatted = activity.createdAt ? new Date(activity.createdAt).toLocaleDateString() : "\u2014";
+    const completedAtFormatted = activity.completedAt ? new Date(activity.completedAt).toLocaleDateString() : void 0;
+    const canAdvance = activity.lifecycle === "inProgress";
+    const canComplete = activity.lifecycle === "inProgress" || activity.lifecycle === "ready";
+    const canCancel = activity.lifecycle !== "completed" && activity.lifecycle !== "cancelled" && activity.lifecycle !== "failed";
+    activityVMs.push({
+      id: activity.id,
+      definitionId: activity.definitionId,
+      label,
+      description,
+      scope: activity.scope,
+      scopeBadgeClass: resolveScopeBadgeClass(activity.scope),
+      lifecycle: activity.lifecycle,
+      lifecycleBadgeClass: resolveLifecycleBadgeClass2(activity.lifecycle),
+      progressTicks: activity.elapsedTicks,
+      durationTicks: activity.durationTicks ?? null,
+      durationFormatted,
+      progressPercent,
+      isIndefinite,
+      isCompleted: completed,
+      participants: Object.freeze(participants),
+      outcomes: Object.freeze(outcomeVMs),
+      startedAtFormatted,
+      completedAtFormatted,
+      isSecret,
+      canAdvance,
+      canComplete,
+      canCancel
+    });
+  }
+  const allVisible = data.activities.filter((a) => {
+    const isSecret = Boolean(a.visibility === "secret" || a.tags?.includes("secret"));
+    return !isSecret || viewerIsGm;
+  });
+  const totalCount = allVisible.length;
+  const activeCount = allVisible.filter((a) => a.lifecycle === "inProgress").length;
+  const completedCount = allVisible.filter((a) => a.lifecycle === "completed").length;
+  return {
+    domainUuid,
+    viewerIsGm,
+    totalCount,
+    activeCount,
+    completedCount,
+    activities: Object.freeze(activityVMs),
+    filterLifecycle,
+    filterScope,
+    searchTerm
+  };
+}
+
+// src/ui/domain-patterns/downtime/downtime-view.ts
+function escapeHtml5(value) {
+  if (value === null || value === void 0) return "";
+  return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+function escapeAttribute5(value) {
+  return escapeHtml5(value);
+}
+function renderDowntimeTableHtml(activities) {
+  if (activities.length === 0) {
+    return `<div class="dm-empty-state">No downtime activities found.</div>`;
+  }
+  return `
+    <table class="dm-downtime-table">
+      <thead>
+        <tr>
+          <th>Endeavor / Activity</th>
+          <th>Definition</th>
+          <th>Scope</th>
+          <th>Status</th>
+          <th>Progress / Duration</th>
+          <th>Participants</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${activities.map((a) => {
+    return `
+            <tr class="dm-downtime-row" data-downtime-id="${escapeAttribute5(a.id)}">
+              <td class="dm-cell-name">
+                <span class="dm-downtime-label">${escapeHtml5(a.label)}</span>
+                ${a.isSecret ? `<span class="dm-badge dm-badge-secret">Secret</span>` : ""}
+              </td>
+              <td class="dm-cell-def">
+                <code>${escapeHtml5(a.definitionId)}</code>
+              </td>
+              <td class="dm-cell-scope">
+                <span class="dm-badge ${escapeAttribute5(a.scopeBadgeClass)}">${escapeHtml5(a.scope)}</span>
+              </td>
+              <td class="dm-cell-status">
+                <span class="dm-badge ${escapeAttribute5(a.lifecycleBadgeClass)}">${escapeHtml5(a.lifecycle)}</span>
+              </td>
+              <td class="dm-cell-duration">
+                ${a.isIndefinite ? `
+                  <div class="dm-indefinite-tag">
+                    <i class="fas fa-infinity"></i> ${escapeHtml5(a.durationFormatted)}
+                  </div>
+                ` : `
+                  <div class="dm-progress-container">
+                    <div class="dm-progress-bar" style="width: ${a.progressPercent ?? 0}%;"></div>
+                    <span class="dm-progress-text">${escapeHtml5(a.durationFormatted)} (${a.progressPercent ?? 0}%)</span>
+                  </div>
+                `}
+              </td>
+              <td class="dm-cell-participants">
+                <span class="dm-participants-summary">
+                  <i class="fas fa-users"></i> ${a.participants.length} participant(s)
+                </span>
+              </td>
+              <td class="dm-cell-actions">
+                <button type="button" class="dm-btn dm-btn-sm" data-action="openDowntimeDetail" data-downtime-id="${escapeAttribute5(a.id)}" title="Inspect Activity">
+                  <i class="fas fa-search"></i> Inspect
+                </button>
+                ${a.canAdvance ? `
+                  <button type="button" class="dm-btn dm-btn-sm dm-btn-primary" data-action="advanceDowntime" data-downtime-id="${escapeAttribute5(a.id)}" title="Advance 1 Tick">
+                    <i class="fas fa-step-forward"></i> +1 Tick
+                  </button>
+                ` : ""}
+                ${a.canComplete ? `
+                  <button type="button" class="dm-btn dm-btn-sm dm-btn-success" data-action="completeDowntime" data-downtime-id="${escapeAttribute5(a.id)}" title="Complete Activity">
+                    <i class="fas fa-check"></i> Complete
+                  </button>
+                ` : ""}
+              </td>
+            </tr>
+          `;
+  }).join("")}
+      </tbody>
+    </table>
+  `;
+}
+function renderDowntimeDetailModalHtml(downtime, viewerIsGm) {
+  return `
+    <div class="dm-modal dm-downtime-detail-modal" data-downtime-id="${escapeAttribute5(downtime.id)}">
+      <header class="dm-modal-header">
+        <h3>Endeavor Inspector: ${escapeHtml5(downtime.label)}</h3>
+        <button type="button" class="dm-btn-close" data-action="closeModal">&times;</button>
+      </header>
+
+      <div class="dm-modal-body">
+        <section class="dm-detail-summary">
+          <div class="dm-summary-grid">
+            <div class="dm-stat">
+              <span class="dm-stat-label">Status</span>
+              <span class="dm-badge ${escapeAttribute5(downtime.lifecycleBadgeClass)}">${escapeHtml5(downtime.lifecycle)}</span>
+            </div>
+            <div class="dm-stat">
+              <span class="dm-stat-label">Scope</span>
+              <span class="dm-badge ${escapeAttribute5(downtime.scopeBadgeClass)}">${escapeHtml5(downtime.scope)}</span>
+            </div>
+            <div class="dm-stat">
+              <span class="dm-stat-label">Definition</span>
+              <code>${escapeHtml5(downtime.definitionId)}</code>
+            </div>
+            <div class="dm-stat">
+              <span class="dm-stat-label">Elapsed / Duration</span>
+              <span>${escapeHtml5(downtime.durationFormatted)}</span>
+            </div>
+          </div>
+
+          <div class="dm-progress-section">
+            <h4>Endeavor Duration</h4>
+            ${downtime.isIndefinite ? `
+              <div class="dm-indefinite-notice">
+                <i class="fas fa-infinity"></i> Indefinite Activity (Running continuously for ${downtime.progressTicks} ticks)
+              </div>
+            ` : `
+              <div class="dm-progress-container dm-progress-large">
+                <div class="dm-progress-bar" style="width: ${downtime.progressPercent ?? 0}%;"></div>
+                <span class="dm-progress-text">${escapeHtml5(downtime.durationFormatted)} (${downtime.progressPercent ?? 0}%)</span>
+              </div>
+            `}
+          </div>
+        </section>
+
+        <section class="dm-section dm-participants-section">
+          <h4>Participants (${downtime.participants.length})</h4>
+          ${downtime.participants.length > 0 ? `
+            <ul class="dm-participants-list">
+              ${downtime.participants.map((p) => `
+                <li class="dm-participant-item">
+                  <span class="dm-participant-type dm-badge">[${escapeHtml5(p.participantType)}]</span>
+                  <span class="dm-participant-name"><strong>${escapeHtml5(p.displayName)}</strong></span>
+                  <span class="dm-participant-role">(${escapeHtml5(p.role)})</span>
+                  <span class="dm-participant-cap">Capacity: ${p.capacityConsumed}</span>
+                </li>
+              `).join("")}
+            </ul>
+          ` : `
+            <div class="dm-muted-text">No registered participants.</div>
+          `}
+        </section>
+
+        <section class="dm-section dm-outcomes-section">
+          <h4>Expected Outcomes & Receipts</h4>
+          ${downtime.outcomes.length > 0 ? `
+            <ul class="dm-outcomes-list">
+              ${downtime.outcomes.map((o) => `
+                <li class="dm-outcome-item ${o.received ? "dm-outcome-received" : ""}">
+                  <span class="dm-badge ${o.received ? "dm-badge-healthy" : "dm-badge-info"}">
+                    ${o.received ? "Granted" : "Pending"}
+                  </span>
+                  <span class="dm-outcome-desc">${escapeHtml5(o.description)}</span>
+                  <span class="dm-outcome-type">(${escapeHtml5(o.type)})</span>
+                </li>
+              `).join("")}
+            </ul>
+          ` : `
+            <div class="dm-muted-text">No outcomes declared.</div>
+          `}
+        </section>
+
+        ${downtime.description ? `
+          <section class="dm-section dm-desc-section">
+            <h4>Narrative Details</h4>
+            <p>${escapeHtml5(downtime.description)}</p>
+          </section>
+        ` : ""}
+      </div>
+
+      <footer class="dm-modal-footer">
+        ${downtime.canAdvance ? `
+          <form class="dm-advance-ticks-form" data-form-type="advanceDowntime" data-downtime-id="${escapeAttribute5(downtime.id)}">
+            <input type="number" name="ticks" value="1" min="1" max="100" class="dm-input-sm" style="width: 60px;" />
+            <button type="submit" class="dm-btn dm-btn-primary">
+              <i class="fas fa-forward"></i> Advance Ticks
+            </button>
+          </form>
+        ` : ""}
+
+        ${downtime.canComplete ? `
+          <button type="button" class="dm-btn dm-btn-success" data-action="completeDowntime" data-downtime-id="${escapeAttribute5(downtime.id)}">
+            <i class="fas fa-check"></i> Complete Activity
+          </button>
+        ` : ""}
+
+        ${downtime.canCancel ? `
+          <button type="button" class="dm-btn dm-btn-danger" data-action="cancelDowntime" data-downtime-id="${escapeAttribute5(downtime.id)}">
+            <i class="fas fa-times"></i> Cancel Activity
+          </button>
+        ` : ""}
+
+        <button type="button" class="dm-btn" data-action="closeModal">Close</button>
+      </footer>
+    </div>
+  `;
+}
+function renderDowntimeStartModalHtml(domainUuid, definitions) {
+  return `
+    <div class="dm-modal dm-downtime-start-modal">
+      <header class="dm-modal-header">
+        <h3>Initiate Downtime Activity</h3>
+        <button type="button" class="dm-btn-close" data-action="closeModal">&times;</button>
+      </header>
+
+      <form data-form-type="startDowntime" data-domain-uuid="${escapeAttribute5(domainUuid)}">
+        <div class="dm-modal-body">
+          <div class="dm-form-group">
+            <label for="dm-downtime-definition">Activity Blueprint</label>
+            <select id="dm-downtime-definition" name="definitionId" required>
+              <option value="">-- Select an activity --</option>
+              ${definitions.map((d) => `
+                <option value="${escapeAttribute5(d.id)}" data-scope="${escapeAttribute5(d.scope)}" data-duration="${d.defaultDurationTicks ?? ""}">
+                  ${escapeHtml5(d.label)} (${escapeHtml5(d.scope)}) ${d.defaultDurationTicks ? `- ${d.defaultDurationTicks} ticks` : "- Indefinite"}
+                </option>
+              `).join("")}
+            </select>
+          </div>
+
+          <div class="dm-form-group">
+            <label for="dm-downtime-label">Activity Label / Description</label>
+            <input type="text" id="dm-downtime-label" name="label" placeholder="Custom endeavor label (optional)" />
+          </div>
+
+          <div class="dm-form-group">
+            <label for="dm-downtime-scope">Scope</label>
+            <select id="dm-downtime-scope" name="scope">
+              <option value="domain">Domain-wide</option>
+              <option value="group">Operational Group</option>
+              <option value="individual">Individual Notable / Actor</option>
+              <option value="cross-domain">Cross-Domain</option>
+            </select>
+          </div>
+
+          <div class="dm-form-group">
+            <label for="dm-downtime-duration">Duration (Ticks)</label>
+            <input type="number" id="dm-downtime-duration" name="durationTicks" min="1" placeholder="Leave empty for Indefinite duration" />
+            <small class="dm-help-text">Leave blank for open-ended or indefinite downtime.</small>
+          </div>
+
+          <div class="dm-form-group">
+            <label for="dm-participant-ref">Primary Participant Reference</label>
+            <input type="text" id="dm-participant-ref" name="participantRef" placeholder="Notable ID, Group ID, or Domain reference" />
+          </div>
+        </div>
+
+        <footer class="dm-modal-footer">
+          <button type="submit" class="dm-btn dm-btn-primary">
+            <i class="fas fa-play"></i> Begin Activity
+          </button>
+          <button type="button" class="dm-btn" data-action="closeModal">Cancel</button>
+        </footer>
+      </form>
+    </div>
+  `;
+}
+function renderDowntimeSubsystemHtml(vm) {
+  return `
+    <div class="dm-downtime-subsystem" data-domain-uuid="${escapeAttribute5(vm.domainUuid)}">
+      <header class="dm-subsystem-header">
+        <div class="dm-header-title">
+          <h2>Downtime & Endeavors</h2>
+          <span class="dm-header-subtitle">Interludes, Character Endeavors, Training & Reconnaissance</span>
+        </div>
+
+        <div class="dm-summary-counters">
+          <div class="dm-counter-card">
+            <span class="dm-counter-value">${vm.totalCount}</span>
+            <span class="dm-counter-label">Total</span>
+          </div>
+          <div class="dm-counter-card dm-counter-active">
+            <span class="dm-counter-value">${vm.activeCount}</span>
+            <span class="dm-counter-label">In Progress</span>
+          </div>
+          <div class="dm-counter-card dm-counter-completed">
+            <span class="dm-counter-value">${vm.completedCount}</span>
+            <span class="dm-counter-label">Completed</span>
+          </div>
+        </div>
+      </header>
+
+      <div class="dm-toolbar">
+        <div class="dm-toolbar-filters">
+          <label class="dm-filter-label">Status:</label>
+          <select name="filterLifecycle" data-action="filterDowntimeLifecycle" class="dm-select-sm">
+            <option value="all" ${vm.filterLifecycle === "all" ? "selected" : ""}>All Statuses</option>
+            <option value="active" ${vm.filterLifecycle === "active" ? "selected" : ""}>In Progress</option>
+            <option value="completed" ${vm.filterLifecycle === "completed" ? "selected" : ""}>Completed</option>
+            <option value="paused" ${vm.filterLifecycle === "paused" ? "selected" : ""}>Paused</option>
+            <option value="canceled" ${vm.filterLifecycle === "canceled" ? "selected" : ""}>Canceled</option>
+          </select>
+
+          <input
+            type="text"
+            placeholder="Search activities..."
+            data-action="searchDowntime"
+            value="${escapeAttribute5(vm.searchTerm)}"
+            class="dm-input-sm dm-search-input"
+          />
+        </div>
+
+        <div class="dm-toolbar-actions">
+          <button type="button" class="dm-btn dm-btn-primary dm-btn-sm" data-action="openStartModal">
+            <i class="fas fa-plus"></i> Initiate Downtime
+          </button>
+        </div>
+      </div>
+
+      <main class="dm-subsystem-content">
+        ${renderDowntimeTableHtml(vm.activities)}
+      </main>
+    </div>
+  `;
+}
+
+// src/ui/domain-patterns/downtime/downtime-app.ts
+function cleanPayload4(payload) {
+  if (payload === null || typeof payload !== "object") {
+    return payload;
+  }
+  if (Array.isArray(payload)) {
+    return payload.map(cleanPayload4);
+  }
+  const cleaned = {};
+  for (const [key, value] of Object.entries(payload)) {
+    if (value !== void 0) {
+      cleaned[key] = typeof value === "object" && value !== null ? cleanPayload4(value) : value;
+    }
+  }
+  return cleaned;
+}
+function makeCommand5(type, payload) {
+  return {
+    contractVersion: COMMAND_CONTRACT_VERSION_V1,
+    commandId: createCommandId(),
+    type,
+    payload: cleanPayload4(payload),
+    issuedAtReal: Date.now()
+  };
+}
+var DowntimeApplicationController = class {
+  #domainUuid;
+  #commandBus;
+  #domains;
+  #downtimeRegistry;
+  #viewer;
+  #activeModal = null;
+  #selectedDowntimeId = null;
+  #filterLifecycle = "all";
+  #searchTerm = "";
+  #lastViewModel = null;
+  constructor(options) {
+    this.#domainUuid = options.domainUuid;
+    this.#commandBus = options.commandBus;
+    this.#domains = options.domains;
+    this.#downtimeRegistry = options.downtimeRegistry ?? createDefaultDowntimeRegistry();
+    this.#viewer = options.viewer;
+  }
+  get domainUuid() {
+    return this.#domainUuid;
+  }
+  get activeModal() {
+    return this.#activeModal;
+  }
+  get selectedDowntimeId() {
+    return this.#selectedDowntimeId;
+  }
+  get filterLifecycle() {
+    return this.#filterLifecycle;
+  }
+  get searchTerm() {
+    return this.#searchTerm;
+  }
+  get viewModel() {
+    return this.#lastViewModel;
+  }
+  setFilterLifecycle(filter) {
+    this.#filterLifecycle = filter;
+  }
+  setSearchTerm(term) {
+    this.#searchTerm = term;
+  }
+  openStartModal() {
+    this.#activeModal = "start";
+  }
+  openDowntimeDetail(downtimeId) {
+    this.#selectedDowntimeId = downtimeId;
+    this.#activeModal = "detail";
+  }
+  closeModal() {
+    this.#activeModal = null;
+    this.#selectedDowntimeId = null;
+  }
+  async loadViewModel() {
+    const id = this.#domainUuid.startsWith("JournalEntry.") ? this.#domainUuid.slice("JournalEntry.".length) : this.#domainUuid;
+    const docRes = await this.#domains.read(id);
+    if (!docRes.ok) return docRes;
+    const isGm = this.#viewer?.isGm ?? true;
+    const vm = buildDowntimeViewModel(docRes.value, {
+      viewerIsGm: isGm,
+      downtimeRegistry: this.#downtimeRegistry,
+      filterLifecycle: this.#filterLifecycle,
+      searchTerm: this.#searchTerm
+    });
+    this.#lastViewModel = vm;
+    return ok(vm);
+  }
+  render(viewModel) {
+    const vm = viewModel ?? this.#lastViewModel;
+    if (!vm) {
+      return `<div class="dm-loading">Loading Downtime Subsystem...</div>`;
+    }
+    const mainHtml = renderDowntimeSubsystemHtml(vm);
+    let modalHtml = "";
+    if (this.#activeModal === "start") {
+      const defs = this.#downtimeRegistry.list();
+      modalHtml = renderDowntimeStartModalHtml(this.#domainUuid, defs);
+    } else if (this.#activeModal === "detail" && this.#selectedDowntimeId) {
+      const a = vm.activities.find((item) => item.id === this.#selectedDowntimeId);
+      if (a) {
+        modalHtml = renderDowntimeDetailModalHtml(a, vm.viewerIsGm);
+      }
+    }
+    return `
+      <div class="dm-downtime-app-v2" data-domain-uuid="${escapeAttribute5(this.#domainUuid)}">
+        ${mainHtml}
+        ${modalHtml ? `<div class="dm-modal-backdrop">${modalHtml}</div>` : ""}
+      </div>
+    `;
+  }
+  async dispatchStartDowntime(payload) {
+    const id = this.#domainUuid.startsWith("JournalEntry.") ? this.#domainUuid.slice("JournalEntry.".length) : this.#domainUuid;
+    const docRes = await this.#domains.read(id);
+    if (!docRes.ok) return docRes;
+    const record = docRes.value.record;
+    const currentDowntimeData = getDomainDowntimeData(record);
+    const activityId = `dt-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const participants = [];
+    if (payload.participantRef) {
+      participants.push({
+        participantRef: payload.participantRef,
+        participantType: "notable",
+        role: "lead",
+        capacityConsumed: 1
+      });
+    }
+    const now = Date.now();
+    const newActivity = {
+      id: activityId,
+      domainUuid: this.#domainUuid,
+      definitionId: payload.definitionId,
+      name: payload.label ?? payload.definitionId,
+      schemaVersion: 1,
+      revision: 0,
+      scope: payload.scope ?? "domain",
+      lifecycle: "inProgress",
+      elapsedTicks: 0,
+      durationTicks: payload.durationTicks ?? null,
+      participants: Object.freeze(participants),
+      tags: Object.freeze([]),
+      createdAt: now,
+      updatedAt: now
+    };
+    const updatedActivities = [...currentDowntimeData.activities, newActivity];
+    const updatedRecord = withDomainDowntimeData(record, {
+      ...currentDowntimeData,
+      activities: updatedActivities
+    });
+    if ("save" in this.#domains && typeof this.#domains.save === "function") {
+      const saveRes = await this.#domains.save({
+        ...docRes.value,
+        record: updatedRecord
+      });
+      if (!saveRes.ok) return saveRes;
+    }
+    if (this.#commandBus) {
+      const cmd = makeCommand5("downtime:start-activity", {
+        domainUuid: this.#domainUuid,
+        activity: newActivity
+      });
+      await this.#commandBus.execute(cmd);
+    }
+    return ok({ activityId });
+  }
+  async dispatchAdvanceDowntime(payload) {
+    const id = this.#domainUuid.startsWith("JournalEntry.") ? this.#domainUuid.slice("JournalEntry.".length) : this.#domainUuid;
+    const docRes = await this.#domains.read(id);
+    if (!docRes.ok) return docRes;
+    const record = docRes.value.record;
+    const currentDowntimeData = getDomainDowntimeData(record);
+    const activity = currentDowntimeData.activities.find((a) => a.id === payload.activityId);
+    if (!activity) {
+      return err(createPublicError({
+        code: "DM_DOWNTIME_NOT_FOUND",
+        category: "not-found",
+        message: `Downtime activity ${payload.activityId} not found`
+      }));
+    }
+    const newProgress = activity.elapsedTicks + Math.max(0, payload.ticks);
+    let newLifecycle = activity.lifecycle;
+    if (activity.durationTicks !== null && activity.durationTicks !== void 0) {
+      if (newProgress >= activity.durationTicks && newLifecycle === "inProgress") {
+        newLifecycle = "completed";
+      }
+    }
+    const now = Date.now();
+    const updatedActivity = {
+      ...activity,
+      elapsedTicks: newProgress,
+      lifecycle: newLifecycle,
+      revision: activity.revision + 1,
+      updatedAt: now,
+      completedAt: newLifecycle === "completed" ? now : activity.completedAt
+    };
+    const updatedActivities = currentDowntimeData.activities.map(
+      (a) => a.id === payload.activityId ? updatedActivity : a
+    );
+    const updatedRecord = withDomainDowntimeData(record, {
+      ...currentDowntimeData,
+      activities: updatedActivities
+    });
+    if ("save" in this.#domains && typeof this.#domains.save === "function") {
+      const saveRes = await this.#domains.save({
+        ...docRes.value,
+        record: updatedRecord
+      });
+      if (!saveRes.ok) return saveRes;
+    }
+    return ok({ activity: updatedActivity });
+  }
+  async dispatchCompleteDowntime(activityId) {
+    const id = this.#domainUuid.startsWith("JournalEntry.") ? this.#domainUuid.slice("JournalEntry.".length) : this.#domainUuid;
+    const docRes = await this.#domains.read(id);
+    if (!docRes.ok) return docRes;
+    const record = docRes.value.record;
+    const currentDowntimeData = getDomainDowntimeData(record);
+    const activity = currentDowntimeData.activities.find((a) => a.id === activityId);
+    if (!activity) {
+      return err(createPublicError({
+        code: "DM_DOWNTIME_NOT_FOUND",
+        category: "not-found",
+        message: `Downtime activity ${activityId} not found`
+      }));
+    }
+    const now = Date.now();
+    const updatedActivity = {
+      ...activity,
+      lifecycle: "completed",
+      revision: activity.revision + 1,
+      updatedAt: now,
+      completedAt: now
+    };
+    const updatedActivities = currentDowntimeData.activities.map(
+      (a) => a.id === activityId ? updatedActivity : a
+    );
+    const updatedRecord = withDomainDowntimeData(record, {
+      ...currentDowntimeData,
+      activities: updatedActivities
+    });
+    if ("save" in this.#domains && typeof this.#domains.save === "function") {
+      const saveRes = await this.#domains.save({
+        ...docRes.value,
+        record: updatedRecord
+      });
+      if (!saveRes.ok) return saveRes;
+    }
+    return ok({ activity: updatedActivity });
+  }
+  async dispatchCancelDowntime(activityId, reason) {
+    const id = this.#domainUuid.startsWith("JournalEntry.") ? this.#domainUuid.slice("JournalEntry.".length) : this.#domainUuid;
+    const docRes = await this.#domains.read(id);
+    if (!docRes.ok) return docRes;
+    const record = docRes.value.record;
+    const currentDowntimeData = getDomainDowntimeData(record);
+    const activity = currentDowntimeData.activities.find((a) => a.id === activityId);
+    if (!activity) {
+      return err(createPublicError({
+        code: "DM_DOWNTIME_NOT_FOUND",
+        category: "not-found",
+        message: `Downtime activity ${activityId} not found`
+      }));
+    }
+    const now = Date.now();
+    const updatedActivity = {
+      ...activity,
+      lifecycle: "cancelled",
+      revision: activity.revision + 1,
+      updatedAt: now,
+      cancelledAt: now,
+      metadata: {
+        ...activity.metadata,
+        cancellationReason: reason
+      }
+    };
+    const updatedActivities = currentDowntimeData.activities.map(
+      (a) => a.id === activityId ? updatedActivity : a
+    );
+    const updatedRecord = withDomainDowntimeData(record, {
+      ...currentDowntimeData,
+      activities: updatedActivities
+    });
+    if ("save" in this.#domains && typeof this.#domains.save === "function") {
+      const saveRes = await this.#domains.save({
+        ...docRes.value,
+        record: updatedRecord
+      });
+      if (!saveRes.ok) return saveRes;
+    }
+    return ok({ activity: updatedActivity });
+  }
+};
+var MockApplicationV25 = class {
+  element = null;
+  options;
+  constructor(options = {}) {
+    this.options = options;
+  }
+  async _prepareContext(options) {
+    return {};
+  }
+  _renderHTML(context, options) {
+    return "";
+  }
+  _replaceHTML(result, content, options) {
+    if (typeof result === "string") {
+      content.innerHTML = result;
+    }
+  }
+  _setupActions(element) {
+    if (!element || element._dmActionsConfigured) return;
+    element._dmActionsConfigured = true;
+    const actions = this.constructor.DEFAULT_OPTIONS?.actions ?? {};
+    element.addEventListener?.("click", async (event) => {
+      let target = event?.target;
+      while (target) {
+        const action = target.getAttribute?.("data-action") ?? target.dataset?.action;
+        if (action && typeof actions[action] === "function") {
+          await actions[action].call(this, event, target);
+          return;
+        }
+        if (target === element) break;
+        target = target.parentElement;
+      }
+    });
+  }
+  async render(force, options) {
+    if (!this.element) {
+      const classes = (this.constructor.DEFAULT_OPTIONS?.classes ?? ["domain-manager", "dm-downtime-app-v2"]).join(" ");
+      if (typeof globalThis.document?.createElement === "function") {
+        const el = globalThis.document.createElement("div");
+        el.className = classes;
+        this.element = el;
+      } else {
+        const listeners = {};
+        this.element = {
+          className: classes,
+          innerHTML: "",
+          children: [],
+          querySelectorAll: () => [],
+          querySelector: () => null,
+          addEventListener: (evt, cb) => {
+            listeners[evt] = listeners[evt] || [];
+            listeners[evt].push(cb);
+          },
+          _listeners: listeners
+        };
+      }
+    }
+    const context = await this._prepareContext(options);
+    const result = await this._renderHTML(context, options);
+    this._replaceHTML(result, this.element, options);
+    this._setupActions(this.element);
+    this._onRender(context, options);
+    return this;
+  }
+  _onRender(context, options) {
+  }
+  async close(options) {
+    this.element = null;
+  }
+};
+var BaseApp5 = globalThis.foundry?.applications?.api?.ApplicationV2 ?? MockApplicationV25;
+var DowntimeApplication = class _DowntimeApplication extends BaseApp5 {
+  static DEFAULT_OPTIONS = {
+    id: "domain-manager-downtime-{id}",
+    classes: ["domain-manager", "dm-downtime-app-v2"],
+    tag: "div",
+    window: {
+      title: "Downtime & Endeavors",
+      icon: "fas fa-hourglass-half",
+      resizable: true,
+      minimizable: true
+    },
+    position: {
+      width: 840,
+      height: 600
+    },
+    actions: {
+      openStartModal: _DowntimeApplication.#onOpenStartModal,
+      openDowntimeDetail: _DowntimeApplication.#onOpenDowntimeDetail,
+      advanceDowntime: _DowntimeApplication.#onAdvanceDowntime,
+      completeDowntime: _DowntimeApplication.#onCompleteDowntime,
+      cancelDowntime: _DowntimeApplication.#onCancelDowntime,
+      closeModal: _DowntimeApplication.#onCloseModal
+    }
+  };
+  #controller;
+  constructor(options) {
+    super(options);
+    this.#controller = new DowntimeApplicationController(options);
+  }
+  get controller() {
+    return this.#controller;
+  }
+  async _prepareContext(options) {
+    const vmRes = await this.#controller.loadViewModel();
+    return {
+      viewModel: vmRes.ok ? vmRes.value : null,
+      error: !vmRes.ok ? vmRes.error : null
+    };
+  }
+  _renderHTML(context, options) {
+    if (context.error) {
+      return `<div class="dm-error-state">${escapeHtml5(context.error.message)}</div>`;
+    }
+    return this.#controller.render(context.viewModel);
+  }
+  _replaceHTML(result, content, options) {
+    if (typeof result === "string") {
+      content.innerHTML = result;
+    } else if (result && typeof content.replaceChildren === "function") {
+      content.replaceChildren(result);
+    } else if (result) {
+      content.innerHTML = String(result);
+    }
+  }
+  _onRender(context, options) {
+    const el = this.element;
+    if (el) {
+      this.attachEventListeners(el);
+    }
+  }
+  attachEventListeners(element) {
+    const forms = element.querySelectorAll?.("form[data-form-type]") ?? [];
+    forms.forEach((form) => {
+      if (form._dmSubmitBound) return;
+      form._dmSubmitBound = true;
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const formType = form.getAttribute?.("data-form-type");
+        const formData = new FormData(form);
+        const data = {};
+        formData.forEach((val, key) => {
+          data[key] = String(val).trim();
+        });
+        if (formType === "startDowntime") {
+          const durationTicks = data.durationTicks ? parseInt(data.durationTicks, 10) : null;
+          await this.#controller.dispatchStartDowntime({
+            definitionId: data.definitionId,
+            label: data.label || void 0,
+            scope: data.scope || "domain",
+            durationTicks: durationTicks && !isNaN(durationTicks) ? durationTicks : null,
+            participantRef: data.participantRef || void 0
+          });
+          this.#controller.closeModal();
+          this.render();
+        } else if (formType === "advanceDowntime") {
+          const activityId = form.getAttribute?.("data-downtime-id");
+          const ticks = parseInt(data.ticks || "1", 10);
+          if (activityId) {
+            await this.#controller.dispatchAdvanceDowntime({
+              activityId,
+              ticks: isNaN(ticks) ? 1 : ticks
+            });
+            this.render();
+          }
+        }
+      });
+    });
+    const filterSelect = element.querySelector?.('select[data-action="filterDowntimeLifecycle"]');
+    if (filterSelect && !filterSelect._dmChangeBound) {
+      filterSelect._dmChangeBound = true;
+      filterSelect.addEventListener("change", () => {
+        this.#controller.setFilterLifecycle(filterSelect.value);
+        this.render();
+      });
+    }
+    const searchInput = element.querySelector?.('input[data-action="searchDowntime"]');
+    if (searchInput && !searchInput._dmInputBound) {
+      searchInput._dmInputBound = true;
+      searchInput.addEventListener("input", () => {
+        this.#controller.setSearchTerm(searchInput.value);
+        this.render();
+      });
+    }
+  }
+  static #onOpenStartModal() {
+    this.#controller.openStartModal();
+    this.render();
+  }
+  static #onOpenDowntimeDetail(event, target) {
+    const id = target?.dataset?.downtimeId ?? target?.getAttribute?.("data-downtime-id");
+    if (id) {
+      this.#controller.openDowntimeDetail(id);
+      this.render();
+    }
+  }
+  static async #onAdvanceDowntime(event, target) {
+    const id = target?.dataset?.downtimeId ?? target?.getAttribute?.("data-downtime-id");
+    if (id) {
+      await this.#controller.dispatchAdvanceDowntime({ activityId: id, ticks: 1 });
+      this.render();
+    }
+  }
+  static async #onCompleteDowntime(event, target) {
+    const id = target?.dataset?.downtimeId ?? target?.getAttribute?.("data-downtime-id");
+    if (id) {
+      await this.#controller.dispatchCompleteDowntime(id);
+      this.render();
+    }
+  }
+  static async #onCancelDowntime(event, target) {
+    const id = target?.dataset?.downtimeId ?? target?.getAttribute?.("data-downtime-id");
+    if (id) {
+      await this.#controller.dispatchCancelDowntime(id);
+      this.render();
+    }
+  }
+  static #onCloseModal() {
+    this.#controller.closeModal();
+    this.render();
+  }
+};
+
 // src/main.ts
 var logger = new Logger("Domain Manager");
 var runtime = null;
@@ -20059,12 +26276,18 @@ Hooks.once("ready", async () => {
 export {
   DefaultDomainControllerProvider,
   DefaultPublicEconomyApi,
+  DowntimeApplication,
+  DowntimeApplicationController,
   EconomyApplication,
   EconomyApplicationController,
+  FacilitiesApplication,
+  FacilitiesApplicationController,
   PeopleApplication,
   PeopleApplicationController,
   PeopleRepairTool,
   PeopleService,
+  ProjectsApplication,
+  ProjectsApplicationController,
   ProviderRegistry,
   ResourceDefinitionRegistry,
   ThresholdService,
