@@ -2088,7 +2088,10 @@ export class EconomyService {
   }
 
   #cleanUuid(domainUuid: string): string {
-    return domainUuid.trim();
+    const value = domainUuid.trim();
+    return value.startsWith("JournalEntry.")
+      ? value.slice("JournalEntry.".length)
+      : value;
   }
 
   #evaluateThresholds(

@@ -152,7 +152,16 @@ export class LedgerStore {
     let filtered = list;
 
     if (filter.domainUuid !== undefined) {
-      filtered = filtered.filter((e) => e.domainUuid === filter.domainUuid);
+      const cleanFilter = filter.domainUuid.startsWith("JournalEntry.")
+        ? filter.domainUuid.slice("JournalEntry.".length)
+        : filter.domainUuid;
+      filtered = filtered.filter((e) => {
+        if (e.domainUuid === filter.domainUuid) return true;
+        const cleanEntry = e.domainUuid.startsWith("JournalEntry.")
+          ? e.domainUuid.slice("JournalEntry.".length)
+          : e.domainUuid;
+        return cleanEntry === cleanFilter;
+      });
     }
     if (filter.resourceId !== undefined) {
       filtered = filtered.filter((e) => e.resourceId === filter.resourceId);

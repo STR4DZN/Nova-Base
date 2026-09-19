@@ -12310,7 +12310,7 @@ var G2DiagnosticsProvider = class {
 
 // src/core/versioning/build-metadata.ts
 var BUILD_METADATA = Object.freeze({
-  moduleVersion: "0.0.4",
+  moduleVersion: "0.0.5",
   buildChannel: "dev",
   target: "foundry-vtt"
 });
@@ -12755,7 +12755,12 @@ var LedgerStore = class {
     }
     let filtered = list;
     if (filter.domainUuid !== void 0) {
-      filtered = filtered.filter((e) => e.domainUuid === filter.domainUuid);
+      const cleanFilter = filter.domainUuid.startsWith("JournalEntry.") ? filter.domainUuid.slice("JournalEntry.".length) : filter.domainUuid;
+      filtered = filtered.filter((e) => {
+        if (e.domainUuid === filter.domainUuid) return true;
+        const cleanEntry = e.domainUuid.startsWith("JournalEntry.") ? e.domainUuid.slice("JournalEntry.".length) : e.domainUuid;
+        return cleanEntry === cleanFilter;
+      });
     }
     if (filter.resourceId !== void 0) {
       filtered = filtered.filter((e) => e.resourceId === filter.resourceId);
@@ -13202,7 +13207,12 @@ var ReservationStore = class {
       return Object.freeze(all);
     }
     if (filter.domainUuid !== void 0) {
-      all = all.filter((r) => r.domainUuid === filter.domainUuid);
+      const cleanFilter = filter.domainUuid.startsWith("JournalEntry.") ? filter.domainUuid.slice("JournalEntry.".length) : filter.domainUuid;
+      all = all.filter((r) => {
+        if (r.domainUuid === filter.domainUuid) return true;
+        const cleanR = r.domainUuid.startsWith("JournalEntry.") ? r.domainUuid.slice("JournalEntry.".length) : r.domainUuid;
+        return cleanR === cleanFilter;
+      });
     }
     if (filter.resourceId !== void 0) {
       all = all.filter((r) => r.resourceId === filter.resourceId);
@@ -13225,9 +13235,11 @@ var ReservationStore = class {
     return this.listEvents(reservationId);
   }
   getReservedTotal(domainUuid, resourceId) {
+    const cleanTarget = domainUuid.startsWith("JournalEntry.") ? domainUuid.slice("JournalEntry.".length) : domainUuid;
     let total = 0;
     for (const r of this.#reservations.values()) {
-      if (r.domainUuid === domainUuid && r.resourceId === resourceId && (r.status === "active" || r.status === "partially-consumed")) {
+      const cleanR = r.domainUuid.startsWith("JournalEntry.") ? r.domainUuid.slice("JournalEntry.".length) : r.domainUuid;
+      if ((r.domainUuid === domainUuid || cleanR === cleanTarget) && r.resourceId === resourceId && (r.status === "active" || r.status === "partially-consumed")) {
         total += r.remainingAmountMinor;
       }
     }
@@ -15719,7 +15731,8 @@ var EconomyService = class {
     }
   }
   #cleanUuid(domainUuid) {
-    return domainUuid.trim();
+    const value = domainUuid.trim();
+    return value.startsWith("JournalEntry.") ? value.slice("JournalEntry.".length) : value;
   }
   #evaluateThresholds(domainUuid, resourceId, balanceMinor, capacityMinor) {
     if (!this.#thresholdService) return;
@@ -16197,7 +16210,8 @@ var EconomyAggregationProvider = class {
     const hiddenContributors = [];
     const unknownContributors = [];
     for (const uuid of domainUuids) {
-      const docRes = await this.#domains.read(uuid);
+      const cleanId = uuid.trim().startsWith("JournalEntry.") ? uuid.trim().slice("JournalEntry.".length) : uuid.trim();
+      const docRes = await this.#domains.read(cleanId);
       if (!docRes.ok) {
         if (!unknownContributors.includes(uuid)) {
           unknownContributors.push(uuid);
@@ -16417,7 +16431,7 @@ var DefaultPublicEconomyApi = class {
     }
     const accessibleDomains = /* @__PURE__ */ new Set();
     for (const d of candidateDomains) {
-      const cleanId = d.startsWith("JournalEntry.") ? d.slice("JournalEntry.".length) : d;
+      const cleanId = this.#cleanUuid(d);
       const docRes = await this.#domains.read(cleanId);
       if (docRes.ok) {
         const doc = docRes.value;
@@ -16440,7 +16454,7 @@ var DefaultPublicEconomyApi = class {
     if (resourceIds.length > 0) {
       let anyResourceVisible = false;
       for (const d of accessibleDomains) {
-        const cleanId = d.startsWith("JournalEntry.") ? d.slice("JournalEntry.".length) : d;
+        const cleanId = this.#cleanUuid(d);
         const docRes = await this.#domains.read(cleanId);
         if (docRes.ok) {
           const econRes = tryGetDomainEconomyData(docRes.value.record);
@@ -16550,7 +16564,8 @@ var DefaultPublicEconomyApi = class {
   }
   async getContext(domainUuid, callerViewer) {
     const viewer = this.#projection.resolveViewer(callerViewer);
-    const docRes = await this.#domains.read(domainUuid);
+    const cleanId = this.#cleanUuid(domainUuid);
+    const docRes = await this.#domains.read(cleanId);
     if (!docRes.ok) return docRes;
     const econRes = tryGetDomainEconomyData(docRes.value.record);
     if (!econRes.ok) return econRes;
@@ -16670,7 +16685,7 @@ var DefaultPublicEconomyApi = class {
     const viewer = this.#projection.resolveViewer(callerViewer);
     const visibleDomainResourceKeys = /* @__PURE__ */ new Set();
     if (filter.domainUuid) {
-      const cleanId = filter.domainUuid.startsWith("JournalEntry.") ? filter.domainUuid.slice("JournalEntry.".length) : filter.domainUuid;
+      const cleanId = this.#cleanUuid(filter.domainUuid);
       const docRes = await this.#domains.read(cleanId);
       if (docRes.ok) {
         const econRes = tryGetDomainEconomyData(docRes.value.record);
@@ -16732,7 +16747,8 @@ var DefaultPublicEconomyApi = class {
         })
       );
     }
-    const docRes = await this.#domains.read(r.domainUuid);
+    const cleanId = this.#cleanUuid(r.domainUuid);
+    const docRes = await this.#domains.read(cleanId);
     if (!docRes.ok) {
       return err(
         createPublicError({
@@ -16780,7 +16796,8 @@ var DefaultPublicEconomyApi = class {
     const raw = this.#reservationStore.list(filter);
     const visibleResourceIds = /* @__PURE__ */ new Set();
     if (filter.domainUuid) {
-      const docRes = await this.#domains.read(filter.domainUuid);
+      const cleanId = this.#cleanUuid(filter.domainUuid);
+      const docRes = await this.#domains.read(cleanId);
       if (docRes.ok) {
         const econRes = tryGetDomainEconomyData(docRes.value.record);
         if (econRes.ok) {
@@ -16864,6 +16881,10 @@ var DefaultPublicEconomyApi = class {
       issuedAtReal: Date.now()
     };
     return this.#commandBus.execute(envelope, options);
+  }
+  #cleanUuid(domainUuid) {
+    const value = domainUuid.trim();
+    return value.startsWith("JournalEntry.") ? value.slice("JournalEntry.".length) : value;
   }
 };
 
@@ -17675,7 +17696,8 @@ var NativeResourceProvider = class {
     return this.capabilities.includes(cap);
   }
   async readBalance(domainUuid, resourceId, _providerRef) {
-    const docRes = await this.#domains.read(domainUuid);
+    const cleanId = domainUuid.trim().startsWith("JournalEntry.") ? domainUuid.trim().slice("JournalEntry.".length) : domainUuid.trim();
+    const docRes = await this.#domains.read(cleanId);
     if (!docRes.ok) return docRes;
     const econRes = tryGetDomainEconomyData(docRes.value.record);
     if (!econRes.ok) return econRes;

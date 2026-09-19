@@ -2,7 +2,7 @@
 
 ## Identidade
 
-- Module version: `0.0.4`
+- Module version: `0.0.5`
 - Gate de código atual: `G4 — Economy & Resources (IMPLEMENTAÇÃO COMPLETA — PENDENTE ACEITAÇÃO DO USUÁRIO)`
 - Estado local: `GATE_G4_PENDING_USER_ACCEPTANCE`
 - Estado externo: `GATE_G4_PENDING_USER_ACCEPTANCE (Aguardando homologação e aceitação soberana do usuário)`
@@ -32,17 +32,18 @@
 | Verificação | Resultado |
 |---|---|
 | TypeScript strict (`tsc --noEmit`) | PASS (0 erros) |
-| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 435/435 (0 falhas) |
+| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 444/444 (0 falhas) |
 | Relatório de Aceitação | Gerado (`docs/GATE_G4_ACCEPTANCE_REPORT.md`, `docs/GATE_G4_REVALIDACAO_FINAL_5.md`, `docs/GATE_G4_REVALIDACAO_FINAL_6.md`) |
 | Regressões G0/G1/G2/G3 | 0 (todos os 335 testes anteriores preservados e passando) |
-| Testes novos Gate G4 | 100 testes dedicados (G4.1 a G4.10 + suítes de auditoria, isolamento, hardening, matriz de recuperação e revalidações 3/4/5/6) |
+| Testes novos Gate G4 | 109 testes dedicados (G4.1 a G4.10 + suítes de auditoria, isolamento, hardening, matriz de recuperação, revalidações 3/4/5/6 e resolução estrita de UUID JournalEntry) |
 | Remediação de Auditoria G4-AUD-001 a G4-AUD-012 | PASS — 100% remediado, endurecido e verificado |
 | Remediação da Revalidação G4-REVAL3-001 a G4-REVAL3-007 | PASS — 100% remediado, endurecido e verificado |
 | Remediação da Revalidação G4-REVAL4-001 a G4-REVAL4-004 | PASS — 100% remediado, endurecido e verificado |
 | Remediação da Revalidação G4-REVAL5-001 a G4-REVAL5-004 | PASS — 100% remediado, endurecido e verificado |
 | Remediação da Revalidação G4-REVAL6-001 | PASS — 100% remediado, endurecido e verificado |
+| Normalização de UUID JournalEntry (`domain-uuid-resolution`) | PASS — 100% remediado e verificado contra store estrito (0 bypass) |
 | Build do pacote (`node build.mjs`) | PASS (`dist/main.js` gerado) |
-| Empacotamento (`node scripts/package.mjs`) | PASS (`dist/domain-manager-v0.0.4.zip` gerado) |
+| Empacotamento (`node scripts/package.mjs`) | PASS (`dist/domain-manager-v0.0.5.zip` gerado) |
 | Validação de pacote (`node scripts/validate-package.mjs`) | PASS |
 | Validação de artefato (`node scripts/validate-artifact.mjs`) | PASS |
 

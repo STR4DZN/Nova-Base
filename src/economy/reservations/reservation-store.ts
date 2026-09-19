@@ -114,7 +114,16 @@ export class ReservationStore {
     }
 
     if (filter.domainUuid !== undefined) {
-      all = all.filter((r) => r.domainUuid === filter.domainUuid);
+      const cleanFilter = filter.domainUuid.startsWith("JournalEntry.")
+        ? filter.domainUuid.slice("JournalEntry.".length)
+        : filter.domainUuid;
+      all = all.filter((r) => {
+        if (r.domainUuid === filter.domainUuid) return true;
+        const cleanR = r.domainUuid.startsWith("JournalEntry.")
+          ? r.domainUuid.slice("JournalEntry.".length)
+          : r.domainUuid;
+        return cleanR === cleanFilter;
+      });
     }
     if (filter.resourceId !== undefined) {
       all = all.filter((r) => r.resourceId === filter.resourceId);
@@ -141,10 +150,16 @@ export class ReservationStore {
   }
 
   getReservedTotal(domainUuid: string, resourceId: string): number {
+    const cleanTarget = domainUuid.startsWith("JournalEntry.")
+      ? domainUuid.slice("JournalEntry.".length)
+      : domainUuid;
     let total = 0;
     for (const r of this.#reservations.values()) {
+      const cleanR = r.domainUuid.startsWith("JournalEntry.")
+        ? r.domainUuid.slice("JournalEntry.".length)
+        : r.domainUuid;
       if (
-        r.domainUuid === domainUuid &&
+        (r.domainUuid === domainUuid || cleanR === cleanTarget) &&
         r.resourceId === resourceId &&
         (r.status === "active" || r.status === "partially-consumed")
       ) {

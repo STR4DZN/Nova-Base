@@ -41,7 +41,10 @@ export class NativeResourceProvider implements ResourceProvider {
     resourceId: string,
     _providerRef: string
   ): Promise<Result<ResourceProviderBalanceResult, PublicError>> {
-    const docRes = await this.#domains.read(domainUuid);
+    const cleanId = domainUuid.trim().startsWith("JournalEntry.")
+      ? domainUuid.trim().slice("JournalEntry.".length)
+      : domainUuid.trim();
+    const docRes = await this.#domains.read(cleanId);
     if (!docRes.ok) return docRes;
 
     const econRes = tryGetDomainEconomyData(docRes.value.record);

@@ -78,7 +78,10 @@ export class EconomyAggregationProvider {
     const unknownContributors: string[] = [];
 
     for (const uuid of domainUuids) {
-      const docRes = await this.#domains.read(uuid);
+      const cleanId = uuid.trim().startsWith("JournalEntry.")
+        ? uuid.trim().slice("JournalEntry.".length)
+        : uuid.trim();
+      const docRes = await this.#domains.read(cleanId);
       if (!docRes.ok) {
         if (!unknownContributors.includes(uuid)) {
           unknownContributors.push(uuid);

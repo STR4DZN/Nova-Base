@@ -222,7 +222,7 @@ export class DefaultPublicEconomyApi implements PublicEconomyApi {
 
     const accessibleDomains = new Set<string>();
     for (const d of candidateDomains) {
-      const cleanId = d.startsWith("JournalEntry.") ? d.slice("JournalEntry.".length) : d;
+      const cleanId = this.#cleanUuid(d);
       const docRes = await this.#domains.read(cleanId);
       if (docRes.ok) {
         const doc = docRes.value as any;
@@ -249,7 +249,7 @@ export class DefaultPublicEconomyApi implements PublicEconomyApi {
     if (resourceIds.length > 0) {
       let anyResourceVisible = false;
       for (const d of accessibleDomains) {
-        const cleanId = d.startsWith("JournalEntry.") ? d.slice("JournalEntry.".length) : d;
+        const cleanId = this.#cleanUuid(d);
         const docRes = await this.#domains.read(cleanId);
         if (docRes.ok) {
           const econRes = tryGetDomainEconomyData(docRes.value.record);
@@ -392,7 +392,8 @@ export class DefaultPublicEconomyApi implements PublicEconomyApi {
     callerViewer?: Partial<ViewerIdentity>
   ): Promise<Result<EconomyContextDto, PublicError>> {
     const viewer = this.#projection.resolveViewer(callerViewer);
-    const docRes = await this.#domains.read(domainUuid);
+    const cleanId = this.#cleanUuid(domainUuid);
+    const docRes = await this.#domains.read(cleanId);
     if (!docRes.ok) return docRes;
 
     const econRes = tryGetDomainEconomyData(docRes.value.record);
@@ -558,9 +559,7 @@ export class DefaultPublicEconomyApi implements PublicEconomyApi {
     const visibleDomainResourceKeys = new Set<string>();
 
     if (filter.domainUuid) {
-      const cleanId = filter.domainUuid.startsWith("JournalEntry.")
-        ? filter.domainUuid.slice("JournalEntry.".length)
-        : filter.domainUuid;
+      const cleanId = this.#cleanUuid(filter.domainUuid);
       const docRes = await this.#domains.read(cleanId);
       if (docRes.ok) {
         const econRes = tryGetDomainEconomyData(docRes.value.record);
@@ -637,7 +636,8 @@ export class DefaultPublicEconomyApi implements PublicEconomyApi {
     }
 
     // Resolve domain and check account visibility (G4-AUD-007)
-    const docRes = await this.#domains.read(r.domainUuid);
+    const cleanId = this.#cleanUuid(r.domainUuid);
+    const docRes = await this.#domains.read(cleanId);
     if (!docRes.ok) {
       return err(
         createPublicError({
@@ -694,7 +694,8 @@ export class DefaultPublicEconomyApi implements PublicEconomyApi {
     const visibleResourceIds = new Set<string>();
 
     if (filter.domainUuid) {
-      const docRes = await this.#domains.read(filter.domainUuid);
+      const cleanId = this.#cleanUuid(filter.domainUuid);
+      const docRes = await this.#domains.read(cleanId);
       if (docRes.ok) {
         const econRes = tryGetDomainEconomyData(docRes.value.record);
         if (econRes.ok) {
@@ -832,5 +833,12 @@ export class DefaultPublicEconomyApi implements PublicEconomyApi {
     };
 
     return this.#commandBus.execute(envelope, options);
+  }
+
+  #cleanUuid(domainUuid: string): string {
+    const value = domainUuid.trim();
+    return value.startsWith("JournalEntry.")
+      ? value.slice("JournalEntry.".length)
+      : value;
   }
 }
