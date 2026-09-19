@@ -80,11 +80,41 @@ import {
   type ThresholdStorageAdapter
 } from "../economy/storage/threshold-storage-adapter.js";
 import { EconomyApplication, EconomyApplicationController } from "../ui/domain-patterns/economy/economy-app.js";
+import {
+  ProjectDefinitionRegistry,
+  createDefaultProjectRegistry
+} from "../projects/definitions/project-registry.js";
+import { ProjectsService } from "../projects/services/projects-service.js";
+import {
+  DefaultPublicProjectsApi,
+  type PublicProjectsApi
+} from "../projects/api/public-projects-api.js";
+import { registerProjectCommands } from "../projects/commands/project-commands.js";
+import {
+  FacilityDefinitionRegistry,
+  createDefaultFacilityRegistry
+} from "../facilities/definitions/facility-registry.js";
+import { FacilitiesService } from "../facilities/services/facilities-service.js";
+import {
+  DefaultPublicFacilitiesApi,
+  type PublicFacilitiesApi
+} from "../facilities/api/public-facilities-api.js";
+import { registerFacilityCommands } from "../facilities/commands/facility-commands.js";
+import {
+  DowntimeDefinitionRegistry,
+  createDefaultDowntimeRegistry
+} from "../downtime/definitions/downtime-registry.js";
+import { DowntimeService } from "../downtime/services/downtime-service.js";
+import {
+  DefaultPublicDowntimeApi,
+  type PublicDowntimeApi
+} from "../downtime/api/public-downtime-api.js";
+import { registerDowntimeCommands } from "../downtime/commands/downtime-commands.js";
 
 /**
  * Public API exposed to external modules / users via module.api.
  *
- * Implements G4-AUD-004:
+ * Implements G4-AUD-004 & G5-AUD-001:
  * Strict isolation between internal stores/mutators and public query/dispatch facades.
  */
 export interface PublicModuleApi {
@@ -92,16 +122,19 @@ export interface PublicModuleApi {
   readonly domains: DomainReadRepository;
   readonly economy: PublicEconomyApi;
   readonly people: PublicPeopleApi;
+  readonly projects: PublicProjectsApi;
+  readonly facilities: PublicFacilitiesApi;
+  readonly downtime: PublicDowntimeApi;
   readonly diagnostics: G2DiagnosticsProvider;
 }
 
 /**
  * Runtime services owned by the Domain Manager composition root.
  *
- * Implements Master Spec §11.1, §11.2, G2-AUD-001, G2-AUD-008, G4-AUD-004:
+ * Implements Master Spec §11.1, §11.2, G2-AUD-001, G2-AUD-008, G4-AUD-004, G5-AUD-001:
  * - Public UI/services only see read operations and sanitized DTOs via read-only facades.
  * - State mutations must strictly be dispatched via `commandBus`.
- * - Complete Gate G2, G3, and G4 verticals are composed and reachable from production entrypoint.
+ * - Complete Gate G2, G3, G4, and G5 verticals are composed and reachable from production entrypoint.
  */
 export interface DomainManagerRuntime {
   readonly publicApi: PublicModuleApi;
@@ -125,6 +158,12 @@ export interface DomainManagerRuntime {
   readonly providerRegistry: ProviderRegistry;
   readonly customResourceStore: CustomResourceDefinitionStore;
   readonly thresholds: ThresholdService;
+  readonly projects: PublicProjectsApi;
+  readonly facilities: PublicFacilitiesApi;
+  readonly downtime: PublicDowntimeApi;
+  readonly projectRegistry: ProjectDefinitionRegistry;
+  readonly facilityRegistry: FacilityDefinitionRegistry;
+  readonly downtimeRegistry: DowntimeDefinitionRegistry;
   initialize(): Promise<void>;
   destroy(): void;
 }
@@ -150,6 +189,9 @@ export interface DomainManagerRuntimeOptions {
   readonly customResourceStorageAdapter?: CustomResourceStorageAdapter;
   readonly thresholdService?: ThresholdService;
   readonly thresholdStorageAdapter?: ThresholdStorageAdapter;
+  readonly projectRegistry?: ProjectDefinitionRegistry;
+  readonly facilityRegistry?: FacilityDefinitionRegistry;
+  readonly downtimeRegistry?: DowntimeDefinitionRegistry;
 }
 
 /**
@@ -214,6 +256,26 @@ export function composeDomainManagerRuntime(
   // G4-AUD-005: Instantiate canonical DomainControllerProvider BEFORE registering economy commands
   const controllerProvider = options.controllerProvider ?? new DefaultDomainControllerProvider();
 
+  const projectRegistry = options.projectRegistry ?? createDefaultProjectRegistry();
+  const facilityRegistry = options.facilityRegistry ?? createDefaultFacilityRegistry();
+  const downtimeRegistry = options.downtimeRegistry ?? createDefaultDowntimeRegistry();
+
+  const facilitiesService = new FacilitiesService({
+    domains: mutableDomainRepo,
+    facilityRegistry
+  });
+  const projectsService = new ProjectsService({
+    domains: mutableDomainRepo,
+    projectRegistry,
+    economyService,
+    facilitiesService,
+    transactionStore
+  });
+  const downtimeService = new DowntimeService({
+    domains: mutableDomainRepo,
+    downtimeRegistry
+  });
+
   const registry = new CommandRegistry();
   registerDomainCommandHandlers(registry, coordinator, mutableDomainRepo);
   registerPopulationCommandHandlers(registry, coordinator, mutableDomainRepo);
@@ -230,6 +292,24 @@ export function composeDomainManagerRuntime(
     thresholdService,
     customResourceStore,
     resourceRegistry
+  });
+  registerProjectCommands({
+    registry,
+    projectsService,
+    domains: mutableDomainRepo,
+    controllerProvider
+  });
+  registerFacilityCommands({
+    registry,
+    facilitiesService,
+    domains: mutableDomainRepo,
+    controllerProvider
+  });
+  registerDowntimeCommands({
+    registry,
+    downtimeService,
+    domains: mutableDomainRepo,
+    controllerProvider
   });
   registry.freeze();
 
@@ -299,11 +379,36 @@ export function composeDomainManagerRuntime(
     transactionStore
   });
 
+  // G5-AUD-001: Public Projects, Facilities, and Downtime API facades
+  const publicProjects = new DefaultPublicProjectsApi({
+    domains: readOnlyDomains,
+    commandBus,
+    projectRegistry,
+    projectsService
+  });
+
+  const publicFacilities = new DefaultPublicFacilitiesApi({
+    domains: readOnlyDomains,
+    commandBus,
+    facilityRegistry,
+    facilitiesService
+  });
+
+  const publicDowntime = new DefaultPublicDowntimeApi({
+    domains: readOnlyDomains,
+    commandBus,
+    downtimeRegistry,
+    downtimeService
+  });
+
   const publicApi: PublicModuleApi = Object.freeze({
     version: BUILD_METADATA.moduleVersion,
     domains: readOnlyDomains,
     economy: publicEconomy,
     people,
+    projects: publicProjects,
+    facilities: publicFacilities,
+    downtime: publicDowntime,
     diagnostics
   });
 
@@ -330,6 +435,12 @@ export function composeDomainManagerRuntime(
     providerRegistry,
     customResourceStore,
     thresholds: thresholdService,
+    projects: publicProjects,
+    facilities: publicFacilities,
+    downtime: publicDowntime,
+    projectRegistry,
+    facilityRegistry,
+    downtimeRegistry,
     initialize: async () => {
       await transactionStore.rehydrate();
       await ledgerStore.rehydrate();
@@ -381,3 +492,63 @@ export {
   createDefaultProviderRegistry
 } from "../economy/providers/provider-registry.js";
 export { EconomyApplication, EconomyApplicationController } from "../ui/domain-patterns/economy/economy-app.js";
+
+// G5 exports
+export {
+  ProjectsService,
+  type StartProjectParams,
+  type AdvanceProjectParams,
+  type CompleteProjectParams
+} from "../projects/services/projects-service.js";
+export {
+  DefaultPublicProjectsApi,
+  type PublicProjectsApi
+} from "../projects/api/public-projects-api.js";
+export {
+  ProjectDefinitionRegistry,
+  createDefaultProjectRegistry
+} from "../projects/definitions/project-registry.js";
+export {
+  ProjectsApplication,
+  ProjectsApplicationController
+} from "../ui/domain-patterns/projects/project-app.js";
+
+export {
+  FacilitiesService,
+  type CreateFacilityParams,
+  type MaintainFacilityParams,
+  type RepairFacilityParams,
+  type ApplyDamageParams
+} from "../facilities/services/facilities-service.js";
+export {
+  DefaultPublicFacilitiesApi,
+  type PublicFacilitiesApi
+} from "../facilities/api/public-facilities-api.js";
+export {
+  FacilityDefinitionRegistry,
+  createDefaultFacilityRegistry
+} from "../facilities/definitions/facility-registry.js";
+export {
+  FacilitiesApplication,
+  FacilitiesApplicationController
+} from "../ui/domain-patterns/facilities/facility-app.js";
+
+export {
+  DowntimeService,
+  type StartActivityParams,
+  type AdvanceActivityParams,
+  type CompleteActivityParams
+} from "../downtime/services/downtime-service.js";
+export {
+  DefaultPublicDowntimeApi,
+  type PublicDowntimeApi
+} from "../downtime/api/public-downtime-api.js";
+export {
+  DowntimeDefinitionRegistry,
+  createDefaultDowntimeRegistry
+} from "../downtime/definitions/downtime-registry.js";
+export {
+  DowntimeApplication,
+  DowntimeApplicationController
+} from "../ui/domain-patterns/downtime/downtime-app.js";
+

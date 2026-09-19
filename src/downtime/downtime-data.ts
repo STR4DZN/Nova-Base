@@ -98,28 +98,36 @@ function extractRecord(domain: DomainRecord | { record: DomainRecord }): DomainR
 }
 
 /**
- * Retrieves DomainDowntimeData from a domain record if present and valid.
- * Returns null if not configured or capability not present.
+ * Retrieves and validates DomainDowntimeData from a domain record.
+ * Returns default if not configured, or err if configured but corrupt.
  */
-export function tryGetDomainDowntimeData(domain: DomainRecord | { record: DomainRecord }): DomainDowntimeData | null {
+export function tryGetDomainDowntimeData(
+  domain: DomainRecord | { record: DomainRecord }
+): Result<DomainDowntimeData, PublicError> {
   const record = extractRecord(domain);
   const config =
-    record.definition.capabilities.config[DOWNTIME_CAPABILITY_ID] ??
-    record.definition.capabilities.config[DOWNTIME_CAPABILITY_ALIAS];
+    record?.definition?.capabilities?.config?.[DOWNTIME_CAPABILITY_ID] ??
+    record?.definition?.capabilities?.config?.[DOWNTIME_CAPABILITY_ALIAS];
 
-  if (!config) {
-    return null;
+  if (config === undefined || config === null) {
+    return ok(createDefaultDomainDowntimeData());
   }
 
-  const validation = validateDomainDowntimeData(config);
-  return validation.ok ? validation.value : null;
+  return validateDomainDowntimeData(config);
 }
 
 /**
- * Retrieves DomainDowntimeData from a domain record, returning default empty data if not configured.
+ * Retrieves DomainDowntimeData from a domain record, returning default empty data if not configured,
+ * but throwing if data is corrupted.
  */
-export function getDomainDowntimeData(domain: DomainRecord | { record: DomainRecord }): DomainDowntimeData {
-  return tryGetDomainDowntimeData(domain) ?? createDefaultDomainDowntimeData();
+export function getDomainDowntimeData(
+  domain: DomainRecord | { record: DomainRecord }
+): DomainDowntimeData {
+  const res = tryGetDomainDowntimeData(domain);
+  if (!res.ok) {
+    throw new Error(`Domain downtime data corruption: [${res.error.code}] ${res.error.message}`);
+  }
+  return res.value;
 }
 
 /**

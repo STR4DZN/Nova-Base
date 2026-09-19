@@ -6,17 +6,12 @@ import {
 } from "../../../commands/command-envelope.js";
 import { createPublicError } from "../../../core/contracts/public-error.js";
 import { err, ok, type Result } from "../../../core/contracts/result.js";
-import type { DomainReadRepository, DomainRepositoryContract } from "../../../storage/repositories/domain-repository.js";
+import type { DomainReadRepository } from "../../../storage/repositories/domain-repository.js";
 import type { ViewerIdentity } from "../../../projection/viewer-identity.js";
 import {
   ProjectDefinitionRegistry,
   createDefaultProjectRegistry
 } from "../../../projects/definitions/project-registry.js";
-import {
-  withDomainProjectsData,
-  getDomainProjectsData,
-  type DomainProjectsData
-} from "../../../projects/project-data.js";
 import type { ProjectInstance, ProjectLifecycle } from "../../../projects/types/project-types.js";
 import {
   buildProjectsViewModel,
@@ -31,13 +26,6 @@ import {
   renderProjectsSubsystemHtml,
   renderProjectStartModalHtml
 } from "./project-view.js";
-import {
-  evaluateProjectAdvancePlan,
-  commitProjectAdvance,
-  pauseProject,
-  resumeProject,
-  cancelProject
-} from "../../../projects/plans/project-advance-plan-service.js";
 
 function cleanPayload<T>(payload: T): T {
   if (payload === null || typeof payload !== "object") {
@@ -68,7 +56,7 @@ function makeCommand<T>(type: string, payload: T): DomainCommand<T> {
 export interface ProjectsAppOptions {
   readonly domainUuid: string;
   readonly commandBus?: CommandBus;
-  readonly domains: DomainReadRepository | DomainRepositoryContract;
+  readonly domains: DomainReadRepository;
   readonly projectRegistry?: ProjectDefinitionRegistry;
   readonly viewer?: Partial<ViewerIdentity>;
 }
@@ -78,7 +66,7 @@ export type ProjectsModalType = "start" | "detail" | null;
 export class ProjectsApplicationController {
   readonly #domainUuid: string;
   readonly #commandBus?: CommandBus;
-  readonly #domains: DomainReadRepository | DomainRepositoryContract;
+  readonly #domains: DomainReadRepository;
   readonly #projectRegistry: ProjectDefinitionRegistry;
   readonly #viewer?: Partial<ViewerIdentity>;
 
@@ -150,7 +138,7 @@ export class ProjectsApplicationController {
     const docRes = await this.#domains.read(id);
     if (!docRes.ok) return docRes;
 
-    const isGm = this.#viewer?.isGm ?? true;
+    const isGm = this.#viewer?.isGm ?? false;
     const vm = buildProjectsViewModel(docRes.value, {
       viewerIsGm: isGm,
       projectRegistry: this.#projectRegistry,
@@ -189,6 +177,34 @@ export class ProjectsApplicationController {
     `;
   }
 
+  async #executeCommand(cmd: DomainCommand<any>): Promise<Result<unknown>> {
+    if (!this.#commandBus) {
+      return err(
+        createPublicError({
+          code: "DM_COMMAND_BUS_NOT_AVAILABLE",
+          category: "internal",
+          message: "CommandBus is required for dispatching projects mutations"
+        })
+      );
+    }
+    const receiptRes = await this.#commandBus.execute(cmd);
+    if (!receiptRes.ok) {
+      return receiptRes;
+    }
+    const receipt = receiptRes.value;
+    if (receipt.status === "rejected") {
+      return err(
+        receipt.error ??
+          createPublicError({
+            code: "DM_COMMAND_REJECTED",
+            category: "internal",
+            message: "Project command rejected"
+          })
+      );
+    }
+    return ok(receipt.result);
+  }
+
   async dispatchStartProject(payload: {
     readonly definitionId: string;
     readonly name?: string;
@@ -197,60 +213,21 @@ export class ProjectsApplicationController {
     readonly workRequired: number;
     readonly initialState?: ProjectLifecycle;
   }): Promise<Result<unknown>> {
-    const id = this.#domainUuid.startsWith("JournalEntry.")
-      ? this.#domainUuid.slice("JournalEntry.".length)
-      : this.#domainUuid;
-
-    const docRes = await this.#domains.read(id);
-    if (!docRes.ok) return docRes;
-
-    const record = docRes.value.record;
-    const currentProjectsData = getDomainProjectsData(record);
-
-    const projectId = `proj-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-    const now = Date.now();
-    const newProject: ProjectInstance = {
-      id: projectId,
+    const cmd = makeCommand("projects:start-project", {
       domainUuid: this.#domainUuid,
       definitionId: payload.definitionId,
       name: payload.name ?? payload.label ?? payload.definitionId,
-      schemaVersion: 1,
-      revision: 0,
-      lifecycle: payload.initialState ?? "active",
       workRequired: payload.workRequired,
-      workCompleted: 0,
-      clampProgress: true,
-      tags: Object.freeze([]),
-      createdAt: now,
-      updatedAt: now,
-      metadata: {
-        targetRef: payload.targetRef ?? this.#domainUuid
-      }
-    };
-
-    const updatedProjects = [...currentProjectsData.projects, newProject];
-    const updatedRecord = withDomainProjectsData(record, {
-      ...currentProjectsData,
-      projects: updatedProjects
+      initialState: payload.initialState ?? "active",
+      targetRef: payload.targetRef ?? this.#domainUuid
     });
-
-    if ("save" in this.#domains && typeof this.#domains.save === "function") {
-      const saveRes = await this.#domains.save({
-        ...docRes.value,
-        record: updatedRecord
-      });
-      if (!saveRes.ok) return saveRes;
-    }
-
-    if (this.#commandBus) {
-      const cmd = makeCommand("projects:start-project", {
-        domainUuid: this.#domainUuid,
-        project: newProject
-      });
-      await this.#commandBus.execute(cmd);
-    }
-
-    return ok({ projectId });
+    const res = await this.#executeCommand(cmd);
+    if (!res.ok) return res;
+    const project = (res.value as any)?.project;
+    return ok({
+      project,
+      projectId: project?.id
+    });
   }
 
   async dispatchAdvanceProject(payload: {
@@ -258,130 +235,54 @@ export class ProjectsApplicationController {
     readonly units: number;
     readonly notes?: string;
   }): Promise<Result<unknown>> {
-    const id = this.#domainUuid.startsWith("JournalEntry.")
-      ? this.#domainUuid.slice("JournalEntry.".length)
-      : this.#domainUuid;
-
-    const docRes = await this.#domains.read(id);
-    if (!docRes.ok) return docRes;
-
-    const record = docRes.value.record;
-    const currentProjectsData = getDomainProjectsData(record);
-    const project = currentProjectsData.projects.find((p) => p.id === payload.projectId);
-    if (!project) {
-      return err(createPublicError({
-        code: "DM_PROJECT_NOT_FOUND",
-        category: "not-found",
-        message: `Project ${payload.projectId} not found`
-      }));
-    }
-
-    const definition = this.#projectRegistry.get(project.definitionId);
-    if (!definition) {
-      return err(createPublicError({
-        code: "DM_PROJECT_DEFINITION_NOT_FOUND",
-        category: "not-found",
-        message: `Project definition ${project.definitionId} not found`
-      }));
-    }
-
-    const plan = evaluateProjectAdvancePlan({
-      project,
-      definition,
-      domain: record,
-      proposedDelta: payload.units
+    const cmd = makeCommand("projects:advance-project", {
+      domainUuid: this.#domainUuid,
+      projectId: payload.projectId,
+      units: payload.units,
+      notes: payload.notes
     });
-
-    if (!plan.isSatisfied) {
-      return err(createPublicError({
-        code: "DM_PROJECT_ADVANCE_BLOCKED",
-        category: "conflict",
-        message: plan.blockers[0]?.message ?? "Advance blocked"
-      }));
-    }
-
-    const advanceRes = commitProjectAdvance(plan, project, {
-      note: payload.notes
-    });
-
-    if (!advanceRes.ok) return advanceRes;
-
-    const updatedProject = advanceRes.value.updatedProject;
-    const updatedProjects = currentProjectsData.projects.map((p) =>
-      p.id === payload.projectId ? updatedProject : p
-    );
-
-    const updatedRecord = withDomainProjectsData(record, {
-      ...currentProjectsData,
-      projects: updatedProjects
-    });
-
-    if ("save" in this.#domains && typeof this.#domains.save === "function") {
-      const saveRes = await this.#domains.save({
-        ...docRes.value,
-        record: updatedRecord
-      });
-      if (!saveRes.ok) return saveRes;
-    }
-
-    return ok(advanceRes.value);
+    return this.#executeCommand(cmd);
   }
 
   async dispatchPauseProject(projectId: string, reason?: string): Promise<Result<unknown>> {
-    return this.#mutateProjectLifecycle(projectId, (p) => pauseProject(p, { note: reason }));
+    const cmd = makeCommand("projects:pause-project", {
+      domainUuid: this.#domainUuid,
+      projectId,
+      reason
+    });
+    return this.#executeCommand(cmd);
   }
 
   async dispatchResumeProject(projectId: string, reason?: string): Promise<Result<unknown>> {
-    return this.#mutateProjectLifecycle(projectId, (p) => resumeProject(p, { note: reason }));
+    const cmd = makeCommand("projects:resume-project", {
+      domainUuid: this.#domainUuid,
+      projectId,
+      reason
+    });
+    return this.#executeCommand(cmd);
   }
 
   async dispatchCancelProject(projectId: string, reason?: string): Promise<Result<unknown>> {
-    return this.#mutateProjectLifecycle(projectId, (p) => cancelProject(p, { note: reason }));
+    const cmd = makeCommand("projects:cancel-project", {
+      domainUuid: this.#domainUuid,
+      projectId,
+      reason
+    });
+    return this.#executeCommand(cmd);
   }
 
-  async #mutateProjectLifecycle(
-    projectId: string,
-    mutator: (p: ProjectInstance) => Result<{ readonly updatedProject: ProjectInstance }>
-  ): Promise<Result<unknown>> {
-    const id = this.#domainUuid.startsWith("JournalEntry.")
-      ? this.#domainUuid.slice("JournalEntry.".length)
-      : this.#domainUuid;
-
-    const docRes = await this.#domains.read(id);
-    if (!docRes.ok) return docRes;
-
-    const record = docRes.value.record;
-    const currentProjectsData = getDomainProjectsData(record);
-    const project = currentProjectsData.projects.find((p) => p.id === projectId);
-    if (!project) {
-      return err(createPublicError({
-        code: "DM_PROJECT_NOT_FOUND",
-        category: "not-found",
-        message: `Project ${projectId} not found`
-      }));
-    }
-
-    const mutateRes = mutator(project);
-    if (!mutateRes.ok) return mutateRes;
-
-    const updatedProjects = currentProjectsData.projects.map((p) =>
-      p.id === projectId ? mutateRes.value.updatedProject : p
-    );
-
-    const updatedRecord = withDomainProjectsData(record, {
-      ...currentProjectsData,
-      projects: updatedProjects
+  async dispatchCompleteProject(payload: {
+    readonly projectId: string;
+    readonly notes?: string;
+    readonly outcomes?: unknown;
+  }): Promise<Result<unknown>> {
+    const cmd = makeCommand("projects:complete-project", {
+      domainUuid: this.#domainUuid,
+      projectId: payload.projectId,
+      notes: payload.notes,
+      outcomes: payload.outcomes
     });
-
-    if ("save" in this.#domains && typeof this.#domains.save === "function") {
-      const saveRes = await this.#domains.save({
-        ...docRes.value,
-        record: updatedRecord
-      });
-      if (!saveRes.ok) return saveRes;
-    }
-
-    return ok(mutateRes.value);
+    return this.#executeCommand(cmd);
   }
 }
 

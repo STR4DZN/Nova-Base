@@ -6,17 +6,12 @@ import {
 } from "../../../commands/command-envelope.js";
 import { createPublicError } from "../../../core/contracts/public-error.js";
 import { err, ok, type Result } from "../../../core/contracts/result.js";
-import type { DomainReadRepository, DomainRepositoryContract } from "../../../storage/repositories/domain-repository.js";
+import type { DomainReadRepository } from "../../../storage/repositories/domain-repository.js";
 import type { ViewerIdentity } from "../../../projection/viewer-identity.js";
 import {
   FacilityDefinitionRegistry,
   createDefaultFacilityRegistry
 } from "../../../facilities/definitions/facility-registry.js";
-import {
-  withDomainFacilitiesData,
-  getDomainFacilitiesData,
-  type DomainFacilitiesData
-} from "../../../facilities/facility-data.js";
 import type {
   FacilityInstance,
   FacilityLifecycle,
@@ -38,15 +33,6 @@ import {
   renderFacilityMaintenanceModalHtml,
   renderFacilityRepairModalHtml
 } from "./facility-view.js";
-import {
-  evaluateFacilityMaintenancePlan,
-  commitFacilityMaintenance
-} from "../../../facilities/plans/facility-maintenance-plan-service.js";
-import {
-  evaluateFacilityRepairPlan,
-  commitFacilityRepair,
-  applyFacilityDamage
-} from "../../../facilities/plans/facility-repair-plan-service.js";
 
 function cleanPayload<T>(payload: T): T {
   if (payload === null || typeof payload !== "object") {
@@ -77,7 +63,7 @@ function makeCommand<T>(type: string, payload: T): DomainCommand<T> {
 export interface FacilitiesAppOptions {
   readonly domainUuid: string;
   readonly commandBus?: CommandBus;
-  readonly domains: DomainReadRepository | DomainRepositoryContract;
+  readonly domains: DomainReadRepository;
   readonly facilityRegistry?: FacilityDefinitionRegistry;
   readonly viewer?: Partial<ViewerIdentity>;
 }
@@ -87,7 +73,7 @@ export type FacilitiesModalType = "create" | "detail" | "maintenance" | "repair"
 export class FacilitiesApplicationController {
   readonly #domainUuid: string;
   readonly #commandBus?: CommandBus;
-  readonly #domains: DomainReadRepository | DomainRepositoryContract;
+  readonly #domains: DomainReadRepository;
   readonly #facilityRegistry: FacilityDefinitionRegistry;
   readonly #viewer?: Partial<ViewerIdentity>;
 
@@ -169,7 +155,7 @@ export class FacilitiesApplicationController {
     const docRes = await this.#domains.read(id);
     if (!docRes.ok) return docRes;
 
-    const isGm = this.#viewer?.isGm ?? true;
+    const isGm = this.#viewer?.isGm ?? false;
     const vm = buildFacilitiesViewModel(docRes.value, {
       viewerIsGm: isGm,
       facilityRegistry: this.#facilityRegistry,
@@ -218,154 +204,66 @@ export class FacilitiesApplicationController {
     `;
   }
 
+  async #executeCommand(cmd: DomainCommand<any>): Promise<Result<unknown>> {
+    if (!this.#commandBus) {
+      return err(
+        createPublicError({
+          code: "DM_COMMAND_BUS_NOT_AVAILABLE",
+          category: "internal",
+          message: "CommandBus is required for dispatching facility mutations"
+        })
+      );
+    }
+    const receiptRes = await this.#commandBus.execute(cmd);
+    if (!receiptRes.ok) {
+      return receiptRes;
+    }
+    const receipt = receiptRes.value;
+    if (receipt.status === "rejected") {
+      return err(
+        receipt.error ??
+          createPublicError({
+            code: "DM_COMMAND_REJECTED",
+            category: "internal",
+            message: "Facility command rejected"
+          })
+      );
+    }
+    return ok(receipt.result);
+  }
+
   async dispatchCreateFacility(payload: {
     readonly definitionId: string;
     readonly name?: string;
     readonly level: number;
     readonly initialLifecycle?: FacilityLifecycle;
   }): Promise<Result<unknown>> {
-    const id = this.#domainUuid.startsWith("JournalEntry.")
-      ? this.#domainUuid.slice("JournalEntry.".length)
-      : this.#domainUuid;
-
-    const docRes = await this.#domains.read(id);
-    if (!docRes.ok) return docRes;
-
-    const record = docRes.value.record;
-    const currentFacilitiesData = getDomainFacilitiesData(record);
-
-    const facilityId = `fac-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-    const now = Date.now();
-    const newFacility: FacilityInstance = {
-      id: facilityId,
-      definitionId: payload.definitionId,
+    const cmd = makeCommand("facilities:create-facility", {
       domainUuid: this.#domainUuid,
-      name: payload.name || payload.definitionId,
-      schemaVersion: 1,
-      revision: 0,
+      definitionId: payload.definitionId,
+      name: payload.name,
       level: payload.level,
-      lifecycle: payload.initialLifecycle ?? "operational",
-      readiness: "ready",
-      installedModules: Object.freeze([]),
-      activeUpgrades: Object.freeze([]),
-      integrity: Object.freeze({ current: 100, max: 100 }),
-      conditions: Object.freeze([]),
-      maintenanceState: {
-        status: "current",
-        overdueTicks: 0,
-        accumulatedTicks: 0
-      },
-      tags: Object.freeze([]),
-      createdAt: now,
-      updatedAt: now
-    };
-
-    const updatedFacilities = [...currentFacilitiesData.facilities, newFacility];
-    const updatedRecord = withDomainFacilitiesData(record, {
-      ...currentFacilitiesData,
-      facilities: updatedFacilities
+      initialLifecycle: payload.initialLifecycle
     });
-
-    if ("save" in this.#domains && typeof this.#domains.save === "function") {
-      const saveRes = await this.#domains.save({
-        ...docRes.value,
-        record: updatedRecord
-      });
-      if (!saveRes.ok) return saveRes;
-    }
-
-    if (this.#commandBus) {
-      const cmd = makeCommand("facilities:create-facility", {
-        domainUuid: this.#domainUuid,
-        facility: newFacility
-      });
-      await this.#commandBus.execute(cmd);
-    }
-
-    return ok({ facilityId });
+    const res = await this.#executeCommand(cmd);
+    if (!res.ok) return res;
+    const facility = (res.value as any)?.facility;
+    return ok({
+      facility,
+      facilityId: facility?.id
+    });
   }
 
   async dispatchMaintainFacility(payload: {
     readonly facilityId: string;
     readonly notes?: string;
   }): Promise<Result<unknown>> {
-    const id = this.#domainUuid.startsWith("JournalEntry.")
-      ? this.#domainUuid.slice("JournalEntry.".length)
-      : this.#domainUuid;
-
-    const docRes = await this.#domains.read(id);
-    if (!docRes.ok) return docRes;
-
-    const record = docRes.value.record;
-    const currentFacilitiesData = getDomainFacilitiesData(record);
-    const facility = currentFacilitiesData.facilities.find((f) => f.id === payload.facilityId);
-    if (!facility) {
-      return err(createPublicError({
-        code: "DM_FACILITY_NOT_FOUND",
-        category: "not-found",
-        message: `Facility ${payload.facilityId} not found`
-      }));
-    }
-
-    const def = this.#facilityRegistry.get(facility.definitionId);
-    let updatedFacility: FacilityInstance;
-
-    if (def?.maintenance) {
-      const plan = evaluateFacilityMaintenancePlan({ facility, definition: def });
-      if (plan.valid) {
-        const commitRes = commitFacilityMaintenance({
-          plan,
-          facility,
-          note: payload.notes
-        });
-        if (!commitRes.ok) return commitRes;
-        updatedFacility = commitRes.value.updatedFacility;
-      } else {
-        // Fallback: reset maintenance timer
-        updatedFacility = {
-          ...facility,
-          maintenanceState: {
-            status: "current",
-            overdueTicks: 0,
-            accumulatedTicks: 0,
-            lastMaintainedTimestamp: Date.now()
-          },
-          revision: facility.revision + 1,
-          updatedAt: Date.now()
-        };
-      }
-    } else {
-      updatedFacility = {
-        ...facility,
-        maintenanceState: {
-          status: "current",
-          overdueTicks: 0,
-          accumulatedTicks: 0,
-          lastMaintainedTimestamp: Date.now()
-        },
-        revision: facility.revision + 1,
-        updatedAt: Date.now()
-      };
-    }
-
-    const updatedFacilities = currentFacilitiesData.facilities.map((f) =>
-      f.id === payload.facilityId ? updatedFacility : f
-    );
-
-    const updatedRecord = withDomainFacilitiesData(record, {
-      ...currentFacilitiesData,
-      facilities: updatedFacilities
+    const cmd = makeCommand("facilities:maintain-facility", {
+      domainUuid: this.#domainUuid,
+      facilityId: payload.facilityId,
+      notes: payload.notes
     });
-
-    if ("save" in this.#domains && typeof this.#domains.save === "function") {
-      const saveRes = await this.#domains.save({
-        ...docRes.value,
-        record: updatedRecord
-      });
-      if (!saveRes.ok) return saveRes;
-    }
-
-    return ok({ facility: updatedFacility });
+    return this.#executeCommand(cmd);
   }
 
   async dispatchRepairFacility(payload: {
@@ -374,97 +272,14 @@ export class FacilitiesApplicationController {
     readonly removeConditionIds?: readonly string[];
     readonly notes?: string;
   }): Promise<Result<unknown>> {
-    const id = this.#domainUuid.startsWith("JournalEntry.")
-      ? this.#domainUuid.slice("JournalEntry.".length)
-      : this.#domainUuid;
-
-    const docRes = await this.#domains.read(id);
-    if (!docRes.ok) return docRes;
-
-    const record = docRes.value.record;
-    const currentFacilitiesData = getDomainFacilitiesData(record);
-    const facility = currentFacilitiesData.facilities.find((f) => f.id === payload.facilityId);
-    if (!facility) {
-      return err(createPublicError({
-        code: "DM_FACILITY_NOT_FOUND",
-        category: "not-found",
-        message: `Facility ${payload.facilityId} not found`
-      }));
-    }
-
-    const def = this.#facilityRegistry.get(facility.definitionId);
-    let updatedFacility: FacilityInstance;
-
-    if (def) {
-      const plan = evaluateFacilityRepairPlan({
-        facility,
-        definition: def,
-        targetIntegrityDelta: payload.restoreIntegrity,
-        conditionsToClear: payload.removeConditionIds
-      });
-
-      if (plan.valid && plan.isDirectRepairAllowed && !plan.requiresProject) {
-        const commitRes = commitFacilityRepair({
-          plan,
-          facility,
-          note: payload.notes
-        });
-        if (!commitRes.ok) return commitRes;
-        updatedFacility = commitRes.value.updatedFacility;
-      } else {
-        // Direct repair fallback
-        const max = facility.integrity?.max ?? 100;
-        const current = facility.integrity?.current ?? 100;
-        const restored = Math.min(max, current + (payload.restoreIntegrity ?? (max - current)));
-        const clearSet = new Set(payload.removeConditionIds ?? []);
-        const remainingConditions = (facility.conditions ?? []).filter((c) => !clearSet.has(c.id));
-
-        updatedFacility = {
-          ...facility,
-          integrity: Object.freeze({ current: restored, max }),
-          conditions: Object.freeze(remainingConditions),
-          lifecycle: facility.lifecycle === "degraded" && restored >= max ? "operational" : facility.lifecycle,
-          readiness: "ready",
-          revision: facility.revision + 1,
-          updatedAt: Date.now()
-        };
-      }
-    } else {
-      const max = facility.integrity?.max ?? 100;
-      const current = facility.integrity?.current ?? 100;
-      const restored = Math.min(max, current + (payload.restoreIntegrity ?? (max - current)));
-      const clearSet = new Set(payload.removeConditionIds ?? []);
-      const remainingConditions = (facility.conditions ?? []).filter((c) => !clearSet.has(c.id));
-
-      updatedFacility = {
-        ...facility,
-        integrity: Object.freeze({ current: restored, max }),
-        conditions: Object.freeze(remainingConditions),
-        lifecycle: facility.lifecycle === "degraded" && restored >= max ? "operational" : facility.lifecycle,
-        readiness: "ready",
-        revision: facility.revision + 1,
-        updatedAt: Date.now()
-      };
-    }
-
-    const updatedFacilities = currentFacilitiesData.facilities.map((f) =>
-      f.id === payload.facilityId ? updatedFacility : f
-    );
-
-    const updatedRecord = withDomainFacilitiesData(record, {
-      ...currentFacilitiesData,
-      facilities: updatedFacilities
+    const cmd = makeCommand("facilities:repair-facility", {
+      domainUuid: this.#domainUuid,
+      facilityId: payload.facilityId,
+      restoreIntegrity: payload.restoreIntegrity,
+      removeConditionIds: payload.removeConditionIds,
+      notes: payload.notes
     });
-
-    if ("save" in this.#domains && typeof this.#domains.save === "function") {
-      const saveRes = await this.#domains.save({
-        ...docRes.value,
-        record: updatedRecord
-      });
-      if (!saveRes.ok) return saveRes;
-    }
-
-    return ok({ facility: updatedFacility });
+    return this.#executeCommand(cmd);
   }
 
   async dispatchDamageFacility(payload: {
@@ -472,51 +287,26 @@ export class FacilitiesApplicationController {
     readonly damageAmount: number;
     readonly condition?: FacilityCondition;
   }): Promise<Result<unknown>> {
-    const id = this.#domainUuid.startsWith("JournalEntry.")
-      ? this.#domainUuid.slice("JournalEntry.".length)
-      : this.#domainUuid;
-
-    const docRes = await this.#domains.read(id);
-    if (!docRes.ok) return docRes;
-
-    const record = docRes.value.record;
-    const currentFacilitiesData = getDomainFacilitiesData(record);
-    const facility = currentFacilitiesData.facilities.find((f) => f.id === payload.facilityId);
-    if (!facility) {
-      return err(createPublicError({
-        code: "DM_FACILITY_NOT_FOUND",
-        category: "not-found",
-        message: `Facility ${payload.facilityId} not found`
-      }));
-    }
-
-    const damageRes = applyFacilityDamage({
-      facility,
-      deltaIntegrity: payload.damageAmount,
-      condition: payload.condition
+    const cmd = makeCommand("facilities:apply-damage", {
+      domainUuid: this.#domainUuid,
+      facilityId: payload.facilityId,
+      damage: payload.damageAmount,
+      condition: payload.condition,
+      conditionId: payload.condition?.id
     });
-    if (!damageRes.ok) return damageRes;
+    return this.#executeCommand(cmd);
+  }
 
-    const damagedFacility = damageRes.value;
-
-    const updatedFacilities = currentFacilitiesData.facilities.map((f) =>
-      f.id === payload.facilityId ? damagedFacility : f
-    );
-
-    const updatedRecord = withDomainFacilitiesData(record, {
-      ...currentFacilitiesData,
-      facilities: updatedFacilities
+  async dispatchDecommissionFacility(payload: {
+    readonly facilityId: string;
+    readonly reason?: string;
+  }): Promise<Result<unknown>> {
+    const cmd = makeCommand("facilities:decommission-facility", {
+      domainUuid: this.#domainUuid,
+      facilityId: payload.facilityId,
+      reason: payload.reason
     });
-
-    if ("save" in this.#domains && typeof this.#domains.save === "function") {
-      const saveRes = await this.#domains.save({
-        ...docRes.value,
-        record: updatedRecord
-      });
-      if (!saveRes.ok) return saveRes;
-    }
-
-    return ok({ facility: damagedFacility });
+    return this.#executeCommand(cmd);
   }
 }
 

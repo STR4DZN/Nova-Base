@@ -98,31 +98,35 @@ function extractRecord(domain: DomainRecord | { record: DomainRecord }): DomainR
 }
 
 /**
- * Retrieves and validates the DomainFacilitiesData from a DomainRecord, or returns null if not configured.
+ * Retrieves and validates the DomainFacilitiesData from a DomainRecord, or returns default if not configured.
  */
 export function tryGetDomainFacilitiesData(
   domain: DomainRecord | { record: DomainRecord }
-): DomainFacilitiesData | null {
+): Result<DomainFacilitiesData, PublicError> {
   const rec = extractRecord(domain);
   const cfg =
-    rec.definition.capabilities.config[FACILITIES_CAPABILITY_ID] ??
-    rec.definition.capabilities.config[FACILITIES_CAPABILITY_ALIAS];
+    rec?.definition?.capabilities?.config?.[FACILITIES_CAPABILITY_ID] ??
+    rec?.definition?.capabilities?.config?.[FACILITIES_CAPABILITY_ALIAS];
 
   if (cfg === undefined || cfg === null) {
-    return null;
+    return ok(createDefaultDomainFacilitiesData());
   }
 
-  const res = validateDomainFacilitiesData(cfg);
-  return res.ok ? res.value : null;
+  return validateDomainFacilitiesData(cfg);
 }
 
 /**
- * Retrieves DomainFacilitiesData, returning default empty data if none configured.
+ * Retrieves DomainFacilitiesData, returning default empty data if none configured,
+ * but throwing if data is corrupted.
  */
 export function getDomainFacilitiesData(
   domain: DomainRecord | { record: DomainRecord }
 ): DomainFacilitiesData {
-  return tryGetDomainFacilitiesData(domain) ?? createDefaultDomainFacilitiesData();
+  const res = tryGetDomainFacilitiesData(domain);
+  if (!res.ok) {
+    throw new Error(`Domain facilities data corruption: [${res.error.code}] ${res.error.message}`);
+  }
+  return res.value;
 }
 
 /**

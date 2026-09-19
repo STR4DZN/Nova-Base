@@ -6,22 +6,16 @@ import {
 } from "../../../commands/command-envelope.js";
 import { createPublicError } from "../../../core/contracts/public-error.js";
 import { err, ok, type Result } from "../../../core/contracts/result.js";
-import type { DomainReadRepository, DomainRepositoryContract } from "../../../storage/repositories/domain-repository.js";
+import type { DomainReadRepository } from "../../../storage/repositories/domain-repository.js";
 import type { ViewerIdentity } from "../../../projection/viewer-identity.js";
 import {
   DowntimeDefinitionRegistry,
   createDefaultDowntimeRegistry
 } from "../../../downtime/definitions/downtime-registry.js";
-import {
-  withDomainDowntimeData,
-  getDomainDowntimeData,
-  type DomainDowntimeData
-} from "../../../downtime/downtime-data.js";
 import type {
   DowntimeInstance,
   DowntimeLifecycle,
-  DowntimeScope,
-  DowntimeParticipant
+  DowntimeScope
 } from "../../../downtime/types/downtime-types.js";
 import {
   buildDowntimeViewModel,
@@ -66,7 +60,7 @@ function makeCommand<T>(type: string, payload: T): DomainCommand<T> {
 export interface DowntimeAppOptions {
   readonly domainUuid: string;
   readonly commandBus?: CommandBus;
-  readonly domains: DomainReadRepository | DomainRepositoryContract;
+  readonly domains: DomainReadRepository;
   readonly downtimeRegistry?: DowntimeDefinitionRegistry;
   readonly viewer?: Partial<ViewerIdentity>;
 }
@@ -76,7 +70,7 @@ export type DowntimeModalType = "start" | "detail" | null;
 export class DowntimeApplicationController {
   readonly #domainUuid: string;
   readonly #commandBus?: CommandBus;
-  readonly #domains: DomainReadRepository | DomainRepositoryContract;
+  readonly #domains: DomainReadRepository;
   readonly #downtimeRegistry: DowntimeDefinitionRegistry;
   readonly #viewer?: Partial<ViewerIdentity>;
 
@@ -148,7 +142,7 @@ export class DowntimeApplicationController {
     const docRes = await this.#domains.read(id);
     if (!docRes.ok) return docRes;
 
-    const isGm = this.#viewer?.isGm ?? true;
+    const isGm = this.#viewer?.isGm ?? false;
     const vm = buildDowntimeViewModel(docRes.value, {
       viewerIsGm: isGm,
       downtimeRegistry: this.#downtimeRegistry,
@@ -187,6 +181,34 @@ export class DowntimeApplicationController {
     `;
   }
 
+  async #executeCommand(cmd: DomainCommand<any>): Promise<Result<unknown>> {
+    if (!this.#commandBus) {
+      return err(
+        createPublicError({
+          code: "DM_COMMAND_BUS_NOT_AVAILABLE",
+          category: "internal",
+          message: "CommandBus is required for dispatching downtime mutations"
+        })
+      );
+    }
+    const receiptRes = await this.#commandBus.execute(cmd);
+    if (!receiptRes.ok) {
+      return receiptRes;
+    }
+    const receipt = receiptRes.value;
+    if (receipt.status === "rejected") {
+      return err(
+        receipt.error ??
+          createPublicError({
+            code: "DM_COMMAND_REJECTED",
+            category: "internal",
+            message: "Downtime command rejected"
+          })
+      );
+    }
+    return ok(receipt.result);
+  }
+
   async dispatchStartDowntime(payload: {
     readonly definitionId: string;
     readonly label?: string;
@@ -194,228 +216,59 @@ export class DowntimeApplicationController {
     readonly durationTicks?: number | null;
     readonly participantRef?: string;
   }): Promise<Result<unknown>> {
-    const id = this.#domainUuid.startsWith("JournalEntry.")
-      ? this.#domainUuid.slice("JournalEntry.".length)
-      : this.#domainUuid;
-
-    const docRes = await this.#domains.read(id);
-    if (!docRes.ok) return docRes;
-
-    const record = docRes.value.record;
-    const currentDowntimeData = getDomainDowntimeData(record);
-
-    const activityId = `dt-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-    const participants: DowntimeParticipant[] = [];
-    if (payload.participantRef) {
-      participants.push({
-        participantRef: payload.participantRef,
-        participantType: "notable",
-        role: "lead",
-        capacityConsumed: 1
-      });
-    }
-
-    const now = Date.now();
-    const newActivity: DowntimeInstance = {
-      id: activityId,
+    const cmd = makeCommand("downtime:start-activity", {
       domainUuid: this.#domainUuid,
       definitionId: payload.definitionId,
-      name: payload.label ?? payload.definitionId,
-      schemaVersion: 1,
-      revision: 0,
-      scope: payload.scope ?? "domain",
-      lifecycle: "inProgress",
-      elapsedTicks: 0,
-      durationTicks: payload.durationTicks ?? null,
-      participants: Object.freeze(participants),
-      tags: Object.freeze([]),
-      createdAt: now,
-      updatedAt: now
-    };
-
-    const updatedActivities = [...currentDowntimeData.activities, newActivity];
-    const updatedRecord = withDomainDowntimeData(record, {
-      ...currentDowntimeData,
-      activities: updatedActivities
+      label: payload.label,
+      scope: payload.scope,
+      durationTicks: payload.durationTicks,
+      participantRef: payload.participantRef
     });
-
-    if ("save" in this.#domains && typeof this.#domains.save === "function") {
-      const saveRes = await this.#domains.save({
-        ...docRes.value,
-        record: updatedRecord
-      });
-      if (!saveRes.ok) return saveRes;
-    }
-
-    if (this.#commandBus) {
-      const cmd = makeCommand("downtime:start-activity", {
-        domainUuid: this.#domainUuid,
-        activity: newActivity
-      });
-      await this.#commandBus.execute(cmd);
-    }
-
-    return ok({ activityId });
+    const res = await this.#executeCommand(cmd);
+    if (!res.ok) return res;
+    const activity = (res.value as any)?.activity;
+    return ok({
+      activity,
+      activityId: activity?.id
+    });
   }
 
   async dispatchAdvanceDowntime(payload: {
     readonly activityId: string;
     readonly ticks: number;
+    readonly notes?: string;
   }): Promise<Result<unknown>> {
-    const id = this.#domainUuid.startsWith("JournalEntry.")
-      ? this.#domainUuid.slice("JournalEntry.".length)
-      : this.#domainUuid;
-
-    const docRes = await this.#domains.read(id);
-    if (!docRes.ok) return docRes;
-
-    const record = docRes.value.record;
-    const currentDowntimeData = getDomainDowntimeData(record);
-    const activity = currentDowntimeData.activities.find((a) => a.id === payload.activityId);
-    if (!activity) {
-      return err(createPublicError({
-        code: "DM_DOWNTIME_NOT_FOUND",
-        category: "not-found",
-        message: `Downtime activity ${payload.activityId} not found`
-      }));
-    }
-
-    const newProgress = activity.elapsedTicks + Math.max(0, payload.ticks);
-    let newLifecycle = activity.lifecycle;
-    if (activity.durationTicks !== null && activity.durationTicks !== undefined) {
-      if (newProgress >= activity.durationTicks && newLifecycle === "inProgress") {
-        newLifecycle = "completed";
-      }
-    }
-
-    const now = Date.now();
-    const updatedActivity: DowntimeInstance = {
-      ...activity,
-      elapsedTicks: newProgress,
-      lifecycle: newLifecycle,
-      revision: activity.revision + 1,
-      updatedAt: now,
-      completedAt: newLifecycle === "completed" ? now : activity.completedAt
-    };
-
-    const updatedActivities = currentDowntimeData.activities.map((a) =>
-      a.id === payload.activityId ? updatedActivity : a
-    );
-
-    const updatedRecord = withDomainDowntimeData(record, {
-      ...currentDowntimeData,
-      activities: updatedActivities
+    const cmd = makeCommand("downtime:advance-activity", {
+      domainUuid: this.#domainUuid,
+      activityId: payload.activityId,
+      ticks: payload.ticks,
+      notes: payload.notes
     });
-
-    if ("save" in this.#domains && typeof this.#domains.save === "function") {
-      const saveRes = await this.#domains.save({
-        ...docRes.value,
-        record: updatedRecord
-      });
-      if (!saveRes.ok) return saveRes;
-    }
-
-    return ok({ activity: updatedActivity });
+    const res = await this.#executeCommand(cmd);
+    if (!res.ok) return res;
+    return ok({ activity: (res.value as any)?.activity });
   }
 
-  async dispatchCompleteDowntime(activityId: string): Promise<Result<unknown>> {
-    const id = this.#domainUuid.startsWith("JournalEntry.")
-      ? this.#domainUuid.slice("JournalEntry.".length)
-      : this.#domainUuid;
-
-    const docRes = await this.#domains.read(id);
-    if (!docRes.ok) return docRes;
-
-    const record = docRes.value.record;
-    const currentDowntimeData = getDomainDowntimeData(record);
-    const activity = currentDowntimeData.activities.find((a) => a.id === activityId);
-    if (!activity) {
-      return err(createPublicError({
-        code: "DM_DOWNTIME_NOT_FOUND",
-        category: "not-found",
-        message: `Downtime activity ${activityId} not found`
-      }));
-    }
-
-    const now = Date.now();
-    const updatedActivity: DowntimeInstance = {
-      ...activity,
-      lifecycle: "completed",
-      revision: activity.revision + 1,
-      updatedAt: now,
-      completedAt: now
-    };
-
-    const updatedActivities = currentDowntimeData.activities.map((a) =>
-      a.id === activityId ? updatedActivity : a
-    );
-
-    const updatedRecord = withDomainDowntimeData(record, {
-      ...currentDowntimeData,
-      activities: updatedActivities
+  async dispatchCompleteDowntime(activityId: string, outcomeKey?: string): Promise<Result<unknown>> {
+    const cmd = makeCommand("downtime:complete-activity", {
+      domainUuid: this.#domainUuid,
+      activityId,
+      outcomeKey
     });
-
-    if ("save" in this.#domains && typeof this.#domains.save === "function") {
-      const saveRes = await this.#domains.save({
-        ...docRes.value,
-        record: updatedRecord
-      });
-      if (!saveRes.ok) return saveRes;
-    }
-
-    return ok({ activity: updatedActivity });
+    const res = await this.#executeCommand(cmd);
+    if (!res.ok) return res;
+    return ok({ activity: (res.value as any)?.activity });
   }
 
   async dispatchCancelDowntime(activityId: string, reason?: string): Promise<Result<unknown>> {
-    const id = this.#domainUuid.startsWith("JournalEntry.")
-      ? this.#domainUuid.slice("JournalEntry.".length)
-      : this.#domainUuid;
-
-    const docRes = await this.#domains.read(id);
-    if (!docRes.ok) return docRes;
-
-    const record = docRes.value.record;
-    const currentDowntimeData = getDomainDowntimeData(record);
-    const activity = currentDowntimeData.activities.find((a) => a.id === activityId);
-    if (!activity) {
-      return err(createPublicError({
-        code: "DM_DOWNTIME_NOT_FOUND",
-        category: "not-found",
-        message: `Downtime activity ${activityId} not found`
-      }));
-    }
-
-    const now = Date.now();
-    const updatedActivity: DowntimeInstance = {
-      ...activity,
-      lifecycle: "cancelled",
-      revision: activity.revision + 1,
-      updatedAt: now,
-      cancelledAt: now,
-      metadata: {
-        ...activity.metadata,
-        cancellationReason: reason
-      }
-    };
-
-    const updatedActivities = currentDowntimeData.activities.map((a) =>
-      a.id === activityId ? updatedActivity : a
-    );
-
-    const updatedRecord = withDomainDowntimeData(record, {
-      ...currentDowntimeData,
-      activities: updatedActivities
+    const cmd = makeCommand("downtime:cancel-activity", {
+      domainUuid: this.#domainUuid,
+      activityId,
+      reason
     });
-
-    if ("save" in this.#domains && typeof this.#domains.save === "function") {
-      const saveRes = await this.#domains.save({
-        ...docRes.value,
-        record: updatedRecord
-      });
-      if (!saveRes.ok) return saveRes;
-    }
-
-    return ok({ activity: updatedActivity });
+    const res = await this.#executeCommand(cmd);
+    if (!res.ok) return res;
+    return ok({ activity: (res.value as any)?.activity });
   }
 }
 

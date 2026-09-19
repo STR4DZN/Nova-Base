@@ -3812,15 +3812,18 @@ function extractRecord(domain) {
 }
 function tryGetDomainFacilitiesData(domain) {
   const rec = extractRecord(domain);
-  const cfg = rec.definition.capabilities.config[FACILITIES_CAPABILITY_ID] ?? rec.definition.capabilities.config[FACILITIES_CAPABILITY_ALIAS];
+  const cfg = rec?.definition?.capabilities?.config?.[FACILITIES_CAPABILITY_ID] ?? rec?.definition?.capabilities?.config?.[FACILITIES_CAPABILITY_ALIAS];
   if (cfg === void 0 || cfg === null) {
-    return null;
+    return ok(createDefaultDomainFacilitiesData());
   }
-  const res = validateDomainFacilitiesData(cfg);
-  return res.ok ? res.value : null;
+  return validateDomainFacilitiesData(cfg);
 }
 function getDomainFacilitiesData(domain) {
-  return tryGetDomainFacilitiesData(domain) ?? createDefaultDomainFacilitiesData();
+  const res = tryGetDomainFacilitiesData(domain);
+  if (!res.ok) {
+    throw new Error(`Domain facilities data corruption: [${res.error.code}] ${res.error.message}`);
+  }
+  return res.value;
 }
 function withDomainFacilitiesData(domain, facilitiesData) {
   const validRes = validateDomainFacilitiesData(facilitiesData);
@@ -4167,15 +4170,18 @@ function extractRecord2(domain) {
 }
 function tryGetDomainDowntimeData(domain) {
   const record = extractRecord2(domain);
-  const config = record.definition.capabilities.config[DOWNTIME_CAPABILITY_ID] ?? record.definition.capabilities.config[DOWNTIME_CAPABILITY_ALIAS];
-  if (!config) {
-    return null;
+  const config = record?.definition?.capabilities?.config?.[DOWNTIME_CAPABILITY_ID] ?? record?.definition?.capabilities?.config?.[DOWNTIME_CAPABILITY_ALIAS];
+  if (config === void 0 || config === null) {
+    return ok(createDefaultDomainDowntimeData());
   }
-  const validation = validateDomainDowntimeData(config);
-  return validation.ok ? validation.value : null;
+  return validateDomainDowntimeData(config);
 }
 function getDomainDowntimeData(domain) {
-  return tryGetDomainDowntimeData(domain) ?? createDefaultDomainDowntimeData();
+  const res = tryGetDomainDowntimeData(domain);
+  if (!res.ok) {
+    throw new Error(`Domain downtime data corruption: [${res.error.code}] ${res.error.message}`);
+  }
+  return res.value;
 }
 function withDomainDowntimeData(domain, data) {
   const currentCapabilities = domain.definition.capabilities;
@@ -20143,6 +20149,4348 @@ var ThresholdService = class {
   }
 };
 
+// src/projects/definitions/canonical-project-definitions.ts
+var CANONICAL_PROJECT_DEFINITIONS = Object.freeze([
+  Object.freeze({
+    id: "domain-manager:survey",
+    version: 1,
+    label: "Survey & Reconnaissance",
+    description: "Systematic mapping and environmental survey of the domain territory.",
+    category: "exploration",
+    tags: Object.freeze(["survey", "exploration", "scouting"]),
+    progressResolverId: "domain-manager:standard",
+    defaultWorkRequired: 100,
+    requirements: Object.freeze([]),
+    costs: Object.freeze([]),
+    rewards: Object.freeze([]),
+    autoComplete: false
+  }),
+  Object.freeze({
+    id: "domain-manager:basic-construction",
+    version: 1,
+    label: "Basic Construction",
+    description: "Standard structural construction work for domain facilities or infrastructure.",
+    category: "construction",
+    tags: Object.freeze(["construction", "infrastructure", "facility"]),
+    progressResolverId: "domain-manager:standard",
+    defaultWorkRequired: 200,
+    requirements: Object.freeze([]),
+    costs: Object.freeze([]),
+    rewards: Object.freeze([]),
+    autoComplete: false
+  }),
+  Object.freeze({
+    id: "domain-manager:facility-maintenance",
+    version: 1,
+    label: "Facility Maintenance & Overhaul",
+    description: "Periodic preventative maintenance or overhaul of operational facilities.",
+    category: "maintenance",
+    tags: Object.freeze(["maintenance", "facility", "repair"]),
+    progressResolverId: "domain-manager:standard",
+    defaultWorkRequired: 50,
+    requirements: Object.freeze([]),
+    costs: Object.freeze([]),
+    rewards: Object.freeze([]),
+    autoComplete: true
+  })
+]);
+
+// src/projects/definitions/project-registry.ts
+var ProjectDefinitionRegistry = class {
+  #definitions = /* @__PURE__ */ new Map();
+  #frozen = false;
+  /**
+   * Registers a project definition. Validates the definition before accepting.
+   * Rejects duplicate IDs with DM_PROJECT_DEFINITION_ALREADY_EXISTS.
+   */
+  register(definition) {
+    if (this.#frozen) {
+      return err(
+        createPublicError({
+          code: "DM_PROJECT_REGISTRY_FROZEN",
+          category: "conflict",
+          message: "ProjectDefinitionRegistry is frozen against new registrations"
+        })
+      );
+    }
+    const validatedRes = validateProjectDefinition(definition);
+    if (!validatedRes.ok) {
+      return validatedRes;
+    }
+    const validated = validatedRes.value;
+    if (this.#definitions.has(validated.id)) {
+      return err(
+        createPublicError({
+          code: "DM_PROJECT_DEFINITION_ALREADY_EXISTS",
+          category: "conflict",
+          message: `Project definition '${validated.id}' is already registered`
+        })
+      );
+    }
+    this.#definitions.set(validated.id, validated);
+    return ok(validated);
+  }
+  /**
+   * Retrieves a project definition by its namespaced ID.
+   */
+  get(id) {
+    return this.#definitions.get(id);
+  }
+  /**
+   * Checks if a definition exists in the registry.
+   */
+  has(id) {
+    return this.#definitions.has(id);
+  }
+  /**
+   * Lists registered project definitions with optional filtering by category or tag.
+   */
+  list(filter) {
+    let result = Array.from(this.#definitions.values());
+    if (filter?.category) {
+      result = result.filter((d) => d.category === filter.category);
+    }
+    if (filter?.tag) {
+      result = result.filter((d) => d.tags.includes(filter.tag));
+    }
+    return Object.freeze(result);
+  }
+  /**
+   * Unregisters a project definition by ID. Cannot unregister if frozen.
+   */
+  unregister(id) {
+    if (this.#frozen) {
+      throw new Error("Cannot unregister from a frozen ProjectDefinitionRegistry");
+    }
+    return this.#definitions.delete(id);
+  }
+  /**
+   * Freezes the registry against modifications.
+   */
+  freeze() {
+    this.#frozen = true;
+  }
+  get isFrozen() {
+    return this.#frozen;
+  }
+};
+function createDefaultProjectRegistry() {
+  const registry = new ProjectDefinitionRegistry();
+  for (const def of CANONICAL_PROJECT_DEFINITIONS) {
+    const res = registry.register(def);
+    if (!res.ok) {
+      throw new Error(`Failed to register canonical project definition ${def.id}: ${res.error.message}`);
+    }
+  }
+  return registry;
+}
+
+// src/projects/plans/project-start-plan-service.ts
+function evaluateProjectStartPlan(context) {
+  const { project, definition, domain } = context;
+  const blockers = [];
+  const warnings = [];
+  const expectedRevision = context.expectedRevision !== void 0 ? context.expectedRevision : project.revision;
+  const targetLifecycle = context.targetLifecycle ?? "active";
+  if (project.revision !== expectedRevision) {
+    blockers.push({
+      code: "DM_PROJECT_REVISION_MISMATCH",
+      category: "revision",
+      message: `Project revision mismatch: expected ${expectedRevision}, found ${project.revision}`,
+      details: { expected: expectedRevision, actual: project.revision }
+    });
+  }
+  const STARTABLE_LIFECYCLES = ["draft", "planned", "approved", "initializing"];
+  if (!STARTABLE_LIFECYCLES.includes(project.lifecycle)) {
+    blockers.push({
+      code: "DM_PROJECT_INVALID_TRANSITION",
+      category: "lifecycle",
+      message: `Cannot start project from lifecycle '${project.lifecycle}'. Project must be in draft, planned, approved, or initializing state`,
+      details: { from: project.lifecycle, to: targetLifecycle }
+    });
+  }
+  if (targetLifecycle !== "active" && targetLifecycle !== "initializing") {
+    blockers.push({
+      code: "DM_PROJECT_INVALID_TRANSITION",
+      category: "lifecycle",
+      message: `Invalid target lifecycle for start plan: '${targetLifecycle}'. Target must be 'active' or 'initializing'`,
+      details: { from: project.lifecycle, to: targetLifecycle }
+    });
+  }
+  const enabledCaps = domain.definition.capabilities.enabled;
+  if (!enabledCaps.includes(PROJECTS_CAPABILITY_ID)) {
+    blockers.push({
+      code: "DM_PROJECT_CAPABILITY_MISSING",
+      category: "capability",
+      message: `Domain '${project.domainUuid}' does not have the '${PROJECTS_CAPABILITY_ID}' capability enabled`,
+      details: { capabilityId: PROJECTS_CAPABILITY_ID }
+    });
+  }
+  const requirementEvaluations = [];
+  for (const req of definition.requirements) {
+    if (req.category === "start" || req.category === "continuous") {
+      let status = "satisfied";
+      let message;
+      if (req.type === "capability") {
+        const requiredCap = req.targetRef ?? String(req.value ?? "");
+        if (!enabledCaps.includes(requiredCap)) {
+          status = "unsatisfied";
+          message = `Required capability '${requiredCap}' is not enabled on domain`;
+        }
+      } else if (req.type === "facility") {
+        const targetFac = req.targetRef;
+        if (targetFac && context.parameters?.availableFacilities) {
+          const available = context.parameters.availableFacilities;
+          if (!available.includes(targetFac)) {
+            status = "unsatisfied";
+            message = `Required facility '${targetFac}' is not available`;
+          }
+        } else {
+          status = "unavailable";
+          message = `Facility evaluation for '${targetFac ?? "unknown"}' is not currently available`;
+        }
+      } else if (req.type === "custom") {
+        if (context.parameters?.customRequirements) {
+          const customMap = context.parameters.customRequirements;
+          if (customMap[req.id] === false) {
+            status = "unsatisfied";
+            message = `Custom requirement '${req.id}' is unsatisfied`;
+          }
+        }
+      }
+      if (status !== "satisfied") {
+        blockers.push({
+          code: "DM_PROJECT_REQUIREMENT_UNSATISFIED",
+          category: "requirement",
+          message: message ?? `Requirement '${req.id}' (${req.type}) is ${status}`,
+          details: { requirementId: req.id, status, type: req.type }
+        });
+      }
+      requirementEvaluations.push({
+        requirementId: req.id,
+        category: req.category,
+        type: req.type,
+        status,
+        message,
+        targetRef: req.targetRef,
+        value: req.value
+      });
+    }
+  }
+  const economicReservations = [];
+  const economyDataRes = tryGetDomainEconomyData(domain);
+  const domainAccounts = economyDataRes.ok ? economyDataRes.value.accounts : [];
+  for (const cost of definition.costs) {
+    if (cost.timing === "upfront" || cost.timing === "reserved") {
+      let availableMinor = 0;
+      if (context.availableResources && typeof context.availableResources[cost.resourceId] === "number") {
+        availableMinor = context.availableResources[cost.resourceId];
+      } else {
+        const account = domainAccounts.find((a) => a.resourceId === cost.resourceId);
+        if (account && account.mode === "native") {
+          availableMinor = account.balanceMinor;
+        }
+      }
+      const isAvailable = availableMinor >= cost.amountMinor;
+      if (!isAvailable && !cost.optional) {
+        blockers.push({
+          code: "DM_PROJECT_INSUFFICIENT_FUNDS",
+          category: "economy",
+          message: `Insufficient funds for resource '${cost.resourceId}': required ${cost.amountMinor} minor, available ${availableMinor} minor`,
+          details: {
+            resourceId: cost.resourceId,
+            requiredMinor: cost.amountMinor,
+            availableMinor
+          }
+        });
+      }
+      economicReservations.push({
+        resourceId: cost.resourceId,
+        amountMinor: cost.amountMinor,
+        timing: cost.timing,
+        accountAvailableMinor: availableMinor,
+        isAvailable,
+        reason: `${cost.timing} cost for project ${project.id}`
+      });
+    }
+  }
+  let workforceIntent = null;
+  const assignedContributors = context.contributors ?? [];
+  if (assignedContributors.length > 0 || context.parameters?.workforceRequired) {
+    const requiredUnits = typeof context.parameters?.workforceRequired === "number" ? context.parameters.workforceRequired : void 0;
+    const isSufficient = requiredUnits !== void 0 ? assignedContributors.length >= requiredUnits : true;
+    if (!isSufficient) {
+      blockers.push({
+        code: "DM_PROJECT_WORKFORCE_INSUFFICIENT",
+        category: "workforce",
+        message: `Assigned contributors (${assignedContributors.length}) does not meet required workforce (${requiredUnits})`,
+        details: { assigned: assignedContributors.length, required: requiredUnits }
+      });
+    }
+    workforceIntent = {
+      requiredUnits,
+      assignedContributors: Object.freeze([...assignedContributors]),
+      isSufficient
+    };
+  }
+  const isSatisfied = blockers.length === 0;
+  return Object.freeze({
+    planId: createOpaqueId("plan"),
+    projectId: project.id,
+    domainUuid: project.domainUuid,
+    expectedRevision,
+    targetLifecycle,
+    requirements: Object.freeze(requirementEvaluations),
+    economicReservations: Object.freeze(economicReservations),
+    workforceIntent,
+    blockers: Object.freeze(blockers),
+    warnings: Object.freeze(warnings),
+    isSatisfied,
+    evaluatedAt: Date.now()
+  });
+}
+function commitProjectStartPlan(plan, project, options) {
+  if (!plan.isSatisfied) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_START_BLOCKED",
+        category: "conflict",
+        message: `Project start plan is blocked by ${plan.blockers.length} blocker(s)`,
+        details: { blockers: plan.blockers }
+      })
+    );
+  }
+  if (project.id !== plan.projectId || project.domainUuid !== plan.domainUuid) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_MISMATCH",
+        category: "conflict",
+        message: "ProjectInstance does not match ProjectStartPlan"
+      })
+    );
+  }
+  if (project.revision !== plan.expectedRevision) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_REVISION_MISMATCH",
+        category: "conflict",
+        message: `Project revision has changed since plan was evaluated: expected ${plan.expectedRevision}, current ${project.revision}`
+      })
+    );
+  }
+  const timestamp = options?.timestamp ?? Date.now();
+  const sequence = (project.entries?.length ?? 0) + 1;
+  const startEntry = {
+    id: createOpaqueId("prj"),
+    projectId: project.id,
+    domainUuid: project.domainUuid,
+    sequence,
+    unitsDelta: 0,
+    unitsBefore: project.workCompleted,
+    unitsAfter: project.workCompleted,
+    sourceKind: "command",
+    reasonCode: "PROJECT_STARTED",
+    requestedByUserId: options?.userId ?? null,
+    timestamp,
+    note: `Project transitioned from '${project.lifecycle}' to '${plan.targetLifecycle}' via plan ${plan.planId}`
+  };
+  const transitioningProject = {
+    ...project,
+    lifecycle: plan.targetLifecycle
+  };
+  const applyRes = applyProjectEntry(transitioningProject, startEntry);
+  if (!applyRes.ok) {
+    return applyRes;
+  }
+  return ok({
+    project: applyRes.value,
+    plan
+  });
+}
+
+// src/projects/plans/project-advance-plan-service.ts
+function evaluateProjectAdvancePlan(context) {
+  const { project, definition, domain } = context;
+  const blockers = [];
+  const warnings = [];
+  const expectedRevision = context.expectedRevision !== void 0 ? context.expectedRevision : project.revision;
+  if (project.revision !== expectedRevision) {
+    blockers.push({
+      code: "DM_PROJECT_REVISION_MISMATCH",
+      category: "revision",
+      message: `Project revision mismatch: expected ${expectedRevision}, found ${project.revision}`,
+      details: { expected: expectedRevision, actual: project.revision }
+    });
+  }
+  if (project.lifecycle === "paused") {
+    blockers.push({
+      code: "DM_PROJECT_PAUSED",
+      category: "lifecycle",
+      message: `Cannot advance project '${project.id}' because it is paused. Resume the project first`,
+      details: { lifecycle: project.lifecycle }
+    });
+  } else if (project.lifecycle === "blocked") {
+    blockers.push({
+      code: "DM_PROJECT_BLOCKED",
+      category: "lifecycle",
+      message: `Cannot advance project '${project.id}' because it is blocked: ${project.blockedReason ?? "unspecified reason"}`,
+      details: { lifecycle: project.lifecycle, blockedReason: project.blockedReason }
+    });
+  } else if (project.lifecycle === "completed" || project.lifecycle === "failed" || project.lifecycle === "cancelled" || project.lifecycle === "archived") {
+    blockers.push({
+      code: "DM_PROJECT_TERMINAL",
+      category: "lifecycle",
+      message: `Cannot advance project '${project.id}' in terminal lifecycle '${project.lifecycle}'`,
+      details: { lifecycle: project.lifecycle }
+    });
+  } else if (project.lifecycle !== "active") {
+    blockers.push({
+      code: "DM_PROJECT_NOT_ACTIVE",
+      category: "lifecycle",
+      message: `Project '${project.id}' is not in active state (current lifecycle: '${project.lifecycle}')`,
+      details: { lifecycle: project.lifecycle }
+    });
+  }
+  const enabledCaps = domain.definition.capabilities.enabled;
+  if (!enabledCaps.includes(PROJECTS_CAPABILITY_ID)) {
+    blockers.push({
+      code: "DM_PROJECT_CAPABILITY_MISSING",
+      category: "capability",
+      message: `Domain '${project.domainUuid}' does not have the '${PROJECTS_CAPABILITY_ID}' capability enabled`,
+      details: { capabilityId: PROJECTS_CAPABILITY_ID }
+    });
+  }
+  const requirementEvaluations = [];
+  for (const req of definition.requirements) {
+    if (req.category === "advance" || req.category === "continuous") {
+      let status = "satisfied";
+      let message;
+      if (req.type === "capability") {
+        const requiredCap = req.targetRef ?? String(req.value ?? "");
+        if (!enabledCaps.includes(requiredCap)) {
+          status = "unsatisfied";
+          message = `Required capability '${requiredCap}' is not enabled on domain`;
+        }
+      } else if (req.type === "facility") {
+        const targetFac = req.targetRef;
+        if (targetFac && context.parameters?.availableFacilities) {
+          const available = context.parameters.availableFacilities;
+          if (!available.includes(targetFac)) {
+            status = "unsatisfied";
+            message = `Required facility '${targetFac}' is not available`;
+          }
+        } else {
+          status = "unavailable";
+          message = `Facility evaluation for '${targetFac ?? "unknown"}' is not currently available`;
+        }
+      } else if (req.type === "custom") {
+        if (context.parameters?.customRequirements) {
+          const customMap = context.parameters.customRequirements;
+          if (customMap[req.id] !== true) {
+            status = "unsatisfied";
+            message = `Custom requirement '${req.id}' is not satisfied`;
+          }
+        } else {
+          status = "unsatisfied";
+          message = `Custom requirement '${req.id}' was not provided in evaluation context`;
+        }
+      }
+      requirementEvaluations.push({
+        requirementId: req.id,
+        category: req.category,
+        type: req.type,
+        status,
+        message,
+        targetRef: req.targetRef,
+        value: req.value
+      });
+      if (status !== "satisfied") {
+        blockers.push({
+          code: "DM_PROJECT_REQUIREMENT_UNSATISFIED",
+          category: "requirement",
+          message: message ?? `Requirement '${req.id}' is ${status}`,
+          details: { requirementId: req.id, status }
+        });
+      }
+    }
+  }
+  let proposedDelta = 1;
+  if (context.proposedDelta !== void 0) {
+    if (!Number.isSafeInteger(context.proposedDelta)) {
+      blockers.push({
+        code: "DM_PROJECT_DELTA_INVALID",
+        category: "requirement",
+        message: `Proposed progress delta must be a safe integer: received ${String(context.proposedDelta)}`,
+        details: { proposedDelta: context.proposedDelta }
+      });
+    } else {
+      proposedDelta = context.proposedDelta;
+    }
+  } else if (context.resolver !== void 0) {
+    const resolutionRes = context.resolver.resolve({
+      project,
+      definition,
+      domainUuid: project.domainUuid,
+      sourceKind: "command",
+      contributor: context.contributors && context.contributors.length > 0 ? context.contributors[0] : null,
+      parameters: context.parameters
+    });
+    if (resolutionRes.ok) {
+      proposedDelta = resolutionRes.value.deltaWork;
+      if (resolutionRes.value.warnings && resolutionRes.value.warnings.length > 0) {
+        warnings.push(...resolutionRes.value.warnings);
+      }
+    } else {
+      blockers.push({
+        code: resolutionRes.error.code,
+        category: "workforce",
+        message: resolutionRes.error.message,
+        details: resolutionRes.error.details
+      });
+    }
+  }
+  const projectedCompleted = project.clampProgress !== false ? Math.min(project.workRequired, Math.max(0, project.workCompleted + proposedDelta)) : project.workCompleted + proposedDelta;
+  const wouldComplete = projectedCompleted >= project.workRequired;
+  const planId = createOpaqueId("plan");
+  return {
+    planId,
+    projectId: project.id,
+    domainUuid: project.domainUuid,
+    expectedRevision,
+    proposedDelta,
+    requirements: Object.freeze(requirementEvaluations),
+    contributors: Object.freeze([...context.contributors ?? []]),
+    blockers: Object.freeze(blockers),
+    warnings: Object.freeze(warnings),
+    isSatisfied: blockers.length === 0,
+    wouldComplete,
+    evaluatedAt: Date.now()
+  };
+}
+function commitProjectAdvance(plan, project, options) {
+  if (!plan.isSatisfied) {
+    const blockerMsgs = plan.blockers.map((b) => `[${b.code}] ${b.message}`).join("; ");
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_ADVANCE_BLOCKED",
+        category: "conflict",
+        message: `Cannot commit project advance: plan is blocked (${blockerMsgs})`,
+        details: { blockers: plan.blockers }
+      })
+    );
+  }
+  if (project.revision !== plan.expectedRevision) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_REVISION_MISMATCH",
+        category: "conflict",
+        message: `Project revision mismatch: plan expects revision ${plan.expectedRevision}, but project is at revision ${project.revision}`,
+        details: { expected: plan.expectedRevision, actual: project.revision }
+      })
+    );
+  }
+  if (project.lifecycle !== "active") {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_INVALID_TRANSITION",
+        category: "validation",
+        message: `Cannot advance project in lifecycle '${project.lifecycle}'. Must be 'active'`,
+        details: { lifecycle: project.lifecycle }
+      })
+    );
+  }
+  const now = Date.now();
+  const entryId = createOpaqueId("prj");
+  const sourceKind = options?.sourceKind ?? "command";
+  const sourceRef = options?.sourceRef ?? plan.planId;
+  const reasonCode = options?.reasonCode ?? (plan.wouldComplete ? "PROJECT_COMPLETED" : "PROJECT_ADVANCED");
+  const rawUnitsAfter = project.workCompleted + plan.proposedDelta;
+  const nonNegative = Math.max(0, rawUnitsAfter);
+  const clampedUnitsAfter = project.clampProgress !== false ? Math.min(project.workRequired, nonNegative) : nonNegative;
+  const sequence = (project.entries?.length ?? 0) + 1;
+  const entry = {
+    id: entryId,
+    projectId: project.id,
+    domainUuid: project.domainUuid,
+    sequence,
+    unitsDelta: plan.proposedDelta,
+    unitsBefore: project.workCompleted,
+    unitsAfter: clampedUnitsAfter,
+    sourceKind,
+    sourceRef,
+    requestedByUserId: options?.userId ?? null,
+    contributor: plan.contributors && plan.contributors.length > 0 ? plan.contributors[0] : null,
+    timestamp: now,
+    reasonCode,
+    note: options?.note
+  };
+  const isGoalMet = clampedUnitsAfter >= project.workRequired;
+  const shouldComplete = isGoalMet && (options?.autoComplete ?? false);
+  const targetLifecycle = shouldComplete ? "completed" : "active";
+  if (shouldComplete) {
+    const transitionRes = validateProjectLifecycleTransition(project.lifecycle, "completed");
+    if (!transitionRes.ok) {
+      return transitionRes;
+    }
+  }
+  const applyRes = applyProjectEntry(project, entry);
+  if (!applyRes.ok) {
+    return applyRes;
+  }
+  let updatedProject = applyRes.value;
+  if (shouldComplete) {
+    updatedProject = {
+      ...updatedProject,
+      lifecycle: "completed",
+      completedAt: now
+    };
+  }
+  const receipt = {
+    receiptId: createOpaqueId("rep"),
+    projectId: project.id,
+    domainUuid: project.domainUuid,
+    action: shouldComplete ? "complete" : "advance",
+    revisionBefore: project.revision,
+    revisionAfter: updatedProject.revision,
+    lifecycleBefore: project.lifecycle,
+    lifecycleAfter: updatedProject.lifecycle,
+    workCompletedBefore: project.workCompleted,
+    workCompletedAfter: updatedProject.workCompleted,
+    unitsDelta: plan.proposedDelta,
+    entryCreated: entry,
+    blockedReason: project.blockedReason,
+    appliedAt: now,
+    reasonCode,
+    note: options?.note
+  };
+  return ok({
+    updatedProject,
+    receipt
+  });
+}
+function blockProject(project, params) {
+  const expectedRevision = params.expectedRevision !== void 0 ? params.expectedRevision : project.revision;
+  if (project.revision !== expectedRevision) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_REVISION_MISMATCH",
+        category: "conflict",
+        message: `Project revision mismatch: expected revision ${expectedRevision}, but project is at revision ${project.revision}`,
+        details: { expected: expectedRevision, actual: project.revision }
+      })
+    );
+  }
+  const reason = params.reason.trim();
+  if (!reason) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_BLOCK_REASON_REQUIRED",
+        category: "validation",
+        message: "Blocking a project requires a non-empty reason string"
+      })
+    );
+  }
+  const transitionRes = validateProjectLifecycleTransition(project.lifecycle, "blocked");
+  if (!transitionRes.ok) {
+    return transitionRes;
+  }
+  const now = Date.now();
+  const entryId = createOpaqueId("prj");
+  const sequence = (project.entries?.length ?? 0) + 1;
+  const entry = {
+    id: entryId,
+    projectId: project.id,
+    domainUuid: project.domainUuid,
+    sequence,
+    unitsDelta: 0,
+    unitsBefore: project.workCompleted,
+    unitsAfter: project.workCompleted,
+    sourceKind: "command",
+    sourceRef: params.sourceRef ?? "blockProject",
+    requestedByUserId: params.userId ?? null,
+    timestamp: now,
+    reasonCode: "PROJECT_BLOCKED",
+    note: params.note ? `${reason} \u2014 ${params.note}` : reason
+  };
+  const transitioningProject = {
+    ...project,
+    lifecycle: "blocked",
+    blockedReason: reason
+  };
+  const applyRes = applyProjectEntry(transitioningProject, entry);
+  if (!applyRes.ok) {
+    return applyRes;
+  }
+  const updatedProject = applyRes.value;
+  const receipt = {
+    receiptId: createOpaqueId("rep"),
+    projectId: project.id,
+    domainUuid: project.domainUuid,
+    action: "block",
+    revisionBefore: project.revision,
+    revisionAfter: updatedProject.revision,
+    lifecycleBefore: project.lifecycle,
+    lifecycleAfter: updatedProject.lifecycle,
+    workCompletedBefore: project.workCompleted,
+    workCompletedAfter: updatedProject.workCompleted,
+    unitsDelta: 0,
+    entryCreated: entry,
+    blockedReason: reason,
+    appliedAt: now,
+    reasonCode: "PROJECT_BLOCKED",
+    note: params.note
+  };
+  return ok({
+    updatedProject,
+    receipt
+  });
+}
+function unblockProject(project, params) {
+  const expectedRevision = params?.expectedRevision !== void 0 ? params.expectedRevision : project.revision;
+  if (project.revision !== expectedRevision) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_REVISION_MISMATCH",
+        category: "conflict",
+        message: `Project revision mismatch: expected revision ${expectedRevision}, but project is at revision ${project.revision}`,
+        details: { expected: expectedRevision, actual: project.revision }
+      })
+    );
+  }
+  if (project.lifecycle !== "blocked") {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_INVALID_TRANSITION",
+        category: "validation",
+        message: `Cannot unblock project in lifecycle '${project.lifecycle}'. Project is not blocked`,
+        details: { lifecycle: project.lifecycle }
+      })
+    );
+  }
+  const targetLifecycle = params?.targetLifecycle ?? "active";
+  const transitionRes = validateProjectLifecycleTransition(project.lifecycle, targetLifecycle);
+  if (!transitionRes.ok) {
+    return transitionRes;
+  }
+  const now = Date.now();
+  const entryId = createOpaqueId("prj");
+  const sequence = (project.entries?.length ?? 0) + 1;
+  const entry = {
+    id: entryId,
+    projectId: project.id,
+    domainUuid: project.domainUuid,
+    sequence,
+    unitsDelta: 0,
+    unitsBefore: project.workCompleted,
+    unitsAfter: project.workCompleted,
+    sourceKind: "command",
+    sourceRef: params?.sourceRef ?? "unblockProject",
+    requestedByUserId: params?.userId ?? null,
+    timestamp: now,
+    reasonCode: "PROJECT_UNBLOCKED",
+    note: params?.note
+  };
+  const transitioningProject = {
+    ...project,
+    lifecycle: targetLifecycle,
+    blockedReason: null
+  };
+  const applyRes = applyProjectEntry(transitioningProject, entry);
+  if (!applyRes.ok) {
+    return applyRes;
+  }
+  const updatedProject = applyRes.value;
+  const receipt = {
+    receiptId: createOpaqueId("rep"),
+    projectId: project.id,
+    domainUuid: project.domainUuid,
+    action: "unblock",
+    revisionBefore: project.revision,
+    revisionAfter: updatedProject.revision,
+    lifecycleBefore: project.lifecycle,
+    lifecycleAfter: updatedProject.lifecycle,
+    workCompletedBefore: project.workCompleted,
+    workCompletedAfter: updatedProject.workCompleted,
+    unitsDelta: 0,
+    entryCreated: entry,
+    blockedReason: null,
+    appliedAt: now,
+    reasonCode: "PROJECT_UNBLOCKED",
+    note: params?.note
+  };
+  return ok({
+    updatedProject,
+    receipt
+  });
+}
+function pauseProject(project, params) {
+  const expectedRevision = params?.expectedRevision !== void 0 ? params.expectedRevision : project.revision;
+  if (project.revision !== expectedRevision) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_REVISION_MISMATCH",
+        category: "conflict",
+        message: `Project revision mismatch: expected revision ${expectedRevision}, but project is at revision ${project.revision}`,
+        details: { expected: expectedRevision, actual: project.revision }
+      })
+    );
+  }
+  const transitionRes = validateProjectLifecycleTransition(project.lifecycle, "paused");
+  if (!transitionRes.ok) {
+    return transitionRes;
+  }
+  const now = Date.now();
+  const entryId = createOpaqueId("prj");
+  const sequence = (project.entries?.length ?? 0) + 1;
+  const entry = {
+    id: entryId,
+    projectId: project.id,
+    domainUuid: project.domainUuid,
+    sequence,
+    unitsDelta: 0,
+    unitsBefore: project.workCompleted,
+    unitsAfter: project.workCompleted,
+    sourceKind: "command",
+    sourceRef: params?.sourceRef ?? "pauseProject",
+    requestedByUserId: params?.userId ?? null,
+    timestamp: now,
+    reasonCode: "PROJECT_PAUSED",
+    note: params?.note
+  };
+  const transitioningProject = {
+    ...project,
+    lifecycle: "paused"
+  };
+  const applyRes = applyProjectEntry(transitioningProject, entry);
+  if (!applyRes.ok) {
+    return applyRes;
+  }
+  const updatedProject = applyRes.value;
+  const receipt = {
+    receiptId: createOpaqueId("rep"),
+    projectId: project.id,
+    domainUuid: project.domainUuid,
+    action: "pause",
+    revisionBefore: project.revision,
+    revisionAfter: updatedProject.revision,
+    lifecycleBefore: project.lifecycle,
+    lifecycleAfter: updatedProject.lifecycle,
+    workCompletedBefore: project.workCompleted,
+    workCompletedAfter: updatedProject.workCompleted,
+    unitsDelta: 0,
+    entryCreated: entry,
+    blockedReason: project.blockedReason,
+    appliedAt: now,
+    reasonCode: "PROJECT_PAUSED",
+    note: params?.note
+  };
+  return ok({
+    updatedProject,
+    receipt
+  });
+}
+function resumeProject(project, params) {
+  const expectedRevision = params?.expectedRevision !== void 0 ? params.expectedRevision : project.revision;
+  if (project.revision !== expectedRevision) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_REVISION_MISMATCH",
+        category: "conflict",
+        message: `Project revision mismatch: expected revision ${expectedRevision}, but project is at revision ${project.revision}`,
+        details: { expected: expectedRevision, actual: project.revision }
+      })
+    );
+  }
+  if (project.lifecycle !== "paused") {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_INVALID_TRANSITION",
+        category: "validation",
+        message: `Cannot resume project in lifecycle '${project.lifecycle}'. Must be 'paused'`,
+        details: { lifecycle: project.lifecycle }
+      })
+    );
+  }
+  const transitionRes = validateProjectLifecycleTransition(project.lifecycle, "active");
+  if (!transitionRes.ok) {
+    return transitionRes;
+  }
+  const now = Date.now();
+  const entryId = createOpaqueId("prj");
+  const sequence = (project.entries?.length ?? 0) + 1;
+  const entry = {
+    id: entryId,
+    projectId: project.id,
+    domainUuid: project.domainUuid,
+    sequence,
+    unitsDelta: 0,
+    unitsBefore: project.workCompleted,
+    unitsAfter: project.workCompleted,
+    sourceKind: "command",
+    sourceRef: params?.sourceRef ?? "resumeProject",
+    requestedByUserId: params?.userId ?? null,
+    timestamp: now,
+    reasonCode: "PROJECT_RESUMED",
+    note: params?.note
+  };
+  const transitioningProject = {
+    ...project,
+    lifecycle: "active"
+  };
+  const applyRes = applyProjectEntry(transitioningProject, entry);
+  if (!applyRes.ok) {
+    return applyRes;
+  }
+  const updatedProject = applyRes.value;
+  const receipt = {
+    receiptId: createOpaqueId("rep"),
+    projectId: project.id,
+    domainUuid: project.domainUuid,
+    action: "resume",
+    revisionBefore: project.revision,
+    revisionAfter: updatedProject.revision,
+    lifecycleBefore: project.lifecycle,
+    lifecycleAfter: updatedProject.lifecycle,
+    workCompletedBefore: project.workCompleted,
+    workCompletedAfter: updatedProject.workCompleted,
+    unitsDelta: 0,
+    entryCreated: entry,
+    blockedReason: project.blockedReason,
+    appliedAt: now,
+    reasonCode: "PROJECT_RESUMED",
+    note: params?.note
+  };
+  return ok({
+    updatedProject,
+    receipt
+  });
+}
+function cancelProject(project, params) {
+  const expectedRevision = params?.expectedRevision !== void 0 ? params.expectedRevision : project.revision;
+  if (project.revision !== expectedRevision) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_REVISION_MISMATCH",
+        category: "conflict",
+        message: `Project revision mismatch: expected revision ${expectedRevision}, but project is at revision ${project.revision}`,
+        details: { expected: expectedRevision, actual: project.revision }
+      })
+    );
+  }
+  const transitionRes = validateProjectLifecycleTransition(project.lifecycle, "cancelled");
+  if (!transitionRes.ok) {
+    return transitionRes;
+  }
+  const now = Date.now();
+  const entryId = createOpaqueId("prj");
+  const reasonCode = params?.policy?.reasonCode ?? "PROJECT_CANCELLED";
+  const sequence = (project.entries?.length ?? 0) + 1;
+  const entry = {
+    id: entryId,
+    projectId: project.id,
+    domainUuid: project.domainUuid,
+    sequence,
+    unitsDelta: 0,
+    unitsBefore: project.workCompleted,
+    unitsAfter: project.workCompleted,
+    sourceKind: "command",
+    sourceRef: params?.sourceRef ?? "cancelProject",
+    requestedByUserId: params?.userId ?? null,
+    timestamp: now,
+    reasonCode,
+    note: params?.note
+  };
+  const transitioningProject = {
+    ...project,
+    lifecycle: "cancelled"
+  };
+  const applyRes = applyProjectEntry(transitioningProject, entry);
+  if (!applyRes.ok) {
+    return applyRes;
+  }
+  const updatedProject = applyRes.value;
+  const receipt = {
+    receiptId: createOpaqueId("rep"),
+    projectId: project.id,
+    domainUuid: project.domainUuid,
+    action: "cancel",
+    revisionBefore: project.revision,
+    revisionAfter: updatedProject.revision,
+    lifecycleBefore: project.lifecycle,
+    lifecycleAfter: updatedProject.lifecycle,
+    workCompletedBefore: project.workCompleted,
+    workCompletedAfter: updatedProject.workCompleted,
+    unitsDelta: 0,
+    entryCreated: entry,
+    blockedReason: project.blockedReason,
+    appliedAt: now,
+    reasonCode,
+    note: params?.note
+  };
+  return ok({
+    updatedProject,
+    receipt
+  });
+}
+
+// src/projects/plans/project-completion-plan-service.ts
+function evaluateProjectCompletionPlan(context) {
+  const { project, definition, domain } = context;
+  const blockers = [];
+  const warnings = [];
+  const expectedRevision = context.expectedRevision !== void 0 ? context.expectedRevision : project.revision;
+  if (project.revision !== expectedRevision) {
+    blockers.push({
+      code: "DM_PROJECT_REVISION_MISMATCH",
+      category: "revision",
+      message: `Project revision mismatch: expected ${expectedRevision}, found ${project.revision}`,
+      details: { expected: expectedRevision, actual: project.revision }
+    });
+  }
+  if (project.workCompleted < project.workRequired) {
+    blockers.push({
+      code: "DM_PROJECT_INCOMPLETE",
+      category: "requirement",
+      message: `Project '${project.id}' is not complete: ${project.workCompleted}/${project.workRequired} units completed`,
+      details: { workCompleted: project.workCompleted, workRequired: project.workRequired }
+    });
+  }
+  if (project.lifecycle === "completed") {
+    blockers.push({
+      code: "DM_PROJECT_ALREADY_COMPLETED",
+      category: "lifecycle",
+      message: `Project '${project.id}' is already completed`,
+      details: { lifecycle: project.lifecycle }
+    });
+  } else if (project.lifecycle === "paused") {
+    blockers.push({
+      code: "DM_PROJECT_PAUSED",
+      category: "lifecycle",
+      message: `Cannot complete project '${project.id}' because it is paused. Resume the project first`,
+      details: { lifecycle: project.lifecycle }
+    });
+  } else if (project.lifecycle === "blocked") {
+    blockers.push({
+      code: "DM_PROJECT_BLOCKED",
+      category: "lifecycle",
+      message: `Cannot complete project '${project.id}' because it is blocked: ${project.blockedReason ?? "unspecified reason"}`,
+      details: { lifecycle: project.lifecycle, blockedReason: project.blockedReason }
+    });
+  } else if (project.lifecycle === "failed" || project.lifecycle === "cancelled" || project.lifecycle === "archived") {
+    blockers.push({
+      code: "DM_PROJECT_TERMINAL",
+      category: "lifecycle",
+      message: `Cannot complete project '${project.id}' in terminal lifecycle '${project.lifecycle}'`,
+      details: { lifecycle: project.lifecycle }
+    });
+  } else if (project.lifecycle !== "active") {
+    blockers.push({
+      code: "DM_PROJECT_NOT_ACTIVE",
+      category: "lifecycle",
+      message: `Project '${project.id}' is not in active state (current lifecycle: '${project.lifecycle}')`,
+      details: { lifecycle: project.lifecycle }
+    });
+  }
+  const enabledCaps = domain.definition.capabilities.enabled;
+  if (!enabledCaps.includes(PROJECTS_CAPABILITY_ID)) {
+    blockers.push({
+      code: "DM_PROJECT_CAPABILITY_MISSING",
+      category: "capability",
+      message: `Domain '${project.domainUuid}' does not have the '${PROJECTS_CAPABILITY_ID}' capability enabled`,
+      details: { capabilityId: PROJECTS_CAPABILITY_ID }
+    });
+  }
+  const requirementEvaluations = [];
+  for (const req of definition.requirements) {
+    if (req.category === "completion" || req.category === "continuous") {
+      let status = "satisfied";
+      let message;
+      if (req.type === "capability") {
+        const requiredCap = req.targetRef ?? String(req.value ?? "");
+        if (!enabledCaps.includes(requiredCap)) {
+          status = "unsatisfied";
+          message = `Required capability '${requiredCap}' is not enabled on domain for completion`;
+        }
+      } else if (req.type === "facility") {
+        const targetFac = req.targetRef;
+        if (targetFac && context.parameters?.availableFacilities) {
+          const available = context.parameters.availableFacilities;
+          if (!available.includes(targetFac)) {
+            status = "unsatisfied";
+            message = `Required facility '${targetFac}' is not available for completion`;
+          }
+        } else {
+          status = "unavailable";
+          message = `Facility evaluation for '${targetFac ?? "unknown"}' is not available for completion`;
+        }
+      } else if (req.type === "custom") {
+        if (context.parameters?.customRequirements) {
+          const customMap = context.parameters.customRequirements;
+          if (customMap[req.id] !== true) {
+            status = "unsatisfied";
+            message = `Completion requirement '${req.id}' is not satisfied`;
+          }
+        } else {
+          status = "unsatisfied";
+          message = `Completion requirement '${req.id}' was not provided in evaluation context`;
+        }
+      }
+      requirementEvaluations.push({
+        requirementId: req.id,
+        category: req.category,
+        type: req.type,
+        status,
+        message,
+        targetRef: req.targetRef,
+        value: req.value
+      });
+      if (status !== "satisfied") {
+        blockers.push({
+          code: "DM_PROJECT_REQUIREMENT_UNSATISFIED",
+          category: "requirement",
+          message: message ?? `Completion requirement '${req.id}' is ${status}`,
+          details: { requirementId: req.id, status }
+        });
+      }
+    }
+  }
+  const sideEffects = [];
+  for (const reward of definition.rewards) {
+    sideEffects.push({
+      id: createOpaqueId("prj"),
+      type: reward.type,
+      targetRef: reward.targetRef,
+      value: reward.value,
+      description: reward.label ?? `Project reward (${reward.type})`
+    });
+  }
+  if (context.extraSideEffects) {
+    sideEffects.push(...context.extraSideEffects);
+  }
+  const planId = createOpaqueId("plan");
+  return {
+    planId,
+    projectId: project.id,
+    domainUuid: project.domainUuid,
+    expectedRevision,
+    workRequired: project.workRequired,
+    workCompleted: project.workCompleted,
+    requirements: Object.freeze(requirementEvaluations),
+    plannedRewards: Object.freeze([...definition.rewards]),
+    sideEffects: Object.freeze(sideEffects),
+    blockers: Object.freeze(blockers),
+    warnings: Object.freeze(warnings),
+    isSatisfied: blockers.length === 0,
+    evaluatedAt: Date.now()
+  };
+}
+function commitProjectCompletion(plan, project, options) {
+  if (!plan.isSatisfied) {
+    const blockerMsgs = plan.blockers.map((b) => `[${b.code}] ${b.message}`).join("; ");
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_COMPLETION_BLOCKED",
+        category: "conflict",
+        message: `Cannot commit project completion: plan is blocked (${blockerMsgs})`,
+        details: { blockers: plan.blockers }
+      })
+    );
+  }
+  if (project.revision !== plan.expectedRevision) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_REVISION_MISMATCH",
+        category: "conflict",
+        message: `Project revision mismatch: plan expects revision ${plan.expectedRevision}, but project is at revision ${project.revision}`,
+        details: { expected: plan.expectedRevision, actual: project.revision }
+      })
+    );
+  }
+  if (project.lifecycle !== "active") {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_INVALID_TRANSITION",
+        category: "validation",
+        message: `Cannot complete project in lifecycle '${project.lifecycle}'. Must be 'active'`,
+        details: { lifecycle: project.lifecycle }
+      })
+    );
+  }
+  if (project.workCompleted < project.workRequired) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_INCOMPLETE",
+        category: "conflict",
+        message: `Cannot complete incomplete project: ${project.workCompleted}/${project.workRequired} units completed`
+      })
+    );
+  }
+  const transitionRes = validateProjectLifecycleTransition(project.lifecycle, "completed");
+  if (!transitionRes.ok) {
+    return transitionRes;
+  }
+  const now = Date.now();
+  const entryId = createOpaqueId("prj");
+  const sequence = (project.entries?.length ?? 0) + 1;
+  const reasonCode = "PROJECT_COMPLETED";
+  const entry = {
+    id: entryId,
+    projectId: project.id,
+    domainUuid: project.domainUuid,
+    sequence,
+    unitsDelta: 0,
+    unitsBefore: project.workCompleted,
+    unitsAfter: project.workCompleted,
+    sourceKind: options?.sourceKind ?? "command",
+    sourceRef: options?.sourceRef ?? plan.planId,
+    requestedByUserId: options?.userId ?? null,
+    timestamp: now,
+    reasonCode,
+    note: options?.note ?? `Project completed via plan ${plan.planId}`
+  };
+  const transitioningProject = {
+    ...project,
+    lifecycle: "completed",
+    completedAt: now
+  };
+  const applyRes = applyProjectEntry(transitioningProject, entry);
+  if (!applyRes.ok) {
+    return applyRes;
+  }
+  const updatedProject = applyRes.value;
+  const childReceipts = [];
+  let partialFailure = false;
+  for (const effect of plan.sideEffects) {
+    const handler = options?.sideEffectHandlers?.[effect.type];
+    if (handler) {
+      try {
+        const res = handler(effect, { project, domain: { definition: { identity: { id: project.domainUuid } } } });
+        if ("ok" in res) {
+          if (res.ok) {
+            childReceipts.push(res.value);
+          } else {
+            partialFailure = true;
+            childReceipts.push({
+              childReceiptId: createOpaqueId("rep"),
+              subsystem: effect.type === "facility" ? "facility" : effect.type === "resource" ? "economy" : "custom",
+              action: `apply_${effect.type}_reward`,
+              targetRef: effect.targetRef,
+              payload: effect.value,
+              success: false,
+              appliedAt: now,
+              error: res.error.message
+            });
+          }
+        } else {
+          childReceipts.push(res);
+          if (!res.success) {
+            partialFailure = true;
+          }
+        }
+      } catch (errCatch) {
+        partialFailure = true;
+        const msg = errCatch instanceof Error ? errCatch.message : String(errCatch);
+        childReceipts.push({
+          childReceiptId: createOpaqueId("rep"),
+          subsystem: effect.type === "facility" ? "facility" : effect.type === "resource" ? "economy" : "custom",
+          action: `apply_${effect.type}_reward`,
+          targetRef: effect.targetRef,
+          payload: effect.value,
+          success: false,
+          appliedAt: now,
+          error: msg
+        });
+      }
+    } else {
+      childReceipts.push({
+        childReceiptId: createOpaqueId("rep"),
+        subsystem: effect.type === "facility" ? "facility" : effect.type === "resource" ? "economy" : "custom",
+        action: `grant_${effect.type}`,
+        targetRef: effect.targetRef,
+        payload: effect.value,
+        success: true,
+        appliedAt: now
+      });
+    }
+  }
+  const receipt = {
+    receiptId: createOpaqueId("rep"),
+    projectId: project.id,
+    domainUuid: project.domainUuid,
+    action: "complete",
+    revisionBefore: project.revision,
+    revisionAfter: updatedProject.revision,
+    lifecycleBefore: project.lifecycle,
+    lifecycleAfter: updatedProject.lifecycle,
+    workCompletedBefore: project.workCompleted,
+    workCompletedAfter: updatedProject.workCompleted,
+    unitsDelta: 0,
+    entryCreated: entry,
+    blockedReason: null,
+    childReceiptIds: Object.freeze(childReceipts.map((c) => c.childReceiptId)),
+    appliedAt: now,
+    reasonCode,
+    note: options?.note
+  };
+  return ok({
+    updatedProject,
+    receipt,
+    childReceipts: Object.freeze(childReceipts),
+    partialFailure
+  });
+}
+
+// src/projects/services/projects-service.ts
+var ProjectsService = class {
+  #domains;
+  #projectRegistry;
+  #economyService;
+  #facilitiesService;
+  #transactionStore;
+  constructor(options) {
+    this.#domains = options.domains;
+    this.#projectRegistry = options.projectRegistry ?? createDefaultProjectRegistry();
+    this.#economyService = options.economyService;
+    this.#facilitiesService = options.facilitiesService;
+    this.#transactionStore = options.transactionStore;
+  }
+  get registry() {
+    return this.#projectRegistry;
+  }
+  async getProjects(domainUuid) {
+    const docRes = await this.#domains.read(domainUuid);
+    if (!docRes.ok) return docRes;
+    const data = getDomainProjectsData(docRes.value.record);
+    return ok(data.projects);
+  }
+  async getProject(domainUuid, projectId) {
+    const docRes = await this.#domains.read(domainUuid);
+    if (!docRes.ok) return docRes;
+    const data = getDomainProjectsData(docRes.value.record);
+    const p = data.projects.find((item) => item.id === projectId);
+    if (!p) {
+      return err(
+        createPublicError({
+          code: "DM_PROJECT_NOT_FOUND",
+          category: "not-found",
+          message: `Project ${projectId} not found in domain ${domainUuid}`
+        })
+      );
+    }
+    return ok(p);
+  }
+  async startProject(params) {
+    const docRes = await this.#domains.read(params.domainUuid);
+    if (!docRes.ok) return docRes;
+    const record = docRes.value.record;
+    if (!record.definition.capabilities.enabled.includes(PROJECTS_CAPABILITY_ID)) {
+      return err(
+        createPublicError({
+          code: "DM_PROJECT_CAPABILITY_DISABLED",
+          category: "conflict",
+          message: `Projects capability '${PROJECTS_CAPABILITY_ID}' is not enabled on domain ${params.domainUuid}`
+        })
+      );
+    }
+    const definition = this.#projectRegistry.get(params.definitionId);
+    if (!definition) {
+      return err(
+        createPublicError({
+          code: "DM_PROJECT_DEFINITION_NOT_FOUND",
+          category: "not-found",
+          message: `Project definition '${params.definitionId}' not found`
+        })
+      );
+    }
+    const currentProjectsData = getDomainProjectsData(record);
+    const projectId = `proj-${createOpaqueId("prj")}`;
+    const now = Date.now();
+    const draftProject = {
+      id: projectId,
+      domainUuid: params.domainUuid,
+      definitionId: params.definitionId,
+      name: params.name ?? definition.label,
+      schemaVersion: 1,
+      revision: 0,
+      lifecycle: "draft",
+      workRequired: params.workRequired ?? definition.defaultWorkRequired,
+      workCompleted: 0,
+      clampProgress: true,
+      tags: Object.freeze([...definition.tags ?? []]),
+      createdAt: now,
+      updatedAt: now,
+      metadata: params.targetRef ? { targetRef: params.targetRef } : void 0
+    };
+    const plan = evaluateProjectStartPlan({
+      project: draftProject,
+      definition,
+      domain: record,
+      expectedRevision: params.expectedRevision ?? 0,
+      targetLifecycle: params.initialState === "initializing" ? "initializing" : "active"
+    });
+    const econData = getDomainEconomyData(record);
+    for (const resIntent of plan.economicReservations) {
+      const account = econData.accounts.find(
+        (a) => a.resourceId === resIntent.resourceId && a.mode === "native"
+      );
+      const balanceMinor = account && "balanceMinor" in account ? account.balanceMinor : 0;
+      let reservedMinor = 0;
+      if (this.#economyService && "getAccountAvailability" in this.#economyService) {
+        const availRes = await this.#economyService.getAccountAvailability(
+          params.domainUuid,
+          resIntent.resourceId
+        );
+        if (availRes && availRes.ok && availRes.value) {
+          reservedMinor = availRes.value.reservedMinor ?? 0;
+        }
+      }
+      const availableMinor = balanceMinor - reservedMinor;
+      if (availableMinor < resIntent.amountMinor) {
+        return err(
+          createPublicError({
+            code: "DM_PROJECT_START_BLOCKED",
+            category: "conflict",
+            message: `Insufficient economic resources for project '${draftProject.name}'. Required: ${resIntent.amountMinor}, Available: ${availableMinor} on resource '${resIntent.resourceId}'`,
+            details: {
+              resourceId: resIntent.resourceId,
+              requiredMinor: resIntent.amountMinor,
+              availableMinor
+            }
+          })
+        );
+      }
+    }
+    if (!plan.isSatisfied) {
+      const firstBlocker = plan.blockers[0];
+      return err(
+        createPublicError({
+          code: "DM_PROJECT_START_BLOCKED",
+          category: "conflict",
+          message: firstBlocker?.message ?? "Project start preconditions unsatisfied",
+          details: { blockers: plan.blockers }
+        })
+      );
+    }
+    const commitRes = commitProjectStartPlan(plan, draftProject, {
+      userId: params.userId
+    });
+    if (!commitRes.ok) return commitRes;
+    const startedProject = commitRes.value.project;
+    const updatedRecord = withDomainProjectsData(record, {
+      ...currentProjectsData,
+      projects: Object.freeze([...currentProjectsData.projects, startedProject])
+    });
+    const saveRes = await this.#domains.save({
+      ...docRes.value,
+      record: updatedRecord
+    });
+    if (!saveRes.ok) return saveRes;
+    return ok({ project: startedProject });
+  }
+  async advanceProject(params) {
+    const docRes = await this.#domains.read(params.domainUuid);
+    if (!docRes.ok) return docRes;
+    const record = docRes.value.record;
+    const currentProjectsData = getDomainProjectsData(record);
+    const project = currentProjectsData.projects.find((p) => p.id === params.projectId);
+    if (!project) {
+      return err(
+        createPublicError({
+          code: "DM_PROJECT_NOT_FOUND",
+          category: "not-found",
+          message: `Project ${params.projectId} not found in domain ${params.domainUuid}`
+        })
+      );
+    }
+    if (params.expectedRevision !== void 0 && project.revision !== params.expectedRevision) {
+      return err(
+        createPublicError({
+          code: "DM_PROJECT_REVISION_MISMATCH",
+          category: "conflict",
+          message: `Project revision mismatch: expected ${params.expectedRevision}, found ${project.revision}`
+        })
+      );
+    }
+    const definition = this.#projectRegistry.get(project.definitionId);
+    if (!definition) {
+      return err(
+        createPublicError({
+          code: "DM_PROJECT_DEFINITION_NOT_FOUND",
+          category: "not-found",
+          message: `Project definition ${project.definitionId} not found`
+        })
+      );
+    }
+    const plan = evaluateProjectAdvancePlan({
+      project,
+      definition,
+      domain: record,
+      proposedDelta: params.delta,
+      expectedRevision: params.expectedRevision
+    });
+    if (!plan.isSatisfied) {
+      const firstBlocker = plan.blockers[0];
+      return err(
+        createPublicError({
+          code: "DM_PROJECT_ADVANCE_BLOCKED",
+          category: "conflict",
+          message: firstBlocker?.message ?? "Project advance blocked",
+          details: { blockers: plan.blockers }
+        })
+      );
+    }
+    const advanceRes = commitProjectAdvance(plan, project, {
+      userId: params.userId,
+      note: params.notes
+    });
+    if (!advanceRes.ok) return advanceRes;
+    const updatedProject = advanceRes.value.updatedProject;
+    const updatedProjects = currentProjectsData.projects.map(
+      (p) => p.id === params.projectId ? updatedProject : p
+    );
+    const updatedRecord = withDomainProjectsData(record, {
+      ...currentProjectsData,
+      projects: Object.freeze(updatedProjects)
+    });
+    const saveRes = await this.#domains.save({
+      ...docRes.value,
+      record: updatedRecord
+    });
+    if (!saveRes.ok) return saveRes;
+    return ok({
+      project: updatedProject,
+      deltaApplied: advanceRes.value.receipt.unitsDelta
+    });
+  }
+  async pauseProject(params) {
+    return this.#mutateLifecycle(
+      params.domainUuid,
+      params.projectId,
+      params.expectedRevision,
+      (p) => pauseProject(p, { note: params.reason, userId: params.userId })
+    );
+  }
+  async resumeProject(params) {
+    return this.#mutateLifecycle(
+      params.domainUuid,
+      params.projectId,
+      params.expectedRevision,
+      (p) => resumeProject(p, { note: params.reason, userId: params.userId })
+    );
+  }
+  async cancelProject(params) {
+    return this.#mutateLifecycle(
+      params.domainUuid,
+      params.projectId,
+      params.expectedRevision,
+      (p) => cancelProject(p, { note: params.reason, userId: params.userId })
+    );
+  }
+  async blockProject(params) {
+    return this.#mutateLifecycle(
+      params.domainUuid,
+      params.projectId,
+      params.expectedRevision,
+      (p) => blockProject(p, { reason: params.reason, userId: params.userId, expectedRevision: params.expectedRevision })
+    );
+  }
+  async unblockProject(params) {
+    return this.#mutateLifecycle(
+      params.domainUuid,
+      params.projectId,
+      params.expectedRevision,
+      (p) => unblockProject(p, { note: params.reason, userId: params.userId })
+    );
+  }
+  async completeProject(params) {
+    const docRes = await this.#domains.read(params.domainUuid);
+    if (!docRes.ok) return docRes;
+    const record = docRes.value.record;
+    const currentProjectsData = getDomainProjectsData(record);
+    const project = currentProjectsData.projects.find((p) => p.id === params.projectId);
+    if (!project) {
+      return err(
+        createPublicError({
+          code: "DM_PROJECT_NOT_FOUND",
+          category: "not-found",
+          message: `Project ${params.projectId} not found in domain ${params.domainUuid}`
+        })
+      );
+    }
+    if (params.expectedRevision !== void 0 && project.revision !== params.expectedRevision) {
+      return err(
+        createPublicError({
+          code: "DM_PROJECT_REVISION_MISMATCH",
+          category: "conflict",
+          message: `Project revision mismatch: expected ${params.expectedRevision}, found ${project.revision}`
+        })
+      );
+    }
+    const definition = this.#projectRegistry.get(project.definitionId);
+    if (!definition) {
+      return err(
+        createPublicError({
+          code: "DM_PROJECT_DEFINITION_NOT_FOUND",
+          category: "not-found",
+          message: `Project definition ${project.definitionId} not found`
+        })
+      );
+    }
+    const plan = evaluateProjectCompletionPlan({
+      project,
+      definition,
+      domain: record,
+      expectedRevision: params.expectedRevision
+    });
+    if (!plan.isSatisfied) {
+      const firstBlocker = plan.blockers[0];
+      return err(
+        createPublicError({
+          code: "DM_PROJECT_COMPLETION_BLOCKED",
+          category: "conflict",
+          message: firstBlocker?.message ?? "Project completion preconditions unsatisfied",
+          details: { blockers: plan.blockers }
+        })
+      );
+    }
+    const sideEffectHandlers = {
+      ...params.options?.sideEffectHandlers ?? {}
+    };
+    if (!sideEffectHandlers.facility && this.#facilitiesService) {
+      const facService = this.#facilitiesService;
+      sideEffectHandlers.facility = (effect) => {
+        const facId = effect.targetRef;
+        return {
+          childReceiptId: createOpaqueId("rep"),
+          subsystem: "facility",
+          action: "create_facility",
+          targetRef: facId,
+          payload: effect.value,
+          success: true,
+          appliedAt: Date.now()
+        };
+      };
+    }
+    if (!sideEffectHandlers.resource && this.#economyService) {
+      const econService = this.#economyService;
+      sideEffectHandlers.resource = (effect) => {
+        return {
+          childReceiptId: createOpaqueId("rep"),
+          subsystem: "economy",
+          action: "credit_resource",
+          targetRef: effect.targetRef,
+          payload: { amountMinor: effect.value },
+          success: true,
+          appliedAt: Date.now()
+        };
+      };
+    }
+    const txId = createOpaqueId("tx");
+    if (this.#transactionStore) {
+      const tx = createTransactionRecord({
+        transactionId: txId,
+        commandId: createCommandId(),
+        authorityEpoch: 1,
+        lockKeys: [`domain:${params.domainUuid}`, `project:${project.id}`],
+        safeAutoRecovery: false,
+        recoveryData: { projectId: project.id, planId: plan.planId }
+      });
+      this.#transactionStore.save(tx);
+      this.#transactionStore.transition(txId, "claimed", 1);
+      this.#transactionStore.transition(txId, "prepared", 1);
+    }
+    const commitRes = commitProjectCompletion(plan, project, {
+      ...params.options,
+      userId: params.userId,
+      sideEffectHandlers
+    });
+    if (!commitRes.ok) {
+      if (this.#transactionStore) {
+        this.#transactionStore.transition(txId, "failed", 1, commitRes.error.message);
+      }
+      return commitRes;
+    }
+    const { updatedProject, childReceipts, partialFailure } = commitRes.value;
+    if (this.#transactionStore) {
+      if (partialFailure) {
+        this.#transactionStore.transition(txId, "needs-recovery", 1, "Coordinated side effects experienced partial failure");
+      } else {
+        this.#transactionStore.transition(txId, "committing", 1);
+      }
+    }
+    const updatedProjects = currentProjectsData.projects.map(
+      (p) => p.id === params.projectId ? updatedProject : p
+    );
+    const updatedRecord = withDomainProjectsData(record, {
+      ...currentProjectsData,
+      projects: Object.freeze(updatedProjects)
+    });
+    const saveRes = await this.#domains.save({
+      ...docRes.value,
+      record: updatedRecord
+    });
+    if (!saveRes.ok) {
+      if (this.#transactionStore) {
+        this.#transactionStore.transition(txId, "failed", 1, saveRes.error.message);
+      }
+      return saveRes;
+    }
+    if (this.#transactionStore && !partialFailure) {
+      this.#transactionStore.transition(txId, "committed", 1);
+    }
+    return ok({
+      project: updatedProject,
+      childReceipts
+    });
+  }
+  async #mutateLifecycle(domainUuid, projectId, expectedRevision, mutator) {
+    const docRes = await this.#domains.read(domainUuid);
+    if (!docRes.ok) return docRes;
+    const record = docRes.value.record;
+    const currentProjectsData = getDomainProjectsData(record);
+    const project = currentProjectsData.projects.find((p) => p.id === projectId);
+    if (!project) {
+      return err(
+        createPublicError({
+          code: "DM_PROJECT_NOT_FOUND",
+          category: "not-found",
+          message: `Project ${projectId} not found in domain ${domainUuid}`
+        })
+      );
+    }
+    if (expectedRevision !== void 0 && project.revision !== expectedRevision) {
+      return err(
+        createPublicError({
+          code: "DM_PROJECT_REVISION_MISMATCH",
+          category: "conflict",
+          message: `Project revision mismatch: expected ${expectedRevision}, found ${project.revision}`
+        })
+      );
+    }
+    const mutateRes = mutator(project);
+    if (!mutateRes.ok) return mutateRes;
+    const updatedProject = mutateRes.value.updatedProject;
+    const updatedProjects = currentProjectsData.projects.map(
+      (p) => p.id === projectId ? updatedProject : p
+    );
+    const updatedRecord = withDomainProjectsData(record, {
+      ...currentProjectsData,
+      projects: Object.freeze(updatedProjects)
+    });
+    const saveRes = await this.#domains.save({
+      ...docRes.value,
+      record: updatedRecord
+    });
+    if (!saveRes.ok) return saveRes;
+    return ok({ project: updatedProject });
+  }
+};
+
+// src/ui/domain-patterns/projects/project-presenter.ts
+function resolveStatusBadgeClass(lifecycle) {
+  switch (lifecycle) {
+    case "active":
+      return "dm-badge-active";
+    case "paused":
+      return "dm-badge-paused";
+    case "blocked":
+      return "dm-badge-blocked";
+    case "completed":
+      return "dm-badge-completed";
+    case "cancelled":
+      return "dm-badge-canceled";
+    case "failed":
+      return "dm-badge-failed";
+    case "draft":
+    case "planned":
+      return "dm-badge-planned";
+    case "initializing":
+      return "dm-badge-initializing";
+    case "approved":
+      return "dm-badge-approved";
+    case "archived":
+      return "dm-badge-archived";
+    default:
+      return "dm-badge-default";
+  }
+}
+function buildProjectsViewModel(domainInput, options = {}) {
+  const record = "record" in domainInput ? domainInput.record : domainInput;
+  const domainUuid = "uuid" in domainInput ? domainInput.uuid : "unknown";
+  const viewerIsGm = options.viewerIsGm ?? options.viewer?.isGm ?? false;
+  const filterLifecycle = options.filterLifecycle ?? "all";
+  const searchTerm = (options.searchTerm ?? "").toLowerCase().trim();
+  const data = getDomainProjectsData(record);
+  const defRegistry = options.projectRegistry;
+  const projectVMs = [];
+  for (const project of data.projects) {
+    const isSecret = Boolean(project.visibility === "secret" || project.tags?.includes("secret"));
+    if (isSecret && !viewerIsGm) {
+      continue;
+    }
+    if (filterLifecycle !== "all" && project.lifecycle !== filterLifecycle) {
+      continue;
+    }
+    const def = defRegistry?.get(project.definitionId);
+    const label = project.name || def?.label || project.id;
+    const description = project.description ?? def?.description ?? "";
+    const category = def?.category ?? "general";
+    const targetRef = project.targetRef ?? domainUuid;
+    if (searchTerm) {
+      const matchName = label.toLowerCase().includes(searchTerm);
+      const matchDef = project.definitionId.toLowerCase().includes(searchTerm);
+      const matchTarget = targetRef.toLowerCase().includes(searchTerm);
+      if (!matchName && !matchDef && !matchTarget) {
+        continue;
+      }
+    }
+    const progressPercent = project.workRequired > 0 ? Math.min(100, Math.max(0, Math.floor(project.workCompleted / project.workRequired * 100))) : 100;
+    const blockers = [];
+    if (project.lifecycle === "blocked") {
+      const bMsg = project.blockedReason || "Project execution is currently blocked.";
+      blockers.push({
+        id: "blocker-main",
+        category: "lifecycle",
+        message: bMsg,
+        isSecret: false
+      });
+    }
+    const rawWorkforce = project.workforceAllocations ?? [];
+    const workforce = rawWorkforce.map((w) => ({
+      typeId: w.typeId ?? "general",
+      required: w.required ?? 0,
+      allocated: w.allocated ?? 0,
+      satisfied: (w.allocated ?? 0) >= (w.required ?? 0)
+    }));
+    const rawRequirements = project.requirements ?? [];
+    const requirements = rawRequirements.map((r) => ({
+      targetRef: r.targetRef ?? "",
+      kind: r.kind ?? "generic",
+      status: r.status ?? "satisfied",
+      isSecret: Boolean(r.isSecret)
+    }));
+    const entriesCount = project.entries?.length ?? 0;
+    const lastUpdatedFormatted = project.updatedAt ? new Date(project.updatedAt).toLocaleDateString() : "\u2014";
+    const completedAtFormatted = project.completedAt ? new Date(project.completedAt).toLocaleDateString() : void 0;
+    const canAdvance = project.lifecycle === "active";
+    const canPause = project.lifecycle === "active";
+    const canResume = project.lifecycle === "paused";
+    const canBlock = project.lifecycle === "active" || project.lifecycle === "paused";
+    const canCancel = project.lifecycle !== "completed" && project.lifecycle !== "cancelled" && project.lifecycle !== "failed" && project.lifecycle !== "archived";
+    projectVMs.push({
+      id: project.id,
+      definitionId: project.definitionId,
+      label,
+      description,
+      lifecycle: project.lifecycle,
+      statusBadgeClass: resolveStatusBadgeClass(project.lifecycle),
+      revision: project.revision,
+      workRequired: project.workRequired,
+      workCompleted: project.workCompleted,
+      progressPercent,
+      targetRef,
+      category,
+      blockers: Object.freeze(blockers),
+      workforce: Object.freeze(workforce),
+      requirements: Object.freeze(requirements),
+      entriesCount,
+      lastUpdatedFormatted,
+      completedAtFormatted,
+      isSecret,
+      canAdvance,
+      canPause,
+      canResume,
+      canBlock,
+      canCancel
+    });
+  }
+  const allVisible = data.projects.filter((p) => {
+    const isSecret = Boolean(p.visibility === "secret" || p.tags?.includes("secret"));
+    return !isSecret || viewerIsGm;
+  });
+  const totalCount = allVisible.length;
+  const activeCount = allVisible.filter((p) => p.lifecycle === "active").length;
+  const pausedCount = allVisible.filter((p) => p.lifecycle === "paused").length;
+  const blockedCount = allVisible.filter((p) => p.lifecycle === "blocked").length;
+  const completedCount = allVisible.filter((p) => p.lifecycle === "completed").length;
+  return {
+    domainUuid,
+    viewerIsGm,
+    totalCount,
+    activeCount,
+    pausedCount,
+    blockedCount,
+    completedCount,
+    projects: Object.freeze(projectVMs),
+    filterLifecycle,
+    searchTerm
+  };
+}
+
+// src/projects/api/public-projects-api.ts
+function makeCommand2(type, payload) {
+  return {
+    contractVersion: COMMAND_CONTRACT_VERSION_V1,
+    commandId: createCommandId(),
+    type,
+    payload,
+    issuedAtReal: Date.now()
+  };
+}
+var DefaultPublicProjectsApi = class {
+  #domains;
+  #commandBus;
+  #projectRegistry;
+  #projectsService;
+  constructor(options) {
+    this.#domains = options.domains;
+    this.#commandBus = options.commandBus;
+    this.#projectRegistry = options.projectRegistry ?? createDefaultProjectRegistry();
+    this.#projectsService = options.projectsService;
+  }
+  async getProjects(domainUuid, viewer) {
+    const cleanId = domainUuid.startsWith("JournalEntry.") ? domainUuid.slice("JournalEntry.".length) : domainUuid;
+    const docRes = await this.#domains.read(cleanId);
+    if (!docRes.ok) return docRes;
+    const data = getDomainProjectsData(docRes.value.record);
+    const isGm = viewer?.isGm ?? false;
+    if (isGm) return ok(data.projects);
+    return ok(data.projects.filter((p) => !p.tags.includes("secret")));
+  }
+  async getProject(domainUuid, projectId, viewer) {
+    const listRes = await this.getProjects(domainUuid, viewer);
+    if (!listRes.ok) return listRes;
+    const p = listRes.value.find((item) => item.id === projectId);
+    if (!p) {
+      return err(
+        createPublicError({
+          code: "DM_PROJECT_NOT_FOUND",
+          category: "not-found",
+          message: `Project ${projectId} not found in domain ${domainUuid}`
+        })
+      );
+    }
+    return ok(p);
+  }
+  buildViewModel(domainInput, options) {
+    const record = "record" in domainInput ? domainInput.record : domainInput;
+    return buildProjectsViewModel(record, {
+      projectRegistry: this.#projectRegistry,
+      ...options
+    });
+  }
+  async startProject(params) {
+    const cmd = makeCommand2("projects:start-project", params);
+    const res = await this.#commandBus.execute(cmd);
+    if (!res.ok) return res;
+    if (res.value.status === "rejected") {
+      return err(res.value.error ?? createPublicError({ code: "DM_COMMAND_REJECTED", category: "internal", message: "Command rejected" }));
+    }
+    return ok(res.value.result);
+  }
+  async advanceProject(params) {
+    const cmd = makeCommand2("projects:advance-project", params);
+    const res = await this.#commandBus.execute(cmd);
+    if (!res.ok) return res;
+    if (res.value.status === "rejected") {
+      return err(res.value.error ?? createPublicError({ code: "DM_COMMAND_REJECTED", category: "internal", message: "Command rejected" }));
+    }
+    return ok(res.value.result);
+  }
+  async pauseProject(params) {
+    const cmd = makeCommand2("projects:pause-project", params);
+    const res = await this.#commandBus.execute(cmd);
+    if (!res.ok) return res;
+    if (res.value.status === "rejected") {
+      return err(res.value.error ?? createPublicError({ code: "DM_COMMAND_REJECTED", category: "internal", message: "Command rejected" }));
+    }
+    return ok(res.value.result);
+  }
+  async resumeProject(params) {
+    const cmd = makeCommand2("projects:resume-project", params);
+    const res = await this.#commandBus.execute(cmd);
+    if (!res.ok) return res;
+    if (res.value.status === "rejected") {
+      return err(res.value.error ?? createPublicError({ code: "DM_COMMAND_REJECTED", category: "internal", message: "Command rejected" }));
+    }
+    return ok(res.value.result);
+  }
+  async cancelProject(params) {
+    const cmd = makeCommand2("projects:cancel-project", params);
+    const res = await this.#commandBus.execute(cmd);
+    if (!res.ok) return res;
+    if (res.value.status === "rejected") {
+      return err(res.value.error ?? createPublicError({ code: "DM_COMMAND_REJECTED", category: "internal", message: "Command rejected" }));
+    }
+    return ok(res.value.result);
+  }
+  async completeProject(params) {
+    const cmd = makeCommand2("projects:complete-project", params);
+    const res = await this.#commandBus.execute(cmd);
+    if (!res.ok) return res;
+    if (res.value.status === "rejected") {
+      return err(res.value.error ?? createPublicError({ code: "DM_COMMAND_REJECTED", category: "internal", message: "Command rejected" }));
+    }
+    return ok(res.value.result);
+  }
+};
+
+// src/projects/commands/project-commands.ts
+function registerProjectCommands(options) {
+  const { registry, projectsService, domains, controllerProvider } = options;
+  function validatePerms(ctx) {
+    return validatePeopleCommandPermission(ctx, domains, (p) => p.domainUuid, {
+      controllerProvider
+    });
+  }
+  registry.register({
+    type: "projects:start-project",
+    visibility: "public",
+    description: "Evaluates start preconditions and authoritatively starts a new project",
+    schemaValidator: (payload) => {
+      if (!payload || typeof payload !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Payload must be an object"
+          })
+        );
+      }
+      const p = payload;
+      if (typeof p.domainUuid !== "string" || !p.domainUuid.trim()) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "domainUuid is required"
+          })
+        );
+      }
+      if (typeof p.definitionId !== "string" || !p.definitionId.trim()) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "definitionId is required"
+          })
+        );
+      }
+      return ok(p);
+    },
+    permissionValidator: validatePerms,
+    handler: async (ctx) => {
+      const p = ctx.command.payload;
+      return projectsService.startProject({
+        domainUuid: p.domainUuid,
+        definitionId: p.definitionId,
+        name: p.name,
+        workRequired: p.workRequired,
+        targetRef: p.targetRef,
+        initialState: p.initialState,
+        userId: ctx.senderUserId,
+        expectedRevision: p.expectedRevision
+      });
+    }
+  });
+  registry.register({
+    type: "projects:advance-project",
+    visibility: "public",
+    description: "Evaluates advance preconditions and authoritatively applies progress to a project",
+    schemaValidator: (payload) => {
+      if (!payload || typeof payload !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Payload must be an object"
+          })
+        );
+      }
+      const p = payload;
+      if (typeof p.domainUuid !== "string" || !p.domainUuid.trim()) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "domainUuid is required"
+          })
+        );
+      }
+      if (typeof p.projectId !== "string" || !p.projectId.trim()) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "projectId is required"
+          })
+        );
+      }
+      if (typeof p.delta !== "number" && typeof p.units !== "number") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "delta (or units) must be a number"
+          })
+        );
+      }
+      return ok(p);
+    },
+    permissionValidator: validatePerms,
+    handler: async (ctx) => {
+      const p = ctx.command.payload;
+      const delta = p.delta ?? p.units ?? 0;
+      return projectsService.advanceProject({
+        domainUuid: p.domainUuid,
+        projectId: p.projectId,
+        delta,
+        notes: p.notes,
+        userId: ctx.senderUserId,
+        expectedRevision: p.expectedRevision
+      });
+    }
+  });
+  registry.register({
+    type: "projects:pause-project",
+    visibility: "public",
+    description: "Pauses an active project",
+    permissionValidator: validatePerms,
+    handler: async (ctx) => {
+      const p = ctx.command.payload;
+      return projectsService.pauseProject({
+        domainUuid: p.domainUuid,
+        projectId: p.projectId,
+        reason: p.reason,
+        userId: ctx.senderUserId,
+        expectedRevision: p.expectedRevision
+      });
+    }
+  });
+  registry.register({
+    type: "projects:resume-project",
+    visibility: "public",
+    description: "Resumes a paused project",
+    permissionValidator: validatePerms,
+    handler: async (ctx) => {
+      const p = ctx.command.payload;
+      return projectsService.resumeProject({
+        domainUuid: p.domainUuid,
+        projectId: p.projectId,
+        reason: p.reason,
+        userId: ctx.senderUserId,
+        expectedRevision: p.expectedRevision
+      });
+    }
+  });
+  registry.register({
+    type: "projects:cancel-project",
+    visibility: "public",
+    description: "Cancels an active or paused project",
+    permissionValidator: validatePerms,
+    handler: async (ctx) => {
+      const p = ctx.command.payload;
+      return projectsService.cancelProject({
+        domainUuid: p.domainUuid,
+        projectId: p.projectId,
+        reason: p.reason,
+        userId: ctx.senderUserId,
+        expectedRevision: p.expectedRevision
+      });
+    }
+  });
+  registry.register({
+    type: "projects:block-project",
+    visibility: "public",
+    description: "Blocks a project with a mandatory reason",
+    permissionValidator: validatePerms,
+    handler: async (ctx) => {
+      const p = ctx.command.payload;
+      return projectsService.blockProject({
+        domainUuid: p.domainUuid,
+        projectId: p.projectId,
+        reason: p.reason ?? "Blocked by authority",
+        userId: ctx.senderUserId,
+        expectedRevision: p.expectedRevision
+      });
+    }
+  });
+  registry.register({
+    type: "projects:unblock-project",
+    visibility: "public",
+    description: "Unblocks a blocked project",
+    permissionValidator: validatePerms,
+    handler: async (ctx) => {
+      const p = ctx.command.payload;
+      return projectsService.unblockProject({
+        domainUuid: p.domainUuid,
+        projectId: p.projectId,
+        reason: p.reason,
+        userId: ctx.senderUserId,
+        expectedRevision: p.expectedRevision
+      });
+    }
+  });
+  registry.register({
+    type: "projects:complete-project",
+    visibility: "public",
+    description: "Authoritatively completes a project and resolves coordinated side effects",
+    permissionValidator: validatePerms,
+    handler: async (ctx) => {
+      const p = ctx.command.payload;
+      return projectsService.completeProject({
+        domainUuid: p.domainUuid,
+        projectId: p.projectId,
+        options: p.options,
+        userId: ctx.senderUserId,
+        expectedRevision: p.expectedRevision
+      });
+    }
+  });
+}
+
+// src/facilities/definitions/canonical-facility-definitions.ts
+var CANONICAL_FACILITY_DEFINITIONS = Object.freeze([
+  Object.freeze({
+    id: "domain-manager:storehouse",
+    version: 1,
+    label: "Storehouse",
+    description: "Central repository for stockpiling domain resources and trade goods.",
+    category: "logistics",
+    tags: Object.freeze(["storage", "resources", "logistics"]),
+    scale: "building",
+    maxLevel: 3,
+    capabilitiesGranted: Object.freeze(["domain-manager:storage"]),
+    defaultReadiness: "ready"
+  }),
+  Object.freeze({
+    id: "domain-manager:basic-workshop",
+    version: 1,
+    label: "Basic Workshop",
+    description: "Equipped workspace providing crafting, repairs, and fabrication capabilities.",
+    category: "production",
+    tags: Object.freeze(["crafting", "workshop", "production"]),
+    scale: "building",
+    maxLevel: 3,
+    capabilitiesGranted: Object.freeze(["domain-manager:workshop"]),
+    defaultReadiness: "ready"
+  }),
+  Object.freeze({
+    id: "domain-manager:guard-post",
+    version: 1,
+    label: "Guard Post",
+    description: "Fortified station garrisoning domain militia and maintaining public order.",
+    category: "security",
+    tags: Object.freeze(["military", "security", "defense"]),
+    scale: "building",
+    maxLevel: 3,
+    capabilitiesGranted: Object.freeze(["domain-manager:security"]),
+    defaultReadiness: "ready"
+  })
+]);
+
+// src/facilities/definitions/facility-registry.ts
+var FacilityDefinitionRegistry = class {
+  #definitions = /* @__PURE__ */ new Map();
+  #frozen = false;
+  register(definition) {
+    if (this.#frozen) {
+      return err(
+        createPublicError({
+          code: "DM_REGISTRY_FROZEN",
+          category: "conflict",
+          message: "Cannot register facility definition in a frozen registry"
+        })
+      );
+    }
+    const validRes = validateFacilityDefinition(definition);
+    if (!validRes.ok) {
+      return validRes;
+    }
+    if (this.#definitions.has(validRes.value.id)) {
+      return err(
+        createPublicError({
+          code: "DM_FACILITY_ALREADY_EXISTS",
+          category: "conflict",
+          message: `FacilityDefinition '${validRes.value.id}' is already registered`
+        })
+      );
+    }
+    this.#definitions.set(validRes.value.id, validRes.value);
+    return ok(void 0);
+  }
+  get(id) {
+    return this.#definitions.get(id);
+  }
+  has(id) {
+    return this.#definitions.has(id);
+  }
+  list(filter) {
+    const all = Array.from(this.#definitions.values());
+    if (!filter) {
+      return Object.freeze(all);
+    }
+    return Object.freeze(
+      all.filter((def) => {
+        if (filter.category && def.category !== filter.category) {
+          return false;
+        }
+        if (filter.tag && !def.tags.includes(filter.tag)) {
+          return false;
+        }
+        return true;
+      })
+    );
+  }
+  freeze() {
+    this.#frozen = true;
+  }
+  get isFrozen() {
+    return this.#frozen;
+  }
+};
+function createDefaultFacilityRegistry() {
+  const registry = new FacilityDefinitionRegistry();
+  for (const def of CANONICAL_FACILITY_DEFINITIONS) {
+    registry.register(def);
+  }
+  return registry;
+}
+
+// src/facilities/plans/facility-maintenance-plan-service.ts
+function evaluateFacilityMaintenancePlan(params) {
+  const { facility, definition, channelId, availableBalances } = params;
+  const errors = [];
+  if (facility.lifecycle === "destroyed" || facility.lifecycle === "decommissioned") {
+    errors.push(
+      createPublicError({
+        code: "DM_FACILITY_NOT_MAINTAINABLE",
+        category: "conflict",
+        message: `Facility '${facility.id}' in lifecycle '${facility.lifecycle}' cannot undergo maintenance`
+      })
+    );
+  }
+  if (!definition.maintenance) {
+    errors.push(
+      createPublicError({
+        code: "DM_FACILITY_NO_MAINTENANCE_REQUIRED",
+        category: "validation",
+        message: `Facility definition '${definition.id}' does not require maintenance`
+      })
+    );
+  }
+  const costs = [];
+  if (channelId && definition.maintenance?.channels) {
+    const channel = definition.maintenance.channels.find((c) => c.id === channelId);
+    if (!channel) {
+      errors.push(
+        createPublicError({
+          code: "DM_FACILITY_CHANNEL_NOT_FOUND",
+          category: "not-found",
+          message: `Maintenance channel '${channelId}' not found on definition '${definition.id}'`
+        })
+      );
+    } else {
+      costs.push(...channel.costs);
+    }
+  } else if (definition.maintenance?.costs) {
+    costs.push(...definition.maintenance.costs);
+  }
+  let canAfford = true;
+  if (availableBalances && costs.length > 0) {
+    for (const cost of costs) {
+      const balance = availableBalances[cost.resourceId] ?? 0;
+      if (balance < cost.amount) {
+        canAfford = false;
+        errors.push(
+          createPublicError({
+            code: "DM_FACILITY_INSUFFICIENT_RESOURCES",
+            category: "conflict",
+            message: `Insufficient resource '${cost.resourceId}' for maintenance: required ${cost.amount}, available ${balance}`
+          })
+        );
+      }
+    }
+  }
+  const conditionsToClear = [];
+  if (facility.conditions) {
+    for (const cond of facility.conditions) {
+      if (cond.type === CONDITION_MAINTENANCE_DUE) {
+        conditionsToClear.push(cond.id);
+      }
+    }
+  }
+  let readinessRestoration;
+  if (facility.readiness === "limited" && (facility.readinessReason?.includes("Maintenance") || conditionsToClear.length > 0)) {
+    readinessRestoration = "ready";
+  }
+  const valid = errors.length === 0;
+  return {
+    planId: createOpaqueId("plan"),
+    facilityId: facility.id,
+    channelId,
+    valid,
+    canAfford,
+    resourceCosts: Object.freeze(costs),
+    plannedStatus: "current",
+    conditionsToClear: Object.freeze(conditionsToClear),
+    readinessRestoration,
+    errors: errors.length > 0 ? Object.freeze(errors) : void 0
+  };
+}
+function commitFacilityMaintenance(params) {
+  const { plan, facility } = params;
+  if (!plan.valid) {
+    return err(
+      createPublicError({
+        code: "DM_FACILITY_MAINTENANCE_PLAN_INVALID",
+        category: "validation",
+        message: `Cannot commit invalid maintenance plan '${plan.planId}'`
+      })
+    );
+  }
+  if (plan.facilityId !== facility.id) {
+    return err(
+      createPublicError({
+        code: "DM_FACILITY_ID_MISMATCH",
+        category: "conflict",
+        message: `Plan facilityId '${plan.facilityId}' does not match facility '${facility.id}'`
+      })
+    );
+  }
+  const now = params.timestamp ?? Date.now();
+  const currentTick = params.currentTick ?? null;
+  const conditionsToClearSet = new Set(plan.conditionsToClear);
+  const remainingConditions = (facility.conditions ?? []).filter(
+    (c) => !conditionsToClearSet.has(c.id) && !conditionsToClearSet.has(c.type)
+  );
+  const newHistory = facility.history ? [...facility.history] : [];
+  for (const condId of plan.conditionsToClear) {
+    newHistory.push({
+      id: createOpaqueId("prj"),
+      entryType: "condition_cleared",
+      timestamp: now,
+      tick: currentTick,
+      conditionId: condId,
+      conditionType: CONDITION_MAINTENANCE_DUE,
+      note: "Cleared on scheduled maintenance completion"
+    });
+  }
+  newHistory.push({
+    id: createOpaqueId("prj"),
+    entryType: "maintained",
+    timestamp: now,
+    tick: currentTick,
+    note: params.note ?? "Facility routine maintenance executed"
+  });
+  const updatedMaintenanceState = {
+    status: "current",
+    lastMaintainedTick: currentTick ?? facility.maintenanceState?.lastMaintainedTick ?? 0,
+    lastMaintainedTimestamp: now,
+    accumulatedTicks: 0,
+    overdueTicks: 0,
+    channels: facility.maintenanceState?.channels
+  };
+  const updatedFacility = {
+    ...facility,
+    readiness: plan.readinessRestoration ?? facility.readiness,
+    readinessReason: plan.readinessRestoration ? null : facility.readinessReason,
+    conditions: Object.freeze(remainingConditions),
+    history: Object.freeze(newHistory),
+    maintenanceState: updatedMaintenanceState,
+    revision: facility.revision + 1,
+    updatedAt: now
+  };
+  const receipt = {
+    planId: plan.planId,
+    facilityId: facility.id,
+    channelId: plan.channelId,
+    timestamp: now,
+    tick: currentTick,
+    resourcesConsumed: plan.resourceCosts,
+    conditionsCleared: plan.conditionsToClear,
+    newStatus: "current",
+    note: params.note
+  };
+  return ok({ updatedFacility, receipt });
+}
+
+// src/facilities/plans/facility-repair-plan-service.ts
+var CANONICAL_MAINTENANCE_PROJECT_ID = "domain-manager:facility-maintenance";
+var DEFAULT_DIRECT_REPAIR_THRESHOLD_PERCENT = 0.5;
+function evaluateFacilityRepairPlan(params) {
+  const { facility, definition, availableBalances } = params;
+  const errors = [];
+  if (facility.lifecycle === "destroyed") {
+    return {
+      planId: createOpaqueId("plan"),
+      facilityId: facility.id,
+      valid: false,
+      isDirectRepairAllowed: false,
+      requiresProject: true,
+      suggestedProjectId: CANONICAL_MAINTENANCE_PROJECT_ID,
+      repairedIntegrityDelta: 0,
+      targetIntegrity: 0,
+      conditionsToClear: Object.freeze([]),
+      resourceCosts: Object.freeze([]),
+      errors: Object.freeze([
+        createPublicError({
+          code: "DM_FACILITY_DESTROYED_REQUIRES_PROJECT",
+          category: "conflict",
+          message: `Facility '${facility.id}' is destroyed and cannot be repaired directly. A Project must be launched.`
+        })
+      ])
+    };
+  }
+  if (facility.lifecycle === "decommissioned") {
+    errors.push(
+      createPublicError({
+        code: "DM_FACILITY_DECOMMISSIONED",
+        category: "conflict",
+        message: `Facility '${facility.id}' is decommissioned and cannot be repaired`
+      })
+    );
+  }
+  let repairedIntegrityDelta = 0;
+  let targetIntegrity = 0;
+  const maxIntegrity = facility.integrity?.max ?? 100;
+  const currentIntegrity = facility.integrity?.current ?? maxIntegrity;
+  if (facility.integrity) {
+    const missing = maxIntegrity - currentIntegrity;
+    if (params.targetIntegrityDelta !== void 0) {
+      repairedIntegrityDelta = Math.min(missing, Math.max(0, params.targetIntegrityDelta));
+    } else {
+      repairedIntegrityDelta = missing;
+    }
+    targetIntegrity = currentIntegrity + repairedIntegrityDelta;
+  }
+  const thresholdPercent = params.directRepairThresholdPercent ?? DEFAULT_DIRECT_REPAIR_THRESHOLD_PERCENT;
+  const maxDirectDelta = Math.ceil(maxIntegrity * thresholdPercent);
+  let isDirectRepairAllowed = true;
+  let requiresProject = false;
+  let suggestedProjectId;
+  const hasCriticalCondition = (facility.conditions ?? []).some((c) => c.severity === "critical");
+  if (repairedIntegrityDelta > maxDirectDelta || hasCriticalCondition) {
+    isDirectRepairAllowed = false;
+    requiresProject = true;
+    suggestedProjectId = CANONICAL_MAINTENANCE_PROJECT_ID;
+  }
+  const conditionsToClear = [];
+  if (params.conditionsToClear) {
+    conditionsToClear.push(...params.conditionsToClear);
+  } else if (facility.conditions) {
+    for (const cond of facility.conditions) {
+      if (cond.type === CONDITION_DAMAGED && isDirectRepairAllowed) {
+        conditionsToClear.push(cond.id);
+      }
+    }
+  }
+  const resourceCosts = [];
+  const costUnit = params.costPerIntegrityPoint ?? { resourceId: "domain-manager:materials", amount: 1 };
+  if (repairedIntegrityDelta > 0) {
+    resourceCosts.push({
+      resourceId: costUnit.resourceId,
+      amount: repairedIntegrityDelta * costUnit.amount
+    });
+  }
+  if (availableBalances && resourceCosts.length > 0) {
+    for (const cost of resourceCosts) {
+      const balance = availableBalances[cost.resourceId] ?? 0;
+      if (balance < cost.amount) {
+        errors.push(
+          createPublicError({
+            code: "DM_FACILITY_INSUFFICIENT_RESOURCES",
+            category: "conflict",
+            message: `Insufficient resource '${cost.resourceId}' for repair: required ${cost.amount}, available ${balance}`
+          })
+        );
+      }
+    }
+  }
+  const valid = errors.length === 0;
+  return {
+    planId: createOpaqueId("plan"),
+    facilityId: facility.id,
+    valid,
+    isDirectRepairAllowed,
+    requiresProject,
+    suggestedProjectId,
+    repairedIntegrityDelta,
+    targetIntegrity,
+    conditionsToClear: Object.freeze(conditionsToClear),
+    resourceCosts: Object.freeze(resourceCosts),
+    errors: errors.length > 0 ? Object.freeze(errors) : void 0
+  };
+}
+function commitFacilityRepair(params) {
+  const { plan, facility } = params;
+  if (!plan.valid) {
+    return err(
+      createPublicError({
+        code: "DM_FACILITY_REPAIR_PLAN_INVALID",
+        category: "validation",
+        message: `Cannot commit invalid repair plan '${plan.planId}'`
+      })
+    );
+  }
+  if (plan.facilityId !== facility.id) {
+    return err(
+      createPublicError({
+        code: "DM_FACILITY_ID_MISMATCH",
+        category: "conflict",
+        message: `Plan facilityId '${plan.facilityId}' does not match facility '${facility.id}'`
+      })
+    );
+  }
+  if (!plan.isDirectRepairAllowed || plan.requiresProject) {
+    return err(
+      createPublicError({
+        code: "DM_FACILITY_REPAIR_REQUIRES_PROJECT",
+        category: "conflict",
+        message: `Repair requires a Project (suggested: '${plan.suggestedProjectId ?? CANONICAL_MAINTENANCE_PROJECT_ID}'). Direct repair disallowed.`
+      })
+    );
+  }
+  const now = params.timestamp ?? Date.now();
+  const tick = params.currentTick ?? null;
+  let updatedIntegrity = facility.integrity ? { ...facility.integrity } : void 0;
+  if (updatedIntegrity) {
+    updatedIntegrity.current = plan.targetIntegrity;
+  }
+  const conditionsToClearSet = new Set(plan.conditionsToClear);
+  const remainingConditions = (facility.conditions ?? []).filter(
+    (c) => !conditionsToClearSet.has(c.id) && !conditionsToClearSet.has(c.type)
+  );
+  const newHistory = facility.history ? [...facility.history] : [];
+  for (const condId of plan.conditionsToClear) {
+    newHistory.push({
+      id: createOpaqueId("prj"),
+      entryType: "condition_cleared",
+      timestamp: now,
+      tick,
+      conditionId: condId,
+      note: "Cleared on direct facility repair"
+    });
+  }
+  newHistory.push({
+    id: createOpaqueId("prj"),
+    entryType: "repaired",
+    timestamp: now,
+    tick,
+    deltaIntegrity: plan.repairedIntegrityDelta,
+    previousIntegrity: facility.integrity?.current,
+    newIntegrity: plan.targetIntegrity,
+    note: params.note ?? "Facility direct repair executed"
+  });
+  let newLifecycle = facility.lifecycle;
+  let newReadiness = facility.readiness;
+  let newReadinessReason = facility.readinessReason;
+  if (updatedIntegrity && updatedIntegrity.current >= updatedIntegrity.max) {
+    if (facility.lifecycle === "degraded") {
+      newLifecycle = "operational";
+    }
+    const hasRemainingBlockingCondition = remainingConditions.some(
+      (c) => c.readinessPenalty === "limited" || c.readinessPenalty === "blocked"
+    );
+    if (!hasRemainingBlockingCondition) {
+      newReadiness = "ready";
+      newReadinessReason = null;
+    }
+  }
+  const updatedFacility = {
+    ...facility,
+    lifecycle: newLifecycle,
+    readiness: newReadiness,
+    readinessReason: newReadinessReason,
+    integrity: updatedIntegrity ? Object.freeze(updatedIntegrity) : void 0,
+    conditions: Object.freeze(remainingConditions),
+    history: Object.freeze(newHistory),
+    revision: facility.revision + 1,
+    updatedAt: now
+  };
+  const receipt = {
+    planId: plan.planId,
+    facilityId: facility.id,
+    timestamp: now,
+    tick,
+    integrityRestored: plan.repairedIntegrityDelta,
+    newIntegrity: plan.targetIntegrity,
+    resourcesConsumed: plan.resourceCosts,
+    conditionsCleared: plan.conditionsToClear,
+    note: params.note
+  };
+  return ok({ updatedFacility, receipt });
+}
+
+// src/facilities/services/facilities-service.ts
+var FacilitiesService = class {
+  #domains;
+  #facilityRegistry;
+  constructor(options) {
+    this.#domains = options.domains;
+    this.#facilityRegistry = options.facilityRegistry ?? createDefaultFacilityRegistry();
+  }
+  get registry() {
+    return this.#facilityRegistry;
+  }
+  async getFacilities(domainUuid) {
+    const docRes = await this.#domains.read(domainUuid);
+    if (!docRes.ok) return docRes;
+    const data = getDomainFacilitiesData(docRes.value.record);
+    return ok(data.facilities);
+  }
+  async getFacility(domainUuid, facilityId) {
+    const docRes = await this.#domains.read(domainUuid);
+    if (!docRes.ok) return docRes;
+    const data = getDomainFacilitiesData(docRes.value.record);
+    const f = data.facilities.find((item) => item.id === facilityId);
+    if (!f) {
+      return err(
+        createPublicError({
+          code: "DM_FACILITY_NOT_FOUND",
+          category: "not-found",
+          message: `Facility ${facilityId} not found in domain ${domainUuid}`
+        })
+      );
+    }
+    return ok(f);
+  }
+  async createFacility(params) {
+    const docRes = await this.#domains.read(params.domainUuid);
+    if (!docRes.ok) return docRes;
+    const record = docRes.value.record;
+    if (!record.definition.capabilities.enabled.includes(FACILITIES_CAPABILITY_ID)) {
+      return err(
+        createPublicError({
+          code: "DM_FACILITY_CAPABILITY_DISABLED",
+          category: "conflict",
+          message: `Facilities capability '${FACILITIES_CAPABILITY_ID}' is not enabled on domain ${params.domainUuid}`
+        })
+      );
+    }
+    const definition = this.#facilityRegistry.get(params.definitionId);
+    if (!definition) {
+      return err(
+        createPublicError({
+          code: "DM_FACILITY_DEFINITION_NOT_FOUND",
+          category: "not-found",
+          message: `Facility definition '${params.definitionId}' not found`
+        })
+      );
+    }
+    const currentFacilitiesData = getDomainFacilitiesData(record);
+    const facilityId = `fac-${createOpaqueId("prj").slice("prj_".length)}`;
+    const now = Date.now();
+    const newFacility = {
+      id: facilityId,
+      definitionId: params.definitionId,
+      domainUuid: params.domainUuid,
+      name: params.name || definition.label,
+      schemaVersion: 1,
+      revision: 0,
+      level: params.level ?? 1,
+      lifecycle: params.initialLifecycle ?? "operational",
+      readiness: "ready",
+      installedModules: Object.freeze([]),
+      activeUpgrades: Object.freeze([]),
+      integrity: Object.freeze({ current: 100, max: 100 }),
+      conditions: Object.freeze([]),
+      maintenanceState: {
+        status: "current",
+        overdueTicks: 0,
+        accumulatedTicks: 0
+      },
+      tags: Object.freeze([...definition.tags ?? []]),
+      createdAt: now,
+      updatedAt: now
+    };
+    const updatedFacilities = Object.freeze([...currentFacilitiesData.facilities, newFacility]);
+    const updatedRecord = withDomainFacilitiesData(record, {
+      ...currentFacilitiesData,
+      facilities: updatedFacilities
+    });
+    const saveRes = await this.#domains.save({
+      ...docRes.value,
+      record: updatedRecord
+    });
+    if (!saveRes.ok) return saveRes;
+    return ok({ facility: newFacility });
+  }
+  async maintainFacility(params) {
+    const docRes = await this.#domains.read(params.domainUuid);
+    if (!docRes.ok) return docRes;
+    const record = docRes.value.record;
+    const currentFacilitiesData = getDomainFacilitiesData(record);
+    const facility = currentFacilitiesData.facilities.find((f) => f.id === params.facilityId);
+    if (!facility) {
+      return err(
+        createPublicError({
+          code: "DM_FACILITY_NOT_FOUND",
+          category: "not-found",
+          message: `Facility ${params.facilityId} not found in domain ${params.domainUuid}`
+        })
+      );
+    }
+    const def = this.#facilityRegistry.get(facility.definitionId);
+    if (!def) {
+      return err(
+        createPublicError({
+          code: "DM_FACILITY_DEFINITION_NOT_FOUND",
+          category: "not-found",
+          message: `Facility definition '${facility.definitionId}' not found`
+        })
+      );
+    }
+    if (!def.maintenance) {
+      return err(
+        createPublicError({
+          code: "DM_FACILITY_MAINTENANCE_NOT_CONFIGURED",
+          category: "conflict",
+          message: `Facility '${facility.name}' definition does not configure maintenance`
+        })
+      );
+    }
+    const plan = evaluateFacilityMaintenancePlan({ facility, definition: def });
+    if (!plan.valid) {
+      const firstErr = plan.errors?.[0];
+      return err(
+        createPublicError({
+          code: "DM_FACILITY_MAINTENANCE_BLOCKED",
+          category: "conflict",
+          message: firstErr?.message ?? "Facility maintenance plan is invalid or blocked",
+          details: { errors: plan.errors }
+        })
+      );
+    }
+    const commitRes = commitFacilityMaintenance({
+      plan,
+      facility,
+      note: params.notes
+    });
+    if (!commitRes.ok) return commitRes;
+    const updatedFacility = commitRes.value.updatedFacility;
+    const updatedFacilities = currentFacilitiesData.facilities.map(
+      (f) => f.id === params.facilityId ? updatedFacility : f
+    );
+    const updatedRecord = withDomainFacilitiesData(record, {
+      ...currentFacilitiesData,
+      facilities: Object.freeze(updatedFacilities)
+    });
+    const saveRes = await this.#domains.save({
+      ...docRes.value,
+      record: updatedRecord
+    });
+    if (!saveRes.ok) return saveRes;
+    return ok({ facility: updatedFacility });
+  }
+  async repairFacility(params) {
+    const docRes = await this.#domains.read(params.domainUuid);
+    if (!docRes.ok) return docRes;
+    const record = docRes.value.record;
+    const currentFacilitiesData = getDomainFacilitiesData(record);
+    const facility = currentFacilitiesData.facilities.find((f) => f.id === params.facilityId);
+    if (!facility) {
+      return err(
+        createPublicError({
+          code: "DM_FACILITY_NOT_FOUND",
+          category: "not-found",
+          message: `Facility ${params.facilityId} not found in domain ${params.domainUuid}`
+        })
+      );
+    }
+    const def = this.#facilityRegistry.get(facility.definitionId);
+    if (!def) {
+      return err(
+        createPublicError({
+          code: "DM_FACILITY_DEFINITION_NOT_FOUND",
+          category: "not-found",
+          message: `Facility definition '${facility.definitionId}' not found`
+        })
+      );
+    }
+    const plan = evaluateFacilityRepairPlan({
+      facility,
+      definition: def,
+      targetIntegrityDelta: params.restoreIntegrity,
+      conditionsToClear: params.removeConditionIds
+    });
+    if (!plan.valid) {
+      const firstErr = plan.errors?.[0];
+      return err(
+        createPublicError({
+          code: "DM_FACILITY_REPAIR_BLOCKED",
+          category: "conflict",
+          message: firstErr?.message ?? "Facility repair plan is invalid or blocked",
+          details: { errors: plan.errors }
+        })
+      );
+    }
+    if (plan.requiresProject || !plan.isDirectRepairAllowed) {
+      return err(
+        createPublicError({
+          code: "DM_FACILITY_REPAIR_REQUIRES_PROJECT",
+          category: "conflict",
+          message: "Facility damage requires an engineering project and cannot be repaired directly"
+        })
+      );
+    }
+    const commitRes = commitFacilityRepair({
+      plan,
+      facility,
+      note: params.notes
+    });
+    if (!commitRes.ok) return commitRes;
+    const updatedFacility = commitRes.value.updatedFacility;
+    const updatedFacilities = currentFacilitiesData.facilities.map(
+      (f) => f.id === params.facilityId ? updatedFacility : f
+    );
+    const updatedRecord = withDomainFacilitiesData(record, {
+      ...currentFacilitiesData,
+      facilities: Object.freeze(updatedFacilities)
+    });
+    const saveRes = await this.#domains.save({
+      ...docRes.value,
+      record: updatedRecord
+    });
+    if (!saveRes.ok) return saveRes;
+    return ok({ facility: updatedFacility });
+  }
+  async applyDamage(params) {
+    const docRes = await this.#domains.read(params.domainUuid);
+    if (!docRes.ok) return docRes;
+    const record = docRes.value.record;
+    const currentFacilitiesData = getDomainFacilitiesData(record);
+    const facility = currentFacilitiesData.facilities.find((f) => f.id === params.facilityId);
+    if (!facility) {
+      return err(
+        createPublicError({
+          code: "DM_FACILITY_NOT_FOUND",
+          category: "not-found",
+          message: `Facility ${params.facilityId} not found in domain ${params.domainUuid}`
+        })
+      );
+    }
+    const max = facility.integrity?.max ?? 100;
+    const current = facility.integrity?.current ?? 100;
+    const newIntegrity = Math.max(0, current - Math.abs(params.damage));
+    let newLifecycle = facility.lifecycle;
+    let newReadiness = facility.readiness;
+    if (newIntegrity === 0) {
+      newLifecycle = "disabled";
+      newReadiness = "unavailable";
+    } else if (newIntegrity < max / 2) {
+      newLifecycle = "degraded";
+      newReadiness = "limited";
+    }
+    const conditions = [...facility.conditions ?? []];
+    if (params.condition) {
+      if (!conditions.some((c) => c.id === params.condition.id)) {
+        conditions.push(params.condition);
+      }
+    } else if (params.conditionId && !conditions.some((c) => c.id === params.conditionId)) {
+      conditions.push({
+        id: params.conditionId,
+        type: `domain-manager:${params.conditionId}`,
+        label: params.conditionId,
+        severity: newIntegrity === 0 ? "critical" : "major",
+        appliedAtTimestamp: Date.now()
+      });
+    }
+    const updatedFacility = {
+      ...facility,
+      integrity: Object.freeze({ current: newIntegrity, max }),
+      lifecycle: newLifecycle,
+      readiness: newReadiness,
+      conditions: Object.freeze(conditions),
+      revision: facility.revision + 1,
+      updatedAt: Date.now()
+    };
+    const updatedFacilities = currentFacilitiesData.facilities.map(
+      (f) => f.id === params.facilityId ? updatedFacility : f
+    );
+    const updatedRecord = withDomainFacilitiesData(record, {
+      ...currentFacilitiesData,
+      facilities: Object.freeze(updatedFacilities)
+    });
+    const saveRes = await this.#domains.save({
+      ...docRes.value,
+      record: updatedRecord
+    });
+    if (!saveRes.ok) return saveRes;
+    return ok({ facility: updatedFacility });
+  }
+  async decommissionFacility(params) {
+    const docRes = await this.#domains.read(params.domainUuid);
+    if (!docRes.ok) return docRes;
+    const record = docRes.value.record;
+    const currentFacilitiesData = getDomainFacilitiesData(record);
+    const facility = currentFacilitiesData.facilities.find((f) => f.id === params.facilityId);
+    if (!facility) {
+      return err(
+        createPublicError({
+          code: "DM_FACILITY_NOT_FOUND",
+          category: "not-found",
+          message: `Facility ${params.facilityId} not found in domain ${params.domainUuid}`
+        })
+      );
+    }
+    const updatedFacility = {
+      ...facility,
+      lifecycle: "decommissioned",
+      readiness: "unavailable",
+      revision: facility.revision + 1,
+      updatedAt: Date.now()
+    };
+    const updatedFacilities = currentFacilitiesData.facilities.map(
+      (f) => f.id === params.facilityId ? updatedFacility : f
+    );
+    const updatedRecord = withDomainFacilitiesData(record, {
+      ...currentFacilitiesData,
+      facilities: Object.freeze(updatedFacilities)
+    });
+    const saveRes = await this.#domains.save({
+      ...docRes.value,
+      record: updatedRecord
+    });
+    if (!saveRes.ok) return saveRes;
+    return ok({ facility: updatedFacility });
+  }
+};
+
+// src/ui/domain-patterns/facilities/facility-presenter.ts
+function resolveLifecycleBadgeClass(lifecycle) {
+  switch (lifecycle) {
+    case "operational":
+      return "dm-badge-operational";
+    case "underConstruction":
+      return "dm-badge-under-construction";
+    case "planned":
+      return "dm-badge-planned";
+    case "inactive":
+      return "dm-badge-inactive";
+    case "degraded":
+      return "dm-badge-degraded";
+    case "disabled":
+      return "dm-badge-disabled";
+    case "decommissioned":
+      return "dm-badge-decommissioned";
+    case "destroyed":
+      return "dm-badge-destroyed";
+    default:
+      return "dm-badge-default";
+  }
+}
+function resolveReadinessBadgeClass(readiness) {
+  switch (readiness) {
+    case "ready":
+      return "dm-badge-ready";
+    case "limited":
+      return "dm-badge-limited";
+    case "blocked":
+      return "dm-badge-blocked";
+    case "unavailable":
+      return "dm-badge-unavailable";
+    default:
+      return "dm-badge-default";
+  }
+}
+function resolveSeverityBadgeClass(severity) {
+  switch (severity) {
+    case "critical":
+      return "dm-badge-danger";
+    case "major":
+      return "dm-badge-warning";
+    case "moderate":
+      return "dm-badge-info";
+    case "minor":
+    default:
+      return "dm-badge-default";
+  }
+}
+function resolveMaintenanceBadgeClass(status) {
+  switch (status) {
+    case "current":
+      return "dm-badge-healthy";
+    case "due":
+      return "dm-badge-info";
+    case "overdue":
+      return "dm-badge-warning";
+    case "exempt":
+      return "dm-badge-default";
+    default:
+      return "dm-badge-default";
+  }
+}
+function buildFacilitiesViewModel(domainInput, options = {}) {
+  const record = "record" in domainInput ? domainInput.record : domainInput;
+  const domainUuid = "uuid" in domainInput ? domainInput.uuid : "unknown";
+  const viewerIsGm = options.viewerIsGm ?? options.viewer?.isGm ?? false;
+  const filterReadiness = options.filterReadiness ?? "all";
+  const filterLifecycle = options.filterLifecycle ?? "all";
+  const searchTerm = (options.searchTerm ?? "").toLowerCase().trim();
+  const data = getDomainFacilitiesData(record);
+  const defRegistry = options.facilityRegistry;
+  const facilityVMs = [];
+  for (const facility of data.facilities) {
+    const isSecret = Boolean(facility.visibility === "secret" || facility.tags?.includes("secret"));
+    if (isSecret && !viewerIsGm) {
+      continue;
+    }
+    if (filterReadiness !== "all" && facility.readiness !== filterReadiness) {
+      continue;
+    }
+    if (filterLifecycle !== "all" && facility.lifecycle !== filterLifecycle) {
+      continue;
+    }
+    const def = defRegistry?.get(facility.definitionId);
+    const name = facility.name || def?.label || facility.id;
+    if (searchTerm) {
+      const matchName = name.toLowerCase().includes(searchTerm);
+      const matchDef = facility.definitionId.toLowerCase().includes(searchTerm);
+      if (!matchName && !matchDef) {
+        continue;
+      }
+    }
+    const integrity = facility.integrity?.current ?? 100;
+    const maxIntegrity = facility.integrity?.max ?? 100;
+    const integrityPercent = maxIntegrity > 0 ? Math.min(100, Math.max(0, Math.floor(integrity / maxIntegrity * 100))) : 100;
+    let integrityClass = "healthy";
+    if (integrityPercent < 40) {
+      integrityClass = "danger";
+    } else if (integrityPercent < 80) {
+      integrityClass = "warning";
+    }
+    const maintState = facility.maintenanceState;
+    const intervalTicks = def?.maintenance?.intervalTicks ?? 30;
+    const ticksSince = maintState?.accumulatedTicks ?? 0;
+    const maintenanceRatio = intervalTicks > 0 ? ticksSince / intervalTicks : 0;
+    const formattedRatio = `${Math.floor(maintenanceRatio * 100)}%`;
+    const maintStatus = maintState?.status ?? "current";
+    const consecutiveMissed = Math.floor(ticksSince / Math.max(1, intervalTicks));
+    const maintenanceVM = {
+      status: maintStatus,
+      statusBadgeClass: resolveMaintenanceBadgeClass(maintStatus),
+      intervalTicks,
+      ticksSinceLastMaintenance: ticksSince,
+      maintenanceRatio,
+      formattedRatio,
+      consecutiveMissedCycles: consecutiveMissed
+    };
+    const rawConditions = facility.conditions ?? [];
+    const conditionVMs = rawConditions.map((c) => ({
+      id: c.id,
+      severity: c.severity,
+      severityBadgeClass: resolveSeverityBadgeClass(c.severity),
+      description: c.description ?? c.label,
+      causesDegradation: c.severity === "critical" || c.severity === "major",
+      suppressesCapabilities: c.suppressedCapabilities ?? []
+    }));
+    const effectiveCapabilities = def ? calculateFacilityEffectiveCapabilities(facility, def) : Object.freeze([]);
+    const slotsCount = facility.installedModules?.length ?? 0;
+    const activeModulesCount = facility.installedModules?.length ?? 0;
+    const activeUpgradesCount = facility.activeUpgrades?.length ?? 0;
+    const canMaintain = facility.lifecycle !== "destroyed" && facility.lifecycle !== "decommissioned";
+    const canRepair = (integrity < maxIntegrity || conditionVMs.length > 0) && facility.lifecycle !== "destroyed";
+    facilityVMs.push({
+      id: facility.id,
+      definitionId: facility.definitionId,
+      name,
+      level: facility.level,
+      revision: facility.revision,
+      lifecycle: facility.lifecycle,
+      lifecycleBadgeClass: resolveLifecycleBadgeClass(facility.lifecycle),
+      readiness: facility.readiness,
+      readinessBadgeClass: resolveReadinessBadgeClass(facility.readiness),
+      structuralIntegrity: integrity,
+      maxStructuralIntegrity: maxIntegrity,
+      integrityPercent,
+      integrityClass,
+      conditions: Object.freeze(conditionVMs),
+      maintenance: maintenanceVM,
+      effectiveCapabilities: Object.freeze(effectiveCapabilities),
+      slotsCount,
+      activeModulesCount,
+      activeUpgradesCount,
+      isSecret,
+      canRepair,
+      canMaintain
+    });
+  }
+  const allVisible = data.facilities.filter((f) => {
+    const isSecret = Boolean(f.visibility === "secret" || f.tags?.includes("secret"));
+    return !isSecret || viewerIsGm;
+  });
+  const totalCount = allVisible.length;
+  const operationalCount = allVisible.filter((f) => f.lifecycle === "operational").length;
+  const readyCount = allVisible.filter((f) => f.readiness === "ready").length;
+  const degradedOrDamagedCount = allVisible.filter((f) => {
+    const isDegraded = f.lifecycle === "degraded";
+    const isDamaged = f.integrity ? f.integrity.current < f.integrity.max : false;
+    const hasConditions = (f.conditions?.length ?? 0) > 0;
+    return isDegraded || isDamaged || hasConditions;
+  }).length;
+  return {
+    domainUuid,
+    viewerIsGm,
+    totalCount,
+    operationalCount,
+    readyCount,
+    degradedOrDamagedCount,
+    facilities: Object.freeze(facilityVMs),
+    filterReadiness,
+    filterLifecycle,
+    searchTerm
+  };
+}
+
+// src/facilities/api/public-facilities-api.ts
+function makeCommand3(type, payload) {
+  return {
+    contractVersion: COMMAND_CONTRACT_VERSION_V1,
+    commandId: createCommandId(),
+    type,
+    payload,
+    issuedAtReal: Date.now()
+  };
+}
+var DefaultPublicFacilitiesApi = class {
+  #domains;
+  #commandBus;
+  #facilityRegistry;
+  #facilitiesService;
+  constructor(options) {
+    this.#domains = options.domains;
+    this.#commandBus = options.commandBus;
+    this.#facilityRegistry = options.facilityRegistry ?? createDefaultFacilityRegistry();
+    this.#facilitiesService = options.facilitiesService;
+  }
+  async getFacilities(domainUuid, viewer) {
+    const cleanId = domainUuid.startsWith("JournalEntry.") ? domainUuid.slice("JournalEntry.".length) : domainUuid;
+    const docRes = await this.#domains.read(cleanId);
+    if (!docRes.ok) return docRes;
+    const data = getDomainFacilitiesData(docRes.value.record);
+    const isGm = viewer?.isGm ?? false;
+    if (isGm) return ok(data.facilities);
+    return ok(data.facilities.filter((f) => !f.tags.includes("secret")));
+  }
+  async getFacility(domainUuid, facilityId, viewer) {
+    const listRes = await this.getFacilities(domainUuid, viewer);
+    if (!listRes.ok) return listRes;
+    const f = listRes.value.find((item) => item.id === facilityId);
+    if (!f) {
+      return err(
+        createPublicError({
+          code: "DM_FACILITY_NOT_FOUND",
+          category: "not-found",
+          message: `Facility ${facilityId} not found in domain ${domainUuid}`
+        })
+      );
+    }
+    return ok(f);
+  }
+  buildViewModel(domainInput, options) {
+    const record = "record" in domainInput ? domainInput.record : domainInput;
+    return buildFacilitiesViewModel(record, {
+      facilityRegistry: this.#facilityRegistry,
+      ...options
+    });
+  }
+  async createFacility(params) {
+    const cmd = makeCommand3("facilities:create-facility", params);
+    const res = await this.#commandBus.execute(cmd);
+    if (!res.ok) return res;
+    if (res.value.status === "rejected") {
+      return err(res.value.error ?? createPublicError({ code: "DM_COMMAND_REJECTED", category: "internal", message: "Command rejected" }));
+    }
+    return ok(res.value.result);
+  }
+  async maintainFacility(params) {
+    const cmd = makeCommand3("facilities:maintain-facility", params);
+    const res = await this.#commandBus.execute(cmd);
+    if (!res.ok) return res;
+    if (res.value.status === "rejected") {
+      return err(res.value.error ?? createPublicError({ code: "DM_COMMAND_REJECTED", category: "internal", message: "Command rejected" }));
+    }
+    return ok(res.value.result);
+  }
+  async repairFacility(params) {
+    const cmd = makeCommand3("facilities:repair-facility", params);
+    const res = await this.#commandBus.execute(cmd);
+    if (!res.ok) return res;
+    if (res.value.status === "rejected") {
+      return err(res.value.error ?? createPublicError({ code: "DM_COMMAND_REJECTED", category: "internal", message: "Command rejected" }));
+    }
+    return ok(res.value.result);
+  }
+  async applyDamage(params) {
+    const cmd = makeCommand3("facilities:apply-damage", params);
+    const res = await this.#commandBus.execute(cmd);
+    if (!res.ok) return res;
+    if (res.value.status === "rejected") {
+      return err(res.value.error ?? createPublicError({ code: "DM_COMMAND_REJECTED", category: "internal", message: "Command rejected" }));
+    }
+    return ok(res.value.result);
+  }
+  async decommissionFacility(params) {
+    const cmd = makeCommand3("facilities:decommission-facility", params);
+    const res = await this.#commandBus.execute(cmd);
+    if (!res.ok) return res;
+    if (res.value.status === "rejected") {
+      return err(res.value.error ?? createPublicError({ code: "DM_COMMAND_REJECTED", category: "internal", message: "Command rejected" }));
+    }
+    return ok(res.value.result);
+  }
+};
+
+// src/facilities/commands/facility-commands.ts
+function registerFacilityCommands(options) {
+  const { registry, facilitiesService, domains, controllerProvider } = options;
+  function validatePerms(ctx) {
+    return validatePeopleCommandPermission(ctx, domains, (p) => p.domainUuid, {
+      controllerProvider
+    });
+  }
+  registry.register({
+    type: "facilities:create-facility",
+    visibility: "public",
+    description: "Authoritatively creates a new facility in the domain",
+    schemaValidator: (payload) => {
+      if (!payload || typeof payload !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Payload must be an object"
+          })
+        );
+      }
+      const p = payload;
+      if (typeof p.domainUuid !== "string" || !p.domainUuid.trim()) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "domainUuid is required"
+          })
+        );
+      }
+      if (typeof p.definitionId !== "string" || !p.definitionId.trim()) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "definitionId is required"
+          })
+        );
+      }
+      return ok(p);
+    },
+    permissionValidator: validatePerms,
+    handler: async (ctx) => {
+      const p = ctx.command.payload;
+      return facilitiesService.createFacility({
+        domainUuid: p.domainUuid,
+        definitionId: p.definitionId,
+        name: p.name,
+        level: p.level,
+        initialLifecycle: p.initialLifecycle,
+        userId: ctx.senderUserId
+      });
+    }
+  });
+  registry.register({
+    type: "facilities:maintain-facility",
+    visibility: "public",
+    description: "Authoritatively executes facility maintenance using evaluateFacilityMaintenancePlan",
+    schemaValidator: (payload) => {
+      if (!payload || typeof payload !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Payload must be an object"
+          })
+        );
+      }
+      const p = payload;
+      if (typeof p.domainUuid !== "string" || !p.domainUuid.trim()) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "domainUuid is required"
+          })
+        );
+      }
+      if (typeof p.facilityId !== "string" || !p.facilityId.trim()) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "facilityId is required"
+          })
+        );
+      }
+      return ok(p);
+    },
+    permissionValidator: validatePerms,
+    handler: async (ctx) => {
+      const p = ctx.command.payload;
+      return facilitiesService.maintainFacility({
+        domainUuid: p.domainUuid,
+        facilityId: p.facilityId,
+        notes: p.notes,
+        userId: ctx.senderUserId
+      });
+    }
+  });
+  registry.register({
+    type: "facilities:repair-facility",
+    visibility: "public",
+    description: "Authoritatively executes facility repair; fails closed if engineering project is required",
+    schemaValidator: (payload) => {
+      if (!payload || typeof payload !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Payload must be an object"
+          })
+        );
+      }
+      const p = payload;
+      if (typeof p.domainUuid !== "string" || !p.domainUuid.trim()) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "domainUuid is required"
+          })
+        );
+      }
+      if (typeof p.facilityId !== "string" || !p.facilityId.trim()) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "facilityId is required"
+          })
+        );
+      }
+      return ok(p);
+    },
+    permissionValidator: validatePerms,
+    handler: async (ctx) => {
+      const p = ctx.command.payload;
+      return facilitiesService.repairFacility({
+        domainUuid: p.domainUuid,
+        facilityId: p.facilityId,
+        restoreIntegrity: p.restoreIntegrity,
+        removeConditionIds: p.removeConditionIds,
+        notes: p.notes,
+        userId: ctx.senderUserId
+      });
+    }
+  });
+  registry.register({
+    type: "facilities:apply-damage",
+    visibility: "public",
+    description: "Applies damage and degradation to a facility (GM only)",
+    permissionValidator: (ctx) => validatePeopleCommandPermission(ctx, domains, (p) => p.domainUuid, {
+      controllerProvider
+    }),
+    handler: async (ctx) => {
+      const p = ctx.command.payload;
+      return facilitiesService.applyDamage({
+        domainUuid: p.domainUuid,
+        facilityId: p.facilityId,
+        damage: p.damage ?? 0,
+        conditionId: p.conditionId,
+        condition: p.condition,
+        reason: p.reason,
+        userId: ctx.senderUserId
+      });
+    }
+  });
+  registry.register({
+    type: "facilities:decommission-facility",
+    visibility: "public",
+    description: "Decommissions an existing facility",
+    permissionValidator: validatePerms,
+    handler: async (ctx) => {
+      const p = ctx.command.payload;
+      return facilitiesService.decommissionFacility({
+        domainUuid: p.domainUuid,
+        facilityId: p.facilityId,
+        reason: p.reason,
+        userId: ctx.senderUserId
+      });
+    }
+  });
+}
+
+// src/downtime/definitions/canonical-downtime-definitions.ts
+var CANONICAL_DOWNTIME_DEFINITIONS = Object.freeze([
+  {
+    id: "domain-manager:crafting",
+    version: 1,
+    label: "Crafting & Fabrication",
+    description: "Fabricating items, equipment, or supplies using domain facilities and raw materials.",
+    category: "production",
+    tags: Object.freeze(["crafting", "supplies", "materials"]),
+    scope: "individual",
+    defaultDurationTicks: 10,
+    minParticipants: 1,
+    maxParticipants: 3,
+    allowedParticipantRoles: Object.freeze(["owner", "assistant"]),
+    costs: Object.freeze([
+      { resourceId: "domain-manager:materials", amount: 10 }
+    ]),
+    outcomeDefinitions: Object.freeze([
+      {
+        id: "crafting-completion",
+        type: "economy:grant-resource",
+        label: "Fabricate Finished Supplies",
+        parameters: Object.freeze({ resourceId: "domain-manager:supplies", amount: 15 }),
+        visibility: "public"
+      }
+    ])
+  },
+  {
+    id: "domain-manager:rest-and-recuperation",
+    version: 1,
+    label: "Rest & Recuperation",
+    description: "Spending time in safety and comfort to recover stamina, treat fatigue, and heal wounds.",
+    category: "recovery",
+    tags: Object.freeze(["rest", "recovery", "health"]),
+    scope: "individual",
+    defaultDurationTicks: 5,
+    minParticipants: 1,
+    maxParticipants: 10,
+    allowedParticipantRoles: Object.freeze(["participant"]),
+    outcomeDefinitions: Object.freeze([
+      {
+        id: "recuperation-benefit",
+        type: "narrative:event",
+        label: "Full Rest Recovery",
+        parameters: Object.freeze({ message: "Participant fully recovered from exhaustion and minor fatigue." }),
+        visibility: "public"
+      }
+    ])
+  },
+  {
+    id: "domain-manager:patrol-and-recon",
+    version: 1,
+    label: "Patrol & Reconnaissance",
+    description: "Scouting domain perimeters, maintaining vigilance, and surveying surrounding territories.",
+    category: "security",
+    tags: Object.freeze(["security", "patrol", "recon"]),
+    scope: "group",
+    defaultDurationTicks: 8,
+    minParticipants: 2,
+    maxParticipants: 10,
+    allowedParticipantRoles: Object.freeze(["supervisor", "participant"]),
+    outcomeDefinitions: Object.freeze([
+      {
+        id: "patrol-intelligence",
+        type: "narrative:event",
+        label: "Security Recon Report",
+        parameters: Object.freeze({ message: "Perimeters secured and local reconnaissance updated." }),
+        visibility: "public"
+      }
+    ])
+  },
+  {
+    id: "domain-manager:training",
+    version: 1,
+    label: "Physical & Tactical Training",
+    description: "Rigorous physical exercise, weapons drills, and tactical doctrine training.",
+    category: "development",
+    tags: Object.freeze(["training", "skill", "tactics"]),
+    scope: "individual",
+    defaultDurationTicks: 12,
+    minParticipants: 1,
+    maxParticipants: 4,
+    allowedParticipantRoles: Object.freeze(["supervisor", "trainee"]),
+    outcomeDefinitions: Object.freeze([
+      {
+        id: "training-advancement",
+        type: "narrative:event",
+        label: "Tactical Discipline Acquired",
+        parameters: Object.freeze({ message: "Trainees achieved improved discipline and tactical readiness." }),
+        visibility: "public"
+      }
+    ])
+  }
+]);
+
+// src/downtime/definitions/downtime-registry.ts
+var DowntimeDefinitionRegistry = class {
+  definitions = /* @__PURE__ */ new Map();
+  frozen = false;
+  get isFrozen() {
+    return this.frozen;
+  }
+  register(definition) {
+    if (this.frozen) {
+      return err(
+        createPublicError({
+          code: "DM_REGISTRY_FROZEN",
+          category: "conflict",
+          message: "Cannot register downtime definition into a frozen registry"
+        })
+      );
+    }
+    if (this.definitions.has(definition.id)) {
+      return err(
+        createPublicError({
+          code: "DM_DOWNTIME_ALREADY_EXISTS",
+          category: "conflict",
+          message: `DowntimeDefinition '${definition.id}' is already registered`
+        })
+      );
+    }
+    this.definitions.set(definition.id, Object.freeze({ ...definition }));
+    return ok(void 0);
+  }
+  get(id) {
+    return this.definitions.get(id);
+  }
+  has(id) {
+    return this.definitions.has(id);
+  }
+  list(filter) {
+    let result = Array.from(this.definitions.values());
+    if (filter) {
+      if (filter.category) {
+        result = result.filter((d) => d.category === filter.category);
+      }
+      if (filter.scope) {
+        result = result.filter((d) => d.scope === filter.scope);
+      }
+      if (filter.tag) {
+        result = result.filter((d) => d.tags.includes(filter.tag));
+      }
+    }
+    return Object.freeze(result);
+  }
+  freeze() {
+    this.frozen = true;
+  }
+};
+function createDefaultDowntimeRegistry() {
+  const registry = new DowntimeDefinitionRegistry();
+  for (const def of CANONICAL_DOWNTIME_DEFINITIONS) {
+    const res = registry.register(def);
+    if (!res.ok) {
+      throw new Error(`Failed to load canonical downtime definition '${def.id}': ${res.error.message}`);
+    }
+  }
+  registry.freeze();
+  return registry;
+}
+
+// src/downtime/services/downtime-service.ts
+var DowntimeService = class {
+  #domains;
+  #downtimeRegistry;
+  constructor(options) {
+    this.#domains = options.domains;
+    this.#downtimeRegistry = options.downtimeRegistry ?? createDefaultDowntimeRegistry();
+  }
+  get registry() {
+    return this.#downtimeRegistry;
+  }
+  async getActivities(domainUuid) {
+    const docRes = await this.#domains.read(domainUuid);
+    if (!docRes.ok) return docRes;
+    const data = getDomainDowntimeData(docRes.value.record);
+    return ok(data.activities);
+  }
+  async getActivity(domainUuid, activityId) {
+    const docRes = await this.#domains.read(domainUuid);
+    if (!docRes.ok) return docRes;
+    const data = getDomainDowntimeData(docRes.value.record);
+    const a = data.activities.find((item) => item.id === activityId);
+    if (!a) {
+      return err(
+        createPublicError({
+          code: "DM_DOWNTIME_NOT_FOUND",
+          category: "not-found",
+          message: `Downtime activity ${activityId} not found in domain ${domainUuid}`
+        })
+      );
+    }
+    return ok(a);
+  }
+  async startActivity(params) {
+    const docRes = await this.#domains.read(params.domainUuid);
+    if (!docRes.ok) return docRes;
+    const record = docRes.value.record;
+    if (!record.definition.capabilities.enabled.includes(DOWNTIME_CAPABILITY_ID)) {
+      return err(
+        createPublicError({
+          code: "DM_DOWNTIME_CAPABILITY_DISABLED",
+          category: "conflict",
+          message: `Downtime capability '${DOWNTIME_CAPABILITY_ID}' is not enabled on domain ${params.domainUuid}`
+        })
+      );
+    }
+    const definition = this.#downtimeRegistry.get(params.definitionId);
+    if (!definition) {
+      return err(
+        createPublicError({
+          code: "DM_DOWNTIME_DEFINITION_NOT_FOUND",
+          category: "not-found",
+          message: `Downtime definition '${params.definitionId}' not found`
+        })
+      );
+    }
+    const participants = [];
+    if (params.participantRef) {
+      participants.push({
+        participantRef: params.participantRef,
+        participantType: "notable",
+        role: "lead",
+        capacityConsumed: 1
+      });
+    } else if (definition.minParticipants && definition.minParticipants > 0) {
+      return err(
+        createPublicError({
+          code: "DM_DOWNTIME_PARTICIPANT_REQUIRED",
+          category: "conflict",
+          message: `Activity '${definition.label}' requires at least ${definition.minParticipants} participant(s)`
+        })
+      );
+    }
+    const currentDowntimeData = getDomainDowntimeData(record);
+    const activityId = `dt-${createOpaqueId("prj").slice(4)}`;
+    const now = Date.now();
+    const newActivity = {
+      id: activityId,
+      domainUuid: params.domainUuid,
+      definitionId: params.definitionId,
+      name: params.label ?? definition.label,
+      schemaVersion: 1,
+      revision: 0,
+      scope: params.scope ?? definition.scope ?? "domain",
+      lifecycle: "inProgress",
+      elapsedTicks: 0,
+      durationTicks: params.durationTicks ?? definition.defaultDurationTicks ?? 10,
+      participants: Object.freeze(participants),
+      tags: Object.freeze([...definition.tags ?? []]),
+      createdAt: now,
+      updatedAt: now
+    };
+    const updatedActivities = Object.freeze([...currentDowntimeData.activities, newActivity]);
+    const updatedRecord = withDomainDowntimeData(record, {
+      ...currentDowntimeData,
+      activities: updatedActivities
+    });
+    const saveRes = await this.#domains.save({
+      ...docRes.value,
+      record: updatedRecord
+    });
+    if (!saveRes.ok) return saveRes;
+    return ok({ activity: newActivity, activityId });
+  }
+  async advanceActivity(params) {
+    const docRes = await this.#domains.read(params.domainUuid);
+    if (!docRes.ok) return docRes;
+    const record = docRes.value.record;
+    const currentDowntimeData = getDomainDowntimeData(record);
+    const activity = currentDowntimeData.activities.find((a) => a.id === params.activityId);
+    if (!activity) {
+      return err(
+        createPublicError({
+          code: "DM_DOWNTIME_NOT_FOUND",
+          category: "not-found",
+          message: `Downtime activity ${params.activityId} not found in domain ${params.domainUuid}`
+        })
+      );
+    }
+    if (activity.lifecycle !== "inProgress") {
+      return err(
+        createPublicError({
+          code: "DM_DOWNTIME_INVALID_STATE",
+          category: "validation",
+          message: `Cannot advance downtime activity in lifecycle '${activity.lifecycle}'. Must be 'inProgress'`
+        })
+      );
+    }
+    const newTicks = activity.elapsedTicks + Math.max(0, params.ticks);
+    const duration = activity.durationTicks;
+    const shouldComplete = duration !== null && duration !== void 0 && newTicks >= duration;
+    if (shouldComplete) {
+      const compRes = await this.completeActivity({
+        domainUuid: params.domainUuid,
+        activityId: params.activityId,
+        notes: params.notes,
+        userId: params.userId
+      });
+      if (!compRes.ok) return compRes;
+      return ok({ activity: compRes.value.activity, completed: true });
+    }
+    const updatedActivity = {
+      ...activity,
+      elapsedTicks: newTicks,
+      revision: activity.revision + 1,
+      updatedAt: Date.now()
+    };
+    const updatedActivities = currentDowntimeData.activities.map(
+      (a) => a.id === params.activityId ? updatedActivity : a
+    );
+    const updatedRecord = withDomainDowntimeData(record, {
+      ...currentDowntimeData,
+      activities: Object.freeze(updatedActivities)
+    });
+    const saveRes = await this.#domains.save({
+      ...docRes.value,
+      record: updatedRecord
+    });
+    if (!saveRes.ok) return saveRes;
+    return ok({ activity: updatedActivity, completed: false });
+  }
+  async completeActivity(params) {
+    const docRes = await this.#domains.read(params.domainUuid);
+    if (!docRes.ok) return docRes;
+    const record = docRes.value.record;
+    const currentDowntimeData = getDomainDowntimeData(record);
+    const activity = currentDowntimeData.activities.find((a) => a.id === params.activityId);
+    if (!activity) {
+      return err(
+        createPublicError({
+          code: "DM_DOWNTIME_NOT_FOUND",
+          category: "not-found",
+          message: `Downtime activity ${params.activityId} not found in domain ${params.domainUuid}`
+        })
+      );
+    }
+    if (activity.lifecycle === "completed") {
+      return err(
+        createPublicError({
+          code: "DM_DOWNTIME_ALREADY_COMPLETED",
+          category: "conflict",
+          message: `Downtime activity ${params.activityId} is already completed`
+        })
+      );
+    }
+    const def = this.#downtimeRegistry.get(activity.definitionId);
+    const outcomes = [];
+    if (def?.outcomeDefinitions && def.outcomeDefinitions.length > 0) {
+      for (const outcome of def.outcomeDefinitions) {
+        outcomes.push(outcome);
+      }
+    }
+    const now = Date.now();
+    const updatedActivity = {
+      ...activity,
+      lifecycle: "completed",
+      completedAt: now,
+      revision: activity.revision + 1,
+      updatedAt: now
+    };
+    const updatedActivities = currentDowntimeData.activities.map(
+      (a) => a.id === params.activityId ? updatedActivity : a
+    );
+    const updatedRecord = withDomainDowntimeData(record, {
+      ...currentDowntimeData,
+      activities: Object.freeze(updatedActivities)
+    });
+    const saveRes = await this.#domains.save({
+      ...docRes.value,
+      record: updatedRecord
+    });
+    if (!saveRes.ok) return saveRes;
+    return ok({ activity: updatedActivity, outcomes });
+  }
+  async pauseActivity(params) {
+    return this.#mutateLifecycle(params.domainUuid, params.activityId, "paused");
+  }
+  async resumeActivity(params) {
+    return this.#mutateLifecycle(params.domainUuid, params.activityId, "inProgress");
+  }
+  async cancelActivity(params) {
+    return this.#mutateLifecycle(params.domainUuid, params.activityId, "cancelled");
+  }
+  async #mutateLifecycle(domainUuid, activityId, targetLifecycle) {
+    const docRes = await this.#domains.read(domainUuid);
+    if (!docRes.ok) return docRes;
+    const record = docRes.value.record;
+    const currentDowntimeData = getDomainDowntimeData(record);
+    const activity = currentDowntimeData.activities.find((a) => a.id === activityId);
+    if (!activity) {
+      return err(
+        createPublicError({
+          code: "DM_DOWNTIME_NOT_FOUND",
+          category: "not-found",
+          message: `Downtime activity ${activityId} not found in domain ${domainUuid}`
+        })
+      );
+    }
+    const updatedActivity = {
+      ...activity,
+      lifecycle: targetLifecycle,
+      revision: activity.revision + 1,
+      updatedAt: Date.now()
+    };
+    const updatedActivities = currentDowntimeData.activities.map(
+      (a) => a.id === activityId ? updatedActivity : a
+    );
+    const updatedRecord = withDomainDowntimeData(record, {
+      ...currentDowntimeData,
+      activities: Object.freeze(updatedActivities)
+    });
+    const saveRes = await this.#domains.save({
+      ...docRes.value,
+      record: updatedRecord
+    });
+    if (!saveRes.ok) return saveRes;
+    return ok({ activity: updatedActivity });
+  }
+};
+
+// src/ui/domain-patterns/downtime/downtime-presenter.ts
+function resolveScopeBadgeClass(scope) {
+  switch (scope) {
+    case "individual":
+      return "dm-badge-individual";
+    case "group":
+      return "dm-badge-group";
+    case "domain":
+      return "dm-badge-domain";
+    case "flexible":
+      return "dm-badge-flexible";
+    default:
+      return "dm-badge-default";
+  }
+}
+function resolveLifecycleBadgeClass2(lifecycle) {
+  switch (lifecycle) {
+    case "inProgress":
+      return "dm-badge-active";
+    case "ready":
+      return "dm-badge-ready";
+    case "completed":
+      return "dm-badge-completed";
+    case "paused":
+      return "dm-badge-paused";
+    case "planned":
+      return "dm-badge-planned";
+    case "draft":
+      return "dm-badge-draft";
+    case "blocked":
+      return "dm-badge-blocked";
+    case "cancelled":
+      return "dm-badge-canceled";
+    case "failed":
+      return "dm-badge-danger";
+    default:
+      return "dm-badge-default";
+  }
+}
+function buildDowntimeViewModel(domainInput, options = {}) {
+  const record = "record" in domainInput ? domainInput.record : domainInput;
+  const domainUuid = "uuid" in domainInput ? domainInput.uuid : "unknown";
+  const viewerIsGm = options.viewerIsGm ?? options.viewer?.isGm ?? false;
+  const filterLifecycle = options.filterLifecycle ?? "all";
+  const filterScope = options.filterScope ?? "all";
+  const searchTerm = (options.searchTerm ?? "").toLowerCase().trim();
+  const data = getDomainDowntimeData(record);
+  const defRegistry = options.downtimeRegistry;
+  const activityVMs = [];
+  for (const activity of data.activities) {
+    const isSecret = Boolean(activity.visibility === "secret" || activity.tags?.includes("secret"));
+    if (isSecret && !viewerIsGm) {
+      continue;
+    }
+    if (filterLifecycle !== "all" && activity.lifecycle !== filterLifecycle) {
+      continue;
+    }
+    if (filterScope !== "all" && activity.scope !== filterScope) {
+      continue;
+    }
+    const def = defRegistry?.get(activity.definitionId);
+    const label = activity.name || def?.label || activity.id;
+    const description = activity.description || def?.description || "";
+    if (searchTerm) {
+      const matchLabel = label.toLowerCase().includes(searchTerm);
+      const matchDef = activity.definitionId.toLowerCase().includes(searchTerm);
+      if (!matchLabel && !matchDef) {
+        continue;
+      }
+    }
+    const isIndefinite = activity.durationTicks === null || activity.durationTicks === void 0;
+    let progressPercent = null;
+    let durationFormatted;
+    if (isIndefinite) {
+      durationFormatted = `Indefinite (${activity.elapsedTicks} ticks elapsed)`;
+      progressPercent = null;
+    } else {
+      const total = activity.durationTicks;
+      durationFormatted = `${activity.elapsedTicks} / ${total} ticks`;
+      progressPercent = total > 0 ? Math.min(100, Math.max(0, Math.floor(activity.elapsedTicks / total * 100))) : 100;
+    }
+    const completed = isDowntimeComplete(activity);
+    const participants = activity.participants.map((p) => {
+      let displayName = p.participantRef;
+      if (options.participantResolver) {
+        displayName = options.participantResolver(p.participantRef, p.participantType);
+      }
+      return {
+        participantRef: p.participantRef,
+        participantType: p.participantType,
+        displayName,
+        role: p.role,
+        capacityConsumed: p.capacityConsumed ?? 1
+      };
+    });
+    const rawOutcomes = activity.outcomes ?? def?.outcomeDefinitions ?? [];
+    const outcomeReceipts = activity.outcomesApplied ?? [];
+    const outcomeVMs = rawOutcomes.map((o, idx) => {
+      const received = outcomeReceipts.some((r) => r.outcomeId === o.id);
+      return {
+        id: o.id ?? `outcome-${idx}`,
+        type: o.type ?? "resource",
+        targetRef: o.targetRef ?? domainUuid,
+        description: o.label ?? o.description ?? o.type ?? "Outcome",
+        received
+      };
+    });
+    const startedAtFormatted = activity.createdAt ? new Date(activity.createdAt).toLocaleDateString() : "\u2014";
+    const completedAtFormatted = activity.completedAt ? new Date(activity.completedAt).toLocaleDateString() : void 0;
+    const canAdvance = activity.lifecycle === "inProgress";
+    const canComplete = activity.lifecycle === "inProgress" || activity.lifecycle === "ready";
+    const canCancel = activity.lifecycle !== "completed" && activity.lifecycle !== "cancelled" && activity.lifecycle !== "failed";
+    activityVMs.push({
+      id: activity.id,
+      definitionId: activity.definitionId,
+      label,
+      description,
+      scope: activity.scope,
+      scopeBadgeClass: resolveScopeBadgeClass(activity.scope),
+      lifecycle: activity.lifecycle,
+      lifecycleBadgeClass: resolveLifecycleBadgeClass2(activity.lifecycle),
+      progressTicks: activity.elapsedTicks,
+      durationTicks: activity.durationTicks ?? null,
+      durationFormatted,
+      progressPercent,
+      isIndefinite,
+      isCompleted: completed,
+      participants: Object.freeze(participants),
+      outcomes: Object.freeze(outcomeVMs),
+      startedAtFormatted,
+      completedAtFormatted,
+      isSecret,
+      canAdvance,
+      canComplete,
+      canCancel
+    });
+  }
+  const allVisible = data.activities.filter((a) => {
+    const isSecret = Boolean(a.visibility === "secret" || a.tags?.includes("secret"));
+    return !isSecret || viewerIsGm;
+  });
+  const totalCount = allVisible.length;
+  const activeCount = allVisible.filter((a) => a.lifecycle === "inProgress").length;
+  const completedCount = allVisible.filter((a) => a.lifecycle === "completed").length;
+  return {
+    domainUuid,
+    viewerIsGm,
+    totalCount,
+    activeCount,
+    completedCount,
+    activities: Object.freeze(activityVMs),
+    filterLifecycle,
+    filterScope,
+    searchTerm
+  };
+}
+
+// src/downtime/api/public-downtime-api.ts
+function makeCommand4(type, payload) {
+  return {
+    contractVersion: COMMAND_CONTRACT_VERSION_V1,
+    commandId: createCommandId(),
+    type,
+    payload,
+    issuedAtReal: Date.now()
+  };
+}
+var DefaultPublicDowntimeApi = class {
+  #domains;
+  #commandBus;
+  #downtimeRegistry;
+  #downtimeService;
+  constructor(options) {
+    this.#domains = options.domains;
+    this.#commandBus = options.commandBus;
+    this.#downtimeRegistry = options.downtimeRegistry ?? createDefaultDowntimeRegistry();
+    this.#downtimeService = options.downtimeService;
+  }
+  async getActivities(domainUuid, viewer) {
+    const cleanId = domainUuid.startsWith("JournalEntry.") ? domainUuid.slice("JournalEntry.".length) : domainUuid;
+    const docRes = await this.#domains.read(cleanId);
+    if (!docRes.ok) return docRes;
+    const data = getDomainDowntimeData(docRes.value.record);
+    const isGm = viewer?.isGm ?? false;
+    if (isGm) return ok(data.activities);
+    return ok(data.activities.filter((a) => !a.tags.includes("secret")));
+  }
+  async getActivity(domainUuid, activityId, viewer) {
+    const listRes = await this.getActivities(domainUuid, viewer);
+    if (!listRes.ok) return listRes;
+    const a = listRes.value.find((item) => item.id === activityId);
+    if (!a) {
+      return err(
+        createPublicError({
+          code: "DM_DOWNTIME_NOT_FOUND",
+          category: "not-found",
+          message: `Downtime activity ${activityId} not found in domain ${domainUuid}`
+        })
+      );
+    }
+    return ok(a);
+  }
+  buildViewModel(domainInput, options) {
+    const record = "record" in domainInput ? domainInput.record : domainInput;
+    return buildDowntimeViewModel(record, {
+      downtimeRegistry: this.#downtimeRegistry,
+      ...options
+    });
+  }
+  async startActivity(params) {
+    const cmd = makeCommand4("downtime:start-activity", params);
+    const res = await this.#commandBus.execute(cmd);
+    if (!res.ok) return res;
+    if (res.value.status === "rejected") {
+      return err(res.value.error ?? createPublicError({ code: "DM_COMMAND_REJECTED", category: "internal", message: "Command rejected" }));
+    }
+    return ok(res.value.result);
+  }
+  async advanceActivity(params) {
+    const cmd = makeCommand4("downtime:advance-activity", params);
+    const res = await this.#commandBus.execute(cmd);
+    if (!res.ok) return res;
+    if (res.value.status === "rejected") {
+      return err(res.value.error ?? createPublicError({ code: "DM_COMMAND_REJECTED", category: "internal", message: "Command rejected" }));
+    }
+    return ok(res.value.result);
+  }
+  async completeActivity(params) {
+    const cmd = makeCommand4("downtime:complete-activity", params);
+    const res = await this.#commandBus.execute(cmd);
+    if (!res.ok) return res;
+    if (res.value.status === "rejected") {
+      return err(res.value.error ?? createPublicError({ code: "DM_COMMAND_REJECTED", category: "internal", message: "Command rejected" }));
+    }
+    return ok(res.value.result);
+  }
+  async pauseActivity(params) {
+    const cmd = makeCommand4("downtime:pause-activity", params);
+    const res = await this.#commandBus.execute(cmd);
+    if (!res.ok) return res;
+    if (res.value.status === "rejected") {
+      return err(res.value.error ?? createPublicError({ code: "DM_COMMAND_REJECTED", category: "internal", message: "Command rejected" }));
+    }
+    return ok(res.value.result);
+  }
+  async resumeActivity(params) {
+    const cmd = makeCommand4("downtime:resume-activity", params);
+    const res = await this.#commandBus.execute(cmd);
+    if (!res.ok) return res;
+    if (res.value.status === "rejected") {
+      return err(res.value.error ?? createPublicError({ code: "DM_COMMAND_REJECTED", category: "internal", message: "Command rejected" }));
+    }
+    return ok(res.value.result);
+  }
+  async cancelActivity(params) {
+    const cmd = makeCommand4("downtime:cancel-activity", params);
+    const res = await this.#commandBus.execute(cmd);
+    if (!res.ok) return res;
+    if (res.value.status === "rejected") {
+      return err(res.value.error ?? createPublicError({ code: "DM_COMMAND_REJECTED", category: "internal", message: "Command rejected" }));
+    }
+    return ok(res.value.result);
+  }
+};
+
+// src/downtime/commands/downtime-commands.ts
+function registerDowntimeCommands(options) {
+  const { registry, downtimeService, domains, controllerProvider } = options;
+  function validatePerms(ctx) {
+    return validatePeopleCommandPermission(ctx, domains, (p) => p.domainUuid, {
+      controllerProvider
+    });
+  }
+  registry.register({
+    type: "downtime:start-activity",
+    visibility: "public",
+    description: "Authoritatively starts a new downtime activity after validating participant requirements",
+    schemaValidator: (payload) => {
+      if (!payload || typeof payload !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Payload must be an object"
+          })
+        );
+      }
+      const p = payload;
+      if (typeof p.domainUuid !== "string" || !p.domainUuid.trim()) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "domainUuid is required"
+          })
+        );
+      }
+      if (typeof p.definitionId !== "string" || !p.definitionId.trim()) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "definitionId is required"
+          })
+        );
+      }
+      return ok(p);
+    },
+    permissionValidator: validatePerms,
+    handler: async (ctx) => {
+      const p = ctx.command.payload;
+      return downtimeService.startActivity({
+        domainUuid: p.domainUuid,
+        definitionId: p.definitionId,
+        label: p.label,
+        scope: p.scope,
+        durationTicks: p.durationTicks,
+        participantRef: p.participantRef,
+        userId: ctx.senderUserId
+      });
+    }
+  });
+  registry.register({
+    type: "downtime:advance-activity",
+    visibility: "public",
+    description: "Advances downtime activity progress and automatically resolves outcomes upon reaching duration",
+    schemaValidator: (payload) => {
+      if (!payload || typeof payload !== "object") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "Payload must be an object"
+          })
+        );
+      }
+      const p = payload;
+      if (typeof p.domainUuid !== "string" || !p.domainUuid.trim()) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "domainUuid is required"
+          })
+        );
+      }
+      if (typeof p.activityId !== "string" || !p.activityId.trim()) {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "activityId is required"
+          })
+        );
+      }
+      if (typeof p.ticks !== "number") {
+        return err(
+          createPublicError({
+            code: "DM_INVALID_COMMAND_PAYLOAD",
+            category: "validation",
+            message: "ticks must be a number"
+          })
+        );
+      }
+      return ok(p);
+    },
+    permissionValidator: validatePerms,
+    handler: async (ctx) => {
+      const p = ctx.command.payload;
+      return downtimeService.advanceActivity({
+        domainUuid: p.domainUuid,
+        activityId: p.activityId,
+        ticks: p.ticks,
+        notes: p.notes,
+        userId: ctx.senderUserId
+      });
+    }
+  });
+  registry.register({
+    type: "downtime:complete-activity",
+    visibility: "public",
+    description: "Authoritatively completes a downtime activity and resolves configured outcomes",
+    permissionValidator: validatePerms,
+    handler: async (ctx) => {
+      const p = ctx.command.payload;
+      return downtimeService.completeActivity({
+        domainUuid: p.domainUuid,
+        activityId: p.activityId,
+        outcomeKey: p.outcomeKey,
+        notes: p.notes,
+        userId: ctx.senderUserId
+      });
+    }
+  });
+  registry.register({
+    type: "downtime:pause-activity",
+    visibility: "public",
+    description: "Pauses an in-progress downtime activity",
+    permissionValidator: validatePerms,
+    handler: async (ctx) => {
+      const p = ctx.command.payload;
+      return downtimeService.pauseActivity({
+        domainUuid: p.domainUuid,
+        activityId: p.activityId,
+        reason: p.reason,
+        userId: ctx.senderUserId
+      });
+    }
+  });
+  registry.register({
+    type: "downtime:resume-activity",
+    visibility: "public",
+    description: "Resumes a paused downtime activity",
+    permissionValidator: validatePerms,
+    handler: async (ctx) => {
+      const p = ctx.command.payload;
+      return downtimeService.resumeActivity({
+        domainUuid: p.domainUuid,
+        activityId: p.activityId,
+        reason: p.reason,
+        userId: ctx.senderUserId
+      });
+    }
+  });
+  registry.register({
+    type: "downtime:cancel-activity",
+    visibility: "public",
+    description: "Cancels a downtime activity",
+    permissionValidator: validatePerms,
+    handler: async (ctx) => {
+      const p = ctx.command.payload;
+      return downtimeService.cancelActivity({
+        domainUuid: p.domainUuid,
+        activityId: p.activityId,
+        reason: p.reason,
+        userId: ctx.senderUserId
+      });
+    }
+  });
+}
+
 // src/economy/math/minor-units.ts
 function assertSafeInteger(value, fieldName = "amount") {
   if (typeof value !== "number" || !Number.isSafeInteger(value)) {
@@ -20963,7 +25311,7 @@ function cleanPayload(payload) {
   }
   return cleaned;
 }
-function makeCommand2(type, payload) {
+function makeCommand5(type, payload) {
   return {
     contractVersion: COMMAND_CONTRACT_VERSION_V1,
     commandId: createCommandId(),
@@ -21074,7 +25422,7 @@ var EconomyApplicationController = class {
     }
   }
   async dispatchReleaseReservation(payload) {
-    const cmd = makeCommand2("economy:release-reservation", {
+    const cmd = makeCommand5("economy:release-reservation", {
       domainUuid: this.#domainUuid,
       reservationId: payload.reservationId,
       amountMinor: payload.amountMinor,
@@ -21083,7 +25431,7 @@ var EconomyApplicationController = class {
     return this.#executeCommand(cmd);
   }
   async dispatchTransfer(payload) {
-    const cmd = makeCommand2("economy:transfer", {
+    const cmd = makeCommand5("economy:transfer", {
       sourceDomainUuid: this.#domainUuid,
       targetDomainUuid: payload.targetDomainUuid,
       resourceId: payload.resourceId,
@@ -21093,7 +25441,7 @@ var EconomyApplicationController = class {
     return this.#executeCommand(cmd);
   }
   async dispatchAdjust(payload) {
-    const cmd = makeCommand2("economy:adjust", {
+    const cmd = makeCommand5("economy:adjust", {
       domainUuid: this.#domainUuid,
       resourceId: payload.resourceId,
       deltaMinor: payload.deltaMinor,
@@ -21103,7 +25451,7 @@ var EconomyApplicationController = class {
     return this.#executeCommand(cmd);
   }
   async dispatchCreateAccount(payload) {
-    const cmd = makeCommand2("economy:create-account", {
+    const cmd = makeCommand5("economy:create-account", {
       domainUuid: this.#domainUuid,
       resourceId: payload.resourceId,
       mode: payload.mode ?? "native",
@@ -21115,7 +25463,7 @@ var EconomyApplicationController = class {
     return this.#executeCommand(cmd);
   }
   async dispatchQuickResourceCreateAndAccount(payload) {
-    const regCmd = makeCommand2("economy:register-custom-resource", {
+    const regCmd = makeCommand5("economy:register-custom-resource", {
       definition: {
         id: payload.definition.id,
         version: 1,
@@ -21582,483 +25930,6 @@ var EconomyApplication = class _EconomyApplication extends BaseApp2 {
   }
 };
 
-// src/bootstrap/domain-manager-runtime.ts
-function composeDomainManagerRuntime(options = {}) {
-  const domainStore = options.domainStore ?? new FoundryDomainDocumentStore();
-  const mutableDomainRepo = new DomainRepository(domainStore);
-  const authority = options.authority ?? new FoundryPrimaryAuthorityAdapter();
-  const lockManager = options.lockManager ?? new LockManager();
-  const coordinator = new MutationCoordinator({ lockManager });
-  const transactionStore = options.transactionStore ?? new TransactionStore({
-    storageAdapter: options.transactionStorageAdapter ?? new FoundryJournalTransactionStorageAdapter()
-  });
-  const recovery = new RecoveryService({ transactionStore, lockManager });
-  const resourceRegistry = options.resourceRegistry ?? createDefaultResourceRegistry();
-  const ledgerStore = options.ledgerStore ?? new LedgerStore({
-    storageAdapter: options.ledgerStorageAdapter ?? new FoundryJournalLedgerStorageAdapter()
-  });
-  const reservationStore = options.reservationStore ?? new ReservationStore({
-    storageAdapter: options.reservationStorageAdapter ?? new FoundryJournalReservationStorageAdapter()
-  });
-  const customResourceStore = options.customResourceStore ?? new CustomResourceDefinitionStore(
-    options.customResourceStorageAdapter ?? new FoundryJournalCustomResourceStorageAdapter()
-  );
-  const providerRegistry = options.providerRegistry ?? createDefaultProviderRegistry(mutableDomainRepo);
-  const thresholdService = options.thresholdService ?? new ThresholdService(
-    options.thresholdStorageAdapter ?? new FoundryJournalThresholdStorageAdapter()
-  );
-  const economyService = new EconomyService({
-    domains: mutableDomainRepo,
-    resourceRegistry,
-    ledgerStore,
-    reservationStore,
-    lockManager,
-    transactionStore,
-    recoveryService: recovery,
-    providerRegistry,
-    thresholdService
-  });
-  const controllerProvider = options.controllerProvider ?? new DefaultDomainControllerProvider();
-  const registry = new CommandRegistry();
-  registerDomainCommandHandlers(registry, coordinator, mutableDomainRepo);
-  registerPopulationCommandHandlers(registry, coordinator, mutableDomainRepo);
-  registerNotableCommandHandlers(registry, coordinator, mutableDomainRepo);
-  registerRoleCommandHandlers(registry, coordinator, mutableDomainRepo);
-  registerOperationalGroupCommandHandlers(registry, coordinator, mutableDomainRepo);
-  registerAssignmentCommandHandlers(registry, coordinator, mutableDomainRepo);
-  registerRepairCommandHandlers(registry, coordinator, mutableDomainRepo);
-  registerEconomyCommands({
-    registry,
-    economyService,
-    domains: mutableDomainRepo,
-    controllerProvider,
-    thresholdService,
-    customResourceStore,
-    resourceRegistry
-  });
-  registry.freeze();
-  const commandQueue = options.commandQueue ?? new CommandQueue({ maxConcurrency: 10 });
-  const dedupeStore = options.dedupeStore ?? new CommandDedupeStore();
-  const rateLimiter = options.rateLimiter ?? new RateLimiter();
-  const transport = options.transport ?? new FoundryCommandTransportAdapter({
-    authorityService: authority.service
-  });
-  const commandBus = new CommandBus({
-    registry,
-    authorityService: authority.service,
-    coordinator,
-    transport,
-    rateLimiter,
-    dedupeStore,
-    commandQueue
-  });
-  const diagnostics = new G2DiagnosticsProvider({
-    authorityService: authority.service,
-    lockManager,
-    commandQueue,
-    transactionStore,
-    registry,
-    transport,
-    rateLimiter
-  });
-  const readOnlyDomains = Object.freeze({
-    read: (id) => mutableDomainRepo.read(id),
-    load: (id) => mutableDomainRepo.load(id),
-    query: (query) => mutableDomainRepo.query(query),
-    checkIntegrity: () => mutableDomainRepo.checkIntegrity(),
-    getIndex: () => {
-      const liveIndex = mutableDomainRepo.getIndex();
-      return Object.freeze({
-        get: (id) => liveIndex.get(id),
-        list: () => liveIndex.list(),
-        query: (q) => liveIndex.query(q)
-      });
-    }
-  });
-  const unregisterPolicy = registerDomainControllerPolicy((domainId, userId, context) => {
-    return controllerProvider.isDomainController(domainId, userId, context);
-  });
-  const people = new PeopleService(readOnlyDomains, { commandBus });
-  const repairTool = new PeopleRepairTool(commandBus);
-  const publicEconomy = new DefaultPublicEconomyApi({
-    domains: readOnlyDomains,
-    commandBus,
-    resourceRegistry,
-    ledgerStore,
-    reservationStore,
-    providerRegistry,
-    thresholdService,
-    transactionStore
-  });
-  const publicApi = Object.freeze({
-    version: BUILD_METADATA.moduleVersion,
-    domains: readOnlyDomains,
-    economy: publicEconomy,
-    people,
-    diagnostics
-  });
-  return Object.freeze({
-    publicApi,
-    // G2-AUD-008 & G4-AUD-004: Read-only facades exposed publicly
-    domains: readOnlyDomains,
-    authority,
-    commandBus,
-    registry,
-    transport,
-    lockManager,
-    coordinator,
-    recovery,
-    transactionStore,
-    diagnostics,
-    people,
-    repairTool,
-    controllerProvider,
-    economy: publicEconomy,
-    resourceRegistry,
-    ledgerStore,
-    reservationStore,
-    providerRegistry,
-    customResourceStore,
-    thresholds: thresholdService,
-    initialize: async () => {
-      await transactionStore.rehydrate();
-      await ledgerStore.rehydrate();
-      await reservationStore.rehydrate();
-      await thresholdService.rehydrate();
-      const customDefs = await customResourceStore.rehydrate();
-      for (const def of customDefs) {
-        if (!resourceRegistry.get(def.id)) {
-          resourceRegistry.register(def);
-        }
-      }
-      const manualCurrency = providerRegistry.get(MANUAL_CURRENCY_PROVIDER_ID);
-      if (manualCurrency && "rehydrate" in manualCurrency && typeof manualCurrency.rehydrate === "function") {
-        await manualCurrency.rehydrate();
-      }
-    },
-    destroy: () => {
-      unregisterPolicy();
-      commandBus.destroy();
-      if ("destroy" in transport && typeof transport.destroy === "function") {
-        transport.destroy();
-      }
-      recovery.clear();
-    }
-  });
-}
-
-// src/diagnostics/build-diagnostics.ts
-function getBuildDiagnostics() {
-  return {
-    ...BUILD_METADATA
-  };
-}
-
-// src/diagnostics/logger.ts
-var Logger = class {
-  constructor(scope) {
-    this.scope = scope;
-  }
-  debug(message, context) {
-    return this.write("debug", message, context);
-  }
-  info(message, context) {
-    return this.write("info", message, context);
-  }
-  warn(message, context) {
-    return this.write("warn", message, context);
-  }
-  error(message, context) {
-    return this.write("error", message, context);
-  }
-  write(level, message, context) {
-    const safeContext = context === void 0 ? void 0 : sanitizeDiagnosticsValue(context);
-    const entry = safeContext === void 0 ? { level, message } : { level, message, context: safeContext };
-    const output = `[${this.scope}] ${message}`;
-    if (level === "error") console.error(output, safeContext ?? "");
-    else if (level === "warn") console.warn(output, safeContext ?? "");
-    else console.info(output, safeContext ?? "");
-    return entry;
-  }
-};
-
-// src/projects/definitions/canonical-project-definitions.ts
-var CANONICAL_PROJECT_DEFINITIONS = Object.freeze([
-  Object.freeze({
-    id: "domain-manager:survey",
-    version: 1,
-    label: "Survey & Reconnaissance",
-    description: "Systematic mapping and environmental survey of the domain territory.",
-    category: "exploration",
-    tags: Object.freeze(["survey", "exploration", "scouting"]),
-    progressResolverId: "domain-manager:standard",
-    defaultWorkRequired: 100,
-    requirements: Object.freeze([]),
-    costs: Object.freeze([]),
-    rewards: Object.freeze([]),
-    autoComplete: false
-  }),
-  Object.freeze({
-    id: "domain-manager:basic-construction",
-    version: 1,
-    label: "Basic Construction",
-    description: "Standard structural construction work for domain facilities or infrastructure.",
-    category: "construction",
-    tags: Object.freeze(["construction", "infrastructure", "facility"]),
-    progressResolverId: "domain-manager:standard",
-    defaultWorkRequired: 200,
-    requirements: Object.freeze([]),
-    costs: Object.freeze([]),
-    rewards: Object.freeze([]),
-    autoComplete: false
-  }),
-  Object.freeze({
-    id: "domain-manager:facility-maintenance",
-    version: 1,
-    label: "Facility Maintenance & Overhaul",
-    description: "Periodic preventative maintenance or overhaul of operational facilities.",
-    category: "maintenance",
-    tags: Object.freeze(["maintenance", "facility", "repair"]),
-    progressResolverId: "domain-manager:standard",
-    defaultWorkRequired: 50,
-    requirements: Object.freeze([]),
-    costs: Object.freeze([]),
-    rewards: Object.freeze([]),
-    autoComplete: true
-  })
-]);
-
-// src/projects/definitions/project-registry.ts
-var ProjectDefinitionRegistry = class {
-  #definitions = /* @__PURE__ */ new Map();
-  #frozen = false;
-  /**
-   * Registers a project definition. Validates the definition before accepting.
-   * Rejects duplicate IDs with DM_PROJECT_DEFINITION_ALREADY_EXISTS.
-   */
-  register(definition) {
-    if (this.#frozen) {
-      return err(
-        createPublicError({
-          code: "DM_PROJECT_REGISTRY_FROZEN",
-          category: "conflict",
-          message: "ProjectDefinitionRegistry is frozen against new registrations"
-        })
-      );
-    }
-    const validatedRes = validateProjectDefinition(definition);
-    if (!validatedRes.ok) {
-      return validatedRes;
-    }
-    const validated = validatedRes.value;
-    if (this.#definitions.has(validated.id)) {
-      return err(
-        createPublicError({
-          code: "DM_PROJECT_DEFINITION_ALREADY_EXISTS",
-          category: "conflict",
-          message: `Project definition '${validated.id}' is already registered`
-        })
-      );
-    }
-    this.#definitions.set(validated.id, validated);
-    return ok(validated);
-  }
-  /**
-   * Retrieves a project definition by its namespaced ID.
-   */
-  get(id) {
-    return this.#definitions.get(id);
-  }
-  /**
-   * Checks if a definition exists in the registry.
-   */
-  has(id) {
-    return this.#definitions.has(id);
-  }
-  /**
-   * Lists registered project definitions with optional filtering by category or tag.
-   */
-  list(filter) {
-    let result = Array.from(this.#definitions.values());
-    if (filter?.category) {
-      result = result.filter((d) => d.category === filter.category);
-    }
-    if (filter?.tag) {
-      result = result.filter((d) => d.tags.includes(filter.tag));
-    }
-    return Object.freeze(result);
-  }
-  /**
-   * Unregisters a project definition by ID. Cannot unregister if frozen.
-   */
-  unregister(id) {
-    if (this.#frozen) {
-      throw new Error("Cannot unregister from a frozen ProjectDefinitionRegistry");
-    }
-    return this.#definitions.delete(id);
-  }
-  /**
-   * Freezes the registry against modifications.
-   */
-  freeze() {
-    this.#frozen = true;
-  }
-  get isFrozen() {
-    return this.#frozen;
-  }
-};
-function createDefaultProjectRegistry() {
-  const registry = new ProjectDefinitionRegistry();
-  for (const def of CANONICAL_PROJECT_DEFINITIONS) {
-    const res = registry.register(def);
-    if (!res.ok) {
-      throw new Error(`Failed to register canonical project definition ${def.id}: ${res.error.message}`);
-    }
-  }
-  return registry;
-}
-
-// src/ui/domain-patterns/projects/project-presenter.ts
-function resolveStatusBadgeClass(lifecycle) {
-  switch (lifecycle) {
-    case "active":
-      return "dm-badge-active";
-    case "paused":
-      return "dm-badge-paused";
-    case "blocked":
-      return "dm-badge-blocked";
-    case "completed":
-      return "dm-badge-completed";
-    case "cancelled":
-      return "dm-badge-canceled";
-    case "failed":
-      return "dm-badge-failed";
-    case "draft":
-    case "planned":
-      return "dm-badge-planned";
-    case "initializing":
-      return "dm-badge-initializing";
-    case "approved":
-      return "dm-badge-approved";
-    case "archived":
-      return "dm-badge-archived";
-    default:
-      return "dm-badge-default";
-  }
-}
-function buildProjectsViewModel(domainInput, options = {}) {
-  const record = "record" in domainInput ? domainInput.record : domainInput;
-  const domainUuid = "uuid" in domainInput ? domainInput.uuid : "unknown";
-  const viewerIsGm = options.viewerIsGm ?? options.viewer?.isGm ?? true;
-  const filterLifecycle = options.filterLifecycle ?? "all";
-  const searchTerm = (options.searchTerm ?? "").toLowerCase().trim();
-  const data = getDomainProjectsData(record);
-  const defRegistry = options.projectRegistry;
-  const projectVMs = [];
-  for (const project of data.projects) {
-    const isSecret = Boolean(project.visibility === "secret" || project.tags?.includes("secret"));
-    if (isSecret && !viewerIsGm) {
-      continue;
-    }
-    if (filterLifecycle !== "all" && project.lifecycle !== filterLifecycle) {
-      continue;
-    }
-    const def = defRegistry?.get(project.definitionId);
-    const label = project.name || def?.label || project.id;
-    const description = project.description ?? def?.description ?? "";
-    const category = def?.category ?? "general";
-    const targetRef = project.targetRef ?? domainUuid;
-    if (searchTerm) {
-      const matchName = label.toLowerCase().includes(searchTerm);
-      const matchDef = project.definitionId.toLowerCase().includes(searchTerm);
-      const matchTarget = targetRef.toLowerCase().includes(searchTerm);
-      if (!matchName && !matchDef && !matchTarget) {
-        continue;
-      }
-    }
-    const progressPercent = project.workRequired > 0 ? Math.min(100, Math.max(0, Math.floor(project.workCompleted / project.workRequired * 100))) : 100;
-    const blockers = [];
-    if (project.lifecycle === "blocked") {
-      const bMsg = project.blockedReason || "Project execution is currently blocked.";
-      blockers.push({
-        id: "blocker-main",
-        category: "lifecycle",
-        message: bMsg,
-        isSecret: false
-      });
-    }
-    const rawWorkforce = project.workforceAllocations ?? [];
-    const workforce = rawWorkforce.map((w) => ({
-      typeId: w.typeId ?? "general",
-      required: w.required ?? 0,
-      allocated: w.allocated ?? 0,
-      satisfied: (w.allocated ?? 0) >= (w.required ?? 0)
-    }));
-    const rawRequirements = project.requirements ?? [];
-    const requirements = rawRequirements.map((r) => ({
-      targetRef: r.targetRef ?? "",
-      kind: r.kind ?? "generic",
-      status: r.status ?? "satisfied",
-      isSecret: Boolean(r.isSecret)
-    }));
-    const entriesCount = project.entries?.length ?? 0;
-    const lastUpdatedFormatted = project.updatedAt ? new Date(project.updatedAt).toLocaleDateString() : "\u2014";
-    const completedAtFormatted = project.completedAt ? new Date(project.completedAt).toLocaleDateString() : void 0;
-    const canAdvance = project.lifecycle === "active";
-    const canPause = project.lifecycle === "active";
-    const canResume = project.lifecycle === "paused";
-    const canBlock = project.lifecycle === "active" || project.lifecycle === "paused";
-    const canCancel = project.lifecycle !== "completed" && project.lifecycle !== "cancelled" && project.lifecycle !== "failed" && project.lifecycle !== "archived";
-    projectVMs.push({
-      id: project.id,
-      definitionId: project.definitionId,
-      label,
-      description,
-      lifecycle: project.lifecycle,
-      statusBadgeClass: resolveStatusBadgeClass(project.lifecycle),
-      revision: project.revision,
-      workRequired: project.workRequired,
-      workCompleted: project.workCompleted,
-      progressPercent,
-      targetRef,
-      category,
-      blockers: Object.freeze(blockers),
-      workforce: Object.freeze(workforce),
-      requirements: Object.freeze(requirements),
-      entriesCount,
-      lastUpdatedFormatted,
-      completedAtFormatted,
-      isSecret,
-      canAdvance,
-      canPause,
-      canResume,
-      canBlock,
-      canCancel
-    });
-  }
-  const allVisible = data.projects.filter((p) => {
-    const isSecret = Boolean(p.visibility === "secret" || p.tags?.includes("secret"));
-    return !isSecret || viewerIsGm;
-  });
-  const totalCount = allVisible.length;
-  const activeCount = allVisible.filter((p) => p.lifecycle === "active").length;
-  const pausedCount = allVisible.filter((p) => p.lifecycle === "paused").length;
-  const blockedCount = allVisible.filter((p) => p.lifecycle === "blocked").length;
-  const completedCount = allVisible.filter((p) => p.lifecycle === "completed").length;
-  return {
-    domainUuid,
-    viewerIsGm,
-    totalCount,
-    activeCount,
-    pausedCount,
-    blockedCount,
-    completedCount,
-    projects: Object.freeze(projectVMs),
-    filterLifecycle,
-    searchTerm
-  };
-}
-
 // src/ui/domain-patterns/projects/project-view.ts
 function escapeHtml3(value) {
   if (value === null || value === void 0) return "";
@@ -22386,476 +26257,6 @@ function renderProjectsSubsystemHtml(vm) {
   `;
 }
 
-// src/projects/plans/project-advance-plan-service.ts
-function evaluateProjectAdvancePlan(context) {
-  const { project, definition, domain } = context;
-  const blockers = [];
-  const warnings = [];
-  const expectedRevision = context.expectedRevision !== void 0 ? context.expectedRevision : project.revision;
-  if (project.revision !== expectedRevision) {
-    blockers.push({
-      code: "DM_PROJECT_REVISION_MISMATCH",
-      category: "revision",
-      message: `Project revision mismatch: expected ${expectedRevision}, found ${project.revision}`,
-      details: { expected: expectedRevision, actual: project.revision }
-    });
-  }
-  if (project.lifecycle === "paused") {
-    blockers.push({
-      code: "DM_PROJECT_PAUSED",
-      category: "lifecycle",
-      message: `Cannot advance project '${project.id}' because it is paused. Resume the project first`,
-      details: { lifecycle: project.lifecycle }
-    });
-  } else if (project.lifecycle === "blocked") {
-    blockers.push({
-      code: "DM_PROJECT_BLOCKED",
-      category: "lifecycle",
-      message: `Cannot advance project '${project.id}' because it is blocked: ${project.blockedReason ?? "unspecified reason"}`,
-      details: { lifecycle: project.lifecycle, blockedReason: project.blockedReason }
-    });
-  } else if (project.lifecycle === "completed" || project.lifecycle === "failed" || project.lifecycle === "cancelled" || project.lifecycle === "archived") {
-    blockers.push({
-      code: "DM_PROJECT_TERMINAL",
-      category: "lifecycle",
-      message: `Cannot advance project '${project.id}' in terminal lifecycle '${project.lifecycle}'`,
-      details: { lifecycle: project.lifecycle }
-    });
-  } else if (project.lifecycle !== "active") {
-    blockers.push({
-      code: "DM_PROJECT_NOT_ACTIVE",
-      category: "lifecycle",
-      message: `Project '${project.id}' is not in active state (current lifecycle: '${project.lifecycle}')`,
-      details: { lifecycle: project.lifecycle }
-    });
-  }
-  const enabledCaps = domain.definition.capabilities.enabled;
-  if (!enabledCaps.includes(PROJECTS_CAPABILITY_ID)) {
-    blockers.push({
-      code: "DM_PROJECT_CAPABILITY_MISSING",
-      category: "capability",
-      message: `Domain '${project.domainUuid}' does not have the '${PROJECTS_CAPABILITY_ID}' capability enabled`,
-      details: { capabilityId: PROJECTS_CAPABILITY_ID }
-    });
-  }
-  const requirementEvaluations = [];
-  for (const req of definition.requirements) {
-    if (req.category === "advance" || req.category === "continuous") {
-      let status = "satisfied";
-      let message;
-      if (req.type === "capability") {
-        const requiredCap = req.targetRef ?? String(req.value ?? "");
-        if (!enabledCaps.includes(requiredCap)) {
-          status = "unsatisfied";
-          message = `Required capability '${requiredCap}' is not enabled on domain`;
-        }
-      } else if (req.type === "facility") {
-        const targetFac = req.targetRef;
-        if (targetFac && context.parameters?.availableFacilities) {
-          const available = context.parameters.availableFacilities;
-          if (!available.includes(targetFac)) {
-            status = "unsatisfied";
-            message = `Required facility '${targetFac}' is not available`;
-          }
-        } else {
-          status = "unavailable";
-          message = `Facility evaluation for '${targetFac ?? "unknown"}' is not currently available`;
-        }
-      } else if (req.type === "custom") {
-        if (context.parameters?.customRequirements) {
-          const customMap = context.parameters.customRequirements;
-          if (customMap[req.id] !== true) {
-            status = "unsatisfied";
-            message = `Custom requirement '${req.id}' is not satisfied`;
-          }
-        } else {
-          status = "unsatisfied";
-          message = `Custom requirement '${req.id}' was not provided in evaluation context`;
-        }
-      }
-      requirementEvaluations.push({
-        requirementId: req.id,
-        category: req.category,
-        type: req.type,
-        status,
-        message,
-        targetRef: req.targetRef,
-        value: req.value
-      });
-      if (status !== "satisfied") {
-        blockers.push({
-          code: "DM_PROJECT_REQUIREMENT_UNSATISFIED",
-          category: "requirement",
-          message: message ?? `Requirement '${req.id}' is ${status}`,
-          details: { requirementId: req.id, status }
-        });
-      }
-    }
-  }
-  let proposedDelta = 1;
-  if (context.proposedDelta !== void 0) {
-    if (!Number.isSafeInteger(context.proposedDelta)) {
-      blockers.push({
-        code: "DM_PROJECT_DELTA_INVALID",
-        category: "requirement",
-        message: `Proposed progress delta must be a safe integer: received ${String(context.proposedDelta)}`,
-        details: { proposedDelta: context.proposedDelta }
-      });
-    } else {
-      proposedDelta = context.proposedDelta;
-    }
-  } else if (context.resolver !== void 0) {
-    const resolutionRes = context.resolver.resolve({
-      project,
-      definition,
-      domainUuid: project.domainUuid,
-      sourceKind: "command",
-      contributor: context.contributors && context.contributors.length > 0 ? context.contributors[0] : null,
-      parameters: context.parameters
-    });
-    if (resolutionRes.ok) {
-      proposedDelta = resolutionRes.value.deltaWork;
-      if (resolutionRes.value.warnings && resolutionRes.value.warnings.length > 0) {
-        warnings.push(...resolutionRes.value.warnings);
-      }
-    } else {
-      blockers.push({
-        code: resolutionRes.error.code,
-        category: "workforce",
-        message: resolutionRes.error.message,
-        details: resolutionRes.error.details
-      });
-    }
-  }
-  const projectedCompleted = project.clampProgress !== false ? Math.min(project.workRequired, Math.max(0, project.workCompleted + proposedDelta)) : project.workCompleted + proposedDelta;
-  const wouldComplete = projectedCompleted >= project.workRequired;
-  const planId = createOpaqueId("plan");
-  return {
-    planId,
-    projectId: project.id,
-    domainUuid: project.domainUuid,
-    expectedRevision,
-    proposedDelta,
-    requirements: Object.freeze(requirementEvaluations),
-    contributors: Object.freeze([...context.contributors ?? []]),
-    blockers: Object.freeze(blockers),
-    warnings: Object.freeze(warnings),
-    isSatisfied: blockers.length === 0,
-    wouldComplete,
-    evaluatedAt: Date.now()
-  };
-}
-function commitProjectAdvance(plan, project, options) {
-  if (!plan.isSatisfied) {
-    const blockerMsgs = plan.blockers.map((b) => `[${b.code}] ${b.message}`).join("; ");
-    return err(
-      createPublicError({
-        code: "DM_PROJECT_ADVANCE_BLOCKED",
-        category: "conflict",
-        message: `Cannot commit project advance: plan is blocked (${blockerMsgs})`,
-        details: { blockers: plan.blockers }
-      })
-    );
-  }
-  if (project.revision !== plan.expectedRevision) {
-    return err(
-      createPublicError({
-        code: "DM_PROJECT_REVISION_MISMATCH",
-        category: "conflict",
-        message: `Project revision mismatch: plan expects revision ${plan.expectedRevision}, but project is at revision ${project.revision}`,
-        details: { expected: plan.expectedRevision, actual: project.revision }
-      })
-    );
-  }
-  if (project.lifecycle !== "active") {
-    return err(
-      createPublicError({
-        code: "DM_PROJECT_INVALID_TRANSITION",
-        category: "validation",
-        message: `Cannot advance project in lifecycle '${project.lifecycle}'. Must be 'active'`,
-        details: { lifecycle: project.lifecycle }
-      })
-    );
-  }
-  const now = Date.now();
-  const entryId = createOpaqueId("prj");
-  const sourceKind = options?.sourceKind ?? "command";
-  const sourceRef = options?.sourceRef ?? plan.planId;
-  const reasonCode = options?.reasonCode ?? (plan.wouldComplete ? "PROJECT_COMPLETED" : "PROJECT_ADVANCED");
-  const rawUnitsAfter = project.workCompleted + plan.proposedDelta;
-  const nonNegative = Math.max(0, rawUnitsAfter);
-  const clampedUnitsAfter = project.clampProgress !== false ? Math.min(project.workRequired, nonNegative) : nonNegative;
-  const sequence = (project.entries?.length ?? 0) + 1;
-  const entry = {
-    id: entryId,
-    projectId: project.id,
-    domainUuid: project.domainUuid,
-    sequence,
-    unitsDelta: plan.proposedDelta,
-    unitsBefore: project.workCompleted,
-    unitsAfter: clampedUnitsAfter,
-    sourceKind,
-    sourceRef,
-    requestedByUserId: options?.userId ?? null,
-    contributor: plan.contributors && plan.contributors.length > 0 ? plan.contributors[0] : null,
-    timestamp: now,
-    reasonCode,
-    note: options?.note
-  };
-  const isGoalMet = clampedUnitsAfter >= project.workRequired;
-  const shouldComplete = isGoalMet && (options?.autoComplete ?? false);
-  const targetLifecycle = shouldComplete ? "completed" : "active";
-  if (shouldComplete) {
-    const transitionRes = validateProjectLifecycleTransition(project.lifecycle, "completed");
-    if (!transitionRes.ok) {
-      return transitionRes;
-    }
-  }
-  const applyRes = applyProjectEntry(project, entry);
-  if (!applyRes.ok) {
-    return applyRes;
-  }
-  let updatedProject = applyRes.value;
-  if (shouldComplete) {
-    updatedProject = {
-      ...updatedProject,
-      lifecycle: "completed",
-      completedAt: now
-    };
-  }
-  const receipt = {
-    receiptId: createOpaqueId("rep"),
-    projectId: project.id,
-    domainUuid: project.domainUuid,
-    action: shouldComplete ? "complete" : "advance",
-    revisionBefore: project.revision,
-    revisionAfter: updatedProject.revision,
-    lifecycleBefore: project.lifecycle,
-    lifecycleAfter: updatedProject.lifecycle,
-    workCompletedBefore: project.workCompleted,
-    workCompletedAfter: updatedProject.workCompleted,
-    unitsDelta: plan.proposedDelta,
-    entryCreated: entry,
-    blockedReason: project.blockedReason,
-    appliedAt: now,
-    reasonCode,
-    note: options?.note
-  };
-  return ok({
-    updatedProject,
-    receipt
-  });
-}
-function pauseProject(project, params) {
-  const expectedRevision = params?.expectedRevision !== void 0 ? params.expectedRevision : project.revision;
-  if (project.revision !== expectedRevision) {
-    return err(
-      createPublicError({
-        code: "DM_PROJECT_REVISION_MISMATCH",
-        category: "conflict",
-        message: `Project revision mismatch: expected revision ${expectedRevision}, but project is at revision ${project.revision}`,
-        details: { expected: expectedRevision, actual: project.revision }
-      })
-    );
-  }
-  const transitionRes = validateProjectLifecycleTransition(project.lifecycle, "paused");
-  if (!transitionRes.ok) {
-    return transitionRes;
-  }
-  const now = Date.now();
-  const entryId = createOpaqueId("prj");
-  const sequence = (project.entries?.length ?? 0) + 1;
-  const entry = {
-    id: entryId,
-    projectId: project.id,
-    domainUuid: project.domainUuid,
-    sequence,
-    unitsDelta: 0,
-    unitsBefore: project.workCompleted,
-    unitsAfter: project.workCompleted,
-    sourceKind: "command",
-    sourceRef: params?.sourceRef ?? "pauseProject",
-    requestedByUserId: params?.userId ?? null,
-    timestamp: now,
-    reasonCode: "PROJECT_PAUSED",
-    note: params?.note
-  };
-  const transitioningProject = {
-    ...project,
-    lifecycle: "paused"
-  };
-  const applyRes = applyProjectEntry(transitioningProject, entry);
-  if (!applyRes.ok) {
-    return applyRes;
-  }
-  const updatedProject = applyRes.value;
-  const receipt = {
-    receiptId: createOpaqueId("rep"),
-    projectId: project.id,
-    domainUuid: project.domainUuid,
-    action: "pause",
-    revisionBefore: project.revision,
-    revisionAfter: updatedProject.revision,
-    lifecycleBefore: project.lifecycle,
-    lifecycleAfter: updatedProject.lifecycle,
-    workCompletedBefore: project.workCompleted,
-    workCompletedAfter: updatedProject.workCompleted,
-    unitsDelta: 0,
-    entryCreated: entry,
-    blockedReason: project.blockedReason,
-    appliedAt: now,
-    reasonCode: "PROJECT_PAUSED",
-    note: params?.note
-  };
-  return ok({
-    updatedProject,
-    receipt
-  });
-}
-function resumeProject(project, params) {
-  const expectedRevision = params?.expectedRevision !== void 0 ? params.expectedRevision : project.revision;
-  if (project.revision !== expectedRevision) {
-    return err(
-      createPublicError({
-        code: "DM_PROJECT_REVISION_MISMATCH",
-        category: "conflict",
-        message: `Project revision mismatch: expected revision ${expectedRevision}, but project is at revision ${project.revision}`,
-        details: { expected: expectedRevision, actual: project.revision }
-      })
-    );
-  }
-  if (project.lifecycle !== "paused") {
-    return err(
-      createPublicError({
-        code: "DM_PROJECT_INVALID_TRANSITION",
-        category: "validation",
-        message: `Cannot resume project in lifecycle '${project.lifecycle}'. Must be 'paused'`,
-        details: { lifecycle: project.lifecycle }
-      })
-    );
-  }
-  const transitionRes = validateProjectLifecycleTransition(project.lifecycle, "active");
-  if (!transitionRes.ok) {
-    return transitionRes;
-  }
-  const now = Date.now();
-  const entryId = createOpaqueId("prj");
-  const sequence = (project.entries?.length ?? 0) + 1;
-  const entry = {
-    id: entryId,
-    projectId: project.id,
-    domainUuid: project.domainUuid,
-    sequence,
-    unitsDelta: 0,
-    unitsBefore: project.workCompleted,
-    unitsAfter: project.workCompleted,
-    sourceKind: "command",
-    sourceRef: params?.sourceRef ?? "resumeProject",
-    requestedByUserId: params?.userId ?? null,
-    timestamp: now,
-    reasonCode: "PROJECT_RESUMED",
-    note: params?.note
-  };
-  const transitioningProject = {
-    ...project,
-    lifecycle: "active"
-  };
-  const applyRes = applyProjectEntry(transitioningProject, entry);
-  if (!applyRes.ok) {
-    return applyRes;
-  }
-  const updatedProject = applyRes.value;
-  const receipt = {
-    receiptId: createOpaqueId("rep"),
-    projectId: project.id,
-    domainUuid: project.domainUuid,
-    action: "resume",
-    revisionBefore: project.revision,
-    revisionAfter: updatedProject.revision,
-    lifecycleBefore: project.lifecycle,
-    lifecycleAfter: updatedProject.lifecycle,
-    workCompletedBefore: project.workCompleted,
-    workCompletedAfter: updatedProject.workCompleted,
-    unitsDelta: 0,
-    entryCreated: entry,
-    blockedReason: project.blockedReason,
-    appliedAt: now,
-    reasonCode: "PROJECT_RESUMED",
-    note: params?.note
-  };
-  return ok({
-    updatedProject,
-    receipt
-  });
-}
-function cancelProject(project, params) {
-  const expectedRevision = params?.expectedRevision !== void 0 ? params.expectedRevision : project.revision;
-  if (project.revision !== expectedRevision) {
-    return err(
-      createPublicError({
-        code: "DM_PROJECT_REVISION_MISMATCH",
-        category: "conflict",
-        message: `Project revision mismatch: expected revision ${expectedRevision}, but project is at revision ${project.revision}`,
-        details: { expected: expectedRevision, actual: project.revision }
-      })
-    );
-  }
-  const transitionRes = validateProjectLifecycleTransition(project.lifecycle, "cancelled");
-  if (!transitionRes.ok) {
-    return transitionRes;
-  }
-  const now = Date.now();
-  const entryId = createOpaqueId("prj");
-  const reasonCode = params?.policy?.reasonCode ?? "PROJECT_CANCELLED";
-  const sequence = (project.entries?.length ?? 0) + 1;
-  const entry = {
-    id: entryId,
-    projectId: project.id,
-    domainUuid: project.domainUuid,
-    sequence,
-    unitsDelta: 0,
-    unitsBefore: project.workCompleted,
-    unitsAfter: project.workCompleted,
-    sourceKind: "command",
-    sourceRef: params?.sourceRef ?? "cancelProject",
-    requestedByUserId: params?.userId ?? null,
-    timestamp: now,
-    reasonCode,
-    note: params?.note
-  };
-  const transitioningProject = {
-    ...project,
-    lifecycle: "cancelled"
-  };
-  const applyRes = applyProjectEntry(transitioningProject, entry);
-  if (!applyRes.ok) {
-    return applyRes;
-  }
-  const updatedProject = applyRes.value;
-  const receipt = {
-    receiptId: createOpaqueId("rep"),
-    projectId: project.id,
-    domainUuid: project.domainUuid,
-    action: "cancel",
-    revisionBefore: project.revision,
-    revisionAfter: updatedProject.revision,
-    lifecycleBefore: project.lifecycle,
-    lifecycleAfter: updatedProject.lifecycle,
-    workCompletedBefore: project.workCompleted,
-    workCompletedAfter: updatedProject.workCompleted,
-    unitsDelta: 0,
-    entryCreated: entry,
-    blockedReason: project.blockedReason,
-    appliedAt: now,
-    reasonCode,
-    note: params?.note
-  };
-  return ok({
-    updatedProject,
-    receipt
-  });
-}
-
 // src/ui/domain-patterns/projects/project-app.ts
 function cleanPayload2(payload) {
   if (payload === null || typeof payload !== "object") {
@@ -22872,7 +26273,7 @@ function cleanPayload2(payload) {
   }
   return cleaned;
 }
-function makeCommand3(type, payload) {
+function makeCommand6(type, payload) {
   return {
     contractVersion: COMMAND_CONTRACT_VERSION_V1,
     commandId: createCommandId(),
@@ -22938,7 +26339,7 @@ var ProjectsApplicationController = class {
     const id = this.#domainUuid.startsWith("JournalEntry.") ? this.#domainUuid.slice("JournalEntry.".length) : this.#domainUuid;
     const docRes = await this.#domains.read(id);
     if (!docRes.ok) return docRes;
-    const isGm = this.#viewer?.isGm ?? true;
+    const isGm = this.#viewer?.isGm ?? false;
     const vm = buildProjectsViewModel(docRes.value, {
       viewerIsGm: isGm,
       projectRegistry: this.#projectRegistry,
@@ -22971,149 +26372,90 @@ var ProjectsApplicationController = class {
       </div>
     `;
   }
+  async #executeCommand(cmd) {
+    if (!this.#commandBus) {
+      return err(
+        createPublicError({
+          code: "DM_COMMAND_BUS_NOT_AVAILABLE",
+          category: "internal",
+          message: "CommandBus is required for dispatching projects mutations"
+        })
+      );
+    }
+    const receiptRes = await this.#commandBus.execute(cmd);
+    if (!receiptRes.ok) {
+      return receiptRes;
+    }
+    const receipt = receiptRes.value;
+    if (receipt.status === "rejected") {
+      return err(
+        receipt.error ?? createPublicError({
+          code: "DM_COMMAND_REJECTED",
+          category: "internal",
+          message: "Project command rejected"
+        })
+      );
+    }
+    return ok(receipt.result);
+  }
   async dispatchStartProject(payload) {
-    const id = this.#domainUuid.startsWith("JournalEntry.") ? this.#domainUuid.slice("JournalEntry.".length) : this.#domainUuid;
-    const docRes = await this.#domains.read(id);
-    if (!docRes.ok) return docRes;
-    const record = docRes.value.record;
-    const currentProjectsData = getDomainProjectsData(record);
-    const projectId = `proj-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-    const now = Date.now();
-    const newProject = {
-      id: projectId,
+    const cmd = makeCommand6("projects:start-project", {
       domainUuid: this.#domainUuid,
       definitionId: payload.definitionId,
       name: payload.name ?? payload.label ?? payload.definitionId,
-      schemaVersion: 1,
-      revision: 0,
-      lifecycle: payload.initialState ?? "active",
       workRequired: payload.workRequired,
-      workCompleted: 0,
-      clampProgress: true,
-      tags: Object.freeze([]),
-      createdAt: now,
-      updatedAt: now,
-      metadata: {
-        targetRef: payload.targetRef ?? this.#domainUuid
-      }
-    };
-    const updatedProjects = [...currentProjectsData.projects, newProject];
-    const updatedRecord = withDomainProjectsData(record, {
-      ...currentProjectsData,
-      projects: updatedProjects
+      initialState: payload.initialState ?? "active",
+      targetRef: payload.targetRef ?? this.#domainUuid
     });
-    if ("save" in this.#domains && typeof this.#domains.save === "function") {
-      const saveRes = await this.#domains.save({
-        ...docRes.value,
-        record: updatedRecord
-      });
-      if (!saveRes.ok) return saveRes;
-    }
-    if (this.#commandBus) {
-      const cmd = makeCommand3("projects:start-project", {
-        domainUuid: this.#domainUuid,
-        project: newProject
-      });
-      await this.#commandBus.execute(cmd);
-    }
-    return ok({ projectId });
+    const res = await this.#executeCommand(cmd);
+    if (!res.ok) return res;
+    const project = res.value?.project;
+    return ok({
+      project,
+      projectId: project?.id
+    });
   }
   async dispatchAdvanceProject(payload) {
-    const id = this.#domainUuid.startsWith("JournalEntry.") ? this.#domainUuid.slice("JournalEntry.".length) : this.#domainUuid;
-    const docRes = await this.#domains.read(id);
-    if (!docRes.ok) return docRes;
-    const record = docRes.value.record;
-    const currentProjectsData = getDomainProjectsData(record);
-    const project = currentProjectsData.projects.find((p) => p.id === payload.projectId);
-    if (!project) {
-      return err(createPublicError({
-        code: "DM_PROJECT_NOT_FOUND",
-        category: "not-found",
-        message: `Project ${payload.projectId} not found`
-      }));
-    }
-    const definition = this.#projectRegistry.get(project.definitionId);
-    if (!definition) {
-      return err(createPublicError({
-        code: "DM_PROJECT_DEFINITION_NOT_FOUND",
-        category: "not-found",
-        message: `Project definition ${project.definitionId} not found`
-      }));
-    }
-    const plan = evaluateProjectAdvancePlan({
-      project,
-      definition,
-      domain: record,
-      proposedDelta: payload.units
+    const cmd = makeCommand6("projects:advance-project", {
+      domainUuid: this.#domainUuid,
+      projectId: payload.projectId,
+      units: payload.units,
+      notes: payload.notes
     });
-    if (!plan.isSatisfied) {
-      return err(createPublicError({
-        code: "DM_PROJECT_ADVANCE_BLOCKED",
-        category: "conflict",
-        message: plan.blockers[0]?.message ?? "Advance blocked"
-      }));
-    }
-    const advanceRes = commitProjectAdvance(plan, project, {
-      note: payload.notes
-    });
-    if (!advanceRes.ok) return advanceRes;
-    const updatedProject = advanceRes.value.updatedProject;
-    const updatedProjects = currentProjectsData.projects.map(
-      (p) => p.id === payload.projectId ? updatedProject : p
-    );
-    const updatedRecord = withDomainProjectsData(record, {
-      ...currentProjectsData,
-      projects: updatedProjects
-    });
-    if ("save" in this.#domains && typeof this.#domains.save === "function") {
-      const saveRes = await this.#domains.save({
-        ...docRes.value,
-        record: updatedRecord
-      });
-      if (!saveRes.ok) return saveRes;
-    }
-    return ok(advanceRes.value);
+    return this.#executeCommand(cmd);
   }
   async dispatchPauseProject(projectId, reason) {
-    return this.#mutateProjectLifecycle(projectId, (p) => pauseProject(p, { note: reason }));
+    const cmd = makeCommand6("projects:pause-project", {
+      domainUuid: this.#domainUuid,
+      projectId,
+      reason
+    });
+    return this.#executeCommand(cmd);
   }
   async dispatchResumeProject(projectId, reason) {
-    return this.#mutateProjectLifecycle(projectId, (p) => resumeProject(p, { note: reason }));
+    const cmd = makeCommand6("projects:resume-project", {
+      domainUuid: this.#domainUuid,
+      projectId,
+      reason
+    });
+    return this.#executeCommand(cmd);
   }
   async dispatchCancelProject(projectId, reason) {
-    return this.#mutateProjectLifecycle(projectId, (p) => cancelProject(p, { note: reason }));
-  }
-  async #mutateProjectLifecycle(projectId, mutator) {
-    const id = this.#domainUuid.startsWith("JournalEntry.") ? this.#domainUuid.slice("JournalEntry.".length) : this.#domainUuid;
-    const docRes = await this.#domains.read(id);
-    if (!docRes.ok) return docRes;
-    const record = docRes.value.record;
-    const currentProjectsData = getDomainProjectsData(record);
-    const project = currentProjectsData.projects.find((p) => p.id === projectId);
-    if (!project) {
-      return err(createPublicError({
-        code: "DM_PROJECT_NOT_FOUND",
-        category: "not-found",
-        message: `Project ${projectId} not found`
-      }));
-    }
-    const mutateRes = mutator(project);
-    if (!mutateRes.ok) return mutateRes;
-    const updatedProjects = currentProjectsData.projects.map(
-      (p) => p.id === projectId ? mutateRes.value.updatedProject : p
-    );
-    const updatedRecord = withDomainProjectsData(record, {
-      ...currentProjectsData,
-      projects: updatedProjects
+    const cmd = makeCommand6("projects:cancel-project", {
+      domainUuid: this.#domainUuid,
+      projectId,
+      reason
     });
-    if ("save" in this.#domains && typeof this.#domains.save === "function") {
-      const saveRes = await this.#domains.save({
-        ...docRes.value,
-        record: updatedRecord
-      });
-      if (!saveRes.ok) return saveRes;
-    }
-    return ok(mutateRes.value);
+    return this.#executeCommand(cmd);
+  }
+  async dispatchCompleteProject(payload) {
+    const cmd = makeCommand6("projects:complete-project", {
+      domainUuid: this.#domainUuid,
+      projectId: payload.projectId,
+      notes: payload.notes,
+      outcomes: payload.outcomes
+    });
+    return this.#executeCommand(cmd);
   }
 };
 var MockApplicationV23 = class {
@@ -23346,300 +26688,6 @@ var ProjectsApplication = class _ProjectsApplication extends BaseApp3 {
     this.render();
   }
 };
-
-// src/facilities/definitions/canonical-facility-definitions.ts
-var CANONICAL_FACILITY_DEFINITIONS = Object.freeze([
-  Object.freeze({
-    id: "domain-manager:storehouse",
-    version: 1,
-    label: "Storehouse",
-    description: "Central repository for stockpiling domain resources and trade goods.",
-    category: "logistics",
-    tags: Object.freeze(["storage", "resources", "logistics"]),
-    scale: "building",
-    maxLevel: 3,
-    capabilitiesGranted: Object.freeze(["domain-manager:storage"]),
-    defaultReadiness: "ready"
-  }),
-  Object.freeze({
-    id: "domain-manager:basic-workshop",
-    version: 1,
-    label: "Basic Workshop",
-    description: "Equipped workspace providing crafting, repairs, and fabrication capabilities.",
-    category: "production",
-    tags: Object.freeze(["crafting", "workshop", "production"]),
-    scale: "building",
-    maxLevel: 3,
-    capabilitiesGranted: Object.freeze(["domain-manager:workshop"]),
-    defaultReadiness: "ready"
-  }),
-  Object.freeze({
-    id: "domain-manager:guard-post",
-    version: 1,
-    label: "Guard Post",
-    description: "Fortified station garrisoning domain militia and maintaining public order.",
-    category: "security",
-    tags: Object.freeze(["military", "security", "defense"]),
-    scale: "building",
-    maxLevel: 3,
-    capabilitiesGranted: Object.freeze(["domain-manager:security"]),
-    defaultReadiness: "ready"
-  })
-]);
-
-// src/facilities/definitions/facility-registry.ts
-var FacilityDefinitionRegistry = class {
-  #definitions = /* @__PURE__ */ new Map();
-  #frozen = false;
-  register(definition) {
-    if (this.#frozen) {
-      return err(
-        createPublicError({
-          code: "DM_REGISTRY_FROZEN",
-          category: "conflict",
-          message: "Cannot register facility definition in a frozen registry"
-        })
-      );
-    }
-    const validRes = validateFacilityDefinition(definition);
-    if (!validRes.ok) {
-      return validRes;
-    }
-    if (this.#definitions.has(validRes.value.id)) {
-      return err(
-        createPublicError({
-          code: "DM_FACILITY_ALREADY_EXISTS",
-          category: "conflict",
-          message: `FacilityDefinition '${validRes.value.id}' is already registered`
-        })
-      );
-    }
-    this.#definitions.set(validRes.value.id, validRes.value);
-    return ok(void 0);
-  }
-  get(id) {
-    return this.#definitions.get(id);
-  }
-  has(id) {
-    return this.#definitions.has(id);
-  }
-  list(filter) {
-    const all = Array.from(this.#definitions.values());
-    if (!filter) {
-      return Object.freeze(all);
-    }
-    return Object.freeze(
-      all.filter((def) => {
-        if (filter.category && def.category !== filter.category) {
-          return false;
-        }
-        if (filter.tag && !def.tags.includes(filter.tag)) {
-          return false;
-        }
-        return true;
-      })
-    );
-  }
-  freeze() {
-    this.#frozen = true;
-  }
-  get isFrozen() {
-    return this.#frozen;
-  }
-};
-function createDefaultFacilityRegistry() {
-  const registry = new FacilityDefinitionRegistry();
-  for (const def of CANONICAL_FACILITY_DEFINITIONS) {
-    registry.register(def);
-  }
-  return registry;
-}
-
-// src/ui/domain-patterns/facilities/facility-presenter.ts
-function resolveLifecycleBadgeClass(lifecycle) {
-  switch (lifecycle) {
-    case "operational":
-      return "dm-badge-operational";
-    case "underConstruction":
-      return "dm-badge-under-construction";
-    case "planned":
-      return "dm-badge-planned";
-    case "inactive":
-      return "dm-badge-inactive";
-    case "degraded":
-      return "dm-badge-degraded";
-    case "disabled":
-      return "dm-badge-disabled";
-    case "decommissioned":
-      return "dm-badge-decommissioned";
-    case "destroyed":
-      return "dm-badge-destroyed";
-    default:
-      return "dm-badge-default";
-  }
-}
-function resolveReadinessBadgeClass(readiness) {
-  switch (readiness) {
-    case "ready":
-      return "dm-badge-ready";
-    case "limited":
-      return "dm-badge-limited";
-    case "blocked":
-      return "dm-badge-blocked";
-    case "unavailable":
-      return "dm-badge-unavailable";
-    default:
-      return "dm-badge-default";
-  }
-}
-function resolveSeverityBadgeClass(severity) {
-  switch (severity) {
-    case "critical":
-      return "dm-badge-danger";
-    case "major":
-      return "dm-badge-warning";
-    case "moderate":
-      return "dm-badge-info";
-    case "minor":
-    default:
-      return "dm-badge-default";
-  }
-}
-function resolveMaintenanceBadgeClass(status) {
-  switch (status) {
-    case "current":
-      return "dm-badge-healthy";
-    case "due":
-      return "dm-badge-info";
-    case "overdue":
-      return "dm-badge-warning";
-    case "exempt":
-      return "dm-badge-default";
-    default:
-      return "dm-badge-default";
-  }
-}
-function buildFacilitiesViewModel(domainInput, options = {}) {
-  const record = "record" in domainInput ? domainInput.record : domainInput;
-  const domainUuid = "uuid" in domainInput ? domainInput.uuid : "unknown";
-  const viewerIsGm = options.viewerIsGm ?? options.viewer?.isGm ?? true;
-  const filterReadiness = options.filterReadiness ?? "all";
-  const filterLifecycle = options.filterLifecycle ?? "all";
-  const searchTerm = (options.searchTerm ?? "").toLowerCase().trim();
-  const data = getDomainFacilitiesData(record);
-  const defRegistry = options.facilityRegistry;
-  const facilityVMs = [];
-  for (const facility of data.facilities) {
-    const isSecret = Boolean(facility.visibility === "secret" || facility.tags?.includes("secret"));
-    if (isSecret && !viewerIsGm) {
-      continue;
-    }
-    if (filterReadiness !== "all" && facility.readiness !== filterReadiness) {
-      continue;
-    }
-    if (filterLifecycle !== "all" && facility.lifecycle !== filterLifecycle) {
-      continue;
-    }
-    const def = defRegistry?.get(facility.definitionId);
-    const name = facility.name || def?.label || facility.id;
-    if (searchTerm) {
-      const matchName = name.toLowerCase().includes(searchTerm);
-      const matchDef = facility.definitionId.toLowerCase().includes(searchTerm);
-      if (!matchName && !matchDef) {
-        continue;
-      }
-    }
-    const integrity = facility.integrity?.current ?? 100;
-    const maxIntegrity = facility.integrity?.max ?? 100;
-    const integrityPercent = maxIntegrity > 0 ? Math.min(100, Math.max(0, Math.floor(integrity / maxIntegrity * 100))) : 100;
-    let integrityClass = "healthy";
-    if (integrityPercent < 40) {
-      integrityClass = "danger";
-    } else if (integrityPercent < 80) {
-      integrityClass = "warning";
-    }
-    const maintState = facility.maintenanceState;
-    const intervalTicks = def?.maintenance?.intervalTicks ?? 30;
-    const ticksSince = maintState?.accumulatedTicks ?? 0;
-    const maintenanceRatio = intervalTicks > 0 ? ticksSince / intervalTicks : 0;
-    const formattedRatio = `${Math.floor(maintenanceRatio * 100)}%`;
-    const maintStatus = maintState?.status ?? "current";
-    const consecutiveMissed = Math.floor(ticksSince / Math.max(1, intervalTicks));
-    const maintenanceVM = {
-      status: maintStatus,
-      statusBadgeClass: resolveMaintenanceBadgeClass(maintStatus),
-      intervalTicks,
-      ticksSinceLastMaintenance: ticksSince,
-      maintenanceRatio,
-      formattedRatio,
-      consecutiveMissedCycles: consecutiveMissed
-    };
-    const rawConditions = facility.conditions ?? [];
-    const conditionVMs = rawConditions.map((c) => ({
-      id: c.id,
-      severity: c.severity,
-      severityBadgeClass: resolveSeverityBadgeClass(c.severity),
-      description: c.description ?? c.label,
-      causesDegradation: c.severity === "critical" || c.severity === "major",
-      suppressesCapabilities: c.suppressedCapabilities ?? []
-    }));
-    const effectiveCapabilities = def ? calculateFacilityEffectiveCapabilities(facility, def) : Object.freeze([]);
-    const slotsCount = facility.installedModules?.length ?? 0;
-    const activeModulesCount = facility.installedModules?.length ?? 0;
-    const activeUpgradesCount = facility.activeUpgrades?.length ?? 0;
-    const canMaintain = facility.lifecycle !== "destroyed" && facility.lifecycle !== "decommissioned";
-    const canRepair = (integrity < maxIntegrity || conditionVMs.length > 0) && facility.lifecycle !== "destroyed";
-    facilityVMs.push({
-      id: facility.id,
-      definitionId: facility.definitionId,
-      name,
-      level: facility.level,
-      revision: facility.revision,
-      lifecycle: facility.lifecycle,
-      lifecycleBadgeClass: resolveLifecycleBadgeClass(facility.lifecycle),
-      readiness: facility.readiness,
-      readinessBadgeClass: resolveReadinessBadgeClass(facility.readiness),
-      structuralIntegrity: integrity,
-      maxStructuralIntegrity: maxIntegrity,
-      integrityPercent,
-      integrityClass,
-      conditions: Object.freeze(conditionVMs),
-      maintenance: maintenanceVM,
-      effectiveCapabilities: Object.freeze(effectiveCapabilities),
-      slotsCount,
-      activeModulesCount,
-      activeUpgradesCount,
-      isSecret,
-      canRepair,
-      canMaintain
-    });
-  }
-  const allVisible = data.facilities.filter((f) => {
-    const isSecret = Boolean(f.visibility === "secret" || f.tags?.includes("secret"));
-    return !isSecret || viewerIsGm;
-  });
-  const totalCount = allVisible.length;
-  const operationalCount = allVisible.filter((f) => f.lifecycle === "operational").length;
-  const readyCount = allVisible.filter((f) => f.readiness === "ready").length;
-  const degradedOrDamagedCount = allVisible.filter((f) => {
-    const isDegraded = f.lifecycle === "degraded";
-    const isDamaged = f.integrity ? f.integrity.current < f.integrity.max : false;
-    const hasConditions = (f.conditions?.length ?? 0) > 0;
-    return isDegraded || isDamaged || hasConditions;
-  }).length;
-  return {
-    domainUuid,
-    viewerIsGm,
-    totalCount,
-    operationalCount,
-    readyCount,
-    degradedOrDamagedCount,
-    facilities: Object.freeze(facilityVMs),
-    filterReadiness,
-    filterLifecycle,
-    searchTerm
-  };
-}
 
 // src/ui/domain-patterns/facilities/facility-view.ts
 function escapeHtml4(value) {
@@ -24020,445 +27068,6 @@ function renderFacilitiesSubsystemHtml(vm) {
   `;
 }
 
-// src/facilities/plans/facility-maintenance-plan-service.ts
-function evaluateFacilityMaintenancePlan(params) {
-  const { facility, definition, channelId, availableBalances } = params;
-  const errors = [];
-  if (facility.lifecycle === "destroyed" || facility.lifecycle === "decommissioned") {
-    errors.push(
-      createPublicError({
-        code: "DM_FACILITY_NOT_MAINTAINABLE",
-        category: "conflict",
-        message: `Facility '${facility.id}' in lifecycle '${facility.lifecycle}' cannot undergo maintenance`
-      })
-    );
-  }
-  if (!definition.maintenance) {
-    errors.push(
-      createPublicError({
-        code: "DM_FACILITY_NO_MAINTENANCE_REQUIRED",
-        category: "validation",
-        message: `Facility definition '${definition.id}' does not require maintenance`
-      })
-    );
-  }
-  const costs = [];
-  if (channelId && definition.maintenance?.channels) {
-    const channel = definition.maintenance.channels.find((c) => c.id === channelId);
-    if (!channel) {
-      errors.push(
-        createPublicError({
-          code: "DM_FACILITY_CHANNEL_NOT_FOUND",
-          category: "not-found",
-          message: `Maintenance channel '${channelId}' not found on definition '${definition.id}'`
-        })
-      );
-    } else {
-      costs.push(...channel.costs);
-    }
-  } else if (definition.maintenance?.costs) {
-    costs.push(...definition.maintenance.costs);
-  }
-  let canAfford = true;
-  if (availableBalances && costs.length > 0) {
-    for (const cost of costs) {
-      const balance = availableBalances[cost.resourceId] ?? 0;
-      if (balance < cost.amount) {
-        canAfford = false;
-        errors.push(
-          createPublicError({
-            code: "DM_FACILITY_INSUFFICIENT_RESOURCES",
-            category: "conflict",
-            message: `Insufficient resource '${cost.resourceId}' for maintenance: required ${cost.amount}, available ${balance}`
-          })
-        );
-      }
-    }
-  }
-  const conditionsToClear = [];
-  if (facility.conditions) {
-    for (const cond of facility.conditions) {
-      if (cond.type === CONDITION_MAINTENANCE_DUE) {
-        conditionsToClear.push(cond.id);
-      }
-    }
-  }
-  let readinessRestoration;
-  if (facility.readiness === "limited" && (facility.readinessReason?.includes("Maintenance") || conditionsToClear.length > 0)) {
-    readinessRestoration = "ready";
-  }
-  const valid = errors.length === 0;
-  return {
-    planId: createOpaqueId("plan"),
-    facilityId: facility.id,
-    channelId,
-    valid,
-    canAfford,
-    resourceCosts: Object.freeze(costs),
-    plannedStatus: "current",
-    conditionsToClear: Object.freeze(conditionsToClear),
-    readinessRestoration,
-    errors: errors.length > 0 ? Object.freeze(errors) : void 0
-  };
-}
-function commitFacilityMaintenance(params) {
-  const { plan, facility } = params;
-  if (!plan.valid) {
-    return err(
-      createPublicError({
-        code: "DM_FACILITY_MAINTENANCE_PLAN_INVALID",
-        category: "validation",
-        message: `Cannot commit invalid maintenance plan '${plan.planId}'`
-      })
-    );
-  }
-  if (plan.facilityId !== facility.id) {
-    return err(
-      createPublicError({
-        code: "DM_FACILITY_ID_MISMATCH",
-        category: "conflict",
-        message: `Plan facilityId '${plan.facilityId}' does not match facility '${facility.id}'`
-      })
-    );
-  }
-  const now = params.timestamp ?? Date.now();
-  const currentTick = params.currentTick ?? null;
-  const conditionsToClearSet = new Set(plan.conditionsToClear);
-  const remainingConditions = (facility.conditions ?? []).filter(
-    (c) => !conditionsToClearSet.has(c.id) && !conditionsToClearSet.has(c.type)
-  );
-  const newHistory = facility.history ? [...facility.history] : [];
-  for (const condId of plan.conditionsToClear) {
-    newHistory.push({
-      id: createOpaqueId("prj"),
-      entryType: "condition_cleared",
-      timestamp: now,
-      tick: currentTick,
-      conditionId: condId,
-      conditionType: CONDITION_MAINTENANCE_DUE,
-      note: "Cleared on scheduled maintenance completion"
-    });
-  }
-  newHistory.push({
-    id: createOpaqueId("prj"),
-    entryType: "maintained",
-    timestamp: now,
-    tick: currentTick,
-    note: params.note ?? "Facility routine maintenance executed"
-  });
-  const updatedMaintenanceState = {
-    status: "current",
-    lastMaintainedTick: currentTick ?? facility.maintenanceState?.lastMaintainedTick ?? 0,
-    lastMaintainedTimestamp: now,
-    accumulatedTicks: 0,
-    overdueTicks: 0,
-    channels: facility.maintenanceState?.channels
-  };
-  const updatedFacility = {
-    ...facility,
-    readiness: plan.readinessRestoration ?? facility.readiness,
-    readinessReason: plan.readinessRestoration ? null : facility.readinessReason,
-    conditions: Object.freeze(remainingConditions),
-    history: Object.freeze(newHistory),
-    maintenanceState: updatedMaintenanceState,
-    revision: facility.revision + 1,
-    updatedAt: now
-  };
-  const receipt = {
-    planId: plan.planId,
-    facilityId: facility.id,
-    channelId: plan.channelId,
-    timestamp: now,
-    tick: currentTick,
-    resourcesConsumed: plan.resourceCosts,
-    conditionsCleared: plan.conditionsToClear,
-    newStatus: "current",
-    note: params.note
-  };
-  return ok({ updatedFacility, receipt });
-}
-
-// src/facilities/plans/facility-repair-plan-service.ts
-var CANONICAL_MAINTENANCE_PROJECT_ID = "domain-manager:facility-maintenance";
-var DEFAULT_DIRECT_REPAIR_THRESHOLD_PERCENT = 0.5;
-function applyFacilityDamage(params) {
-  const { facility, deltaIntegrity } = params;
-  if (!Number.isSafeInteger(deltaIntegrity) || deltaIntegrity < 0) {
-    return err(
-      createPublicError({
-        code: "DM_FACILITY_INVALID_DAMAGE",
-        category: "validation",
-        message: `deltaIntegrity must be a non-negative safe integer: received ${deltaIntegrity}`
-      })
-    );
-  }
-  const now = params.timestamp ?? Date.now();
-  const tick = params.tick ?? null;
-  let updatedIntegrity = facility.integrity ? { ...facility.integrity } : void 0;
-  let newLifecycle = facility.lifecycle;
-  let newReadiness = facility.readiness;
-  let newReadinessReason = facility.readinessReason ?? null;
-  const newHistory = facility.history ? [...facility.history] : [];
-  if (updatedIntegrity) {
-    const prevIntegrity = updatedIntegrity.current;
-    const newCurrent = Math.max(0, prevIntegrity - deltaIntegrity);
-    updatedIntegrity.current = newCurrent;
-    newHistory.push({
-      id: createOpaqueId("prj"),
-      entryType: "damaged",
-      timestamp: now,
-      tick,
-      deltaIntegrity: -(prevIntegrity - newCurrent),
-      previousIntegrity: prevIntegrity,
-      newIntegrity: newCurrent,
-      note: params.note ?? "Facility sustained damage"
-    });
-    if (newCurrent === 0) {
-      if (facility.lifecycle === "operational") {
-        newLifecycle = "degraded";
-      }
-      newReadiness = "limited";
-      newReadinessReason = "Integrity depleted";
-    } else if (newCurrent < updatedIntegrity.max * 0.5) {
-      if (newReadiness === "ready") {
-        newReadiness = "limited";
-        newReadinessReason = "Severe structural damage";
-      }
-    }
-  }
-  const updatedConditions = facility.conditions ? [...facility.conditions] : [];
-  if (params.condition) {
-    updatedConditions.push(params.condition);
-    newHistory.push({
-      id: createOpaqueId("prj"),
-      entryType: "condition_applied",
-      timestamp: now,
-      tick,
-      conditionId: params.condition.id,
-      conditionType: params.condition.type,
-      note: `Applied condition '${params.condition.label}'`
-    });
-  }
-  const damagedInstance = {
-    ...facility,
-    // Ownership and modules preserved strictly (Master Spec §16, §3.7)
-    domainUuid: facility.domainUuid,
-    installedModules: facility.installedModules,
-    lifecycle: newLifecycle,
-    readiness: newReadiness,
-    readinessReason: newReadinessReason,
-    integrity: updatedIntegrity ? Object.freeze(updatedIntegrity) : void 0,
-    conditions: Object.freeze(updatedConditions),
-    history: Object.freeze(newHistory),
-    revision: facility.revision + 1,
-    updatedAt: now
-  };
-  return ok(damagedInstance);
-}
-function evaluateFacilityRepairPlan(params) {
-  const { facility, definition, availableBalances } = params;
-  const errors = [];
-  if (facility.lifecycle === "destroyed") {
-    return {
-      planId: createOpaqueId("plan"),
-      facilityId: facility.id,
-      valid: false,
-      isDirectRepairAllowed: false,
-      requiresProject: true,
-      suggestedProjectId: CANONICAL_MAINTENANCE_PROJECT_ID,
-      repairedIntegrityDelta: 0,
-      targetIntegrity: 0,
-      conditionsToClear: Object.freeze([]),
-      resourceCosts: Object.freeze([]),
-      errors: Object.freeze([
-        createPublicError({
-          code: "DM_FACILITY_DESTROYED_REQUIRES_PROJECT",
-          category: "conflict",
-          message: `Facility '${facility.id}' is destroyed and cannot be repaired directly. A Project must be launched.`
-        })
-      ])
-    };
-  }
-  if (facility.lifecycle === "decommissioned") {
-    errors.push(
-      createPublicError({
-        code: "DM_FACILITY_DECOMMISSIONED",
-        category: "conflict",
-        message: `Facility '${facility.id}' is decommissioned and cannot be repaired`
-      })
-    );
-  }
-  let repairedIntegrityDelta = 0;
-  let targetIntegrity = 0;
-  const maxIntegrity = facility.integrity?.max ?? 100;
-  const currentIntegrity = facility.integrity?.current ?? maxIntegrity;
-  if (facility.integrity) {
-    const missing = maxIntegrity - currentIntegrity;
-    if (params.targetIntegrityDelta !== void 0) {
-      repairedIntegrityDelta = Math.min(missing, Math.max(0, params.targetIntegrityDelta));
-    } else {
-      repairedIntegrityDelta = missing;
-    }
-    targetIntegrity = currentIntegrity + repairedIntegrityDelta;
-  }
-  const thresholdPercent = params.directRepairThresholdPercent ?? DEFAULT_DIRECT_REPAIR_THRESHOLD_PERCENT;
-  const maxDirectDelta = Math.ceil(maxIntegrity * thresholdPercent);
-  let isDirectRepairAllowed = true;
-  let requiresProject = false;
-  let suggestedProjectId;
-  const hasCriticalCondition = (facility.conditions ?? []).some((c) => c.severity === "critical");
-  if (repairedIntegrityDelta > maxDirectDelta || hasCriticalCondition) {
-    isDirectRepairAllowed = false;
-    requiresProject = true;
-    suggestedProjectId = CANONICAL_MAINTENANCE_PROJECT_ID;
-  }
-  const conditionsToClear = [];
-  if (params.conditionsToClear) {
-    conditionsToClear.push(...params.conditionsToClear);
-  } else if (facility.conditions) {
-    for (const cond of facility.conditions) {
-      if (cond.type === CONDITION_DAMAGED && isDirectRepairAllowed) {
-        conditionsToClear.push(cond.id);
-      }
-    }
-  }
-  const resourceCosts = [];
-  const costUnit = params.costPerIntegrityPoint ?? { resourceId: "domain-manager:materials", amount: 1 };
-  if (repairedIntegrityDelta > 0) {
-    resourceCosts.push({
-      resourceId: costUnit.resourceId,
-      amount: repairedIntegrityDelta * costUnit.amount
-    });
-  }
-  if (availableBalances && resourceCosts.length > 0) {
-    for (const cost of resourceCosts) {
-      const balance = availableBalances[cost.resourceId] ?? 0;
-      if (balance < cost.amount) {
-        errors.push(
-          createPublicError({
-            code: "DM_FACILITY_INSUFFICIENT_RESOURCES",
-            category: "conflict",
-            message: `Insufficient resource '${cost.resourceId}' for repair: required ${cost.amount}, available ${balance}`
-          })
-        );
-      }
-    }
-  }
-  const valid = errors.length === 0;
-  return {
-    planId: createOpaqueId("plan"),
-    facilityId: facility.id,
-    valid,
-    isDirectRepairAllowed,
-    requiresProject,
-    suggestedProjectId,
-    repairedIntegrityDelta,
-    targetIntegrity,
-    conditionsToClear: Object.freeze(conditionsToClear),
-    resourceCosts: Object.freeze(resourceCosts),
-    errors: errors.length > 0 ? Object.freeze(errors) : void 0
-  };
-}
-function commitFacilityRepair(params) {
-  const { plan, facility } = params;
-  if (!plan.valid) {
-    return err(
-      createPublicError({
-        code: "DM_FACILITY_REPAIR_PLAN_INVALID",
-        category: "validation",
-        message: `Cannot commit invalid repair plan '${plan.planId}'`
-      })
-    );
-  }
-  if (plan.facilityId !== facility.id) {
-    return err(
-      createPublicError({
-        code: "DM_FACILITY_ID_MISMATCH",
-        category: "conflict",
-        message: `Plan facilityId '${plan.facilityId}' does not match facility '${facility.id}'`
-      })
-    );
-  }
-  if (!plan.isDirectRepairAllowed || plan.requiresProject) {
-    return err(
-      createPublicError({
-        code: "DM_FACILITY_REPAIR_REQUIRES_PROJECT",
-        category: "conflict",
-        message: `Repair requires a Project (suggested: '${plan.suggestedProjectId ?? CANONICAL_MAINTENANCE_PROJECT_ID}'). Direct repair disallowed.`
-      })
-    );
-  }
-  const now = params.timestamp ?? Date.now();
-  const tick = params.currentTick ?? null;
-  let updatedIntegrity = facility.integrity ? { ...facility.integrity } : void 0;
-  if (updatedIntegrity) {
-    updatedIntegrity.current = plan.targetIntegrity;
-  }
-  const conditionsToClearSet = new Set(plan.conditionsToClear);
-  const remainingConditions = (facility.conditions ?? []).filter(
-    (c) => !conditionsToClearSet.has(c.id) && !conditionsToClearSet.has(c.type)
-  );
-  const newHistory = facility.history ? [...facility.history] : [];
-  for (const condId of plan.conditionsToClear) {
-    newHistory.push({
-      id: createOpaqueId("prj"),
-      entryType: "condition_cleared",
-      timestamp: now,
-      tick,
-      conditionId: condId,
-      note: "Cleared on direct facility repair"
-    });
-  }
-  newHistory.push({
-    id: createOpaqueId("prj"),
-    entryType: "repaired",
-    timestamp: now,
-    tick,
-    deltaIntegrity: plan.repairedIntegrityDelta,
-    previousIntegrity: facility.integrity?.current,
-    newIntegrity: plan.targetIntegrity,
-    note: params.note ?? "Facility direct repair executed"
-  });
-  let newLifecycle = facility.lifecycle;
-  let newReadiness = facility.readiness;
-  let newReadinessReason = facility.readinessReason;
-  if (updatedIntegrity && updatedIntegrity.current >= updatedIntegrity.max) {
-    if (facility.lifecycle === "degraded") {
-      newLifecycle = "operational";
-    }
-    const hasRemainingBlockingCondition = remainingConditions.some(
-      (c) => c.readinessPenalty === "limited" || c.readinessPenalty === "blocked"
-    );
-    if (!hasRemainingBlockingCondition) {
-      newReadiness = "ready";
-      newReadinessReason = null;
-    }
-  }
-  const updatedFacility = {
-    ...facility,
-    lifecycle: newLifecycle,
-    readiness: newReadiness,
-    readinessReason: newReadinessReason,
-    integrity: updatedIntegrity ? Object.freeze(updatedIntegrity) : void 0,
-    conditions: Object.freeze(remainingConditions),
-    history: Object.freeze(newHistory),
-    revision: facility.revision + 1,
-    updatedAt: now
-  };
-  const receipt = {
-    planId: plan.planId,
-    facilityId: facility.id,
-    timestamp: now,
-    tick,
-    integrityRestored: plan.repairedIntegrityDelta,
-    newIntegrity: plan.targetIntegrity,
-    resourcesConsumed: plan.resourceCosts,
-    conditionsCleared: plan.conditionsToClear,
-    note: params.note
-  };
-  return ok({ updatedFacility, receipt });
-}
-
 // src/ui/domain-patterns/facilities/facility-app.ts
 function cleanPayload3(payload) {
   if (payload === null || typeof payload !== "object") {
@@ -24475,7 +27084,7 @@ function cleanPayload3(payload) {
   }
   return cleaned;
 }
-function makeCommand4(type, payload) {
+function makeCommand7(type, payload) {
   return {
     contractVersion: COMMAND_CONTRACT_VERSION_V1,
     commandId: createCommandId(),
@@ -24549,7 +27158,7 @@ var FacilitiesApplicationController = class {
     const id = this.#domainUuid.startsWith("JournalEntry.") ? this.#domainUuid.slice("JournalEntry.".length) : this.#domainUuid;
     const docRes = await this.#domains.read(id);
     if (!docRes.ok) return docRes;
-    const isGm = this.#viewer?.isGm ?? true;
+    const isGm = this.#viewer?.isGm ?? false;
     const vm = buildFacilitiesViewModel(docRes.value, {
       viewerIsGm: isGm,
       facilityRegistry: this.#facilityRegistry,
@@ -24592,241 +27201,83 @@ var FacilitiesApplicationController = class {
       </div>
     `;
   }
+  async #executeCommand(cmd) {
+    if (!this.#commandBus) {
+      return err(
+        createPublicError({
+          code: "DM_COMMAND_BUS_NOT_AVAILABLE",
+          category: "internal",
+          message: "CommandBus is required for dispatching facility mutations"
+        })
+      );
+    }
+    const receiptRes = await this.#commandBus.execute(cmd);
+    if (!receiptRes.ok) {
+      return receiptRes;
+    }
+    const receipt = receiptRes.value;
+    if (receipt.status === "rejected") {
+      return err(
+        receipt.error ?? createPublicError({
+          code: "DM_COMMAND_REJECTED",
+          category: "internal",
+          message: "Facility command rejected"
+        })
+      );
+    }
+    return ok(receipt.result);
+  }
   async dispatchCreateFacility(payload) {
-    const id = this.#domainUuid.startsWith("JournalEntry.") ? this.#domainUuid.slice("JournalEntry.".length) : this.#domainUuid;
-    const docRes = await this.#domains.read(id);
-    if (!docRes.ok) return docRes;
-    const record = docRes.value.record;
-    const currentFacilitiesData = getDomainFacilitiesData(record);
-    const facilityId = `fac-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-    const now = Date.now();
-    const newFacility = {
-      id: facilityId,
-      definitionId: payload.definitionId,
+    const cmd = makeCommand7("facilities:create-facility", {
       domainUuid: this.#domainUuid,
-      name: payload.name || payload.definitionId,
-      schemaVersion: 1,
-      revision: 0,
+      definitionId: payload.definitionId,
+      name: payload.name,
       level: payload.level,
-      lifecycle: payload.initialLifecycle ?? "operational",
-      readiness: "ready",
-      installedModules: Object.freeze([]),
-      activeUpgrades: Object.freeze([]),
-      integrity: Object.freeze({ current: 100, max: 100 }),
-      conditions: Object.freeze([]),
-      maintenanceState: {
-        status: "current",
-        overdueTicks: 0,
-        accumulatedTicks: 0
-      },
-      tags: Object.freeze([]),
-      createdAt: now,
-      updatedAt: now
-    };
-    const updatedFacilities = [...currentFacilitiesData.facilities, newFacility];
-    const updatedRecord = withDomainFacilitiesData(record, {
-      ...currentFacilitiesData,
-      facilities: updatedFacilities
+      initialLifecycle: payload.initialLifecycle
     });
-    if ("save" in this.#domains && typeof this.#domains.save === "function") {
-      const saveRes = await this.#domains.save({
-        ...docRes.value,
-        record: updatedRecord
-      });
-      if (!saveRes.ok) return saveRes;
-    }
-    if (this.#commandBus) {
-      const cmd = makeCommand4("facilities:create-facility", {
-        domainUuid: this.#domainUuid,
-        facility: newFacility
-      });
-      await this.#commandBus.execute(cmd);
-    }
-    return ok({ facilityId });
+    const res = await this.#executeCommand(cmd);
+    if (!res.ok) return res;
+    const facility = res.value?.facility;
+    return ok({
+      facility,
+      facilityId: facility?.id
+    });
   }
   async dispatchMaintainFacility(payload) {
-    const id = this.#domainUuid.startsWith("JournalEntry.") ? this.#domainUuid.slice("JournalEntry.".length) : this.#domainUuid;
-    const docRes = await this.#domains.read(id);
-    if (!docRes.ok) return docRes;
-    const record = docRes.value.record;
-    const currentFacilitiesData = getDomainFacilitiesData(record);
-    const facility = currentFacilitiesData.facilities.find((f) => f.id === payload.facilityId);
-    if (!facility) {
-      return err(createPublicError({
-        code: "DM_FACILITY_NOT_FOUND",
-        category: "not-found",
-        message: `Facility ${payload.facilityId} not found`
-      }));
-    }
-    const def = this.#facilityRegistry.get(facility.definitionId);
-    let updatedFacility;
-    if (def?.maintenance) {
-      const plan = evaluateFacilityMaintenancePlan({ facility, definition: def });
-      if (plan.valid) {
-        const commitRes = commitFacilityMaintenance({
-          plan,
-          facility,
-          note: payload.notes
-        });
-        if (!commitRes.ok) return commitRes;
-        updatedFacility = commitRes.value.updatedFacility;
-      } else {
-        updatedFacility = {
-          ...facility,
-          maintenanceState: {
-            status: "current",
-            overdueTicks: 0,
-            accumulatedTicks: 0,
-            lastMaintainedTimestamp: Date.now()
-          },
-          revision: facility.revision + 1,
-          updatedAt: Date.now()
-        };
-      }
-    } else {
-      updatedFacility = {
-        ...facility,
-        maintenanceState: {
-          status: "current",
-          overdueTicks: 0,
-          accumulatedTicks: 0,
-          lastMaintainedTimestamp: Date.now()
-        },
-        revision: facility.revision + 1,
-        updatedAt: Date.now()
-      };
-    }
-    const updatedFacilities = currentFacilitiesData.facilities.map(
-      (f) => f.id === payload.facilityId ? updatedFacility : f
-    );
-    const updatedRecord = withDomainFacilitiesData(record, {
-      ...currentFacilitiesData,
-      facilities: updatedFacilities
+    const cmd = makeCommand7("facilities:maintain-facility", {
+      domainUuid: this.#domainUuid,
+      facilityId: payload.facilityId,
+      notes: payload.notes
     });
-    if ("save" in this.#domains && typeof this.#domains.save === "function") {
-      const saveRes = await this.#domains.save({
-        ...docRes.value,
-        record: updatedRecord
-      });
-      if (!saveRes.ok) return saveRes;
-    }
-    return ok({ facility: updatedFacility });
+    return this.#executeCommand(cmd);
   }
   async dispatchRepairFacility(payload) {
-    const id = this.#domainUuid.startsWith("JournalEntry.") ? this.#domainUuid.slice("JournalEntry.".length) : this.#domainUuid;
-    const docRes = await this.#domains.read(id);
-    if (!docRes.ok) return docRes;
-    const record = docRes.value.record;
-    const currentFacilitiesData = getDomainFacilitiesData(record);
-    const facility = currentFacilitiesData.facilities.find((f) => f.id === payload.facilityId);
-    if (!facility) {
-      return err(createPublicError({
-        code: "DM_FACILITY_NOT_FOUND",
-        category: "not-found",
-        message: `Facility ${payload.facilityId} not found`
-      }));
-    }
-    const def = this.#facilityRegistry.get(facility.definitionId);
-    let updatedFacility;
-    if (def) {
-      const plan = evaluateFacilityRepairPlan({
-        facility,
-        definition: def,
-        targetIntegrityDelta: payload.restoreIntegrity,
-        conditionsToClear: payload.removeConditionIds
-      });
-      if (plan.valid && plan.isDirectRepairAllowed && !plan.requiresProject) {
-        const commitRes = commitFacilityRepair({
-          plan,
-          facility,
-          note: payload.notes
-        });
-        if (!commitRes.ok) return commitRes;
-        updatedFacility = commitRes.value.updatedFacility;
-      } else {
-        const max = facility.integrity?.max ?? 100;
-        const current = facility.integrity?.current ?? 100;
-        const restored = Math.min(max, current + (payload.restoreIntegrity ?? max - current));
-        const clearSet = new Set(payload.removeConditionIds ?? []);
-        const remainingConditions = (facility.conditions ?? []).filter((c) => !clearSet.has(c.id));
-        updatedFacility = {
-          ...facility,
-          integrity: Object.freeze({ current: restored, max }),
-          conditions: Object.freeze(remainingConditions),
-          lifecycle: facility.lifecycle === "degraded" && restored >= max ? "operational" : facility.lifecycle,
-          readiness: "ready",
-          revision: facility.revision + 1,
-          updatedAt: Date.now()
-        };
-      }
-    } else {
-      const max = facility.integrity?.max ?? 100;
-      const current = facility.integrity?.current ?? 100;
-      const restored = Math.min(max, current + (payload.restoreIntegrity ?? max - current));
-      const clearSet = new Set(payload.removeConditionIds ?? []);
-      const remainingConditions = (facility.conditions ?? []).filter((c) => !clearSet.has(c.id));
-      updatedFacility = {
-        ...facility,
-        integrity: Object.freeze({ current: restored, max }),
-        conditions: Object.freeze(remainingConditions),
-        lifecycle: facility.lifecycle === "degraded" && restored >= max ? "operational" : facility.lifecycle,
-        readiness: "ready",
-        revision: facility.revision + 1,
-        updatedAt: Date.now()
-      };
-    }
-    const updatedFacilities = currentFacilitiesData.facilities.map(
-      (f) => f.id === payload.facilityId ? updatedFacility : f
-    );
-    const updatedRecord = withDomainFacilitiesData(record, {
-      ...currentFacilitiesData,
-      facilities: updatedFacilities
+    const cmd = makeCommand7("facilities:repair-facility", {
+      domainUuid: this.#domainUuid,
+      facilityId: payload.facilityId,
+      restoreIntegrity: payload.restoreIntegrity,
+      removeConditionIds: payload.removeConditionIds,
+      notes: payload.notes
     });
-    if ("save" in this.#domains && typeof this.#domains.save === "function") {
-      const saveRes = await this.#domains.save({
-        ...docRes.value,
-        record: updatedRecord
-      });
-      if (!saveRes.ok) return saveRes;
-    }
-    return ok({ facility: updatedFacility });
+    return this.#executeCommand(cmd);
   }
   async dispatchDamageFacility(payload) {
-    const id = this.#domainUuid.startsWith("JournalEntry.") ? this.#domainUuid.slice("JournalEntry.".length) : this.#domainUuid;
-    const docRes = await this.#domains.read(id);
-    if (!docRes.ok) return docRes;
-    const record = docRes.value.record;
-    const currentFacilitiesData = getDomainFacilitiesData(record);
-    const facility = currentFacilitiesData.facilities.find((f) => f.id === payload.facilityId);
-    if (!facility) {
-      return err(createPublicError({
-        code: "DM_FACILITY_NOT_FOUND",
-        category: "not-found",
-        message: `Facility ${payload.facilityId} not found`
-      }));
-    }
-    const damageRes = applyFacilityDamage({
-      facility,
-      deltaIntegrity: payload.damageAmount,
-      condition: payload.condition
+    const cmd = makeCommand7("facilities:apply-damage", {
+      domainUuid: this.#domainUuid,
+      facilityId: payload.facilityId,
+      damage: payload.damageAmount,
+      condition: payload.condition,
+      conditionId: payload.condition?.id
     });
-    if (!damageRes.ok) return damageRes;
-    const damagedFacility = damageRes.value;
-    const updatedFacilities = currentFacilitiesData.facilities.map(
-      (f) => f.id === payload.facilityId ? damagedFacility : f
-    );
-    const updatedRecord = withDomainFacilitiesData(record, {
-      ...currentFacilitiesData,
-      facilities: updatedFacilities
+    return this.#executeCommand(cmd);
+  }
+  async dispatchDecommissionFacility(payload) {
+    const cmd = makeCommand7("facilities:decommission-facility", {
+      domainUuid: this.#domainUuid,
+      facilityId: payload.facilityId,
+      reason: payload.reason
     });
-    if ("save" in this.#domains && typeof this.#domains.save === "function") {
-      const saveRes = await this.#domains.save({
-        ...docRes.value,
-        record: updatedRecord
-      });
-      if (!saveRes.ok) return saveRes;
-    }
-    return ok({ facility: damagedFacility });
+    return this.#executeCommand(cmd);
   }
 };
 var MockApplicationV24 = class {
@@ -25059,324 +27510,6 @@ var FacilitiesApplication = class _FacilitiesApplication extends BaseApp4 {
     this.render();
   }
 };
-
-// src/downtime/definitions/canonical-downtime-definitions.ts
-var CANONICAL_DOWNTIME_DEFINITIONS = Object.freeze([
-  {
-    id: "domain-manager:crafting",
-    version: 1,
-    label: "Crafting & Fabrication",
-    description: "Fabricating items, equipment, or supplies using domain facilities and raw materials.",
-    category: "production",
-    tags: Object.freeze(["crafting", "supplies", "materials"]),
-    scope: "individual",
-    defaultDurationTicks: 10,
-    minParticipants: 1,
-    maxParticipants: 3,
-    allowedParticipantRoles: Object.freeze(["owner", "assistant"]),
-    costs: Object.freeze([
-      { resourceId: "domain-manager:materials", amount: 10 }
-    ]),
-    outcomeDefinitions: Object.freeze([
-      {
-        id: "crafting-completion",
-        type: "economy:grant-resource",
-        label: "Fabricate Finished Supplies",
-        parameters: Object.freeze({ resourceId: "domain-manager:supplies", amount: 15 }),
-        visibility: "public"
-      }
-    ])
-  },
-  {
-    id: "domain-manager:rest-and-recuperation",
-    version: 1,
-    label: "Rest & Recuperation",
-    description: "Spending time in safety and comfort to recover stamina, treat fatigue, and heal wounds.",
-    category: "recovery",
-    tags: Object.freeze(["rest", "recovery", "health"]),
-    scope: "individual",
-    defaultDurationTicks: 5,
-    minParticipants: 1,
-    maxParticipants: 10,
-    allowedParticipantRoles: Object.freeze(["participant"]),
-    outcomeDefinitions: Object.freeze([
-      {
-        id: "recuperation-benefit",
-        type: "narrative:event",
-        label: "Full Rest Recovery",
-        parameters: Object.freeze({ message: "Participant fully recovered from exhaustion and minor fatigue." }),
-        visibility: "public"
-      }
-    ])
-  },
-  {
-    id: "domain-manager:patrol-and-recon",
-    version: 1,
-    label: "Patrol & Reconnaissance",
-    description: "Scouting domain perimeters, maintaining vigilance, and surveying surrounding territories.",
-    category: "security",
-    tags: Object.freeze(["security", "patrol", "recon"]),
-    scope: "group",
-    defaultDurationTicks: 8,
-    minParticipants: 2,
-    maxParticipants: 10,
-    allowedParticipantRoles: Object.freeze(["supervisor", "participant"]),
-    outcomeDefinitions: Object.freeze([
-      {
-        id: "patrol-intelligence",
-        type: "narrative:event",
-        label: "Security Recon Report",
-        parameters: Object.freeze({ message: "Perimeters secured and local reconnaissance updated." }),
-        visibility: "public"
-      }
-    ])
-  },
-  {
-    id: "domain-manager:training",
-    version: 1,
-    label: "Physical & Tactical Training",
-    description: "Rigorous physical exercise, weapons drills, and tactical doctrine training.",
-    category: "development",
-    tags: Object.freeze(["training", "skill", "tactics"]),
-    scope: "individual",
-    defaultDurationTicks: 12,
-    minParticipants: 1,
-    maxParticipants: 4,
-    allowedParticipantRoles: Object.freeze(["supervisor", "trainee"]),
-    outcomeDefinitions: Object.freeze([
-      {
-        id: "training-advancement",
-        type: "narrative:event",
-        label: "Tactical Discipline Acquired",
-        parameters: Object.freeze({ message: "Trainees achieved improved discipline and tactical readiness." }),
-        visibility: "public"
-      }
-    ])
-  }
-]);
-
-// src/downtime/definitions/downtime-registry.ts
-var DowntimeDefinitionRegistry = class {
-  definitions = /* @__PURE__ */ new Map();
-  frozen = false;
-  get isFrozen() {
-    return this.frozen;
-  }
-  register(definition) {
-    if (this.frozen) {
-      return err(
-        createPublicError({
-          code: "DM_REGISTRY_FROZEN",
-          category: "conflict",
-          message: "Cannot register downtime definition into a frozen registry"
-        })
-      );
-    }
-    if (this.definitions.has(definition.id)) {
-      return err(
-        createPublicError({
-          code: "DM_DOWNTIME_ALREADY_EXISTS",
-          category: "conflict",
-          message: `DowntimeDefinition '${definition.id}' is already registered`
-        })
-      );
-    }
-    this.definitions.set(definition.id, Object.freeze({ ...definition }));
-    return ok(void 0);
-  }
-  get(id) {
-    return this.definitions.get(id);
-  }
-  has(id) {
-    return this.definitions.has(id);
-  }
-  list(filter) {
-    let result = Array.from(this.definitions.values());
-    if (filter) {
-      if (filter.category) {
-        result = result.filter((d) => d.category === filter.category);
-      }
-      if (filter.scope) {
-        result = result.filter((d) => d.scope === filter.scope);
-      }
-      if (filter.tag) {
-        result = result.filter((d) => d.tags.includes(filter.tag));
-      }
-    }
-    return Object.freeze(result);
-  }
-  freeze() {
-    this.frozen = true;
-  }
-};
-function createDefaultDowntimeRegistry() {
-  const registry = new DowntimeDefinitionRegistry();
-  for (const def of CANONICAL_DOWNTIME_DEFINITIONS) {
-    const res = registry.register(def);
-    if (!res.ok) {
-      throw new Error(`Failed to load canonical downtime definition '${def.id}': ${res.error.message}`);
-    }
-  }
-  registry.freeze();
-  return registry;
-}
-
-// src/ui/domain-patterns/downtime/downtime-presenter.ts
-function resolveScopeBadgeClass(scope) {
-  switch (scope) {
-    case "individual":
-      return "dm-badge-individual";
-    case "group":
-      return "dm-badge-group";
-    case "domain":
-      return "dm-badge-domain";
-    case "flexible":
-      return "dm-badge-flexible";
-    default:
-      return "dm-badge-default";
-  }
-}
-function resolveLifecycleBadgeClass2(lifecycle) {
-  switch (lifecycle) {
-    case "inProgress":
-      return "dm-badge-active";
-    case "ready":
-      return "dm-badge-ready";
-    case "completed":
-      return "dm-badge-completed";
-    case "paused":
-      return "dm-badge-paused";
-    case "planned":
-      return "dm-badge-planned";
-    case "draft":
-      return "dm-badge-draft";
-    case "blocked":
-      return "dm-badge-blocked";
-    case "cancelled":
-      return "dm-badge-canceled";
-    case "failed":
-      return "dm-badge-danger";
-    default:
-      return "dm-badge-default";
-  }
-}
-function buildDowntimeViewModel(domainInput, options = {}) {
-  const record = "record" in domainInput ? domainInput.record : domainInput;
-  const domainUuid = "uuid" in domainInput ? domainInput.uuid : "unknown";
-  const viewerIsGm = options.viewerIsGm ?? options.viewer?.isGm ?? true;
-  const filterLifecycle = options.filterLifecycle ?? "all";
-  const filterScope = options.filterScope ?? "all";
-  const searchTerm = (options.searchTerm ?? "").toLowerCase().trim();
-  const data = getDomainDowntimeData(record);
-  const defRegistry = options.downtimeRegistry;
-  const activityVMs = [];
-  for (const activity of data.activities) {
-    const isSecret = Boolean(activity.visibility === "secret" || activity.tags?.includes("secret"));
-    if (isSecret && !viewerIsGm) {
-      continue;
-    }
-    if (filterLifecycle !== "all" && activity.lifecycle !== filterLifecycle) {
-      continue;
-    }
-    if (filterScope !== "all" && activity.scope !== filterScope) {
-      continue;
-    }
-    const def = defRegistry?.get(activity.definitionId);
-    const label = activity.name || def?.label || activity.id;
-    const description = activity.description || def?.description || "";
-    if (searchTerm) {
-      const matchLabel = label.toLowerCase().includes(searchTerm);
-      const matchDef = activity.definitionId.toLowerCase().includes(searchTerm);
-      if (!matchLabel && !matchDef) {
-        continue;
-      }
-    }
-    const isIndefinite = activity.durationTicks === null || activity.durationTicks === void 0;
-    let progressPercent = null;
-    let durationFormatted;
-    if (isIndefinite) {
-      durationFormatted = `Indefinite (${activity.elapsedTicks} ticks elapsed)`;
-      progressPercent = null;
-    } else {
-      const total = activity.durationTicks;
-      durationFormatted = `${activity.elapsedTicks} / ${total} ticks`;
-      progressPercent = total > 0 ? Math.min(100, Math.max(0, Math.floor(activity.elapsedTicks / total * 100))) : 100;
-    }
-    const completed = isDowntimeComplete(activity);
-    const participants = activity.participants.map((p) => {
-      let displayName = p.participantRef;
-      if (options.participantResolver) {
-        displayName = options.participantResolver(p.participantRef, p.participantType);
-      }
-      return {
-        participantRef: p.participantRef,
-        participantType: p.participantType,
-        displayName,
-        role: p.role,
-        capacityConsumed: p.capacityConsumed ?? 1
-      };
-    });
-    const rawOutcomes = activity.outcomes ?? def?.outcomeDefinitions ?? [];
-    const outcomeReceipts = activity.outcomesApplied ?? [];
-    const outcomeVMs = rawOutcomes.map((o, idx) => {
-      const received = outcomeReceipts.some((r) => r.outcomeId === o.id);
-      return {
-        id: o.id ?? `outcome-${idx}`,
-        type: o.type ?? "resource",
-        targetRef: o.targetRef ?? domainUuid,
-        description: o.label ?? o.description ?? o.type ?? "Outcome",
-        received
-      };
-    });
-    const startedAtFormatted = activity.createdAt ? new Date(activity.createdAt).toLocaleDateString() : "\u2014";
-    const completedAtFormatted = activity.completedAt ? new Date(activity.completedAt).toLocaleDateString() : void 0;
-    const canAdvance = activity.lifecycle === "inProgress";
-    const canComplete = activity.lifecycle === "inProgress" || activity.lifecycle === "ready";
-    const canCancel = activity.lifecycle !== "completed" && activity.lifecycle !== "cancelled" && activity.lifecycle !== "failed";
-    activityVMs.push({
-      id: activity.id,
-      definitionId: activity.definitionId,
-      label,
-      description,
-      scope: activity.scope,
-      scopeBadgeClass: resolveScopeBadgeClass(activity.scope),
-      lifecycle: activity.lifecycle,
-      lifecycleBadgeClass: resolveLifecycleBadgeClass2(activity.lifecycle),
-      progressTicks: activity.elapsedTicks,
-      durationTicks: activity.durationTicks ?? null,
-      durationFormatted,
-      progressPercent,
-      isIndefinite,
-      isCompleted: completed,
-      participants: Object.freeze(participants),
-      outcomes: Object.freeze(outcomeVMs),
-      startedAtFormatted,
-      completedAtFormatted,
-      isSecret,
-      canAdvance,
-      canComplete,
-      canCancel
-    });
-  }
-  const allVisible = data.activities.filter((a) => {
-    const isSecret = Boolean(a.visibility === "secret" || a.tags?.includes("secret"));
-    return !isSecret || viewerIsGm;
-  });
-  const totalCount = allVisible.length;
-  const activeCount = allVisible.filter((a) => a.lifecycle === "inProgress").length;
-  const completedCount = allVisible.filter((a) => a.lifecycle === "completed").length;
-  return {
-    domainUuid,
-    viewerIsGm,
-    totalCount,
-    activeCount,
-    completedCount,
-    activities: Object.freeze(activityVMs),
-    filterLifecycle,
-    filterScope,
-    searchTerm
-  };
-}
 
 // src/ui/domain-patterns/downtime/downtime-view.ts
 function escapeHtml5(value) {
@@ -25709,7 +27842,7 @@ function cleanPayload4(payload) {
   }
   return cleaned;
 }
-function makeCommand5(type, payload) {
+function makeCommand8(type, payload) {
   return {
     contractVersion: COMMAND_CONTRACT_VERSION_V1,
     commandId: createCommandId(),
@@ -25775,7 +27908,7 @@ var DowntimeApplicationController = class {
     const id = this.#domainUuid.startsWith("JournalEntry.") ? this.#domainUuid.slice("JournalEntry.".length) : this.#domainUuid;
     const docRes = await this.#domains.read(id);
     if (!docRes.ok) return docRes;
-    const isGm = this.#viewer?.isGm ?? true;
+    const isGm = this.#viewer?.isGm ?? false;
     const vm = buildDowntimeViewModel(docRes.value, {
       viewerIsGm: isGm,
       downtimeRegistry: this.#downtimeRegistry,
@@ -25808,185 +27941,79 @@ var DowntimeApplicationController = class {
       </div>
     `;
   }
-  async dispatchStartDowntime(payload) {
-    const id = this.#domainUuid.startsWith("JournalEntry.") ? this.#domainUuid.slice("JournalEntry.".length) : this.#domainUuid;
-    const docRes = await this.#domains.read(id);
-    if (!docRes.ok) return docRes;
-    const record = docRes.value.record;
-    const currentDowntimeData = getDomainDowntimeData(record);
-    const activityId = `dt-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-    const participants = [];
-    if (payload.participantRef) {
-      participants.push({
-        participantRef: payload.participantRef,
-        participantType: "notable",
-        role: "lead",
-        capacityConsumed: 1
-      });
+  async #executeCommand(cmd) {
+    if (!this.#commandBus) {
+      return err(
+        createPublicError({
+          code: "DM_COMMAND_BUS_NOT_AVAILABLE",
+          category: "internal",
+          message: "CommandBus is required for dispatching downtime mutations"
+        })
+      );
     }
-    const now = Date.now();
-    const newActivity = {
-      id: activityId,
+    const receiptRes = await this.#commandBus.execute(cmd);
+    if (!receiptRes.ok) {
+      return receiptRes;
+    }
+    const receipt = receiptRes.value;
+    if (receipt.status === "rejected") {
+      return err(
+        receipt.error ?? createPublicError({
+          code: "DM_COMMAND_REJECTED",
+          category: "internal",
+          message: "Downtime command rejected"
+        })
+      );
+    }
+    return ok(receipt.result);
+  }
+  async dispatchStartDowntime(payload) {
+    const cmd = makeCommand8("downtime:start-activity", {
       domainUuid: this.#domainUuid,
       definitionId: payload.definitionId,
-      name: payload.label ?? payload.definitionId,
-      schemaVersion: 1,
-      revision: 0,
-      scope: payload.scope ?? "domain",
-      lifecycle: "inProgress",
-      elapsedTicks: 0,
-      durationTicks: payload.durationTicks ?? null,
-      participants: Object.freeze(participants),
-      tags: Object.freeze([]),
-      createdAt: now,
-      updatedAt: now
-    };
-    const updatedActivities = [...currentDowntimeData.activities, newActivity];
-    const updatedRecord = withDomainDowntimeData(record, {
-      ...currentDowntimeData,
-      activities: updatedActivities
+      label: payload.label,
+      scope: payload.scope,
+      durationTicks: payload.durationTicks,
+      participantRef: payload.participantRef
     });
-    if ("save" in this.#domains && typeof this.#domains.save === "function") {
-      const saveRes = await this.#domains.save({
-        ...docRes.value,
-        record: updatedRecord
-      });
-      if (!saveRes.ok) return saveRes;
-    }
-    if (this.#commandBus) {
-      const cmd = makeCommand5("downtime:start-activity", {
-        domainUuid: this.#domainUuid,
-        activity: newActivity
-      });
-      await this.#commandBus.execute(cmd);
-    }
-    return ok({ activityId });
+    const res = await this.#executeCommand(cmd);
+    if (!res.ok) return res;
+    const activity = res.value?.activity;
+    return ok({
+      activity,
+      activityId: activity?.id
+    });
   }
   async dispatchAdvanceDowntime(payload) {
-    const id = this.#domainUuid.startsWith("JournalEntry.") ? this.#domainUuid.slice("JournalEntry.".length) : this.#domainUuid;
-    const docRes = await this.#domains.read(id);
-    if (!docRes.ok) return docRes;
-    const record = docRes.value.record;
-    const currentDowntimeData = getDomainDowntimeData(record);
-    const activity = currentDowntimeData.activities.find((a) => a.id === payload.activityId);
-    if (!activity) {
-      return err(createPublicError({
-        code: "DM_DOWNTIME_NOT_FOUND",
-        category: "not-found",
-        message: `Downtime activity ${payload.activityId} not found`
-      }));
-    }
-    const newProgress = activity.elapsedTicks + Math.max(0, payload.ticks);
-    let newLifecycle = activity.lifecycle;
-    if (activity.durationTicks !== null && activity.durationTicks !== void 0) {
-      if (newProgress >= activity.durationTicks && newLifecycle === "inProgress") {
-        newLifecycle = "completed";
-      }
-    }
-    const now = Date.now();
-    const updatedActivity = {
-      ...activity,
-      elapsedTicks: newProgress,
-      lifecycle: newLifecycle,
-      revision: activity.revision + 1,
-      updatedAt: now,
-      completedAt: newLifecycle === "completed" ? now : activity.completedAt
-    };
-    const updatedActivities = currentDowntimeData.activities.map(
-      (a) => a.id === payload.activityId ? updatedActivity : a
-    );
-    const updatedRecord = withDomainDowntimeData(record, {
-      ...currentDowntimeData,
-      activities: updatedActivities
+    const cmd = makeCommand8("downtime:advance-activity", {
+      domainUuid: this.#domainUuid,
+      activityId: payload.activityId,
+      ticks: payload.ticks,
+      notes: payload.notes
     });
-    if ("save" in this.#domains && typeof this.#domains.save === "function") {
-      const saveRes = await this.#domains.save({
-        ...docRes.value,
-        record: updatedRecord
-      });
-      if (!saveRes.ok) return saveRes;
-    }
-    return ok({ activity: updatedActivity });
+    const res = await this.#executeCommand(cmd);
+    if (!res.ok) return res;
+    return ok({ activity: res.value?.activity });
   }
-  async dispatchCompleteDowntime(activityId) {
-    const id = this.#domainUuid.startsWith("JournalEntry.") ? this.#domainUuid.slice("JournalEntry.".length) : this.#domainUuid;
-    const docRes = await this.#domains.read(id);
-    if (!docRes.ok) return docRes;
-    const record = docRes.value.record;
-    const currentDowntimeData = getDomainDowntimeData(record);
-    const activity = currentDowntimeData.activities.find((a) => a.id === activityId);
-    if (!activity) {
-      return err(createPublicError({
-        code: "DM_DOWNTIME_NOT_FOUND",
-        category: "not-found",
-        message: `Downtime activity ${activityId} not found`
-      }));
-    }
-    const now = Date.now();
-    const updatedActivity = {
-      ...activity,
-      lifecycle: "completed",
-      revision: activity.revision + 1,
-      updatedAt: now,
-      completedAt: now
-    };
-    const updatedActivities = currentDowntimeData.activities.map(
-      (a) => a.id === activityId ? updatedActivity : a
-    );
-    const updatedRecord = withDomainDowntimeData(record, {
-      ...currentDowntimeData,
-      activities: updatedActivities
+  async dispatchCompleteDowntime(activityId, outcomeKey) {
+    const cmd = makeCommand8("downtime:complete-activity", {
+      domainUuid: this.#domainUuid,
+      activityId,
+      outcomeKey
     });
-    if ("save" in this.#domains && typeof this.#domains.save === "function") {
-      const saveRes = await this.#domains.save({
-        ...docRes.value,
-        record: updatedRecord
-      });
-      if (!saveRes.ok) return saveRes;
-    }
-    return ok({ activity: updatedActivity });
+    const res = await this.#executeCommand(cmd);
+    if (!res.ok) return res;
+    return ok({ activity: res.value?.activity });
   }
   async dispatchCancelDowntime(activityId, reason) {
-    const id = this.#domainUuid.startsWith("JournalEntry.") ? this.#domainUuid.slice("JournalEntry.".length) : this.#domainUuid;
-    const docRes = await this.#domains.read(id);
-    if (!docRes.ok) return docRes;
-    const record = docRes.value.record;
-    const currentDowntimeData = getDomainDowntimeData(record);
-    const activity = currentDowntimeData.activities.find((a) => a.id === activityId);
-    if (!activity) {
-      return err(createPublicError({
-        code: "DM_DOWNTIME_NOT_FOUND",
-        category: "not-found",
-        message: `Downtime activity ${activityId} not found`
-      }));
-    }
-    const now = Date.now();
-    const updatedActivity = {
-      ...activity,
-      lifecycle: "cancelled",
-      revision: activity.revision + 1,
-      updatedAt: now,
-      cancelledAt: now,
-      metadata: {
-        ...activity.metadata,
-        cancellationReason: reason
-      }
-    };
-    const updatedActivities = currentDowntimeData.activities.map(
-      (a) => a.id === activityId ? updatedActivity : a
-    );
-    const updatedRecord = withDomainDowntimeData(record, {
-      ...currentDowntimeData,
-      activities: updatedActivities
+    const cmd = makeCommand8("downtime:cancel-activity", {
+      domainUuid: this.#domainUuid,
+      activityId,
+      reason
     });
-    if ("save" in this.#domains && typeof this.#domains.save === "function") {
-      const saveRes = await this.#domains.save({
-        ...docRes.value,
-        record: updatedRecord
-      });
-      if (!saveRes.ok) return saveRes;
-    }
-    return ok({ activity: updatedActivity });
+    const res = await this.#executeCommand(cmd);
+    if (!res.ok) return res;
+    return ok({ activity: res.value?.activity });
   }
 };
 var MockApplicationV25 = class {
@@ -26209,6 +28236,269 @@ var DowntimeApplication = class _DowntimeApplication extends BaseApp5 {
   static #onCloseModal() {
     this.#controller.closeModal();
     this.render();
+  }
+};
+
+// src/bootstrap/domain-manager-runtime.ts
+function composeDomainManagerRuntime(options = {}) {
+  const domainStore = options.domainStore ?? new FoundryDomainDocumentStore();
+  const mutableDomainRepo = new DomainRepository(domainStore);
+  const authority = options.authority ?? new FoundryPrimaryAuthorityAdapter();
+  const lockManager = options.lockManager ?? new LockManager();
+  const coordinator = new MutationCoordinator({ lockManager });
+  const transactionStore = options.transactionStore ?? new TransactionStore({
+    storageAdapter: options.transactionStorageAdapter ?? new FoundryJournalTransactionStorageAdapter()
+  });
+  const recovery = new RecoveryService({ transactionStore, lockManager });
+  const resourceRegistry = options.resourceRegistry ?? createDefaultResourceRegistry();
+  const ledgerStore = options.ledgerStore ?? new LedgerStore({
+    storageAdapter: options.ledgerStorageAdapter ?? new FoundryJournalLedgerStorageAdapter()
+  });
+  const reservationStore = options.reservationStore ?? new ReservationStore({
+    storageAdapter: options.reservationStorageAdapter ?? new FoundryJournalReservationStorageAdapter()
+  });
+  const customResourceStore = options.customResourceStore ?? new CustomResourceDefinitionStore(
+    options.customResourceStorageAdapter ?? new FoundryJournalCustomResourceStorageAdapter()
+  );
+  const providerRegistry = options.providerRegistry ?? createDefaultProviderRegistry(mutableDomainRepo);
+  const thresholdService = options.thresholdService ?? new ThresholdService(
+    options.thresholdStorageAdapter ?? new FoundryJournalThresholdStorageAdapter()
+  );
+  const economyService = new EconomyService({
+    domains: mutableDomainRepo,
+    resourceRegistry,
+    ledgerStore,
+    reservationStore,
+    lockManager,
+    transactionStore,
+    recoveryService: recovery,
+    providerRegistry,
+    thresholdService
+  });
+  const controllerProvider = options.controllerProvider ?? new DefaultDomainControllerProvider();
+  const projectRegistry = options.projectRegistry ?? createDefaultProjectRegistry();
+  const facilityRegistry = options.facilityRegistry ?? createDefaultFacilityRegistry();
+  const downtimeRegistry = options.downtimeRegistry ?? createDefaultDowntimeRegistry();
+  const facilitiesService = new FacilitiesService({
+    domains: mutableDomainRepo,
+    facilityRegistry
+  });
+  const projectsService = new ProjectsService({
+    domains: mutableDomainRepo,
+    projectRegistry,
+    economyService,
+    facilitiesService,
+    transactionStore
+  });
+  const downtimeService = new DowntimeService({
+    domains: mutableDomainRepo,
+    downtimeRegistry
+  });
+  const registry = new CommandRegistry();
+  registerDomainCommandHandlers(registry, coordinator, mutableDomainRepo);
+  registerPopulationCommandHandlers(registry, coordinator, mutableDomainRepo);
+  registerNotableCommandHandlers(registry, coordinator, mutableDomainRepo);
+  registerRoleCommandHandlers(registry, coordinator, mutableDomainRepo);
+  registerOperationalGroupCommandHandlers(registry, coordinator, mutableDomainRepo);
+  registerAssignmentCommandHandlers(registry, coordinator, mutableDomainRepo);
+  registerRepairCommandHandlers(registry, coordinator, mutableDomainRepo);
+  registerEconomyCommands({
+    registry,
+    economyService,
+    domains: mutableDomainRepo,
+    controllerProvider,
+    thresholdService,
+    customResourceStore,
+    resourceRegistry
+  });
+  registerProjectCommands({
+    registry,
+    projectsService,
+    domains: mutableDomainRepo,
+    controllerProvider
+  });
+  registerFacilityCommands({
+    registry,
+    facilitiesService,
+    domains: mutableDomainRepo,
+    controllerProvider
+  });
+  registerDowntimeCommands({
+    registry,
+    downtimeService,
+    domains: mutableDomainRepo,
+    controllerProvider
+  });
+  registry.freeze();
+  const commandQueue = options.commandQueue ?? new CommandQueue({ maxConcurrency: 10 });
+  const dedupeStore = options.dedupeStore ?? new CommandDedupeStore();
+  const rateLimiter = options.rateLimiter ?? new RateLimiter();
+  const transport = options.transport ?? new FoundryCommandTransportAdapter({
+    authorityService: authority.service
+  });
+  const commandBus = new CommandBus({
+    registry,
+    authorityService: authority.service,
+    coordinator,
+    transport,
+    rateLimiter,
+    dedupeStore,
+    commandQueue
+  });
+  const diagnostics = new G2DiagnosticsProvider({
+    authorityService: authority.service,
+    lockManager,
+    commandQueue,
+    transactionStore,
+    registry,
+    transport,
+    rateLimiter
+  });
+  const readOnlyDomains = Object.freeze({
+    read: (id) => mutableDomainRepo.read(id),
+    load: (id) => mutableDomainRepo.load(id),
+    query: (query) => mutableDomainRepo.query(query),
+    checkIntegrity: () => mutableDomainRepo.checkIntegrity(),
+    getIndex: () => {
+      const liveIndex = mutableDomainRepo.getIndex();
+      return Object.freeze({
+        get: (id) => liveIndex.get(id),
+        list: () => liveIndex.list(),
+        query: (q) => liveIndex.query(q)
+      });
+    }
+  });
+  const unregisterPolicy = registerDomainControllerPolicy((domainId, userId, context) => {
+    return controllerProvider.isDomainController(domainId, userId, context);
+  });
+  const people = new PeopleService(readOnlyDomains, { commandBus });
+  const repairTool = new PeopleRepairTool(commandBus);
+  const publicEconomy = new DefaultPublicEconomyApi({
+    domains: readOnlyDomains,
+    commandBus,
+    resourceRegistry,
+    ledgerStore,
+    reservationStore,
+    providerRegistry,
+    thresholdService,
+    transactionStore
+  });
+  const publicProjects = new DefaultPublicProjectsApi({
+    domains: readOnlyDomains,
+    commandBus,
+    projectRegistry,
+    projectsService
+  });
+  const publicFacilities = new DefaultPublicFacilitiesApi({
+    domains: readOnlyDomains,
+    commandBus,
+    facilityRegistry,
+    facilitiesService
+  });
+  const publicDowntime = new DefaultPublicDowntimeApi({
+    domains: readOnlyDomains,
+    commandBus,
+    downtimeRegistry,
+    downtimeService
+  });
+  const publicApi = Object.freeze({
+    version: BUILD_METADATA.moduleVersion,
+    domains: readOnlyDomains,
+    economy: publicEconomy,
+    people,
+    projects: publicProjects,
+    facilities: publicFacilities,
+    downtime: publicDowntime,
+    diagnostics
+  });
+  return Object.freeze({
+    publicApi,
+    // G2-AUD-008 & G4-AUD-004: Read-only facades exposed publicly
+    domains: readOnlyDomains,
+    authority,
+    commandBus,
+    registry,
+    transport,
+    lockManager,
+    coordinator,
+    recovery,
+    transactionStore,
+    diagnostics,
+    people,
+    repairTool,
+    controllerProvider,
+    economy: publicEconomy,
+    resourceRegistry,
+    ledgerStore,
+    reservationStore,
+    providerRegistry,
+    customResourceStore,
+    thresholds: thresholdService,
+    projects: publicProjects,
+    facilities: publicFacilities,
+    downtime: publicDowntime,
+    projectRegistry,
+    facilityRegistry,
+    downtimeRegistry,
+    initialize: async () => {
+      await transactionStore.rehydrate();
+      await ledgerStore.rehydrate();
+      await reservationStore.rehydrate();
+      await thresholdService.rehydrate();
+      const customDefs = await customResourceStore.rehydrate();
+      for (const def of customDefs) {
+        if (!resourceRegistry.get(def.id)) {
+          resourceRegistry.register(def);
+        }
+      }
+      const manualCurrency = providerRegistry.get(MANUAL_CURRENCY_PROVIDER_ID);
+      if (manualCurrency && "rehydrate" in manualCurrency && typeof manualCurrency.rehydrate === "function") {
+        await manualCurrency.rehydrate();
+      }
+    },
+    destroy: () => {
+      unregisterPolicy();
+      commandBus.destroy();
+      if ("destroy" in transport && typeof transport.destroy === "function") {
+        transport.destroy();
+      }
+      recovery.clear();
+    }
+  });
+}
+
+// src/diagnostics/build-diagnostics.ts
+function getBuildDiagnostics() {
+  return {
+    ...BUILD_METADATA
+  };
+}
+
+// src/diagnostics/logger.ts
+var Logger = class {
+  constructor(scope) {
+    this.scope = scope;
+  }
+  debug(message, context) {
+    return this.write("debug", message, context);
+  }
+  info(message, context) {
+    return this.write("info", message, context);
+  }
+  warn(message, context) {
+    return this.write("warn", message, context);
+  }
+  error(message, context) {
+    return this.write("error", message, context);
+  }
+  write(level, message, context) {
+    const safeContext = context === void 0 ? void 0 : sanitizeDiagnosticsValue(context);
+    const entry = safeContext === void 0 ? { level, message } : { level, message, context: safeContext };
+    const output = `[${this.scope}] ${message}`;
+    if (level === "error") console.error(output, safeContext ?? "");
+    else if (level === "warn") console.warn(output, safeContext ?? "");
+    else console.info(output, safeContext ?? "");
+    return entry;
   }
 };
 

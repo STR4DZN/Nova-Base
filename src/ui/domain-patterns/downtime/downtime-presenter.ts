@@ -120,7 +120,7 @@ export function buildDowntimeViewModel(
 ): DowntimeSubsystemViewModel {
   const record: DomainRecord = "record" in domainInput ? domainInput.record : domainInput;
   const domainUuid = "uuid" in domainInput ? domainInput.uuid : "unknown";
-  const viewerIsGm = options.viewerIsGm ?? options.viewer?.isGm ?? true;
+  const viewerIsGm = options.viewerIsGm ?? options.viewer?.isGm ?? false;
   const filterLifecycle = options.filterLifecycle ?? "all";
   const filterScope = options.filterScope ?? "all";
   const searchTerm = (options.searchTerm ?? "").toLowerCase().trim();

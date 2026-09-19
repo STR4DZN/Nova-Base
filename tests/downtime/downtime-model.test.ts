@@ -296,11 +296,44 @@ test("G5.8: DomainDowntimeData persists, validates duplicate IDs, and integrates
   const withData = withDomainDowntimeData(mockDomain, validData.value!);
   assert.ok(withData.definition.capabilities.enabled.includes(DOWNTIME_CAPABILITY_ID));
 
-  const retrieved = tryGetDomainDowntimeData(withData);
+  const retrievedRes = tryGetDomainDowntimeData(withData);
+  assert.ok(retrievedRes.ok);
+  const retrieved = retrievedRes.value;
   assert.ok(retrieved);
   assert.equal(retrieved.activities.length, 2);
   assert.equal(retrieved.activities[0].id, "dt-1");
   assert.equal(retrieved.activities[1].id, "dt-2");
+});
+
+test("G5-AUD-008: Corrupt downtime data produces PublicError and getDomainDowntimeData throws", () => {
+  const corruptDomain = {
+    schemaVersion: 1,
+    revision: 1,
+    id: "domain-corrupt-dt",
+    definition: {
+      identity: { name: "Corrupt Domain" },
+      capabilities: {
+        enabled: [DOWNTIME_CAPABILITY_ID],
+        config: {
+          [DOWNTIME_CAPABILITY_ID]: {
+            schemaVersion: 99,
+            activities: "invalid_list"
+          }
+        }
+      }
+    }
+  } as unknown as DomainRecord;
+
+  const tryRes = tryGetDomainDowntimeData(corruptDomain);
+  assert.equal(tryRes.ok, false);
+  if (!tryRes.ok) {
+    assert.equal(tryRes.error.code, "DM_DOWNTIME_INVALID_SCHEMA_VERSION");
+  }
+
+  assert.throws(
+    () => getDomainDowntimeData(corruptDomain),
+    /Domain downtime data corruption/
+  );
 });
 
 test("G5.8: CapabilityRegistry validates domain-manager:downtime configuration", () => {

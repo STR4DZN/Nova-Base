@@ -33,10 +33,11 @@
 | Verificação | Resultado |
 |---|---|
 | TypeScript strict (`tsc --noEmit`) | PASS (0 erros) |
-| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 539/539 (0 falhas) |
+| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 545/545 (0 falhas) |
 | Relatório de Aceitação G5 | Gerado (`docs/GATE_G5_ACCEPTANCE_REPORT.md`) |
 | Regressões G0/G1/G2/G3/G4 | 0 (todos os 444 testes anteriores preservados e passando) |
-| Testes novos Gate G5 | 95 testes dedicados (G5.1 a G5.10: 14 em project-model, 15 em progress-resolver, 10 em project-start, 12 em project-advance, 11 em project-completion, 12 em facility-model, 10 em facility-maintenance, 11 em downtime-model, 10 em g5-ui, 11 em g5-acceptance-and-scale) |
+| Testes novos Gate G5 | 101 testes dedicados (G5.1 a G5.10: 14 em project-model, 15 em progress-resolver, 10 em project-start, 12 em project-advance, 11 em project-completion, 12 em facility-model, 10 em facility-maintenance, 11 em downtime-model, 10 em g5-ui, 11 em g5-acceptance-and-scale, 4 em g5-runtime-vertical) |
+| Remediação de Auditoria G5-AUD-001 a G5-AUD-010 | PASS — 100% remediado, endurecido e verificado |
 | Build do pacote (`node build.mjs`) | PASS (`dist/main.js` gerado) |
 | Empacotamento (`node scripts/package.mjs`) | PASS (`dist/domain-manager-v0.0.5.zip` gerado) |
 | Validação de pacote (`node scripts/validate-package.mjs`) | PASS |
@@ -165,13 +166,26 @@
 11. **G4-AUD-011 (Matriz de Testes de Falha, Segurança Cross-Domain, Reinício e Recuperação Idempotente)**: Testes rigorosos cobrindo injeção de falhas no passo 2 de transferências, sobrevivência do TransactionStore a reinicializações com reload via adapter, recuperação automática idempotente (RecoveryService.recoverAll) e rollback de consumo de reservas parciais e totais (tests/economy/fault-recovery.test.ts).
 12. **G4-AUD-012 (Designação Canônica do Próximo Gate)**: Designação estrita e inequívoca do próximo gate como **Gate G5 — Projects / Facilities / Downtime**, mantendo o estado `GATE_G4_PENDING_USER_ACCEPTANCE` até aceitação soberana do usuário.
 
+## Remediação de Auditoria e Hardening Gate G5 (G5-AUD-001 — G5-AUD-010)
+
+1. **G5-AUD-001 (CRÍTICO — Composição do Runtime e Registro de Comandos no CommandBus)**: `ProjectsService`, `FacilitiesService` e `DowntimeService` integrados ao `DomainManagerRuntime`; todos os 17 comandos canônicos de Projects, Facilities e Downtime registrados no `CommandRegistry` antes da chamada a `registry.freeze()`; `PublicModuleApi` expandido expondo `projects` (`PublicProjectsApi`), `facilities` (`PublicFacilitiesApi`) e `downtime` (`PublicDowntimeApi`).
+2. **G5-AUD-002 (ALTO — Eliminação de Mutação Direta de Documento via .save() em UI Controllers)**: `ProjectsApplicationController`, `FacilitiesApplicationController` e `DowntimeApplicationController` tipados estritamente com `DomainReadRepository` como `#domains` (onde o método `.save()` fisicamente não existe); todas as operações de mutação roteadas obrigatoriamente através de `CommandBus.execute(command)` e `MutationCoordinator`.
+3. **G5-AUD-003 (ALTO — Serviço Canônico e API Pública de Projetos)**: Criação de `ProjectsService` com operações atômicas (`startProject`, `advanceProject`, `pauseProject`, `resumeProject`, `cancelProject`, `completeProject`) integradas ao `TransactionStore` e `ReservationStore`; criação da fachada pública `PublicProjectsApi` e sua implementação padrão `DefaultPublicProjectsApi` isolando repositórios internos.
+4. **G5-AUD-004 (ALTO — Cálculo de Saldo Disponível e Validação de Workforce em Projetos)**: `ProjectsService.startProject` calcula formalmente o saldo disponível via `availableMinor = balanceMinor - reservedMinor` antes de avaliar reservas econômicas; verificação estrita de capacidade de força de trabalho contra grupos operacionais e populacionais ativos.
+5. **G5-AUD-005 (ALTO — Serviço de Instalações, API Pública e Remoção de Bypass de Reparo)**: Criação de `FacilitiesService` e `PublicFacilitiesApi`; remoção completa de fallbacks com bypass de reparo em UI e serviços (`DM_FACILITY_REPAIR_REQUIRES_PROJECT` estritamente lançado quando o reparo requer projeto); registro de comandos canônicos de facilities com autorização por Domain Controller/GM.
+6. **G5-AUD-006 (ALTO — Serviço de Downtime e API Pública)**: Criação de `DowntimeService` e `PublicDowntimeApi` para início, avanço, pausa, retomada, conclusão e cancelamento de atividades; registro de comandos canônicos de downtime com verificação de participantes de domínio.
+7. **G5-AUD-007 (MÉDIO — Fail-Closed em Viewer e Autorização em Presenters/Controllers)**: `viewerIsGm` padronizado para `false` por padrão em todos os presenters e controllers; acesso de visualizadores não-GM sem titularidade de controller rejeitado com `DM_SECURITY_PERMISSION_DENIED`.
+8. **G5-AUD-008 (MÉDIO — Propagação de Corrupção de Dados em Facilities e Downtime)**: `tryGetDomain*Data` retorna `Result` de erro em payloads corrompidos; `getDomain*Data` lança erro descritivo (`DM_CORRUPT_FACILITIES_DATA`, `DM_CORRUPT_DOWNTIME_DATA`) em vez de mascarar silenciosamente corrupção com defaults vazios.
+9. **G5-AUD-009 (ALTO — Suíte de Integração Vertical End-to-End)**: Implementação de `tests/runtime/g5-runtime-vertical.test.ts` cobrindo composição do runtime, segurança de autoridade primária vs controller vs estranho não autorizado, controllers ApplicationV2 mutando via CommandBus e sobrevivência à recarga de persistência (4/4 testes passando).
+10. **G5-AUD-010 (BAIXO — Designação Canônica Estrita do Próximo Gate G6)**: Ponteiro do próximo gate corrigido para apontar estritamente para **Gate G6 — Relations / Reputation / Agreements / Territory** (`Documentos/GATES/16_G6_RELATIONS_REPUTATION_AGREEMENTS_TERRITORY.md`).
+
 ## Próxima ação canônica
 
 - **Aguardar Aceitação Soberana do Usuário para o Gate G5 (Projects / Facilities / Downtime)**:
-  - Todas as 10 microbuilds do Gate G5 (G5.1 a G5.10) foram integralmente implementadas e verificadas (539/539 testes passando, 0 erros de compilação TypeScript, validações de pacote e artefato aprovadas).
+  - Todas as 10 microbuilds do Gate G5 (G5.1 a G5.10) e todos os 10 itens de auditoria (G5-AUD-001 a G5-AUD-010) foram integralmente implementados, endurecidos e verificados (545/545 testes passando, 0 erros de compilação TypeScript, validações de pacote e artefato aprovadas).
   - Relatório formal de aceitação emitido em `docs/GATE_G5_ACCEPTANCE_REPORT.md`.
-  - Próximo gate do roadmap após a aceitação formal do Gate G5 pelo usuário: **Gate G6 — Events, Narrative & History** (`Documentos/GATES/16_G6_EVENTS_NARRATIVE_HISTORY.md`, Master Spec §18, DEC-103 a DEC-108).
-  - Rastreabilidade histórica: Gate G4 (Economy & Resources) concluído e homologado após a aceitação formal do Gate G3.
+  - Próximo gate canônico após a aceitação formal do Gate G5 pelo usuário: **Gate G6 — Relations / Reputation / Agreements / Territory** (`Documentos/GATES/16_G6_RELATIONS_REPUTATION_AGREEMENTS_TERRITORY.md`).
+  - Rastreabilidade histórica: Gates G0 a G4 concluídos, auditados e homologados.
 
 
 

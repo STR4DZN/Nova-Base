@@ -308,7 +308,9 @@ test("G5.6: DomainFacilitiesData persists, validates duplicate IDs, and integrat
   const updatedDomain = withDomainFacilitiesData(domain, validData.value);
   assert.ok(updatedDomain.definition.capabilities.enabled.includes(FACILITIES_CAPABILITY_ID));
 
-  const retrieved = tryGetDomainFacilitiesData(updatedDomain);
+  const retrievedRes = tryGetDomainFacilitiesData(updatedDomain);
+  assert.ok(retrievedRes.ok);
+  const retrieved = retrievedRes.value;
   assert.ok(retrieved);
   assert.equal(retrieved.facilities.length, 2);
   assert.equal(retrieved.facilities[0].id, "fac-1");
@@ -318,4 +320,35 @@ test("G5.6: DomainFacilitiesData persists, validates duplicate IDs, and integrat
   const capDef = domainCapabilityRegistry.get(FACILITIES_CAPABILITY_ID);
   assert.ok(capDef);
   assert.equal(capDef.functional, true);
+});
+
+test("G5-AUD-008: Corrupt facilities data produces PublicError and getDomainFacilitiesData throws", () => {
+  const corruptDomain = {
+    schemaVersion: 1,
+    revision: 1,
+    id: "domain-corrupt",
+    definition: {
+      identity: { name: "Corrupt Domain" },
+      capabilities: {
+        enabled: [FACILITIES_CAPABILITY_ID],
+        config: {
+          [FACILITIES_CAPABILITY_ID]: {
+            schemaVersion: 99,
+            facilities: "invalid_list"
+          }
+        }
+      }
+    }
+  } as unknown as DomainRecord;
+
+  const tryRes = tryGetDomainFacilitiesData(corruptDomain);
+  assert.equal(tryRes.ok, false);
+  if (!tryRes.ok) {
+    assert.equal(tryRes.error.code, "DM_FACILITY_INVALID_SCHEMA_VERSION");
+  }
+
+  assert.throws(
+    () => getDomainFacilitiesData(corruptDomain),
+    /Domain facilities data corruption/
+  );
 });

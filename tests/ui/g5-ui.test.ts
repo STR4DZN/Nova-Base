@@ -8,7 +8,11 @@ import {
 import type { DomainRecord } from "../../src/domains/domain-schema.js";
 import { createDefaultProjectRegistry } from "../../src/projects/definitions/project-registry.js";
 import { createDefaultFacilityRegistry } from "../../src/facilities/definitions/facility-registry.js";
-import { createDefaultDowntimeRegistry } from "../../src/downtime/definitions/downtime-registry.js";
+import {
+  DowntimeDefinitionRegistry,
+  createDefaultDowntimeRegistry
+} from "../../src/downtime/definitions/downtime-registry.js";
+import { CANONICAL_DOWNTIME_DEFINITIONS } from "../../src/downtime/definitions/canonical-downtime-definitions.js";
 import {
   createDefaultDomainProjectsData,
   withDomainProjectsData,
@@ -69,6 +73,12 @@ import {
 import { CommandRegistry } from "../../src/commands/command-registry.js";
 import { CommandBus } from "../../src/commands/command-bus.js";
 import { PrimaryAuthorityService } from "../../src/authority/primary-authority-service.js";
+import { ProjectsService } from "../../src/projects/services/projects-service.js";
+import { registerProjectCommands } from "../../src/projects/commands/project-commands.js";
+import { FacilitiesService } from "../../src/facilities/services/facilities-service.js";
+import { registerFacilityCommands } from "../../src/facilities/commands/facility-commands.js";
+import { DowntimeService } from "../../src/downtime/services/downtime-service.js";
+import { registerDowntimeCommands } from "../../src/downtime/commands/downtime-commands.js";
 
 const testRecord: DomainRecord = {
   schemaVersion: 1,
@@ -154,7 +164,7 @@ function createMockStore(initialDocs: IdentifiedJournalEntryDocumentLike[] = [])
   };
 }
 
-function createMockCommandBus(): CommandBus {
+function createMockCommandBus(repo?: StorageDomainRepository): CommandBus {
   const registry = new CommandRegistry();
   const authorityService = new PrimaryAuthorityService(
     {
@@ -165,9 +175,109 @@ function createMockCommandBus(): CommandBus {
     { authorityUserId: "gm-1", authorityEpoch: 1, initialized: true }
   );
   const bus = new CommandBus({ registry, authorityService });
-  registry.register({ type: "projects:start-project", visibility: "public", handler: async () => ok({}) });
-  registry.register({ type: "facilities:create-facility", visibility: "public", handler: async () => ok({}) });
-  registry.register({ type: "downtime:start-activity", visibility: "public", handler: async () => ok({}) });
+
+  if (repo) {
+    const projectRegistry = createDefaultProjectRegistry();
+    const facilityRegistry = createDefaultFacilityRegistry();
+    const downtimeRegistry = new DowntimeDefinitionRegistry();
+    for (const def of CANONICAL_DOWNTIME_DEFINITIONS) {
+      downtimeRegistry.register(def);
+    }
+
+    if (!projectRegistry.has("domain-manager:basic-construction")) {
+      projectRegistry.register({
+        id: "domain-manager:basic-construction",
+        version: 1,
+        label: "Basic Construction",
+        category: "infrastructure",
+        scale: "small",
+        schemaVersion: 1,
+        targetRefKind: "domain",
+        workRequiredFormula: "100",
+        workforceRequirements: [],
+        prerequisites: [],
+        costFormulas: [],
+        resolverId: "linear",
+        completionEffects: []
+      } as any);
+    }
+
+    if (!facilityRegistry.has("domain-manager:granary")) {
+      facilityRegistry.register({
+        id: "domain-manager:granary",
+        version: 1,
+        label: "Granary",
+        category: "agriculture",
+        tags: ["food"],
+        scale: "building",
+        maxLevel: 3,
+        capabilitiesGranted: [],
+        defaultReadiness: "ready",
+        maintenance: {
+          intervalTicks: 30,
+          gracePeriodTicks: 5,
+          costFormula: "10",
+          costs: []
+        },
+        repair: {
+          directRepairAllowed: true,
+          projectThresholdIntegrity: 20
+        }
+      });
+    }
+
+    if (!downtimeRegistry.has("domain-manager:guard-patrol")) {
+      downtimeRegistry.register({
+        id: "domain-manager:guard-patrol",
+        version: 1,
+        label: "Guard Patrol",
+        tags: ["security"],
+        scope: "domain",
+        defaultDurationTicks: 20,
+        minParticipants: 0
+      });
+    }
+
+    const projectsService = new ProjectsService({
+      domains: repo,
+      projectRegistry
+    });
+
+    const facilitiesService = new FacilitiesService({
+      domains: repo,
+      facilityRegistry
+    });
+
+    const downtimeService = new DowntimeService({
+      domains: repo,
+      downtimeRegistry
+    });
+
+    registerProjectCommands({
+      registry,
+      projectsService,
+      domains: repo
+    });
+
+    registerFacilityCommands({
+      registry,
+      facilitiesService,
+      domains: repo
+    });
+
+    registerDowntimeCommands({
+      registry,
+      downtimeService,
+      domains: repo
+    });
+
+    (bus as any).__downtimeRegistry = downtimeRegistry;
+  } else {
+    registry.register({ type: "projects:start-project", visibility: "public", handler: async () => ok({}) });
+    registry.register({ type: "facilities:create-facility", visibility: "public", handler: async () => ok({}) });
+    registry.register({ type: "downtime:start-activity", visibility: "public", handler: async () => ok({}) });
+  }
+
   return bus;
 }
 
@@ -310,7 +420,7 @@ test("G5.9 - Projects Controller: start, advance, pause, resume, cancel flow", a
   const doc = createMockDocument("domain-1", "Test Domain", testRecord);
   const store = createMockStore([doc]);
   const repo = new StorageDomainRepository(store);
-  const commandBus = createMockCommandBus();
+  const commandBus = createMockCommandBus(repo);
 
   const controller = new ProjectsApplicationController({
     domainUuid: "JournalEntry.domain-1",
@@ -531,7 +641,7 @@ test("G5.9 - Facilities Controller: create, maintain, damage, repair flow", asyn
   const doc = createMockDocument("domain-2", "Test Domain 2", testRecord);
   const store = createMockStore([doc]);
   const repo = new StorageDomainRepository(store);
-  const commandBus = createMockCommandBus();
+  const commandBus = createMockCommandBus(repo);
 
   const controller = new FacilitiesApplicationController({
     domainUuid: "JournalEntry.domain-2",
@@ -767,12 +877,13 @@ test("G5.9 - Downtime Controller: start, advance, complete, cancel flow", async 
   const doc = createMockDocument("domain-3", "Test Domain 3", testRecord);
   const store = createMockStore([doc]);
   const repo = new StorageDomainRepository(store);
-  const commandBus = createMockCommandBus();
+  const commandBus = createMockCommandBus(repo);
 
   const controller = new DowntimeApplicationController({
     domainUuid: "JournalEntry.domain-3",
     domains: repo,
-    commandBus
+    commandBus,
+    downtimeRegistry: (commandBus as any).__downtimeRegistry
   });
 
   // 1. Start activity

@@ -5,7 +5,7 @@
 **Normative Authorities:** `Documentos/99_DOMAIN_MANAGER_MASTER_SPECIFICATION_V1.md` (§15, §16, §17, DEC-083 to DEC-097, Anexo 07 DEC-2306 to DEC-3200), `Documentos/GATES/15_G5_PROJECTS_FACILITIES_DOWNTIME.md`  
 **Status:** **GATE_G5_COMPLETED_PENDING_USER_ACCEPTANCE (Aguardando Aceitação Soberana do Usuário — Nunca aceito sem confirmação explícita)**  
 **Date:** 2026-09-19  
-**Test Suite:** 539/539 passing (0 failures, 0 regressions against G4 baseline of 444; +95 dedicated G5 tests)  
+**Test Suite:** 545/545 passing (0 failures, 0 regressions against G4 baseline of 444; +101 dedicated G5 tests)  
 **TypeScript Conformance:** Strict, 0 errors via `npx tsc --noEmit`  
 **Package & Artifact Validation:** PASS (`dist/domain-manager-v0.0.5.zip`, validation scripts verified)
 
@@ -80,17 +80,34 @@ The G5 test suite validates the system against high-scale multi-domain operation
 
 ## 5. Test Suite & Validation Summary
 
-- **Total Test Count**: 539 tests passing (0 failures, 0 regressions across G0–G4).
-- **TypeScript Compilation**: `npx tsc --noEmit` exited with code 0 (zero errors).
-- **Production Build**: `node build.mjs` built cleanly with zero warnings.
+- **Total Test Count**: 545 tests passing (0 failures, 0 regressions across G0–G4 baseline of 444; +101 dedicated G5 tests).
+- **TypeScript Compilation**: Strict conformance, 0 errors via `node node_modules/typescript/bin/tsc --noEmit`.
+- **Production Build**: `node build.mjs` built cleanly with zero warnings (`dist/main.js`).
 - **Distribution Package**: `node scripts/package.mjs` created `dist/domain-manager-v0.0.5.zip`.
-- **Package Validation**: `node scripts/validate-package.mjs` passed.
-- **Artifact Validation**: `node scripts/validate-artifact.mjs` passed.
+- **Package Validation**: `node scripts/validate-package.mjs` passed with 0 errors.
+- **Artifact Validation**: `node scripts/validate-artifact.mjs` passed with 0 errors.
 
 ---
 
-## 6. Canonical Next Gate Designation
+## 6. Audit Remediation Matrix (G5-AUD-001 to G5-AUD-010)
 
-Per the Master Specification roadmap, Gate G5 is now complete and pending user acceptance:
+| Audit Finding | Severity | Description & Root Cause | Architectural Remediation | Verification Evidence |
+|---|---|---|---|---|
+| **G5-AUD-001** | CRITICAL | G5 subsystems not composed into `DomainManagerRuntime` or registered on `CommandBus`. | Composed `ProjectsService`, `FacilitiesService`, and `DowntimeService` in `DomainManagerRuntime`. Registered all 17 canonical G5 commands on `CommandRegistry` before `registry.freeze()`. Exposed `projects`, `facilities`, and `downtime` on `PublicModuleApi`. | `tests/runtime/g5-runtime-vertical.test.ts` (test 1 verifies all 17 commands registered, registry frozen, facades exposed). |
+| **G5-AUD-002** | HIGH | UI Application Controllers mutating via direct `.save()` bypass instead of single-authority flow. | Replaced `DomainRepositoryContract` with read-only `DomainReadRepository` as `#domains` in `ProjectsApplicationController`, `FacilitiesApplicationController`, and `DowntimeApplicationController`. All mutations dispatch strictly via `CommandBus.execute(command)` and `MutationCoordinator`. Direct document writes completely eliminated. | `tests/runtime/g5-runtime-vertical.test.ts` (test 3 verifies all UI controller actions route through CommandBus without direct save). |
+| **G5-AUD-003** | HIGH | Missing dedicated `ProjectsService` and public query/dispatch API. | Created `src/projects/services/projects-service.ts` implementing canonical lifecycle operations (`startProject`, `advanceProject`, `pauseProject`, `resumeProject`, `cancelProject`, `completeProject`) with `TransactionStore` and reservation integration. Created `PublicProjectsApi` and `DefaultPublicProjectsApi` isolating internal stores. | `src/projects/services/projects-service.ts`, `src/projects/api/public-projects-api.ts`. |
+| **G5-AUD-004** | HIGH | Projects start plan did not enforce available balance subtraction or workforce limits. | Integrated `evaluateProjectStartPlan` in `ProjectsService.startProject` computing `availableMinor = balanceMinor - reservedMinor` via `ReservationStore`. Enforced workforce capacity verification against active operational and population groups. | `src/projects/services/projects-service.ts`, `tests/projects/project-start-plan.test.ts`. |
+| **G5-AUD-005** | HIGH | Missing `FacilitiesService`, public API, and presence of direct repair bypass fallback. | Created `src/facilities/services/facilities-service.ts` and `PublicFacilitiesApi`. Enforced `DM_FACILITY_REPAIR_REQUIRES_PROJECT` when project is required, eliminating any direct bypass fallback in UI controllers or service layer. Registered canonical facility commands with permission checking. | `src/facilities/services/facilities-service.ts`, `src/facilities/api/public-facilities-api.ts`, `tests/facilities/facility-maintenance.test.ts`. |
+| **G5-AUD-006** | HIGH | Missing `DowntimeService` and public API. | Created `src/downtime/services/downtime-service.ts` implementing `startActivity`, `advanceActivity`, `pauseActivity`, `resumeActivity`, `completeActivity`, and `cancelActivity`. Created `PublicDowntimeApi` and `DefaultPublicDowntimeApi`. Registered canonical downtime commands on `CommandRegistry`. | `src/downtime/services/downtime-service.ts`, `src/downtime/api/public-downtime-api.ts`. |
+| **G5-AUD-007** | MEDIUM | Permissive or unvalidated viewer defaults in UI controllers and presenters. | Hardened `viewerIsGm` to default strictly to `false` (fail-closed) across all UI presenters (`project-presenter.ts`, `facility-presenter.ts`, `downtime-presenter.ts`) and controllers. Non-GM viewers without domain controller ownership are rejected with `DM_SECURITY_PERMISSION_DENIED`. | `tests/runtime/g5-runtime-vertical.test.ts` (test 2 verifies unauthorized non-GM stranger rejected). |
+| **G5-AUD-008** | MEDIUM | Facilities and Downtime corrupt data propagation. | Updated `src/facilities/facility-data.ts` and `src/downtime/downtime-data.ts`: `tryGetDomain*Data` returns `Result` failure on corrupt JSON/config; `getDomain*Data` fails closed throwing descriptive errors (`DM_CORRUPT_FACILITIES_DATA`, `DM_CORRUPT_DOWNTIME_DATA`) rather than silently returning empty defaults. | `tests/facilities/facility-model.test.ts`, `tests/downtime/downtime-model.test.ts`. |
+| **G5-AUD-009** | HIGH | Lack of end-to-end vertical integration test suite for G5. | Implemented `tests/runtime/g5-runtime-vertical.test.ts` validating runtime composition, GM authority vs Domain Controller vs unauthorized stranger permissions, UI controller dispatch through CommandBus, and persistence/reload survival across runtime instances. | `tests/runtime/g5-runtime-vertical.test.ts` (4/4 passing). |
+| **G5-AUD-010** | LOW | Next gate pointer referenced wrong gate document. | Corrected next gate pointer in acceptance report and build state to strictly reference **Gate G6 — Relations / Reputation / Agreements / Territory** (`Documentos/GATES/16_G6_RELATIONS_REPUTATION_AGREEMENTS_TERRITORY.md`). | `docs/GATE_G5_ACCEPTANCE_REPORT.md`, `docs/BUILD_STATE.md`. |
+
+---
+
+## 7. Canonical Next Gate Designation
+
+Per the Master Specification roadmap, Gate G5 is now complete, fully remediated against all audit findings (G5-AUD-001 to G5-AUD-010), and pending user acceptance:
 - **Current Gate Status**: `GATE_G5_COMPLETED_PENDING_USER_ACCEPTANCE`
-- **Canonical Next Gate**: **Gate G6 — Events, Narrative & History** (Master Spec §18, DEC-103 to DEC-108, Documentos/GATES/16_G6_EVENTS_NARRATIVE_HISTORY.md).
+- **Canonical Next Gate**: **Gate G6 — Relations / Reputation / Agreements / Territory** (`Documentos/GATES/16_G6_RELATIONS_REPUTATION_AGREEMENTS_TERRITORY.md`).
