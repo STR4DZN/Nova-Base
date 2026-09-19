@@ -2,7 +2,7 @@
 
 ## Identidade
 
-- Module version: `0.0.3`
+- Module version: `0.0.4`
 - Gate de código atual: `G4 — Economy & Resources (IMPLEMENTAÇÃO COMPLETA — PENDENTE ACEITAÇÃO DO USUÁRIO)`
 - Estado local: `GATE_G4_PENDING_USER_ACCEPTANCE`
 - Estado externo: `GATE_G4_PENDING_USER_ACCEPTANCE (Aguardando homologação e aceitação soberana do usuário)`
@@ -42,7 +42,7 @@
 | Remediação da Revalidação G4-REVAL5-001 a G4-REVAL5-004 | PASS — 100% remediado, endurecido e verificado |
 | Remediação da Revalidação G4-REVAL6-001 | PASS — 100% remediado, endurecido e verificado |
 | Build do pacote (`node build.mjs`) | PASS (`dist/main.js` gerado) |
-| Empacotamento (`node scripts/package.mjs`) | PASS (`dist/domain-manager-v0.0.3.zip` gerado) |
+| Empacotamento (`node scripts/package.mjs`) | PASS (`dist/domain-manager-v0.0.4.zip` gerado) |
 | Validação de pacote (`node scripts/validate-package.mjs`) | PASS |
 | Validação de artefato (`node scripts/validate-artifact.mjs`) | PASS |
 

@@ -8,7 +8,7 @@
 **Status Atual:** **GATE_G4_PENDING_USER_ACCEPTANCE** (Aguardando homologação e aceitação soberana do usuário)  
 **Suíte de Testes:** 435/435 passing (0 falhas, 0 regressões contra baseline de 434 da 5ª revalidação, 428 da 4ª revalidação e 335 de G3)  
 **TypeScript Conformance:** Strict, 0 erros via `tsc --noEmit`  
-**Validação de Pacote e Artefatos:** PASS (`dist/domain-manager-v0.0.3.zip`, scripts de validação aprovados)  
+**Validação de Pacote e Artefatos:** PASS (`dist/domain-manager-v0.0.4.zip`, scripts de validação aprovados)  
 
 ---
 

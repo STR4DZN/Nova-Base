@@ -7,7 +7,7 @@
 **Date:** 2026-09-18  
 **Test Suite:** 435/435 passing (0 failures, 0 regressions against G3 baseline of 335; +100 dedicated G4 tests)  
 **TypeScript Conformance:** Strict, 0 errors via `tsc --noEmit`  
-**Package & Artifact Validation:** PASS (`dist/domain-manager-v0.0.3.zip`, validation scripts verified)
+**Package & Artifact Validation:** PASS (`dist/domain-manager-v0.0.4.zip`, validation scripts verified)
 
 ---
 
