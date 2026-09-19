@@ -1138,5 +1138,292 @@ test("G4-REVAL5-001: commitAdjust debit fails closed when readBalance fails", as
   assert.equal(mutateCalled, false, "mutateBalance must never be called when read fails during debit check");
 });
 
+test("G4-REVAL6-001: Provider restart/reconciliation handles flush failure and resolves divergence", async () => {
+  const { DomainRepository: StorageDomainRepository } = await import(
+    "../../src/storage/repositories/domain-repository.js"
+  );
+  const { createDefaultResourceRegistry } = await import(
+    "../../src/economy/definitions/resource-registry.js"
+  );
+  const { LedgerStore } = await import("../../src/economy/ledger/ledger-store.js");
+  const { ReservationStore } = await import(
+    "../../src/economy/reservations/reservation-store.js"
+  );
+  const { EconomyService } = await import(
+    "../../src/economy/services/economy-service.js"
+  );
+  const { LockManager } = await import("../../src/mutations/lock-manager.js");
+  const { TransactionStore } = await import("../../src/mutations/transaction-store.js");
+  const { RecoveryService } = await import("../../src/mutations/recovery-service.js");
+  const { ProviderRegistry } = await import("../../src/economy/providers/provider-registry.js");
+  const { ManualCurrencyProvider } = await import(
+    "../../src/economy/providers/manual-currency-provider.js"
+  );
+  const { InMemoryManualCurrencyStorageAdapter } = await import(
+    "../../src/economy/storage/manual-currency-storage-adapter.js"
+  );
+  const { createTransactionRecord } = await import(
+    "../../src/mutations/transaction-record.js"
+  );
+
+  let docFlags: Record<string, unknown> = {
+    "domain-manager": {
+      schemaVersion: 1,
+      revision: 0,
+      definition: {
+        identity: { aliases: [], summary: "Test", description: "" },
+        classification: { kind: "base", scale: "small", tags: [] },
+        hierarchy: { parentDomainUuid: null },
+        capabilities: { enabled: ["domain-manager:domain", "domain-manager:economy"], config: {} }
+      },
+      state: { lifecycle: "active" },
+      metadata: { createdByUserId: null, archivedAt: null, source: { type: "manual", ref: null } }
+    }
+  };
+
+  const doc = {
+    id: "dom-reval6",
+    uuid: "JournalEntry.dom-reval6",
+    name: "Reval6 Test Domain",
+    get flags() { return docFlags; },
+    ownership: { default: 3 },
+    update: async (data: any) => {
+      if (data["flags.domain-manager"]) {
+        docFlags = { ...docFlags, "domain-manager": data["flags.domain-manager"] };
+      }
+    }
+  };
+
+  const domains = new StorageDomainRepository({
+    get: () => doc as any,
+    list: () => [doc as any],
+    create: async () => { throw new Error("not used"); }
+  });
+
+  // --- Scenario B (Mandatory Primary Test): Provider flush fails -> Restart -> Reconcile reports not-written -> Ledger compensated, tx failed ---
+  const adapter = new InMemoryManualCurrencyStorageAdapter();
+  // Initial provider balance = 1000, 0 operations
+  await adapter.saveSnapshot({
+    schemaVersion: 1,
+    balances: { "JournalEntry.dom-reval6:treasury": 1000 },
+    operations: {},
+    updatedAt: Date.now()
+  });
+
+  const provider1 = new ManualCurrencyProvider({ storageAdapter: adapter });
+  await provider1.rehydrate();
+  const balInit = await provider1.getCurrencyBalance("JournalEntry.dom-reval6:treasury");
+  assert.equal(balInit.ok && balInit.value, 1000);
+
+  const reg1 = new ProviderRegistry();
+  reg1.register(provider1);
+
+  const txStore = new TransactionStore();
+  const ledgerStore = new LedgerStore();
+  const lockManager = new LockManager();
+  const recovery1 = new RecoveryService(txStore, lockManager);
+
+  const econ1 = new EconomyService({
+    domains,
+    resourceRegistry: createDefaultResourceRegistry(),
+    ledgerStore,
+    reservationStore: new ReservationStore(),
+    lockManager,
+    transactionStore: txStore,
+    recoveryService: recovery1,
+    providerRegistry: reg1
+  });
+
+  await econ1.createAccount({
+    domainUuid: doc.uuid,
+    resourceId: "domain-manager:treasury",
+    mode: "provider",
+    providerId: provider1.providerId,
+    providerRef: `${doc.uuid}:treasury`
+  });
+
+  // Inject failure on provider flush (simulating storage crash during commitAdjust after ledger write)
+  let failFlush = true;
+  const originalSaveSnapshot = adapter.saveSnapshot.bind(adapter);
+  adapter.saveSnapshot = async (s) => {
+    if (failFlush) {
+      throw new Error("Simulated storage write error on provider flush");
+    }
+    return originalSaveSnapshot(s);
+  };
+
+  // Perform commitAdjust(+500)
+  const adjustRes = await econ1.commitAdjust({
+    domainUuid: doc.uuid,
+    resourceId: "domain-manager:treasury",
+    deltaMinor: 500,
+    reason: "Deposit 500 with flush failure"
+  });
+
+  // Must return DM_ECON_PROVIDER_STORAGE_ERROR
+  assert.equal(adjustRes.ok, false);
+  if (!adjustRes.ok) {
+    assert.equal(adjustRes.error.code, "DM_ECON_PROVIDER_STORAGE_ERROR");
+  }
+
+  // Transaction must be in "needs-recovery"
+  const unresolvedTxs = txStore.listUnresolved();
+  assert.equal(unresolvedTxs.length, 1);
+  const txRecord = unresolvedTxs[0];
+  assert.equal(txRecord.state, "needs-recovery");
+
+  // Ledger has the initial uncompensated +500 entry
+  const entriesBeforeRecovery = ledgerStore.query({ transactionId: txRecord.transactionId });
+  assert.equal(entriesBeforeRecovery.length, 1);
+  assert.equal(entriesBeforeRecovery[0].deltaMinor, 500);
+
+  // --- Simulate Server Restart ---
+  failFlush = false;
+  // Provider 2 rehydrates from storage adapter. Since saveSnapshot failed, adapter only has initial state (1000 balance, 0 ops)
+  const provider2 = new ManualCurrencyProvider({ storageAdapter: adapter });
+  await provider2.rehydrate();
+  const p2Bal = await provider2.getCurrencyBalance("JournalEntry.dom-reval6:treasury");
+  assert.equal(p2Bal.ok && p2Bal.value, 1000, "Rehydrated provider must have initial 1000 balance");
+
+  // Reconcile on provider2 must return "not-written"
+  const recP2 = await provider2.reconcile(
+    doc.uuid,
+    "domain-manager:treasury",
+    `${doc.uuid}:treasury`,
+    txRecord.transactionId
+  );
+  assert.equal(recP2.ok, true);
+  if (recP2.ok) {
+    assert.equal(recP2.value.outcome, "not-written");
+  }
+
+  // Create recovery service and register compensator via EconomyService constructor
+  const reg2 = new ProviderRegistry();
+  reg2.register(provider2);
+  const recovery2 = new RecoveryService(txStore, lockManager);
+  const econ2 = new EconomyService({
+    domains,
+    resourceRegistry: createDefaultResourceRegistry(),
+    ledgerStore,
+    reservationStore: new ReservationStore(),
+    lockManager,
+    transactionStore: txStore,
+    recoveryService: recovery2,
+    providerRegistry: reg2
+  });
+
+  // Run recovery: Scenario B
+  const recoverRes = await recovery2.recoverTransaction(txRecord.transactionId, 2);
+  assert.equal(recoverRes.ok, true);
+  if (recoverRes.ok) {
+    assert.equal(recoverRes.value.state, "failed", "Transaction must transition to 'failed' (NOT 'committed')");
+  }
+
+  // Verify ledger compensation: opposing delta (-500) appended, net delta = 0
+  const entriesAfterRecovery = ledgerStore.query({ transactionId: txRecord.transactionId });
+  assert.equal(entriesAfterRecovery.length, 2, "Compensating ledger entry must be appended");
+  const compEntry = entriesAfterRecovery.find((e) => e.source?.type === "recovery");
+  assert.equal(compEntry !== undefined, true);
+  assert.equal(compEntry?.deltaMinor, -500);
+
+  const totalDelta = entriesAfterRecovery.reduce((sum, e) => sum + e.deltaMinor, 0);
+  assert.equal(totalDelta, 0, "Net ledger delta must be 0 after compensation");
+
+  // Verify provider balance remains 1000 (no divergence with ledger net 0)
+  const p2FinalBal = await provider2.getCurrencyBalance("JournalEntry.dom-reval6:treasury");
+  assert.equal(p2FinalBal.ok && p2FinalBal.value, 1000);
+
+  // --- Scenario A: Provider reconcile returns 'written' -> committed ---
+  const txRecordA = createTransactionRecord({
+    transactionId: "tx-scenario-a",
+    commandId: "cmd-scenario-a" as any,
+    authorityEpoch: 2,
+    lockKeys: [`domain:${doc.uuid}`],
+    safeAutoRecovery: true,
+    recoveryData: {
+      type: "economy:provider-adjust",
+      domainUuid: doc.uuid,
+      resourceId: "domain-manager:treasury",
+      providerId: provider2.providerId,
+      providerRef: `${doc.uuid}:treasury`,
+      deltaMinor: 200,
+      reason: "Deposit 200 (written confirmed)",
+      providerWriteConfirmed: false
+    }
+  });
+  txStore.save(txRecordA);
+  txStore.transition(txRecordA.transactionId, "claimed", 2);
+  txStore.transition(txRecordA.transactionId, "needs-recovery", 2);
+
+  // Add ledger entry for tx-scenario-a
+  const appendResA = ledgerStore.append({
+    domainUuid: doc.uuid,
+    resourceId: "domain-manager:treasury",
+    deltaMinor: 200,
+    kind: "adjustment",
+    transactionId: txRecordA.transactionId,
+    source: { type: "adjustment", reason: "Scenario A written op" }
+  });
+  assert.equal(appendResA.ok, true);
+
+  // Mutate provider so it has the opRef recorded
+  await provider2.mutateBalance(
+    doc.uuid,
+    "domain-manager:treasury",
+    `${doc.uuid}:treasury`,
+    200,
+    "Apply written op",
+    { operationRef: txRecordA.transactionId }
+  );
+
+  const recA = await recovery2.recoverTransaction(txRecordA.transactionId, 2);
+  assert.equal(recA.ok, true);
+  if (recA.ok) {
+    assert.equal(recA.value.state, "committed", "Transaction with written provider outcome must transition to 'committed'");
+  }
+
+  // --- Scenario C: Provider reconcile returns 'unknown' -> remains needs-recovery ---
+  const txRecordC = createTransactionRecord({
+    transactionId: "tx-scenario-c",
+    commandId: "cmd-scenario-c" as any,
+    authorityEpoch: 2,
+    lockKeys: [`domain:${doc.uuid}`],
+    safeAutoRecovery: true,
+    recoveryData: {
+      type: "economy:provider-adjust",
+      domainUuid: doc.uuid,
+      resourceId: "domain-manager:treasury",
+      providerId: provider2.providerId,
+      providerRef: `${doc.uuid}:treasury`,
+      deltaMinor: 300,
+      reason: "Deposit 300 (unknown outcome)",
+      providerWriteConfirmed: false
+    }
+  });
+  txStore.save(txRecordC);
+  txStore.transition(txRecordC.transactionId, "claimed", 2);
+  txStore.transition(txRecordC.transactionId, "needs-recovery", 2);
+
+  // Add ledger entry for tx-scenario-c
+  const appendResC = ledgerStore.append({
+    domainUuid: doc.uuid,
+    resourceId: "domain-manager:treasury",
+    deltaMinor: 300,
+    kind: "adjustment",
+    transactionId: txRecordC.transactionId,
+    source: { type: "adjustment", reason: "Scenario C unknown op" }
+  });
+  assert.equal(appendResC.ok, true);
+
+  // Set provider unhealthy so reconcile returns 'unknown'
+  provider2.setHealthy(false);
+
+  const recC = await recovery2.recoverTransaction(txRecordC.transactionId, 2);
+  assert.equal(recC.ok, false, "Recovery must fail if outcome is unknown");
+  const storedTxC = txStore.get(txRecordC.transactionId);
+  assert.equal(storedTxC?.state, "needs-recovery", "Transaction must remain in 'needs-recovery' when outcome is unknown");
+});
+
+
 
 

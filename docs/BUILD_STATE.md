@@ -32,18 +32,29 @@
 | Verificação | Resultado |
 |---|---|
 | TypeScript strict (`tsc --noEmit`) | PASS (0 erros) |
-| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 434/434 (0 falhas) |
-| Relatório de Aceitação | Gerado (`docs/GATE_G4_ACCEPTANCE_REPORT.md` e `docs/GATE_G4_REVALIDACAO_FINAL_5.md`) |
+| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 435/435 (0 falhas) |
+| Relatório de Aceitação | Gerado (`docs/GATE_G4_ACCEPTANCE_REPORT.md`, `docs/GATE_G4_REVALIDACAO_FINAL_5.md`, `docs/GATE_G4_REVALIDACAO_FINAL_6.md`) |
 | Regressões G0/G1/G2/G3 | 0 (todos os 335 testes anteriores preservados e passando) |
-| Testes novos Gate G4 | 99 testes dedicados (G4.1 a G4.10 + suítes de auditoria, isolamento, hardening, matriz de recuperação e revalidações 3/4/5) |
+| Testes novos Gate G4 | 100 testes dedicados (G4.1 a G4.10 + suítes de auditoria, isolamento, hardening, matriz de recuperação e revalidações 3/4/5/6) |
 | Remediação de Auditoria G4-AUD-001 a G4-AUD-012 | PASS — 100% remediado, endurecido e verificado |
 | Remediação da Revalidação G4-REVAL3-001 a G4-REVAL3-007 | PASS — 100% remediado, endurecido e verificado |
 | Remediação da Revalidação G4-REVAL4-001 a G4-REVAL4-004 | PASS — 100% remediado, endurecido e verificado |
 | Remediação da Revalidação G4-REVAL5-001 a G4-REVAL5-004 | PASS — 100% remediado, endurecido e verificado |
+| Remediação da Revalidação G4-REVAL6-001 | PASS — 100% remediado, endurecido e verificado |
 | Build do pacote (`node build.mjs`) | PASS (`dist/main.js` gerado) |
 | Empacotamento (`node scripts/package.mjs`) | PASS (`dist/domain-manager-v0.0.3.zip` gerado) |
 | Validação de pacote (`node scripts/validate-package.mjs`) | PASS |
 | Validação de artefato (`node scripts/validate-artifact.mjs`) | PASS |
+
+## Remediação da Revalidação Final (6ª Rodada) — G4-REVAL6-001
+
+1. **G4-REVAL6-001 (CRÍTICO / RECUPERAÇÃO — Reconciliação Prévia de Provedores Pós-Queda e Resolução de Divergência)**:
+   - Compensador `economy:provider-adjust` em `EconomyService` executa pré-reconciliação mandatória chamando `provider.reconcile(domainUuid, resourceId, providerRef, transactionId)` antes de tomar decisões de commit/reversão.
+   - Trata o caso crítico em que `provider.flush()` falhou durante `commitAdjust`, a transação ficou em `needs-recovery` e o servidor reiniciou (reidratando o provider ao snapshot anterior, perdendo a mutação em memória).
+   - Quando `hasLedgerEntry && providerOutcome === "not-written"`: estorna a entrada do ledger local (`deltaMinor: -data.deltaMinor`, `source: { type: "recovery" }`), dá flush no store e transiciona a transação para `"failed"`, zerando o delta líquido do ledger e convergindo com o provedor reidratado (sem falso-commit e sem divergência persistente).
+   - Se `providerOutcome === "unknown"`, mantém a transação estritamente em `"needs-recovery"`.
+   - Se `hasLedgerEntry && providerOutcome === "written"`, transiciona a transação para `"committed"`.
+   - Suíte de testes: `tests/economy/providers.test.ts`.
 
 ## Remediação da Revalidação Final (5ª Rodada) — G4-REVAL5-001 a G4-REVAL5-004
 

@@ -5,7 +5,7 @@
 **Normative Authorities:** `Documentos/99_DOMAIN_MANAGER_MASTER_SPECIFICATION_V1.md` (§14, §11–12, §42, DEC-1416 to DEC-2305), `Documentos/GATES/14_G4_ECONOMY_RESOURCES.md`  
 **Status:** **SUBMITTED_FOR_USER_ACCEPTANCE (Aguardando Aceitação Soberana do Usuário — Nunca aceito sem confirmação explícita)**  
 **Date:** 2026-09-18  
-**Test Suite:** 434/434 passing (0 failures, 0 regressions against G3 baseline of 335; +99 dedicated G4 tests)  
+**Test Suite:** 435/435 passing (0 failures, 0 regressions against G3 baseline of 335; +100 dedicated G4 tests)  
 **TypeScript Conformance:** Strict, 0 errors via `tsc --noEmit`  
 **Package & Artifact Validation:** PASS (`dist/domain-manager-v0.0.3.zip`, validation scripts verified)
 

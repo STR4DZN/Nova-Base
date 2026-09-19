@@ -2388,80 +2388,145 @@ export class EconomyService {
       const txEntries = this.#ledgerStore.query({ transactionId: record.transactionId });
       const hasLedgerEntry = txEntries.length > 0;
 
-      if (hasLedgerEntry) {
+      // 1. Reconcile provider first
+      if (!this.#providerRegistry || !data.providerId) {
+        return err(
+          createPublicError({
+            code: "DM_ECON_PROVIDER_UNAVAILABLE",
+            category: "provider",
+            message: `Provider registry or providerId missing for transaction '${record.transactionId}'`
+          })
+        );
+      }
+
+      const provider = this.#providerRegistry.get(data.providerId);
+      if (!provider) {
+        return err(
+          createPublicError({
+            code: "DM_ECON_PROVIDER_UNAVAILABLE",
+            category: "provider",
+            message: `Provider '${data.providerId}' is not registered; cannot reconcile '${record.transactionId}'`
+          })
+        );
+      }
+
+      let providerOutcome: "written" | "not-written" | "unknown" = "unknown";
+      if (typeof (provider as any).reconcile === "function") {
+        const recRes = await (provider as any).reconcile(
+          data.domainUuid,
+          data.resourceId,
+          data.providerRef ?? "",
+          record.transactionId
+        );
+        if (!recRes.ok) {
+          return recRes;
+        }
+        providerOutcome = recRes.value.outcome;
+      } else if (data.providerWriteConfirmed) {
+        providerOutcome = "written";
+      } else {
+        providerOutcome = "unknown";
+      }
+
+      // If provider outcome is unknown, must stay in needs-recovery
+      if (providerOutcome === "unknown") {
+        return err(
+          createPublicError({
+            code: "DM_ECON_RECOVERY_INDETERMINATE",
+            category: "recovery",
+            message: `Provider reconciliation outcome is unknown for transaction '${record.transactionId}'`
+          })
+        );
+      }
+
+      // Case 1: ledger exists + provider says written -> committed
+      if (hasLedgerEntry && providerOutcome === "written") {
         if (this.#transactionStore) {
           this.#transactionStore.transition(
             record.transactionId,
             "committed",
             record.authorityEpoch,
-            "Reconciliation confirmed provider adjustment completed cleanly"
+            "Reconciliation confirmed provider mutation and ledger entry both present"
           );
           await this.#transactionStore.flush();
         }
         return ok(undefined);
       }
 
-      // Revert provider balance mutation with prior reconciliation
-      if (this.#providerRegistry && data.providerId) {
-        const provider = this.#providerRegistry.get(data.providerId);
-        if (provider) {
-          if (typeof (provider as any).reconcile === "function") {
-            const recRes = await (provider as any).reconcile(
-              data.domainUuid,
-              data.resourceId,
-              data.providerRef ?? "",
-              record.transactionId
-            );
-            if (!recRes.ok) {
-              return recRes;
+      // Case 2: ledger exists + provider says not-written -> compensate local ledger entry and fail
+      if (hasLedgerEntry && providerOutcome === "not-written") {
+        const hasCompensatingReversal = txEntries.some(
+          (e) => e.source?.type === "recovery"
+        );
+        if (!hasCompensatingReversal) {
+          this.#ledgerStore.append({
+            domainUuid: data.domainUuid,
+            resourceId: data.resourceId,
+            deltaMinor: -data.deltaMinor,
+            kind: "adjustment",
+            transactionId: record.transactionId,
+            source: {
+              type: "recovery",
+              reason: `Recovery compensation for unwritten provider adjustment ${record.transactionId}`
             }
-            if (recRes.value.outcome === "not-written") {
-              if (this.#transactionStore) {
-                this.#transactionStore.transition(
-                  record.transactionId,
-                  "failed",
-                  record.authorityEpoch,
-                  "Reconciliation confirmed mutation was not applied on provider"
-                );
-                await this.#transactionStore.flush();
-              }
-              return ok(undefined);
-            }
-            if (recRes.value.outcome === "unknown") {
-              return err(
-                createPublicError({
-                  code: "DM_ECON_RECOVERY_INDETERMINATE",
-                  category: "recovery",
-                  message: `Provider reconciliation outcome is unknown for transaction '${record.transactionId}'`
-                })
-              );
-            }
-          } else if (!data.providerWriteConfirmed) {
-            return err(
-              createPublicError({
-                code: "DM_ECON_RECOVERY_INDETERMINATE",
-                category: "recovery",
-                message: `Provider write confirmation is missing and provider does not support reconciliation for '${record.transactionId}'`
-              })
-            );
-          }
+          });
+          await this.#ledgerStore.flush();
+        }
 
-          if (typeof (provider as any).mutateBalance === "function") {
-            const compRes = await (provider as any).mutateBalance(
-              data.domainUuid,
-              data.resourceId,
-              data.providerRef ?? "",
-              -data.deltaMinor,
-              `Recovery compensation for aborted adjustment ${record.transactionId}`
-            );
-            if (!compRes.ok) {
-              return compRes;
-            }
-            if (typeof (provider as any).flush === "function") {
-              await (provider as any).flush();
-            }
+        if (this.#transactionStore) {
+          this.#transactionStore.transition(
+            record.transactionId,
+            "failed",
+            record.authorityEpoch,
+            "Reconciliation confirmed mutation was not applied on provider; compensated local ledger"
+          );
+          await this.#transactionStore.flush();
+        }
+        return ok(undefined);
+      }
+
+      // Case 3: ledger absent + provider says written -> revert provider mutation and compensate
+      if (!hasLedgerEntry && providerOutcome === "written") {
+        if (typeof (provider as any).mutateBalance === "function") {
+          const compRes = await (provider as any).mutateBalance(
+            data.domainUuid,
+            data.resourceId,
+            data.providerRef ?? "",
+            -data.deltaMinor,
+            `Recovery compensation for aborted adjustment ${record.transactionId}`
+          );
+          if (!compRes.ok) {
+            return compRes;
+          }
+          if (typeof (provider as any).flush === "function") {
+            await (provider as any).flush();
           }
         }
+
+        if (this.#transactionStore) {
+          this.#transactionStore.transition(
+            record.transactionId,
+            "compensated",
+            record.authorityEpoch,
+            "Reconciliation reverted orphan provider mutation because ledger entry was missing"
+          );
+          await this.#transactionStore.flush();
+        }
+        return ok(undefined);
+      }
+
+      // Case 4: ledger absent + provider says not-written -> clean failure
+      if (!hasLedgerEntry && providerOutcome === "not-written") {
+        if (this.#transactionStore) {
+          this.#transactionStore.transition(
+            record.transactionId,
+            "failed",
+            record.authorityEpoch,
+            "Reconciliation confirmed mutation was not applied on provider and ledger is absent"
+          );
+          await this.#transactionStore.flush();
+        }
+        return ok(undefined);
       }
 
       return ok(undefined);
