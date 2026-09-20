@@ -7,7 +7,8 @@ import type { ResourceDefinitionRegistry } from "../definitions/resource-registr
 import type { ResourceDefinition } from "../definitions/resource-definition-types.js";
 import type { LedgerStore } from "../ledger/ledger-store.js";
 import type { LedgerEntry, LedgerEntryKind, LedgerEntrySource } from "../ledger/ledger-types.js";
-import type { ReservationStore } from "../reservations/reservation-store.js";
+import { normalizeDomainId } from "../../core/identity/refs.js";
+import type { ReservationStore, ReservationFilter } from "../reservations/reservation-store.js";
 import type { Reservation, ReservationSource } from "../reservations/reservation-types.js";
 import { LockManager } from "../../mutations/lock-manager.js";
 import type { TransactionStore } from "../../mutations/transaction-store.js";
@@ -75,6 +76,7 @@ export interface CreateAccountParams {
   readonly resolverId?: string;
   readonly reason?: string;
   readonly userId?: string;
+  readonly lockOwner?: string;
 }
 
 export interface CloseAccountParams {
@@ -82,6 +84,7 @@ export interface CloseAccountParams {
   readonly resourceId: string;
   readonly reason?: string;
   readonly userId?: string;
+  readonly lockOwner?: string;
 }
 
 export interface AdjustParams {
@@ -93,6 +96,7 @@ export interface AdjustParams {
   readonly userId?: string;
   readonly commandId?: CommandId;
   readonly authorityEpoch?: number;
+  readonly lockOwner?: string;
 }
 
 export interface TransferParams {
@@ -104,6 +108,7 @@ export interface TransferParams {
   readonly userId?: string;
   readonly commandId?: CommandId;
   readonly authorityEpoch?: number;
+  readonly lockOwner?: string;
 }
 
 export interface ConvertParams {
@@ -119,6 +124,7 @@ export interface ConvertParams {
   readonly userId?: string;
   readonly commandId?: CommandId;
   readonly authorityEpoch?: number;
+  readonly lockOwner?: string;
 }
 
 export interface ReserveParams {
@@ -128,6 +134,7 @@ export interface ReserveParams {
   readonly source: ReservationSource;
   readonly expiresAtWorld?: number | null;
   readonly expiresAtReal?: number | null;
+  readonly lockOwner?: string;
 }
 
 export interface ConsumeReservationParams {
@@ -138,6 +145,7 @@ export interface ConsumeReservationParams {
   readonly userId?: string;
   readonly commandId?: CommandId;
   readonly authorityEpoch?: number;
+  readonly lockOwner?: string;
 }
 
 export interface ReleaseReservationParams {
@@ -146,6 +154,7 @@ export interface ReleaseReservationParams {
   readonly amountMinor?: number;
   readonly reason?: string;
   readonly userId?: string;
+  readonly lockOwner?: string;
 }
 
 export interface ReversalParams {
@@ -153,6 +162,7 @@ export interface ReversalParams {
   readonly entryId: string;
   readonly reason: string;
   readonly userId?: string;
+  readonly lockOwner?: string;
 }
 
 export class EconomyService {
@@ -206,6 +216,14 @@ export class EconomyService {
 
   getResourceDefinition(resourceId: string): ResourceDefinition | undefined {
     return this.#resourceRegistry.get(resourceId);
+  }
+
+  listReservations(filter?: ReservationFilter): readonly Reservation[] {
+    return this.#reservationStore.list(filter);
+  }
+
+  getReservation(id: string): Reservation | undefined {
+    return this.#reservationStore.get(id);
   }
 
   async getAccount(
@@ -437,10 +455,10 @@ export class EconomyService {
       return valRes;
     }
 
-    const lockKey = `domain:${params.domainUuid}`;
+    const lockKey = `domain:${normalizeDomainId(params.domainUuid)}`;
     const txId = createOpaqueId("tx");
     const lockRes = await this.#lockManager.acquireLocks({
-      ownerId: `create-account:${txId}`,
+      ownerId: params.lockOwner ?? `create-account:${txId}`,
       keys: [lockKey]
     });
     if (!lockRes.ok) return lockRes;
@@ -516,10 +534,10 @@ export class EconomyService {
   async closeAccount(
     params: CloseAccountParams
   ): Promise<Result<{ success: boolean; softClosed?: boolean }, PublicError>> {
-    const lockKey = `domain:${params.domainUuid}`;
+    const lockKey = `domain:${normalizeDomainId(params.domainUuid)}`;
     const txId = createOpaqueId("tx");
     const lockRes = await this.#lockManager.acquireLocks({
-      ownerId: `close-account:${txId}`,
+      ownerId: params.lockOwner ?? `close-account:${txId}`,
       keys: [lockKey]
     });
     if (!lockRes.ok) return lockRes;
@@ -645,10 +663,10 @@ export class EconomyService {
       PublicError
     >
   > {
-    const lockKey = `domain:${params.domainUuid}`;
+    const lockKey = `domain:${normalizeDomainId(params.domainUuid)}`;
     const txId = createOpaqueId("tx");
     const lockRes = await this.#lockManager.acquireLocks({
-      ownerId: `adjust:${txId}`,
+      ownerId: params.lockOwner ?? `adjust:${txId}`,
       keys: [lockKey]
     });
     if (!lockRes.ok) return lockRes;
@@ -1101,13 +1119,13 @@ export class EconomyService {
     }
 
     // Deterministic ordered multi-key locking (DEC-603–620, DEC-17227)
-    const lockKeys = [params.sourceDomainUuid, params.targetDomainUuid]
+    const lockKeys = [normalizeDomainId(params.sourceDomainUuid), normalizeDomainId(params.targetDomainUuid)]
       .sort((a, b) => a.localeCompare(b))
       .map((u) => `domain:${u}`);
 
     const transactionId = createOpaqueId("tx");
     const lockRes = await this.#lockManager.acquireLocks({
-      ownerId: `transfer:${transactionId}`,
+      ownerId: params.lockOwner ?? `transfer:${transactionId}`,
       keys: lockKeys
     });
     if (!lockRes.ok) return lockRes;
@@ -1433,10 +1451,10 @@ export class EconomyService {
       PublicError
     >
   > {
-    const lockKey = `domain:${params.domainUuid}`;
+    const lockKey = `domain:${normalizeDomainId(params.domainUuid)}`;
     const transactionId = createOpaqueId("tx");
     const lockRes = await this.#lockManager.acquireLocks({
-      ownerId: `convert:${transactionId}`,
+      ownerId: params.lockOwner ?? `convert:${transactionId}`,
       keys: [lockKey]
     });
     if (!lockRes.ok) return lockRes;
@@ -1653,9 +1671,9 @@ export class EconomyService {
 
   async reserve(params: ReserveParams): Promise<Result<Reservation, PublicError>> {
     const txId = createOpaqueId("tx");
-    const lockKey = `domain:${params.domainUuid}`;
+    const lockKey = `domain:${normalizeDomainId(params.domainUuid)}`;
     const lockRes = await this.#lockManager.acquireLocks({
-      ownerId: `reserve:${txId}`,
+      ownerId: params.lockOwner ?? `reserve:${txId}`,
       keys: [lockKey]
     });
     if (!lockRes.ok) return lockRes;
@@ -1751,9 +1769,9 @@ export class EconomyService {
 
     // 3. Acquire canonical lock on domain
     const txId = createOpaqueId("tx");
-    const lockKey = `domain:${params.domainUuid}`;
+    const lockKey = `domain:${normalizeDomainId(params.domainUuid)}`;
     const lockRes = await this.#lockManager.acquireLocks({
-      ownerId: `consume-reservation:${txId}`,
+      ownerId: params.lockOwner ?? `consume-reservation:${txId}`,
       keys: [lockKey]
     });
     if (!lockRes.ok) return lockRes;
@@ -1918,9 +1936,9 @@ export class EconomyService {
 
     // 3. Acquire lock on domain
     const txId = createOpaqueId("tx");
-    const lockKey = `domain:${params.domainUuid}`;
+    const lockKey = `domain:${normalizeDomainId(params.domainUuid)}`;
     const lockRes = await this.#lockManager.acquireLocks({
-      ownerId: `release-reservation:${txId}`,
+      ownerId: params.lockOwner ?? `release-reservation:${txId}`,
       keys: [lockKey]
     });
     if (!lockRes.ok) return lockRes;
@@ -1994,9 +2012,9 @@ export class EconomyService {
     }
 
     const txId = createOpaqueId("tx");
-    const lockKey = `domain:${params.domainUuid}`;
+    const lockKey = `domain:${normalizeDomainId(params.domainUuid)}`;
     const lockRes = await this.#lockManager.acquireLocks({
-      ownerId: `reversal:${txId}`,
+      ownerId: params.lockOwner ?? `reversal:${txId}`,
       keys: [lockKey]
     });
     if (!lockRes.ok) return lockRes;

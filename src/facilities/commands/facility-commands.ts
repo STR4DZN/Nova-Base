@@ -56,6 +56,9 @@ export function registerFacilityCommands(options: RegisterFacilityCommandsOption
       },
       buildPlan: async (ctx, freshState) => {
         const p = ctx.command.payload;
+        const correlationId = (ctx.command as any).correlationId ?? (p as any).correlationId;
+        const causationId = (ctx.command as any).causationId ?? (p as any).causationId ?? ctx.command.commandId;
+        const authorityEpoch = ctx.authorityEpoch;
         return ok(
           createMutationPlan({
             commandId: ctx.command.commandId,
@@ -67,17 +70,37 @@ export function registerFacilityCommands(options: RegisterFacilityCommandsOption
                 payload: {
                   ...p,
                   commandId: ctx.command.commandId,
-                  userId: ctx.senderUserId
+                  userId: ctx.senderUserId,
+                  authorityEpoch,
+                  correlationId,
+                  causationId
                 }
               }
             ],
+            customData: {
+              authorityEpoch,
+              correlationId,
+              causationId,
+              senderUserId: ctx.senderUserId
+            },
             summary: summary(p)
           })
         );
       },
       commit: async (plan, freshState) => {
         const payload = plan.writeSet[0]?.payload as TPayload;
-        const execRes = await execute(payload, { command: { commandId: plan.commandId, payload } } as any);
+        const customData = (plan.customData ?? {}) as Record<string, unknown>;
+        const mergedPayload = {
+          ...payload,
+          authorityEpoch: customData.authorityEpoch ?? (payload as any).authorityEpoch,
+          correlationId: customData.correlationId ?? (payload as any).correlationId,
+          causationId: customData.causationId ?? (payload as any).causationId
+        };
+        const execRes = await execute(mergedPayload, {
+          command: { commandId: plan.commandId, payload: mergedPayload },
+          senderUserId: (customData.senderUserId as string) ?? (payload as any).userId,
+          authorityEpoch: (customData.authorityEpoch as number) ?? 1
+        } as any);
         if (!execRes.ok) return execRes;
         const readRes = await domains.read(freshState.state.uuid);
         return ok({
@@ -102,7 +125,11 @@ export function registerFacilityCommands(options: RegisterFacilityCommandsOption
       name: p.name,
       level: p.level,
       initialLifecycle: p.initialLifecycle,
-      userId: p.userId ?? ctx.senderUserId
+      userId: p.userId ?? ctx.senderUserId,
+      commandId: ctx.command.commandId,
+      authorityEpoch: ctx.authorityEpoch,
+      correlationId: (p as any).correlationId ?? (ctx.command as any).correlationId,
+      causationId: (p as any).causationId ?? (ctx.command as any).causationId ?? ctx.command.commandId
     })
   );
 
@@ -122,7 +149,11 @@ export function registerFacilityCommands(options: RegisterFacilityCommandsOption
             name: p.name,
             level: p.level,
             initialLifecycle: p.initialLifecycle,
-            userId: ctx.senderUserId
+            userId: ctx.senderUserId,
+            commandId: ctx.command.commandId,
+            authorityEpoch: ctx.authorityEpoch,
+            correlationId: (p as any).correlationId ?? (ctx.command as any).correlationId,
+            causationId: (p as any).causationId ?? (ctx.command as any).causationId ?? ctx.command.commandId
           });
         },
     schemaValidator: (payload: unknown) => {
@@ -168,7 +199,11 @@ export function registerFacilityCommands(options: RegisterFacilityCommandsOption
       facilityId: p.facilityId,
       channelId: p.channelId,
       notes: p.notes,
-      userId: p.userId ?? ctx.senderUserId
+      userId: p.userId ?? ctx.senderUserId,
+      commandId: ctx.command.commandId,
+      authorityEpoch: ctx.authorityEpoch,
+      correlationId: (p as any).correlationId ?? (ctx.command as any).correlationId,
+      causationId: (p as any).causationId ?? (ctx.command as any).causationId ?? ctx.command.commandId
     })
   );
 
@@ -187,7 +222,11 @@ export function registerFacilityCommands(options: RegisterFacilityCommandsOption
             facilityId: p.facilityId,
             channelId: p.channelId,
             notes: p.notes,
-            userId: ctx.senderUserId
+            userId: ctx.senderUserId,
+            commandId: ctx.command.commandId,
+            authorityEpoch: ctx.authorityEpoch,
+            correlationId: (p as any).correlationId ?? (ctx.command as any).correlationId,
+            causationId: (p as any).causationId ?? (ctx.command as any).causationId ?? ctx.command.commandId
           });
         },
     schemaValidator: (payload: unknown) => {
@@ -234,7 +273,11 @@ export function registerFacilityCommands(options: RegisterFacilityCommandsOption
       restoreIntegrity: p.restoreIntegrity,
       removeConditionIds: p.removeConditionIds,
       notes: p.notes,
-      userId: p.userId ?? ctx.senderUserId
+      userId: p.userId ?? ctx.senderUserId,
+      commandId: ctx.command.commandId,
+      authorityEpoch: ctx.authorityEpoch,
+      correlationId: (p as any).correlationId ?? (ctx.command as any).correlationId,
+      causationId: (p as any).causationId ?? (ctx.command as any).causationId ?? ctx.command.commandId
     })
   );
 
@@ -254,7 +297,11 @@ export function registerFacilityCommands(options: RegisterFacilityCommandsOption
             restoreIntegrity: p.restoreIntegrity,
             removeConditionIds: p.removeConditionIds,
             notes: p.notes,
-            userId: ctx.senderUserId
+            userId: ctx.senderUserId,
+            commandId: ctx.command.commandId,
+            authorityEpoch: ctx.authorityEpoch,
+            correlationId: (p as any).correlationId ?? (ctx.command as any).correlationId,
+            causationId: (p as any).causationId ?? (ctx.command as any).causationId ?? ctx.command.commandId
           });
         },
     schemaValidator: (payload: unknown) => {
@@ -302,7 +349,11 @@ export function registerFacilityCommands(options: RegisterFacilityCommandsOption
       conditionId: p.conditionId,
       condition: p.condition,
       reason: p.reason,
-      userId: p.userId ?? ctx.senderUserId
+      userId: p.userId ?? ctx.senderUserId,
+      commandId: ctx.command.commandId,
+      authorityEpoch: ctx.authorityEpoch,
+      correlationId: (p as any).correlationId ?? (ctx.command as any).correlationId,
+      causationId: (p as any).causationId ?? (ctx.command as any).causationId ?? ctx.command.commandId
     })
   );
 
@@ -323,7 +374,11 @@ export function registerFacilityCommands(options: RegisterFacilityCommandsOption
             conditionId: p.conditionId,
             condition: p.condition,
             reason: p.reason,
-            userId: ctx.senderUserId
+            userId: ctx.senderUserId,
+            commandId: ctx.command.commandId,
+            authorityEpoch: ctx.authorityEpoch,
+            correlationId: (p as any).correlationId ?? (ctx.command as any).correlationId,
+            causationId: (p as any).causationId ?? (ctx.command as any).causationId ?? ctx.command.commandId
           });
         },
     permissionValidator: (ctx) =>
@@ -340,7 +395,11 @@ export function registerFacilityCommands(options: RegisterFacilityCommandsOption
       domainUuid: p.domainUuid,
       facilityId: p.facilityId,
       reason: p.reason,
-      userId: p.userId ?? ctx.senderUserId
+      userId: p.userId ?? ctx.senderUserId,
+      commandId: ctx.command.commandId,
+      authorityEpoch: ctx.authorityEpoch,
+      correlationId: (p as any).correlationId ?? (ctx.command as any).correlationId,
+      causationId: (p as any).causationId ?? (ctx.command as any).causationId ?? ctx.command.commandId
     })
   );
 
@@ -358,7 +417,11 @@ export function registerFacilityCommands(options: RegisterFacilityCommandsOption
             domainUuid: p.domainUuid,
             facilityId: p.facilityId,
             reason: p.reason,
-            userId: ctx.senderUserId
+            userId: ctx.senderUserId,
+            commandId: ctx.command.commandId,
+            authorityEpoch: ctx.authorityEpoch,
+            correlationId: (p as any).correlationId ?? (ctx.command as any).correlationId,
+            causationId: (p as any).causationId ?? (ctx.command as any).causationId ?? ctx.command.commandId
           });
         },
     permissionValidator: validatePerms

@@ -333,6 +333,9 @@ function normalizeJournalEntryId(idOrUuid) {
   }
   return trimmed;
 }
+function normalizeDomainId(idOrUuid) {
+  return normalizeJournalEntryId(idOrUuid);
+}
 
 // src/domains/domain-validator.ts
 function invalid(message) {
@@ -15955,6 +15958,12 @@ var EconomyService = class {
   getResourceDefinition(resourceId) {
     return this.#resourceRegistry.get(resourceId);
   }
+  listReservations(filter) {
+    return this.#reservationStore.list(filter);
+  }
+  getReservation(id) {
+    return this.#reservationStore.get(id);
+  }
   async getAccount(domainUuid, resourceId) {
     const docRes = await this.#domains.read(this.#cleanUuid(domainUuid));
     if (!docRes.ok) {
@@ -16143,10 +16152,10 @@ var EconomyService = class {
     if (!valRes.ok) {
       return valRes;
     }
-    const lockKey = `domain:${params.domainUuid}`;
+    const lockKey = `domain:${normalizeDomainId(params.domainUuid)}`;
     const txId = createOpaqueId("tx");
     const lockRes = await this.#lockManager.acquireLocks({
-      ownerId: `create-account:${txId}`,
+      ownerId: params.lockOwner ?? `create-account:${txId}`,
       keys: [lockKey]
     });
     if (!lockRes.ok) return lockRes;
@@ -16209,10 +16218,10 @@ var EconomyService = class {
     }
   }
   async closeAccount(params) {
-    const lockKey = `domain:${params.domainUuid}`;
+    const lockKey = `domain:${normalizeDomainId(params.domainUuid)}`;
     const txId = createOpaqueId("tx");
     const lockRes = await this.#lockManager.acquireLocks({
-      ownerId: `close-account:${txId}`,
+      ownerId: params.lockOwner ?? `close-account:${txId}`,
       keys: [lockKey]
     });
     if (!lockRes.ok) return lockRes;
@@ -16308,10 +16317,10 @@ var EconomyService = class {
     return ok(plan);
   }
   async commitAdjust(params) {
-    const lockKey = `domain:${params.domainUuid}`;
+    const lockKey = `domain:${normalizeDomainId(params.domainUuid)}`;
     const txId = createOpaqueId("tx");
     const lockRes = await this.#lockManager.acquireLocks({
-      ownerId: `adjust:${txId}`,
+      ownerId: params.lockOwner ?? `adjust:${txId}`,
       keys: [lockKey]
     });
     if (!lockRes.ok) return lockRes;
@@ -16695,10 +16704,10 @@ var EconomyService = class {
         })
       );
     }
-    const lockKeys = [params.sourceDomainUuid, params.targetDomainUuid].sort((a, b) => a.localeCompare(b)).map((u) => `domain:${u}`);
+    const lockKeys = [normalizeDomainId(params.sourceDomainUuid), normalizeDomainId(params.targetDomainUuid)].sort((a, b) => a.localeCompare(b)).map((u) => `domain:${u}`);
     const transactionId = createOpaqueId("tx");
     const lockRes = await this.#lockManager.acquireLocks({
-      ownerId: `transfer:${transactionId}`,
+      ownerId: params.lockOwner ?? `transfer:${transactionId}`,
       keys: lockKeys
     });
     if (!lockRes.ok) return lockRes;
@@ -16976,10 +16985,10 @@ var EconomyService = class {
     return ok(plan);
   }
   async commitConvert(params) {
-    const lockKey = `domain:${params.domainUuid}`;
+    const lockKey = `domain:${normalizeDomainId(params.domainUuid)}`;
     const transactionId = createOpaqueId("tx");
     const lockRes = await this.#lockManager.acquireLocks({
-      ownerId: `convert:${transactionId}`,
+      ownerId: params.lockOwner ?? `convert:${transactionId}`,
       keys: [lockKey]
     });
     if (!lockRes.ok) return lockRes;
@@ -17170,9 +17179,9 @@ var EconomyService = class {
   }
   async reserve(params) {
     const txId = createOpaqueId("tx");
-    const lockKey = `domain:${params.domainUuid}`;
+    const lockKey = `domain:${normalizeDomainId(params.domainUuid)}`;
     const lockRes = await this.#lockManager.acquireLocks({
-      ownerId: `reserve:${txId}`,
+      ownerId: params.lockOwner ?? `reserve:${txId}`,
       keys: [lockKey]
     });
     if (!lockRes.ok) return lockRes;
@@ -17246,9 +17255,9 @@ var EconomyService = class {
       );
     }
     const txId = createOpaqueId("tx");
-    const lockKey = `domain:${params.domainUuid}`;
+    const lockKey = `domain:${normalizeDomainId(params.domainUuid)}`;
     const lockRes = await this.#lockManager.acquireLocks({
-      ownerId: `consume-reservation:${txId}`,
+      ownerId: params.lockOwner ?? `consume-reservation:${txId}`,
       keys: [lockKey]
     });
     if (!lockRes.ok) return lockRes;
@@ -17387,9 +17396,9 @@ var EconomyService = class {
       );
     }
     const txId = createOpaqueId("tx");
-    const lockKey = `domain:${params.domainUuid}`;
+    const lockKey = `domain:${normalizeDomainId(params.domainUuid)}`;
     const lockRes = await this.#lockManager.acquireLocks({
-      ownerId: `release-reservation:${txId}`,
+      ownerId: params.lockOwner ?? `release-reservation:${txId}`,
       keys: [lockKey]
     });
     if (!lockRes.ok) return lockRes;
@@ -17455,9 +17464,9 @@ var EconomyService = class {
       );
     }
     const txId = createOpaqueId("tx");
-    const lockKey = `domain:${params.domainUuid}`;
+    const lockKey = `domain:${normalizeDomainId(params.domainUuid)}`;
     const lockRes = await this.#lockManager.acquireLocks({
-      ownerId: `reversal:${txId}`,
+      ownerId: params.lockOwner ?? `reversal:${txId}`,
       keys: [lockKey]
     });
     if (!lockRes.ok) return lockRes;
@@ -21379,44 +21388,58 @@ function commitProjectCompletion(plan, project, options) {
   const childReceipts = [];
   let partialFailure = false;
   for (const effect of plan.sideEffects) {
-    const handler = options?.sideEffectHandlers?.[effect.type];
-    if (handler) {
-      try {
-        const res = handler(effect, { project, domain: { definition: { identity: { id: project.domainUuid } } } });
-        if ("ok" in res) {
-          if (res.ok) {
-            childReceipts.push(res.value);
+    if (options?.sideEffectHandlers !== void 0) {
+      const handler = options.sideEffectHandlers[effect.type];
+      if (handler) {
+        try {
+          const res = handler(effect, { project, domain: { definition: { identity: { id: project.domainUuid } } } });
+          if ("ok" in res) {
+            if (res.ok) {
+              childReceipts.push(res.value);
+            } else {
+              partialFailure = true;
+              childReceipts.push({
+                childReceiptId: createOpaqueId("rep"),
+                subsystem: effect.type === "facility" ? "facility" : effect.type === "resource" ? "economy" : "custom",
+                action: `apply_${effect.type}_reward`,
+                targetRef: effect.targetRef,
+                payload: effect.value,
+                success: false,
+                appliedAt: now,
+                error: res.error.message
+              });
+            }
           } else {
-            partialFailure = true;
-            childReceipts.push({
-              childReceiptId: createOpaqueId("rep"),
-              subsystem: effect.type === "facility" ? "facility" : effect.type === "resource" ? "economy" : "custom",
-              action: `apply_${effect.type}_reward`,
-              targetRef: effect.targetRef,
-              payload: effect.value,
-              success: false,
-              appliedAt: now,
-              error: res.error.message
-            });
+            childReceipts.push(res);
+            if (!res.success) {
+              partialFailure = true;
+            }
           }
-        } else {
-          childReceipts.push(res);
-          if (!res.success) {
-            partialFailure = true;
-          }
+        } catch (errCatch) {
+          partialFailure = true;
+          const msg = errCatch instanceof Error ? errCatch.message : String(errCatch);
+          childReceipts.push({
+            childReceiptId: createOpaqueId("rep"),
+            subsystem: effect.type === "facility" ? "facility" : effect.type === "resource" ? "economy" : "custom",
+            action: `apply_${effect.type}_reward`,
+            targetRef: effect.targetRef,
+            payload: effect.value,
+            success: false,
+            appliedAt: now,
+            error: msg
+          });
         }
-      } catch (errCatch) {
+      } else {
         partialFailure = true;
-        const msg = errCatch instanceof Error ? errCatch.message : String(errCatch);
         childReceipts.push({
           childReceiptId: createOpaqueId("rep"),
           subsystem: effect.type === "facility" ? "facility" : effect.type === "resource" ? "economy" : "custom",
-          action: `apply_${effect.type}_reward`,
+          action: `grant_${effect.type}`,
           targetRef: effect.targetRef,
           payload: effect.value,
           success: false,
-          appliedAt: now,
-          error: msg
+          error: `No handler registered for side effect type '${effect.type}'`,
+          appliedAt: now
         });
       }
     } else {
@@ -21617,6 +21640,7 @@ var ProjectsService = class {
         })
       );
     }
+    const createdReservationIds = [];
     if (this.#economyService) {
       for (const cost of definition.costs) {
         if (cost.timing === "upfront") {
@@ -21624,7 +21648,8 @@ var ProjectsService = class {
             domainUuid: params.domainUuid,
             resourceId: cost.resourceId,
             deltaMinor: -cost.amountMinor,
-            reason: `Upfront cost for project ${draftProject.name}`
+            reason: `Upfront cost for project ${draftProject.name}`,
+            lockOwner: params.commandId
           });
           if (!debitRes.ok) {
             return err(
@@ -21641,7 +21666,8 @@ var ProjectsService = class {
             domainUuid: params.domainUuid,
             resourceId: cost.resourceId,
             amountMinor: cost.amountMinor,
-            source: { type: "project", ref: projectId }
+            source: { type: "project", ref: projectId },
+            lockOwner: params.commandId
           });
           if (!reserveRes.ok) {
             return err(
@@ -21653,18 +21679,44 @@ var ProjectsService = class {
               })
             );
           }
+          createdReservationIds.push(reserveRes.value.id);
         }
       }
     }
-    const commitRes = commitProjectStartPlan(plan, draftProject, {
+    const projectToCommit = createdReservationIds.length > 0 ? {
+      ...draftProject,
+      metadata: {
+        ...draftProject.metadata ?? {},
+        reservationIds: Object.freeze(createdReservationIds)
+      }
+    } : draftProject;
+    const commitRes = commitProjectStartPlan(plan, projectToCommit, {
       userId: params.userId
     });
     if (!commitRes.ok) return commitRes;
     const startedProject = commitRes.value.project;
     const freshDocRes = await this.#domains.read(domainUuid);
     if (!freshDocRes.ok) return freshDocRes;
-    const freshProjectsData = getDomainProjectsData(freshDocRes.value.record);
-    const updatedRecord = withDomainProjectsData(freshDocRes.value.record, {
+    let freshRecord = freshDocRes.value.record;
+    if (params.workforceRequired !== void 0 && params.workforceRequired > 0) {
+      const peopleData = getDomainPeopleData(freshRecord);
+      const wfResId = createOpaqueId("resv");
+      const workforceReservation = {
+        id: wfResId,
+        sourceRef: `domain:${domainUuid}`,
+        targetRef: `project:${projectId}`,
+        workforceTypeId: "general",
+        amount: params.workforceRequired,
+        status: "active",
+        visibility: "public"
+      };
+      freshRecord = withDomainPeopleData(freshRecord, {
+        ...peopleData,
+        reservations: Object.freeze([...peopleData.reservations, workforceReservation])
+      });
+    }
+    const freshProjectsData = getDomainProjectsData(freshRecord);
+    const updatedRecord = withDomainProjectsData(freshRecord, {
       ...freshProjectsData,
       projects: Object.freeze([...freshProjectsData.projects, startedProject])
     });
@@ -21734,19 +21786,31 @@ var ProjectsService = class {
     });
     if (!advanceRes.ok) return advanceRes;
     if (this.#economyService && advanceRes.value.receipt.unitsDelta > 0) {
+      const unitsBefore = project.workCompleted;
+      const unitsAfter = Math.min(project.workRequired, unitsBefore + advanceRes.value.receipt.unitsDelta);
       for (const cost of definition.costs) {
         if (cost.timing === "progressive") {
-          const progAmount = Math.max(
-            0,
-            Math.floor(advanceRes.value.receipt.unitsDelta / project.workRequired * cost.amountMinor)
-          );
-          if (progAmount > 0) {
-            await this.#economyService.commitAdjust({
+          const dueBefore = Math.floor(unitsBefore / project.workRequired * cost.amountMinor);
+          const dueAfter = Math.floor(unitsAfter / project.workRequired * cost.amountMinor);
+          const toDebit = dueAfter - dueBefore;
+          if (toDebit > 0) {
+            const debitRes = await this.#economyService.commitAdjust({
               domainUuid: params.domainUuid,
               resourceId: cost.resourceId,
-              deltaMinor: -progAmount,
-              reason: `Progressive cost for project ${project.name}`
+              deltaMinor: -toDebit,
+              reason: `Progressive cost for project ${project.name}`,
+              lockOwner: params.commandId
             });
+            if (!debitRes.ok) {
+              return err(
+                createPublicError({
+                  code: "DM_PROJECT_ADVANCE_BLOCKED",
+                  category: "conflict",
+                  message: `Insufficient funds for progressive cost '${cost.resourceId}': ${debitRes.error.message}`,
+                  details: debitRes.error
+                })
+              );
+            }
           }
         }
       }
@@ -21789,21 +21853,51 @@ var ProjectsService = class {
     );
   }
   async cancelProject(params) {
-    if (this.#economyService && "releaseReservation" in this.#economyService) {
-      try {
-        const resList = await this.#economyService.getReservations?.(params.domainUuid);
-        if (resList && resList.ok && Array.isArray(resList.value)) {
-          for (const r of resList.value) {
-            if (r.source?.ref === params.projectId || r.source?.type === "project") {
-              await this.#economyService.releaseReservation({
-                domainUuid: params.domainUuid,
-                reservationId: r.id,
-                reason: params.reason ?? "Project cancelled"
-              });
-            }
+    const domainUuid = this.#cleanId(params.domainUuid);
+    const docRes = await this.#domains.read(domainUuid);
+    if (!docRes.ok) return docRes;
+    const project = getDomainProjectsData(docRes.value.record).projects.find((p) => p.id === params.projectId);
+    if (this.#economyService) {
+      const activeReservations = [];
+      if (project?.metadata?.reservationIds && Array.isArray(project.metadata.reservationIds)) {
+        activeReservations.push(...project.metadata.reservationIds);
+      }
+      if ("listReservations" in this.#economyService) {
+        const matching = this.#economyService.listReservations({
+          domainUuid: params.domainUuid,
+          sourceRef: params.projectId,
+          status: "active"
+        });
+        for (const m of matching) {
+          if (!activeReservations.includes(m.id)) {
+            activeReservations.push(m.id);
           }
         }
-      } catch {
+      }
+      for (const resId of activeReservations) {
+        await this.#economyService.releaseReservation({
+          domainUuid: params.domainUuid,
+          reservationId: resId,
+          reason: params.reason ?? "Project cancelled",
+          lockOwner: params.commandId
+        });
+      }
+    }
+    const freshDocRes = await this.#domains.read(domainUuid);
+    if (freshDocRes.ok) {
+      const peopleData = getDomainPeopleData(freshDocRes.value.record);
+      const hasWorkforceRes = peopleData.reservations.some(
+        (r) => r.targetRef === `project:${params.projectId}` && r.status === "active"
+      );
+      if (hasWorkforceRes) {
+        const updatedReservations = peopleData.reservations.map(
+          (r) => r.targetRef === `project:${params.projectId}` && r.status === "active" ? { ...r, status: "released" } : r
+        );
+        const updatedRecord = withDomainPeopleData(freshDocRes.value.record, {
+          ...peopleData,
+          reservations: Object.freeze(updatedReservations)
+        });
+        await this.#domains.update({ ...freshDocRes.value, record: updatedRecord });
       }
     }
     return this.#mutateLifecycle(
@@ -21881,113 +21975,6 @@ var ProjectsService = class {
         })
       );
     }
-    if (this.#economyService) {
-      for (const cost of definition.costs) {
-        if (cost.timing === "onCompletion") {
-          await this.#economyService.commitAdjust({
-            domainUuid: params.domainUuid,
-            resourceId: cost.resourceId,
-            deltaMinor: -cost.amountMinor,
-            reason: `OnCompletion cost for project ${project.name}`
-          });
-        }
-      }
-    }
-    const executedReceipts = {};
-    if (this.#facilitiesService) {
-      for (const effect of plan.sideEffects.filter((e) => e.type === "facility")) {
-        if (!effect.targetRef) continue;
-        const facRes = await this.#facilitiesService.createFacility({
-          domainUuid: params.domainUuid,
-          definitionId: effect.targetRef,
-          name: effect.description
-        });
-        if (facRes.ok) {
-          executedReceipts[effect.id] = {
-            childReceiptId: createOpaqueId("rep"),
-            subsystem: "facility",
-            action: "create_facility",
-            targetRef: facRes.value.facility.id,
-            payload: { definitionId: effect.targetRef, facilityId: facRes.value.facility.id },
-            success: true,
-            appliedAt: Date.now()
-          };
-        } else {
-          executedReceipts[effect.id] = {
-            childReceiptId: createOpaqueId("rep"),
-            subsystem: "facility",
-            action: "create_facility",
-            targetRef: effect.targetRef,
-            payload: effect.value,
-            success: false,
-            error: facRes.error.message,
-            appliedAt: Date.now()
-          };
-        }
-      }
-    }
-    if (this.#economyService) {
-      for (const effect of plan.sideEffects.filter((e) => e.type === "resource")) {
-        if (!effect.targetRef) continue;
-        const econRes = await this.#economyService.commitAdjust({
-          domainUuid: params.domainUuid,
-          resourceId: effect.targetRef,
-          deltaMinor: Number(effect.value),
-          reason: `Project completion reward: ${effect.description ?? project.name}`
-        });
-        if (econRes.ok) {
-          executedReceipts[effect.id] = {
-            childReceiptId: createOpaqueId("rep"),
-            subsystem: "economy",
-            action: "credit_resource",
-            targetRef: effect.targetRef,
-            payload: { amountMinor: effect.value },
-            success: true,
-            appliedAt: Date.now()
-          };
-        } else {
-          executedReceipts[effect.id] = {
-            childReceiptId: createOpaqueId("rep"),
-            subsystem: "economy",
-            action: "credit_resource",
-            targetRef: effect.targetRef,
-            payload: { amountMinor: effect.value },
-            success: false,
-            error: econRes.error.message,
-            appliedAt: Date.now()
-          };
-        }
-      }
-    }
-    const sideEffectHandlers = {
-      ...params.options?.sideEffectHandlers ?? {}
-    };
-    if (!sideEffectHandlers.facility) {
-      sideEffectHandlers.facility = (effect) => {
-        return executedReceipts[effect.id] ?? {
-          childReceiptId: createOpaqueId("rep"),
-          subsystem: "facility",
-          action: "create_facility",
-          targetRef: effect.targetRef,
-          payload: effect.value,
-          success: !this.#facilitiesService,
-          appliedAt: Date.now()
-        };
-      };
-    }
-    if (!sideEffectHandlers.resource) {
-      sideEffectHandlers.resource = (effect) => {
-        return executedReceipts[effect.id] ?? {
-          childReceiptId: createOpaqueId("rep"),
-          subsystem: "economy",
-          action: "credit_resource",
-          targetRef: effect.targetRef,
-          payload: { amountMinor: effect.value },
-          success: !this.#economyService,
-          appliedAt: Date.now()
-        };
-      };
-    }
     const txId = createOpaqueId("tx");
     const cmdId = params.commandId ? params.commandId.startsWith("cmd_") ? params.commandId : `cmd_${params.commandId}` : createCommandId();
     const epoch = params.authorityEpoch ?? 1;
@@ -22002,12 +21989,194 @@ var ProjectsService = class {
           projectId: project.id,
           planId: plan.planId,
           correlationId: params.correlationId,
-          causationId: params.causationId
+          causationId: params.causationId,
+          status: "prepared"
         }
       });
       this.#transactionStore.save(tx);
       this.#transactionStore.transition(txId, "claimed", epoch);
       this.#transactionStore.transition(txId, "prepared", epoch);
+    }
+    if (this.#economyService) {
+      for (const cost of definition.costs) {
+        if (cost.timing === "onCompletion") {
+          const debitRes = await this.#economyService.commitAdjust({
+            domainUuid: params.domainUuid,
+            resourceId: cost.resourceId,
+            deltaMinor: -cost.amountMinor,
+            reason: `OnCompletion cost for project ${project.name}`,
+            lockOwner: params.commandId
+          });
+          if (!debitRes.ok) {
+            if (this.#transactionStore) {
+              this.#transactionStore.transition(txId, "failed", epoch, debitRes.error.message);
+            }
+            return err(
+              createPublicError({
+                code: "DM_PROJECT_COMPLETION_BLOCKED",
+                category: "conflict",
+                message: `Failed to debit onCompletion cost for '${cost.resourceId}': ${debitRes.error.message}`,
+                details: debitRes.error
+              })
+            );
+          }
+        }
+      }
+    }
+    if (this.#economyService) {
+      const activeReservations = [];
+      if (project?.metadata?.reservationIds && Array.isArray(project.metadata.reservationIds)) {
+        activeReservations.push(...project.metadata.reservationIds);
+      }
+      if ("listReservations" in this.#economyService) {
+        const matching = this.#economyService.listReservations({
+          domainUuid: params.domainUuid,
+          sourceRef: params.projectId,
+          status: "active"
+        });
+        for (const m of matching) {
+          if (!activeReservations.includes(m.id)) {
+            activeReservations.push(m.id);
+          }
+        }
+      }
+      for (const resId of activeReservations) {
+        const resObj = this.#economyService.getReservation(resId);
+        if (resObj && (resObj.status === "active" || resObj.status === "partially-consumed")) {
+          await this.#economyService.consumeReservation({
+            domainUuid: params.domainUuid,
+            reservationId: resId,
+            amountMinor: resObj.remainingAmountMinor,
+            reason: `Project ${project.name} completed`,
+            lockOwner: params.commandId
+          });
+        }
+      }
+    }
+    let partialFailure = false;
+    const executedReceipts = {};
+    for (const effect of plan.sideEffects.filter((e) => e.type === "facility")) {
+      if (!effect.targetRef) continue;
+      if (!this.#facilitiesService) {
+        partialFailure = true;
+        executedReceipts[effect.id] = {
+          childReceiptId: createOpaqueId("rep"),
+          subsystem: "facility",
+          action: "create_facility",
+          targetRef: effect.targetRef,
+          payload: effect.value,
+          success: false,
+          error: "FacilitiesService not available",
+          appliedAt: Date.now()
+        };
+        continue;
+      }
+      const facRes = await this.#facilitiesService.createFacility({
+        domainUuid: params.domainUuid,
+        definitionId: effect.targetRef,
+        name: effect.description
+      });
+      if (facRes.ok) {
+        executedReceipts[effect.id] = {
+          childReceiptId: createOpaqueId("rep"),
+          subsystem: "facility",
+          action: "create_facility",
+          targetRef: facRes.value.facility.id,
+          payload: { definitionId: effect.targetRef, facilityId: facRes.value.facility.id },
+          success: true,
+          appliedAt: Date.now()
+        };
+      } else {
+        partialFailure = true;
+        executedReceipts[effect.id] = {
+          childReceiptId: createOpaqueId("rep"),
+          subsystem: "facility",
+          action: "create_facility",
+          targetRef: effect.targetRef,
+          payload: effect.value,
+          success: false,
+          error: facRes.error.message,
+          appliedAt: Date.now()
+        };
+      }
+    }
+    for (const effect of plan.sideEffects.filter((e) => e.type === "resource")) {
+      if (!effect.targetRef) continue;
+      if (!this.#economyService) {
+        partialFailure = true;
+        executedReceipts[effect.id] = {
+          childReceiptId: createOpaqueId("rep"),
+          subsystem: "economy",
+          action: "credit_resource",
+          targetRef: effect.targetRef,
+          payload: { amountMinor: effect.value },
+          success: false,
+          error: "EconomyService not available",
+          appliedAt: Date.now()
+        };
+        continue;
+      }
+      const econRes = await this.#economyService.commitAdjust({
+        domainUuid: params.domainUuid,
+        resourceId: effect.targetRef,
+        deltaMinor: Number(effect.value),
+        reason: `Project completion reward: ${effect.description ?? project.name}`,
+        lockOwner: params.commandId
+      });
+      if (econRes.ok) {
+        executedReceipts[effect.id] = {
+          childReceiptId: createOpaqueId("rep"),
+          subsystem: "economy",
+          action: "credit_resource",
+          targetRef: effect.targetRef,
+          payload: { amountMinor: effect.value },
+          success: true,
+          appliedAt: Date.now()
+        };
+      } else {
+        partialFailure = true;
+        executedReceipts[effect.id] = {
+          childReceiptId: createOpaqueId("rep"),
+          subsystem: "economy",
+          action: "credit_resource",
+          targetRef: effect.targetRef,
+          payload: { amountMinor: effect.value },
+          success: false,
+          error: econRes.error.message,
+          appliedAt: Date.now()
+        };
+      }
+    }
+    const sideEffectHandlers = {
+      ...params.options?.sideEffectHandlers ?? {}
+    };
+    if (!sideEffectHandlers.facility) {
+      sideEffectHandlers.facility = (effect) => {
+        return executedReceipts[effect.id] ?? {
+          childReceiptId: createOpaqueId("rep"),
+          subsystem: "facility",
+          action: "create_facility",
+          targetRef: effect.targetRef,
+          payload: effect.value,
+          success: false,
+          error: "No facility receipt generated",
+          appliedAt: Date.now()
+        };
+      };
+    }
+    if (!sideEffectHandlers.resource) {
+      sideEffectHandlers.resource = (effect) => {
+        return executedReceipts[effect.id] ?? {
+          childReceiptId: createOpaqueId("rep"),
+          subsystem: "economy",
+          action: "credit_resource",
+          targetRef: effect.targetRef,
+          payload: { amountMinor: effect.value },
+          success: false,
+          error: "No resource receipt generated",
+          appliedAt: Date.now()
+        };
+      };
     }
     const commitRes = commitProjectCompletion(plan, project, {
       ...params.options,
@@ -22020,26 +22189,31 @@ var ProjectsService = class {
       }
       return commitRes;
     }
-    const { updatedProject, childReceipts, partialFailure } = commitRes.value;
-    if (this.#transactionStore) {
-      if (partialFailure) {
-        this.#transactionStore.transition(
-          txId,
-          "needs-recovery",
-          epoch,
-          "Coordinated side effects experienced partial failure"
-        );
-      } else {
-        this.#transactionStore.transition(txId, "committing", epoch);
-      }
+    const { updatedProject, childReceipts } = commitRes.value;
+    if (commitRes.value.partialFailure) {
+      partialFailure = true;
     }
     const freshDocRes = await this.#domains.read(domainUuid);
     if (!freshDocRes.ok) return freshDocRes;
-    const freshProjectsData = getDomainProjectsData(freshDocRes.value.record);
+    let freshRecord = freshDocRes.value.record;
+    const peopleData = getDomainPeopleData(freshRecord);
+    const hasWorkforceRes = peopleData.reservations.some(
+      (r) => r.targetRef === `project:${params.projectId}` && r.status === "active"
+    );
+    if (hasWorkforceRes) {
+      const updatedReservations = peopleData.reservations.map(
+        (r) => r.targetRef === `project:${params.projectId}` && r.status === "active" ? { ...r, status: "released" } : r
+      );
+      freshRecord = withDomainPeopleData(freshRecord, {
+        ...peopleData,
+        reservations: Object.freeze(updatedReservations)
+      });
+    }
+    const freshProjectsData = getDomainProjectsData(freshRecord);
     const updatedProjects = freshProjectsData.projects.map(
       (p) => p.id === params.projectId ? updatedProject : p
     );
-    const updatedRecord = withDomainProjectsData(freshDocRes.value.record, {
+    const updatedRecord = withDomainProjectsData(freshRecord, {
       ...freshProjectsData,
       projects: Object.freeze(updatedProjects)
     });
@@ -22049,12 +22223,21 @@ var ProjectsService = class {
     });
     if (!saveRes.ok) {
       if (this.#transactionStore) {
-        this.#transactionStore.transition(txId, "failed", epoch, saveRes.error.message);
+        this.#transactionStore.transition(txId, "needs-recovery", epoch, `Save failed after child effects: ${saveRes.error.message}`);
       }
       return saveRes;
     }
-    if (this.#transactionStore && !partialFailure) {
-      this.#transactionStore.transition(txId, "committed", epoch);
+    if (this.#transactionStore) {
+      if (partialFailure) {
+        this.#transactionStore.transition(
+          txId,
+          "needs-recovery",
+          epoch,
+          "Coordinated side effects experienced partial failure"
+        );
+      } else {
+        this.#transactionStore.transition(txId, "committed", epoch);
+      }
     }
     return ok({
       project: updatedProject,
@@ -22377,6 +22560,9 @@ function registerProjectCommands(options) {
       },
       buildPlan: async (ctx, freshState) => {
         const p = ctx.command.payload;
+        const correlationId = ctx.command.correlationId ?? p.correlationId;
+        const causationId = ctx.command.causationId ?? p.causationId ?? ctx.command.commandId;
+        const authorityEpoch = ctx.authorityEpoch;
         return ok(
           createMutationPlan({
             commandId: ctx.command.commandId,
@@ -22388,17 +22574,37 @@ function registerProjectCommands(options) {
                 payload: {
                   ...p,
                   commandId: ctx.command.commandId,
-                  userId: ctx.senderUserId
+                  userId: ctx.senderUserId,
+                  authorityEpoch,
+                  correlationId,
+                  causationId
                 }
               }
             ],
+            customData: {
+              authorityEpoch,
+              correlationId,
+              causationId,
+              senderUserId: ctx.senderUserId
+            },
             summary: summary(p)
           })
         );
       },
       commit: async (plan, freshState) => {
         const payload = plan.writeSet[0]?.payload;
-        const execRes = await execute(payload, { command: { commandId: plan.commandId, payload } });
+        const customData = plan.customData ?? {};
+        const mergedPayload = {
+          ...payload,
+          authorityEpoch: customData.authorityEpoch ?? payload.authorityEpoch,
+          correlationId: customData.correlationId ?? payload.correlationId,
+          causationId: customData.causationId ?? payload.causationId
+        };
+        const execRes = await execute(mergedPayload, {
+          command: { commandId: plan.commandId, payload: mergedPayload },
+          senderUserId: customData.senderUserId ?? payload.userId,
+          authorityEpoch: customData.authorityEpoch ?? 1
+        });
         if (!execRes.ok) return execRes;
         const readRes = await domains.read(freshState.state.uuid);
         return ok({
@@ -22426,7 +22632,10 @@ function registerProjectCommands(options) {
       expectedRevision: p.expectedRevision,
       workforceRequired: p.workforceRequired,
       contributors: p.contributors,
-      commandId: ctx.command.commandId
+      commandId: ctx.command.commandId,
+      authorityEpoch: ctx.authorityEpoch,
+      correlationId: p.correlationId ?? ctx.command.correlationId,
+      causationId: p.causationId ?? ctx.command.causationId ?? ctx.command.commandId
     })
   );
   registry.register({
@@ -22440,7 +22649,10 @@ function registerProjectCommands(options) {
       return projectsService.startProject({
         ...p,
         userId: ctx.senderUserId,
-        commandId: ctx.command.commandId
+        commandId: ctx.command.commandId,
+        authorityEpoch: ctx.authorityEpoch,
+        correlationId: p.correlationId ?? ctx.command.correlationId,
+        causationId: p.causationId ?? ctx.command.causationId ?? ctx.command.commandId
       });
     },
     schemaValidator: (payload) => {
@@ -22486,7 +22698,10 @@ function registerProjectCommands(options) {
       notes: p.notes,
       userId: p.userId ?? ctx.senderUserId,
       expectedRevision: p.expectedRevision,
-      commandId: ctx.command.commandId
+      commandId: ctx.command.commandId,
+      authorityEpoch: ctx.authorityEpoch,
+      correlationId: p.correlationId ?? ctx.command.correlationId,
+      causationId: p.causationId ?? ctx.command.causationId ?? ctx.command.commandId
     })
   );
   registry.register({
@@ -22505,7 +22720,10 @@ function registerProjectCommands(options) {
         notes: p.notes,
         userId: ctx.senderUserId,
         expectedRevision: p.expectedRevision,
-        commandId: ctx.command.commandId
+        commandId: ctx.command.commandId,
+        authorityEpoch: ctx.authorityEpoch,
+        correlationId: p.correlationId ?? ctx.command.correlationId,
+        causationId: p.causationId ?? ctx.command.causationId ?? ctx.command.commandId
       });
     },
     schemaValidator: (payload) => {
@@ -22558,7 +22776,11 @@ function registerProjectCommands(options) {
       projectId: p.projectId,
       reason: p.reason,
       userId: p.userId ?? ctx.senderUserId,
-      expectedRevision: p.expectedRevision
+      expectedRevision: p.expectedRevision,
+      commandId: ctx.command.commandId,
+      authorityEpoch: ctx.authorityEpoch,
+      correlationId: p.correlationId ?? ctx.command.correlationId,
+      causationId: p.causationId ?? ctx.command.causationId ?? ctx.command.commandId
     })
   );
   registry.register({
@@ -22574,7 +22796,11 @@ function registerProjectCommands(options) {
         projectId: p.projectId,
         reason: p.reason,
         userId: ctx.senderUserId,
-        expectedRevision: p.expectedRevision
+        expectedRevision: p.expectedRevision,
+        commandId: ctx.command.commandId,
+        authorityEpoch: ctx.authorityEpoch,
+        correlationId: p.correlationId ?? ctx.command.correlationId,
+        causationId: p.causationId ?? ctx.command.causationId ?? ctx.command.commandId
       });
     },
     permissionValidator: validatePerms
@@ -22587,7 +22813,11 @@ function registerProjectCommands(options) {
       projectId: p.projectId,
       reason: p.reason,
       userId: p.userId ?? ctx.senderUserId,
-      expectedRevision: p.expectedRevision
+      expectedRevision: p.expectedRevision,
+      commandId: ctx.command.commandId,
+      authorityEpoch: ctx.authorityEpoch,
+      correlationId: p.correlationId ?? ctx.command.correlationId,
+      causationId: p.causationId ?? ctx.command.causationId ?? ctx.command.commandId
     })
   );
   registry.register({
@@ -22603,7 +22833,11 @@ function registerProjectCommands(options) {
         projectId: p.projectId,
         reason: p.reason,
         userId: ctx.senderUserId,
-        expectedRevision: p.expectedRevision
+        expectedRevision: p.expectedRevision,
+        commandId: ctx.command.commandId,
+        authorityEpoch: ctx.authorityEpoch,
+        correlationId: p.correlationId ?? ctx.command.correlationId,
+        causationId: p.causationId ?? ctx.command.causationId ?? ctx.command.commandId
       });
     },
     permissionValidator: validatePerms
@@ -22616,7 +22850,11 @@ function registerProjectCommands(options) {
       projectId: p.projectId,
       reason: p.reason,
       userId: p.userId ?? ctx.senderUserId,
-      expectedRevision: p.expectedRevision
+      expectedRevision: p.expectedRevision,
+      commandId: ctx.command.commandId,
+      authorityEpoch: ctx.authorityEpoch,
+      correlationId: p.correlationId ?? ctx.command.correlationId,
+      causationId: p.causationId ?? ctx.command.causationId ?? ctx.command.commandId
     })
   );
   registry.register({
@@ -22632,7 +22870,11 @@ function registerProjectCommands(options) {
         projectId: p.projectId,
         reason: p.reason,
         userId: ctx.senderUserId,
-        expectedRevision: p.expectedRevision
+        expectedRevision: p.expectedRevision,
+        commandId: ctx.command.commandId,
+        authorityEpoch: ctx.authorityEpoch,
+        correlationId: p.correlationId ?? ctx.command.correlationId,
+        causationId: p.causationId ?? ctx.command.causationId ?? ctx.command.commandId
       });
     },
     permissionValidator: validatePerms
@@ -22645,7 +22887,11 @@ function registerProjectCommands(options) {
       projectId: p.projectId,
       reason: p.reason ?? "Blocked by authority",
       userId: p.userId ?? ctx.senderUserId,
-      expectedRevision: p.expectedRevision
+      expectedRevision: p.expectedRevision,
+      commandId: ctx.command.commandId,
+      authorityEpoch: ctx.authorityEpoch,
+      correlationId: p.correlationId ?? ctx.command.correlationId,
+      causationId: p.causationId ?? ctx.command.causationId ?? ctx.command.commandId
     })
   );
   registry.register({
@@ -22661,7 +22907,11 @@ function registerProjectCommands(options) {
         projectId: p.projectId,
         reason: p.reason ?? "Blocked by authority",
         userId: ctx.senderUserId,
-        expectedRevision: p.expectedRevision
+        expectedRevision: p.expectedRevision,
+        commandId: ctx.command.commandId,
+        authorityEpoch: ctx.authorityEpoch,
+        correlationId: p.correlationId ?? ctx.command.correlationId,
+        causationId: p.causationId ?? ctx.command.causationId ?? ctx.command.commandId
       });
     },
     permissionValidator: validatePerms
@@ -22674,7 +22924,11 @@ function registerProjectCommands(options) {
       projectId: p.projectId,
       reason: p.reason,
       userId: p.userId ?? ctx.senderUserId,
-      expectedRevision: p.expectedRevision
+      expectedRevision: p.expectedRevision,
+      commandId: ctx.command.commandId,
+      authorityEpoch: ctx.authorityEpoch,
+      correlationId: p.correlationId ?? ctx.command.correlationId,
+      causationId: p.causationId ?? ctx.command.causationId ?? ctx.command.commandId
     })
   );
   registry.register({
@@ -22690,7 +22944,11 @@ function registerProjectCommands(options) {
         projectId: p.projectId,
         reason: p.reason,
         userId: ctx.senderUserId,
-        expectedRevision: p.expectedRevision
+        expectedRevision: p.expectedRevision,
+        commandId: ctx.command.commandId,
+        authorityEpoch: ctx.authorityEpoch,
+        correlationId: p.correlationId ?? ctx.command.correlationId,
+        causationId: p.causationId ?? ctx.command.causationId ?? ctx.command.commandId
       });
     },
     permissionValidator: validatePerms
@@ -22704,7 +22962,10 @@ function registerProjectCommands(options) {
       options: p.options,
       userId: p.userId ?? ctx.senderUserId,
       expectedRevision: p.expectedRevision,
-      commandId: ctx.command.commandId
+      commandId: ctx.command.commandId,
+      authorityEpoch: ctx.authorityEpoch,
+      correlationId: p.correlationId ?? ctx.command.correlationId,
+      causationId: p.causationId ?? ctx.command.causationId ?? ctx.command.commandId
     })
   );
   registry.register({
@@ -22721,7 +22982,10 @@ function registerProjectCommands(options) {
         options: p.options,
         userId: ctx.senderUserId,
         expectedRevision: p.expectedRevision,
-        commandId: ctx.command.commandId
+        commandId: ctx.command.commandId,
+        authorityEpoch: ctx.authorityEpoch,
+        correlationId: p.correlationId ?? ctx.command.correlationId,
+        causationId: p.causationId ?? ctx.command.causationId ?? ctx.command.commandId
       });
     },
     permissionValidator: validatePerms
@@ -23350,7 +23614,7 @@ var FacilitiesService = class {
       revision: 0,
       level: params.level ?? 1,
       lifecycle: params.initialLifecycle ?? "operational",
-      readiness: "ready",
+      readiness: params.initialReadiness ?? "ready",
       installedModules: Object.freeze([]),
       activeUpgrades: Object.freeze([]),
       integrity: Object.freeze({ current: 100, max: 100 }),
@@ -23445,7 +23709,8 @@ var FacilitiesService = class {
           domainUuid: cleanDomainUuid,
           resourceId: cost.resourceId,
           deltaMinor: -cost.amount,
-          reason: `Maintenance cost for facility '${facility.name}'`
+          reason: `Maintenance cost for facility '${facility.name}'`,
+          lockOwner: params.commandId
         });
         if (!debitRes.ok) {
           return debitRes;
@@ -23534,7 +23799,8 @@ var FacilitiesService = class {
           domainUuid: cleanDomainUuid,
           resourceId: cost.resourceId,
           deltaMinor: -cost.amount,
-          reason: `Repair cost for facility '${facility.name}'`
+          reason: `Repair cost for facility '${facility.name}'`,
+          lockOwner: params.commandId
         });
         if (!debitRes.ok) {
           return debitRes;
@@ -23960,6 +24226,9 @@ function registerFacilityCommands(options) {
       },
       buildPlan: async (ctx, freshState) => {
         const p = ctx.command.payload;
+        const correlationId = ctx.command.correlationId ?? p.correlationId;
+        const causationId = ctx.command.causationId ?? p.causationId ?? ctx.command.commandId;
+        const authorityEpoch = ctx.authorityEpoch;
         return ok(
           createMutationPlan({
             commandId: ctx.command.commandId,
@@ -23971,17 +24240,37 @@ function registerFacilityCommands(options) {
                 payload: {
                   ...p,
                   commandId: ctx.command.commandId,
-                  userId: ctx.senderUserId
+                  userId: ctx.senderUserId,
+                  authorityEpoch,
+                  correlationId,
+                  causationId
                 }
               }
             ],
+            customData: {
+              authorityEpoch,
+              correlationId,
+              causationId,
+              senderUserId: ctx.senderUserId
+            },
             summary: summary(p)
           })
         );
       },
       commit: async (plan, freshState) => {
         const payload = plan.writeSet[0]?.payload;
-        const execRes = await execute(payload, { command: { commandId: plan.commandId, payload } });
+        const customData = plan.customData ?? {};
+        const mergedPayload = {
+          ...payload,
+          authorityEpoch: customData.authorityEpoch ?? payload.authorityEpoch,
+          correlationId: customData.correlationId ?? payload.correlationId,
+          causationId: customData.causationId ?? payload.causationId
+        };
+        const execRes = await execute(mergedPayload, {
+          command: { commandId: plan.commandId, payload: mergedPayload },
+          senderUserId: customData.senderUserId ?? payload.userId,
+          authorityEpoch: customData.authorityEpoch ?? 1
+        });
         if (!execRes.ok) return execRes;
         const readRes = await domains.read(freshState.state.uuid);
         return ok({
@@ -24004,7 +24293,11 @@ function registerFacilityCommands(options) {
       name: p.name,
       level: p.level,
       initialLifecycle: p.initialLifecycle,
-      userId: p.userId ?? ctx.senderUserId
+      userId: p.userId ?? ctx.senderUserId,
+      commandId: ctx.command.commandId,
+      authorityEpoch: ctx.authorityEpoch,
+      correlationId: p.correlationId ?? ctx.command.correlationId,
+      causationId: p.causationId ?? ctx.command.causationId ?? ctx.command.commandId
     })
   );
   registry.register({
@@ -24021,7 +24314,11 @@ function registerFacilityCommands(options) {
         name: p.name,
         level: p.level,
         initialLifecycle: p.initialLifecycle,
-        userId: ctx.senderUserId
+        userId: ctx.senderUserId,
+        commandId: ctx.command.commandId,
+        authorityEpoch: ctx.authorityEpoch,
+        correlationId: p.correlationId ?? ctx.command.correlationId,
+        causationId: p.causationId ?? ctx.command.causationId ?? ctx.command.commandId
       });
     },
     schemaValidator: (payload) => {
@@ -24065,7 +24362,11 @@ function registerFacilityCommands(options) {
       facilityId: p.facilityId,
       channelId: p.channelId,
       notes: p.notes,
-      userId: p.userId ?? ctx.senderUserId
+      userId: p.userId ?? ctx.senderUserId,
+      commandId: ctx.command.commandId,
+      authorityEpoch: ctx.authorityEpoch,
+      correlationId: p.correlationId ?? ctx.command.correlationId,
+      causationId: p.causationId ?? ctx.command.causationId ?? ctx.command.commandId
     })
   );
   registry.register({
@@ -24081,7 +24382,11 @@ function registerFacilityCommands(options) {
         facilityId: p.facilityId,
         channelId: p.channelId,
         notes: p.notes,
-        userId: ctx.senderUserId
+        userId: ctx.senderUserId,
+        commandId: ctx.command.commandId,
+        authorityEpoch: ctx.authorityEpoch,
+        correlationId: p.correlationId ?? ctx.command.correlationId,
+        causationId: p.causationId ?? ctx.command.causationId ?? ctx.command.commandId
       });
     },
     schemaValidator: (payload) => {
@@ -24126,7 +24431,11 @@ function registerFacilityCommands(options) {
       restoreIntegrity: p.restoreIntegrity,
       removeConditionIds: p.removeConditionIds,
       notes: p.notes,
-      userId: p.userId ?? ctx.senderUserId
+      userId: p.userId ?? ctx.senderUserId,
+      commandId: ctx.command.commandId,
+      authorityEpoch: ctx.authorityEpoch,
+      correlationId: p.correlationId ?? ctx.command.correlationId,
+      causationId: p.causationId ?? ctx.command.causationId ?? ctx.command.commandId
     })
   );
   registry.register({
@@ -24143,7 +24452,11 @@ function registerFacilityCommands(options) {
         restoreIntegrity: p.restoreIntegrity,
         removeConditionIds: p.removeConditionIds,
         notes: p.notes,
-        userId: ctx.senderUserId
+        userId: ctx.senderUserId,
+        commandId: ctx.command.commandId,
+        authorityEpoch: ctx.authorityEpoch,
+        correlationId: p.correlationId ?? ctx.command.correlationId,
+        causationId: p.causationId ?? ctx.command.causationId ?? ctx.command.commandId
       });
     },
     schemaValidator: (payload) => {
@@ -24189,7 +24502,11 @@ function registerFacilityCommands(options) {
       conditionId: p.conditionId,
       condition: p.condition,
       reason: p.reason,
-      userId: p.userId ?? ctx.senderUserId
+      userId: p.userId ?? ctx.senderUserId,
+      commandId: ctx.command.commandId,
+      authorityEpoch: ctx.authorityEpoch,
+      correlationId: p.correlationId ?? ctx.command.correlationId,
+      causationId: p.causationId ?? ctx.command.causationId ?? ctx.command.commandId
     })
   );
   registry.register({
@@ -24207,7 +24524,11 @@ function registerFacilityCommands(options) {
         conditionId: p.conditionId,
         condition: p.condition,
         reason: p.reason,
-        userId: ctx.senderUserId
+        userId: ctx.senderUserId,
+        commandId: ctx.command.commandId,
+        authorityEpoch: ctx.authorityEpoch,
+        correlationId: p.correlationId ?? ctx.command.correlationId,
+        causationId: p.causationId ?? ctx.command.causationId ?? ctx.command.commandId
       });
     },
     permissionValidator: (ctx) => validatePeopleCommandPermission(ctx, domains, (p) => p.domainUuid, {
@@ -24221,7 +24542,11 @@ function registerFacilityCommands(options) {
       domainUuid: p.domainUuid,
       facilityId: p.facilityId,
       reason: p.reason,
-      userId: p.userId ?? ctx.senderUserId
+      userId: p.userId ?? ctx.senderUserId,
+      commandId: ctx.command.commandId,
+      authorityEpoch: ctx.authorityEpoch,
+      correlationId: p.correlationId ?? ctx.command.correlationId,
+      causationId: p.causationId ?? ctx.command.causationId ?? ctx.command.commandId
     })
   );
   registry.register({
@@ -24236,7 +24561,11 @@ function registerFacilityCommands(options) {
         domainUuid: p.domainUuid,
         facilityId: p.facilityId,
         reason: p.reason,
-        userId: ctx.senderUserId
+        userId: ctx.senderUserId,
+        commandId: ctx.command.commandId,
+        authorityEpoch: ctx.authorityEpoch,
+        correlationId: p.correlationId ?? ctx.command.correlationId,
+        causationId: p.causationId ?? ctx.command.causationId ?? ctx.command.commandId
       });
     },
     permissionValidator: validatePerms
@@ -24410,11 +24739,13 @@ var DowntimeService = class {
   #downtimeRegistry;
   #economyService;
   #facilitiesService;
+  #outcomeHandlers;
   constructor(options) {
     this.#domains = options.domains;
     this.#downtimeRegistry = options.downtimeRegistry ?? createDefaultDowntimeRegistry();
     this.#economyService = options.economyService;
     this.#facilitiesService = options.facilitiesService;
+    this.#outcomeHandlers = options.outcomeHandlers;
   }
   #cleanId(idOrUuid) {
     return normalizeJournalEntryId(idOrUuid);
@@ -24473,21 +24804,28 @@ var DowntimeService = class {
       for (const p of params.participants) {
         const participantRef = p.participantRef ?? p.ref;
         const participantType = p.participantType ?? (participantRef?.startsWith("group:") ? "group" : "notable");
-        participants.push({
+        const role = p.role ?? definition.allowedParticipantRoles?.[0] ?? "lead";
+        const candidate = {
           participantRef,
           participantType,
-          role: p.role,
+          role,
           name: p.name,
           capacityConsumed: p.capacityConsumed ?? 1
-        });
+        };
+        const valRes = validateDowntimeParticipant(candidate);
+        if (!valRes.ok) return valRes;
+        participants.push(valRes.value);
       }
     } else if (params.participantRef) {
-      participants.push({
+      const candidate = {
         participantRef: params.participantRef,
         participantType: params.participantRef.startsWith("group:") ? "group" : "notable",
         role: definition.allowedParticipantRoles?.[0] ?? "lead",
         capacityConsumed: 1
-      });
+      };
+      const valRes = validateDowntimeParticipant(candidate);
+      if (!valRes.ok) return valRes;
+      participants.push(valRes.value);
     }
     if (definition.minParticipants !== void 0 && participants.length < definition.minParticipants) {
       return err(
@@ -24520,21 +24858,81 @@ var DowntimeService = class {
         }
       }
     }
+    if (definition.requiredCapabilities && definition.requiredCapabilities.length > 0) {
+      for (const reqCap of definition.requiredCapabilities) {
+        if (!record.definition.capabilities.enabled.includes(reqCap)) {
+          return err(
+            createPublicError({
+              code: "DM_DOWNTIME_REQUIRED_CAPABILITY_DISABLED",
+              category: "conflict",
+              message: `Activity '${definition.label}' requires capability '${reqCap}' to be enabled on domain`
+            })
+          );
+        }
+      }
+    }
     if (definition.requiredFacilityDefinitions && definition.requiredFacilityDefinitions.length > 0) {
       const facData = getDomainFacilitiesData(record);
       for (const reqFac of definition.requiredFacilityDefinitions) {
         const hasFac = facData.facilities.some(
-          (f) => f.definitionId === reqFac && (f.lifecycle === "operational" || f.lifecycle === "degraded")
+          (f) => f.definitionId === reqFac && f.lifecycle === "operational" && f.readiness !== "unavailable" && f.status !== "blocked"
         );
         if (!hasFac) {
           return err(
             createPublicError({
               code: "DM_DOWNTIME_REQUIRED_FACILITY_MISSING",
               category: "conflict",
-              message: `Activity '${definition.label}' requires facility '${reqFac}', but none is available`
+              message: `Activity '${definition.label}' requires operational facility '${reqFac}', but none is available`
             })
           );
         }
+      }
+    }
+    const peopleDataRes = tryGetDomainPeopleData(record);
+    if (peopleDataRes.ok) {
+      const people = peopleDataRes.value;
+      for (const p of participants) {
+        const rawRef = p.participantRef;
+        const cleanRef = rawRef.startsWith("notable:") ? rawRef.slice(8) : rawRef.startsWith("group:") ? rawRef.slice(6) : rawRef;
+        if (p.participantType === "notable" && people.notables.length > 0) {
+          const exists = people.notables.some((n) => n.id === cleanRef || n.id === rawRef || `notable:${n.id}` === rawRef);
+          if (!exists) {
+            return err(
+              createPublicError({
+                code: "DM_DOWNTIME_PARTICIPANT_NOT_FOUND",
+                category: "not-found",
+                message: `Notable participant '${rawRef}' not found in domain people data`
+              })
+            );
+          }
+        } else if (p.participantType === "group" && (people.operationalGroups.length > 0 || people.populationGroups.length > 0)) {
+          const exists = people.operationalGroups.some((g) => g.id === cleanRef || g.id === rawRef || `group:${g.id}` === rawRef) || people.populationGroups.some((g) => g.id === cleanRef || g.id === rawRef || `group:${g.id}` === rawRef);
+          if (!exists) {
+            return err(
+              createPublicError({
+                code: "DM_DOWNTIME_PARTICIPANT_NOT_FOUND",
+                category: "not-found",
+                message: `Group participant '${rawRef}' not found in domain people data`
+              })
+            );
+          }
+        }
+      }
+    }
+    const currentDowntimeData = getDomainDowntimeData(record);
+    const inProgressActivities = currentDowntimeData.activities.filter((a) => a.lifecycle === "inProgress");
+    for (const p of participants) {
+      const busyActivity = inProgressActivities.find(
+        (a) => a.participants.some((ap) => ap.participantRef === p.participantRef)
+      );
+      if (busyActivity) {
+        return err(
+          createPublicError({
+            code: "DM_DOWNTIME_PARTICIPANT_BUSY",
+            category: "conflict",
+            message: `Participant '${p.participantRef}' is already active in downtime activity '${busyActivity.id}' (${busyActivity.name})`
+          })
+        );
       }
     }
     if (this.#economyService && definition.costs && definition.costs.length > 0) {
@@ -24543,14 +24941,14 @@ var DowntimeService = class {
           domainUuid: cleanDomainUuid,
           resourceId: cost.resourceId,
           deltaMinor: -cost.amount,
-          reason: `Cost for starting downtime activity '${params.label ?? definition.label}'`
+          reason: `Cost for starting downtime activity '${params.label ?? definition.label}'`,
+          lockOwner: params.commandId
         });
         if (!debitRes.ok) {
           return debitRes;
         }
       }
     }
-    const currentDowntimeData = getDomainDowntimeData(record);
     const activityId = `dt-${createOpaqueId("prj").slice(4)}`;
     const now = Date.now();
     const newActivity = {
@@ -24681,7 +25079,8 @@ var DowntimeService = class {
               domainUuid: cleanDomainUuid,
               resourceId,
               deltaMinor: amount,
-              reason: `Downtime completion reward: ${outcome.label}`
+              reason: `Downtime completion reward: ${outcome.label}`,
+              lockOwner: params.commandId
             });
             outcomesApplied.push({
               childReceiptId: createOpaqueId("rep"),
@@ -24705,15 +25104,35 @@ var DowntimeService = class {
             });
           }
         } else {
-          outcomesApplied.push({
-            childReceiptId: createOpaqueId("rep"),
-            subsystem: "custom",
-            action: outcome.type,
-            targetRef: outcome.id,
-            payload: outcome.parameters,
-            success: true,
-            appliedAt: Date.now()
-          });
+          const handler = params.outcomeHandlers?.[outcome.type] ?? this.#outcomeHandlers?.[outcome.type];
+          if (handler) {
+            try {
+              const res = await handler(outcome);
+              outcomesApplied.push(res);
+            } catch (err3) {
+              outcomesApplied.push({
+                childReceiptId: createOpaqueId("rep"),
+                subsystem: "custom",
+                action: outcome.type,
+                targetRef: outcome.id,
+                payload: outcome.parameters,
+                success: false,
+                error: err3?.message ?? String(err3),
+                appliedAt: Date.now()
+              });
+            }
+          } else {
+            outcomesApplied.push({
+              childReceiptId: createOpaqueId("rep"),
+              subsystem: "custom",
+              action: outcome.type,
+              targetRef: outcome.id,
+              payload: outcome.parameters,
+              success: false,
+              error: `No handler registered for outcome type '${outcome.type}'`,
+              appliedAt: Date.now()
+            });
+          }
         }
       }
     }
@@ -25077,6 +25496,9 @@ function registerDowntimeCommands(options) {
       },
       buildPlan: async (ctx, freshState) => {
         const p = ctx.command.payload;
+        const correlationId = ctx.command.correlationId ?? p.correlationId;
+        const causationId = ctx.command.causationId ?? p.causationId ?? ctx.command.commandId;
+        const authorityEpoch = ctx.authorityEpoch;
         return ok(
           createMutationPlan({
             commandId: ctx.command.commandId,
@@ -25088,17 +25510,37 @@ function registerDowntimeCommands(options) {
                 payload: {
                   ...p,
                   commandId: ctx.command.commandId,
-                  userId: ctx.senderUserId
+                  userId: ctx.senderUserId,
+                  authorityEpoch,
+                  correlationId,
+                  causationId
                 }
               }
             ],
+            customData: {
+              authorityEpoch,
+              correlationId,
+              causationId,
+              senderUserId: ctx.senderUserId
+            },
             summary: summary(p)
           })
         );
       },
       commit: async (plan, freshState) => {
         const payload = plan.writeSet[0]?.payload;
-        const execRes = await execute(payload, { command: { commandId: plan.commandId, payload } });
+        const customData = plan.customData ?? {};
+        const mergedPayload = {
+          ...payload,
+          authorityEpoch: customData.authorityEpoch ?? payload.authorityEpoch,
+          correlationId: customData.correlationId ?? payload.correlationId,
+          causationId: customData.causationId ?? payload.causationId
+        };
+        const execRes = await execute(mergedPayload, {
+          command: { commandId: plan.commandId, payload: mergedPayload },
+          senderUserId: customData.senderUserId ?? payload.userId,
+          authorityEpoch: customData.authorityEpoch ?? 1
+        });
         if (!execRes.ok) return execRes;
         const readRes = await domains.read(freshState.state.uuid);
         return ok({
@@ -25123,7 +25565,11 @@ function registerDowntimeCommands(options) {
       durationTicks: p.durationTicks,
       participantRef: p.participantRef,
       participants: p.participants,
-      userId: p.userId ?? ctx.senderUserId
+      userId: p.userId ?? ctx.senderUserId,
+      commandId: ctx.command.commandId,
+      authorityEpoch: ctx.authorityEpoch,
+      correlationId: p.correlationId ?? ctx.command.correlationId,
+      causationId: p.causationId ?? ctx.command.causationId ?? ctx.command.commandId
     })
   );
   registry.register({
@@ -25142,7 +25588,11 @@ function registerDowntimeCommands(options) {
         durationTicks: p.durationTicks,
         participantRef: p.participantRef,
         participants: p.participants,
-        userId: ctx.senderUserId
+        userId: ctx.senderUserId,
+        commandId: ctx.command.commandId,
+        authorityEpoch: ctx.authorityEpoch,
+        correlationId: p.correlationId ?? ctx.command.correlationId,
+        causationId: p.causationId ?? ctx.command.causationId ?? ctx.command.commandId
       });
     },
     schemaValidator: (payload) => {
@@ -25186,7 +25636,11 @@ function registerDowntimeCommands(options) {
       activityId: p.activityId,
       ticks: p.ticks,
       notes: p.notes,
-      userId: p.userId ?? ctx.senderUserId
+      userId: p.userId ?? ctx.senderUserId,
+      commandId: ctx.command.commandId,
+      authorityEpoch: ctx.authorityEpoch,
+      correlationId: p.correlationId ?? ctx.command.correlationId,
+      causationId: p.causationId ?? ctx.command.causationId ?? ctx.command.commandId
     })
   );
   registry.register({
@@ -25202,7 +25656,11 @@ function registerDowntimeCommands(options) {
         activityId: p.activityId,
         ticks: p.ticks,
         notes: p.notes,
-        userId: ctx.senderUserId
+        userId: ctx.senderUserId,
+        commandId: ctx.command.commandId,
+        authorityEpoch: ctx.authorityEpoch,
+        correlationId: p.correlationId ?? ctx.command.correlationId,
+        causationId: p.causationId ?? ctx.command.causationId ?? ctx.command.commandId
       });
     },
     schemaValidator: (payload) => {
@@ -25255,7 +25713,11 @@ function registerDowntimeCommands(options) {
       activityId: p.activityId,
       outcomeKey: p.outcomeKey,
       notes: p.notes,
-      userId: p.userId ?? ctx.senderUserId
+      userId: p.userId ?? ctx.senderUserId,
+      commandId: ctx.command.commandId,
+      authorityEpoch: ctx.authorityEpoch,
+      correlationId: p.correlationId ?? ctx.command.correlationId,
+      causationId: p.causationId ?? ctx.command.causationId ?? ctx.command.commandId
     })
   );
   registry.register({
@@ -25271,7 +25733,11 @@ function registerDowntimeCommands(options) {
         activityId: p.activityId,
         outcomeKey: p.outcomeKey,
         notes: p.notes,
-        userId: ctx.senderUserId
+        userId: ctx.senderUserId,
+        commandId: ctx.command.commandId,
+        authorityEpoch: ctx.authorityEpoch,
+        correlationId: p.correlationId ?? ctx.command.correlationId,
+        causationId: p.causationId ?? ctx.command.causationId ?? ctx.command.commandId
       });
     },
     permissionValidator: validatePerms
@@ -25283,7 +25749,11 @@ function registerDowntimeCommands(options) {
       domainUuid: p.domainUuid,
       activityId: p.activityId,
       reason: p.reason,
-      userId: p.userId ?? ctx.senderUserId
+      userId: p.userId ?? ctx.senderUserId,
+      commandId: ctx.command.commandId,
+      authorityEpoch: ctx.authorityEpoch,
+      correlationId: p.correlationId ?? ctx.command.correlationId,
+      causationId: p.causationId ?? ctx.command.causationId ?? ctx.command.commandId
     })
   );
   registry.register({
@@ -25298,7 +25768,11 @@ function registerDowntimeCommands(options) {
         domainUuid: p.domainUuid,
         activityId: p.activityId,
         reason: p.reason,
-        userId: ctx.senderUserId
+        userId: ctx.senderUserId,
+        commandId: ctx.command.commandId,
+        authorityEpoch: ctx.authorityEpoch,
+        correlationId: p.correlationId ?? ctx.command.correlationId,
+        causationId: p.causationId ?? ctx.command.causationId ?? ctx.command.commandId
       });
     },
     permissionValidator: validatePerms
@@ -25310,7 +25784,11 @@ function registerDowntimeCommands(options) {
       domainUuid: p.domainUuid,
       activityId: p.activityId,
       reason: p.reason,
-      userId: p.userId ?? ctx.senderUserId
+      userId: p.userId ?? ctx.senderUserId,
+      commandId: ctx.command.commandId,
+      authorityEpoch: ctx.authorityEpoch,
+      correlationId: p.correlationId ?? ctx.command.correlationId,
+      causationId: p.causationId ?? ctx.command.causationId ?? ctx.command.commandId
     })
   );
   registry.register({
@@ -25325,7 +25803,11 @@ function registerDowntimeCommands(options) {
         domainUuid: p.domainUuid,
         activityId: p.activityId,
         reason: p.reason,
-        userId: ctx.senderUserId
+        userId: ctx.senderUserId,
+        commandId: ctx.command.commandId,
+        authorityEpoch: ctx.authorityEpoch,
+        correlationId: p.correlationId ?? ctx.command.correlationId,
+        causationId: p.causationId ?? ctx.command.causationId ?? ctx.command.commandId
       });
     },
     permissionValidator: validatePerms
@@ -25337,7 +25819,11 @@ function registerDowntimeCommands(options) {
       domainUuid: p.domainUuid,
       activityId: p.activityId,
       reason: p.reason,
-      userId: p.userId ?? ctx.senderUserId
+      userId: p.userId ?? ctx.senderUserId,
+      commandId: ctx.command.commandId,
+      authorityEpoch: ctx.authorityEpoch,
+      correlationId: p.correlationId ?? ctx.command.correlationId,
+      causationId: p.causationId ?? ctx.command.causationId ?? ctx.command.commandId
     })
   );
   registry.register({
@@ -25352,7 +25838,11 @@ function registerDowntimeCommands(options) {
         domainUuid: p.domainUuid,
         activityId: p.activityId,
         reason: p.reason,
-        userId: ctx.senderUserId
+        userId: ctx.senderUserId,
+        commandId: ctx.command.commandId,
+        authorityEpoch: ctx.authorityEpoch,
+        correlationId: p.correlationId ?? ctx.command.correlationId,
+        causationId: p.causationId ?? ctx.command.causationId ?? ctx.command.commandId
       });
     },
     permissionValidator: validatePerms

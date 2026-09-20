@@ -41,7 +41,12 @@ export interface CreateFacilityParams {
   readonly name?: string;
   readonly level?: number;
   readonly initialLifecycle?: FacilityLifecycle;
+  readonly initialReadiness?: FacilityReadiness;
   readonly userId?: string | null;
+  readonly commandId?: string;
+  readonly correlationId?: string;
+  readonly causationId?: string;
+  readonly authorityEpoch?: number;
 }
 
 export interface MaintainFacilityParams {
@@ -50,6 +55,10 @@ export interface MaintainFacilityParams {
   readonly channelId?: string;
   readonly notes?: string;
   readonly userId?: string | null;
+  readonly commandId?: string;
+  readonly correlationId?: string;
+  readonly causationId?: string;
+  readonly authorityEpoch?: number;
 }
 
 export interface RepairFacilityParams {
@@ -59,6 +68,10 @@ export interface RepairFacilityParams {
   readonly removeConditionIds?: readonly string[];
   readonly notes?: string;
   readonly userId?: string | null;
+  readonly commandId?: string;
+  readonly correlationId?: string;
+  readonly causationId?: string;
+  readonly authorityEpoch?: number;
 }
 
 export interface ApplyDamageParams {
@@ -69,6 +82,10 @@ export interface ApplyDamageParams {
   readonly condition?: FacilityCondition;
   readonly reason?: string;
   readonly userId?: string | null;
+  readonly commandId?: string;
+  readonly correlationId?: string;
+  readonly causationId?: string;
+  readonly authorityEpoch?: number;
 }
 
 export class FacilitiesService {
@@ -155,7 +172,7 @@ export class FacilitiesService {
       revision: 0,
       level: params.level ?? 1,
       lifecycle: params.initialLifecycle ?? "operational",
-      readiness: "ready",
+      readiness: params.initialReadiness ?? "ready",
       installedModules: Object.freeze([]),
       activeUpgrades: Object.freeze([]),
       integrity: Object.freeze({ current: 100, max: 100 }),
@@ -263,7 +280,8 @@ export class FacilitiesService {
           domainUuid: cleanDomainUuid,
           resourceId: cost.resourceId,
           deltaMinor: -cost.amount,
-          reason: `Maintenance cost for facility '${facility.name}'`
+          reason: `Maintenance cost for facility '${facility.name}'`,
+          lockOwner: params.commandId
         });
         if (!debitRes.ok) {
           return debitRes;
@@ -368,7 +386,8 @@ export class FacilitiesService {
           domainUuid: cleanDomainUuid,
           resourceId: cost.resourceId,
           deltaMinor: -cost.amount,
-          reason: `Repair cost for facility '${facility.name}'`
+          reason: `Repair cost for facility '${facility.name}'`,
+          lockOwner: params.commandId
         });
         if (!debitRes.ok) {
           return debitRes;
@@ -466,7 +485,16 @@ export class FacilitiesService {
     return ok({ facility: updatedFacility });
   }
 
-  async decommissionFacility(params: { domainUuid: string; facilityId: string; reason?: string; userId?: string | null }): Promise<Result<{ readonly facility: FacilityInstance }>> {
+  async decommissionFacility(params: {
+    readonly domainUuid: string;
+    readonly facilityId: string;
+    readonly reason?: string;
+    readonly userId?: string | null;
+    readonly commandId?: string;
+    readonly correlationId?: string;
+    readonly causationId?: string;
+    readonly authorityEpoch?: number;
+  }): Promise<Result<{ readonly facility: FacilityInstance }>> {
     const cleanDomainUuid = this.#cleanId(params.domainUuid);
     const docRes = await this.#domains.read(cleanDomainUuid);
     if (!docRes.ok) return docRes;

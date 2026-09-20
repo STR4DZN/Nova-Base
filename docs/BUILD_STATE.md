@@ -16,7 +16,7 @@
 - **Gate G2**: Concluído, auditado, homologado e aceito em ambiente real Foundry VTT v13.351 + Socketlib.
 - **Gate G3**: Concluído, auditado, homologado e aceito soberanamente pelo usuário (`GATE_G3_HOMOLOGATED_AND_ACCEPTED`).
 - **Gate G4**: Concluído, auditado, homologado e aceito pelo usuário. Implementação completa de todos os 10 microbuilds (G4.1 a G4.10) de acordo com o Master Specification (§14, §11–12, §42, DEC-1416–2305) e `Documentos/GATES/14_G4_ECONOMY_RESOURCES.md`.
-- **Gate G5**: Concluído (G5.1 a G5.10, G5-AUD-001 a G5-AUD-010 e G5-REVAL-001 a G5-REVAL-012) e aguardando aceitação soberana do usuário (`GATE_G5_COMPLETED_PENDING_USER_ACCEPTANCE`).
+- **Gate G5**: Concluído (G5.1 a G5.10, G5-AUD-001 a G5-AUD-010, G5-REVAL-001 a G5-REVAL-012 e G5-REVAL2-001 a G5-REVAL2-010) e aguardando aceitação soberana do usuário (`GATE_G5_COMPLETED_PENDING_USER_ACCEPTANCE`).
   - **G5.1 (Project model / lifecycle — definition / instance / revision)**: Concluído. Separação formal de `ProjectDefinition` (reutilizável, versionada, catalogada em `ProjectDefinitionRegistry`) e `ProjectInstance` (execução concreta por domínio com `revision`, `workRequired`, `workCompleted`, `lifecycle`, `clampProgress`), cálculo puro de progresso inteiro derivado (`calculateProjectProgress` com clamp de goal por DEC-086, DEC-087, DEC-090), máquina de estados de ciclo de vida (`validateProjectLifecycleTransition` cobrindo os 11 estados canônicos de Master §15.4 e reabertura auditada via `allowReopen`), definições canônicas iniciais (`CANONICAL_PROJECT_DEFINITIONS`), e modelo de capacidade em domínio `domain-manager:projects` (`DomainProjectsData`, `tryGetDomainProjectsData`, `withDomainProjectsData`, `getDomainProjectsData`) validado e registrado no `CapabilityRegistry`.
   - **G5.2 (Progress / resolver / history)**: Concluído. Implementação do modelo de histórico append-oriented (`ProjectEntry`), validação estrita de fontes e metadados (`PROJECT_ENTRY_SOURCE_KINDS`), transição de estado pura (`applyProjectEntry`) com suporte a setbacks negativos (DEC-088) e clamp no objetivo por padrão (DEC-090), regras de compensação/reversão auditada (bloqueio de reversão dupla com `DM_PROJECT_REVERSAL_ALREADY_EXISTS` e proibição de reversão de reversão), contrato extensível de resolução pura de progresso (`ProgressResolver`), implementação padrão (`StandardProgressResolver` / `domain-manager:standard`) sem mutação da instância, e catálogo `ProgressResolverRegistry` com factory e suporte a congelamento (`freeze`).
   - **G5.3 (Start plan)**: Concluído. Implementação do modelo de plano pré-execução (`ProjectStartPlan`), avaliação desacoplada de pré-condições (`evaluateProjectStartPlan`) sem mutação direta de Domain/People/Economy, mapeamento de intenção de reservas econômicas (`ProjectEconomicReservationIntent`) para custos upfront e reserved, avaliação de workforce (`ProjectWorkforceIntent`) e requisitos estruturados (`ProjectRequirementEvaluation` com status satisfied/unsatisfied/unavailable/error), detecção e diagnóstico de blockers (`ProjectBlocker`: capacidade ausente, fundos insuficientes, requisitos insatisfeitos, ciclo de vida inválido e `DM_PROJECT_REVISION_MISMATCH`), e commit atômico (`commitProjectStartPlan`) com suporte aos estados `active` e `initializing`, incremento de revisão e geração de `ProjectEntry` inicial.
@@ -33,12 +33,13 @@
 | Verificação | Resultado |
 |---|---|
 | TypeScript strict (`tsc --noEmit`) | PASS (0 erros) |
-| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 554/554 (0 falhas) |
+| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 560/560 (0 falhas) |
 | Relatório de Aceitação G5 | Gerado (`docs/GATE_G5_ACCEPTANCE_REPORT.md`) |
 | Regressões G0/G1/G2/G3/G4 | 0 (todos os 444 testes anteriores preservados e passando) |
-| Testes novos Gate G5 | 110 testes dedicados (G5.1 a G5.10: 101 testes + 9 testes adversários de revalidação em g5-revalidation-adversarial.test.ts) |
+| Testes novos Gate G5 | 116 testes dedicados (G5.1 a G5.10: 101 testes + 15 testes adversários de revalidação em g5-revalidation-adversarial.test.ts) |
 | Remediação de Auditoria G5-AUD-001 a G5-AUD-010 | PASS — 100% remediado, endurecido e verificado |
 | Remediação de Revalidação G5-REVAL-001 a G5-REVAL-012 | PASS — 100% remediado, endurecido e verificado |
+| Remediação de Revalidação 2 G5-REVAL2-001 a G5-REVAL2-010 | PASS — 100% remediado, endurecido e verificado |
 | Build do pacote (`node build.mjs`) | PASS (`dist/main.js` gerado) |
 | Empacotamento (`node scripts/package.mjs`) | PASS (`dist/domain-manager-v0.0.5.zip` gerado) |
 | Validação de pacote (`node scripts/validate-package.mjs`) | PASS |
@@ -56,6 +57,44 @@
 | Empacotamento (`node scripts/package.mjs`) | PASS (`dist/domain-manager-v0.0.5.zip` gerado) |
 | Validação de pacote (`node scripts/validate-package.mjs`) | PASS |
 | Validação de artefato (`node scripts/validate-artifact.mjs`) | PASS |
+
+## Remediação da 2ª Revalidação Gate G5 — G5-REVAL2-001 a G5-REVAL2-010
+
+1. **G5-REVAL2-001 (CRÍTICO — Nested lock / reentrância entre MutationCoordinator e EconomyService)**:
+   - Adicionado parâmetro opcional `lockOwner?: string` propagando o `commandId` para operações de ajuste e reserva no `EconomyService`.
+   - Normalizadas todas as chaves de lock para `domain:${normalizeDomainId(domainUuid)}`.
+   - Reentrância concedida sem deadlock ou timeout quando `lockOwner` corresponde ao titular do lock.
+
+2. **G5-REVAL2-002 (CRÍTICO — Ciclo de vida completo de reservas econômicas no ReservationStore)**:
+   - Expostos métodos `listReservations` e `getReservation` no `EconomyService`.
+   - Cancelamento de projeto em `ProjectsService.cancelProject` consulta reservas ativas vinculadas ao projeto e as libera no `ReservationStore` com status `"released"`.
+
+3. **G5-REVAL2-003 (ALTO — Débito econômico progressivo e de conclusão fail-closed)**:
+   - `ProjectsService.advanceProject` e `completeProject` abortam estritamente caso o débito econômico retorne saldo insuficiente ou erro, prevenindo avanços com falha contábil.
+
+4. **G5-REVAL2-004 (ALTO — Rastreamento cumulativo exato de custo progressivo com perda fracionária zero)**:
+   - Substituído cálculo incremental de passo por deltas cumulativos: `dueAfter = Math.floor((workCompletedAfter * totalCost) / workRequired)`, `dueBefore = Math.floor((workCompletedBefore * totalCost) / workRequired)`, `delta = dueAfter - dueBefore`.
+   - Garante precisão inteira estrita sem perda de frações e convergência exata ao `totalCost` em 100%.
+
+5. **G5-REVAL2-005 (ALTO — Atomicidade de transação de conclusão e recuperação de falha parcial)**:
+   - `ProjectsService.completeProject` prepara o `TransactionRecord` no `TransactionStore` antes dos efeitos colaterais.
+   - Em caso de falha de side effect ou de persistência, transiciona para `"needs-recovery"`. Handlers ausentes em modo estrito falham fechados com `success: false, partialFailure: true`.
+
+6. **G5-REVAL2-006 (ALTO — Propagação de proveniência através do MutationCoordinator e serviços G5)**:
+   - `authorityEpoch`, `correlationId` e `causationId` capturados em `createMutationPlan.customData` e payload do writeSet, propagados até serviços G5 e registrados no `TransactionRecord`.
+
+7. **G5-REVAL2-007 (ALTO — Validação de pré-condições no início de Downtime)**:
+   - `DowntimeService.startActivity` valida: capacidades requeridas habilitadas (`DM_DOWNTIME_REQUIRED_CAPABILITY_DISABLED`), prontidão operacional de instalações requeridas com `lifecycle === "operational"` e `readiness !== "unavailable"` (`DM_DOWNTIME_REQUIRED_FACILITY_MISSING`), existência de participantes no `DomainPeopleData.notables`, e verificação de ocupação ativa (`DM_DOWNTIME_PARTICIPANT_BUSY`).
+
+8. **G5-REVAL2-008 (ALTO — Desfechos de Downtime sem handler falham fechados)**:
+   - Em `DowntimeService.completeActivity`, desfechos não-econômicos sem handler registrado geram `ChildReceipt` com `success: false`, falhando em modo fechado.
+
+9. **G5-REVAL2-009 (ALTO — Reserva de capacidade de Workforce no DomainPeopleData)**:
+   - Alocação de mão-de-obra de projetos é registrada em `DomainPeopleData.reservations` como `"active"`.
+   - Na conclusão ou cancelamento, é transicionada para `"released"`. `calculateWorkforce()` deduz reservas ativas da capacidade disponível.
+
+10. **G5-REVAL2-010 (CRÍTICO — Suíte adversarial end-to-end via CommandBus.execute())**:
+    - Suíte `tests/runtime/g5-revalidation-adversarial.test.ts` expandida para 15 testes, validando todos os cenários G5-REVAL2 executados através de `CommandBus.execute()` com `LockManager` compartilhado.
 
 ## Remediação da Revalidação Final (6ª Rodada) — G4-REVAL6-001
 

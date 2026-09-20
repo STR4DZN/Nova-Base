@@ -62,7 +62,8 @@ import { FacilitiesApplicationController } from "../../src/ui/domain-patterns/fa
 import { DowntimeApplicationController } from "../../src/ui/domain-patterns/downtime/downtime-app.js";
 import type { DomainRecord } from "../../src/domains/domain-schema.js";
 import { withDomainFacilitiesData } from "../../src/facilities/facility-data.js";
-import { withDomainPeopleData, createDefaultDomainPeopleData } from "../../src/people/people-data.js";
+import { withDomainPeopleData, createDefaultDomainPeopleData, getDomainPeopleData } from "../../src/people/people-data.js";
+import { calculateWorkforce } from "../../src/people/workforce/workforce-calculator.js";
 import { withDomainProjectsData } from "../../src/projects/project-data.js";
 import { withDomainDowntimeData } from "../../src/downtime/downtime-data.js";
 import { ok, err } from "../../src/core/contracts/result.js";
@@ -339,7 +340,10 @@ function setupTestEnvironment(record: DomainRecord = createInitialRecord()) {
     commandBus,
     projectRegistry,
     facilityRegistry,
-    downtimeRegistry
+    downtimeRegistry,
+    lockManager,
+    registry,
+    authorityService
   };
 }
 
@@ -992,3 +996,564 @@ test("G5-REVAL-011: Transaction records preserve real commandId and authorityEpo
   assert.equal(tx.commandId, customCommandId, "commandId must not be fabricated or overwritten");
   assert.equal(tx.authorityEpoch, 42, "authorityEpoch must be preserved as 42, not hardcoded to 1");
 });
+
+// ---------------------------------------------------------------------------
+// TEST 10: G5-REVAL2-001 — Nested Lock / Reentrancy through CommandBus
+// ---------------------------------------------------------------------------
+test("G5-REVAL2-001: Nested lock between MutationCoordinator and EconomyService reentrantly succeeds through CommandBus", async () => {
+  let record = createInitialRecord();
+  record = withDomainEconomyData(record, {
+    schemaVersion: 1,
+    accounts: [
+      {
+        mode: "native",
+        domainUuid: "JournalEntry.dom-adv-1",
+        resourceId: "domain-manager:materials",
+        balanceMinor: 200,
+        baseCapacityMinor: null
+      }
+    ]
+  });
+
+  const env = setupTestEnvironment(record);
+
+  // CommandBus executes 'projects:start-project' which acquires domain lock via MutationCoordinator
+  // ProjectsService.startProject commits upfront debit and reservation in EconomyService with lockOwner: commandId
+  // Shared lockManager must permit reentrancy without timeout or deadlock
+  const cmd: DomainCommand<any> = {
+    contractVersion: COMMAND_CONTRACT_VERSION_V1,
+    commandId: createCommandId(),
+    type: "projects:start-project",
+    payload: {
+      domainUuid: env.rawDoc.uuid,
+      definitionId: "domain-manager:fortified-gate", // 50 upfront, 30 reserved
+      name: "Non-Deadlocking Gate",
+      workRequired: 100
+    },
+    issuedAtReal: Date.now()
+  };
+
+  const receiptRes = await env.commandBus.execute(cmd);
+  assert.equal(receiptRes.ok, true);
+  assert.equal(receiptRes.value.status, "executed", "Command must succeed without lock timeout or deadlock");
+
+  // Verify economy state: 200 - 50 upfront = 150 balance; 30 reserved
+  const doc = (await env.domains.read(env.rawDoc.id)).value;
+  const matAcc = doc.record.definition.capabilities.config["domain-manager:economy"].accounts.find(
+    (a: any) => a.resourceId === "domain-manager:materials"
+  );
+  assert.equal(matAcc.balanceMinor, 150, "Upfront cost must be debited");
+
+  const reservations = env.economyService.listReservations({ domainUuid: env.rawDoc.uuid, status: "active" });
+  assert.equal(reservations.length, 1, "Reservation must be registered in ReservationStore");
+  assert.equal(reservations[0].remainingAmountMinor, 30);
+});
+
+// ---------------------------------------------------------------------------
+// TEST 11: G5-REVAL2-002 — Reservation cancellation release via CommandBus
+// ---------------------------------------------------------------------------
+test("G5-REVAL2-002: Project cancellation releases reservations in ReservationStore via CommandBus", async () => {
+  let record = createInitialRecord();
+  record = withDomainEconomyData(record, {
+    schemaVersion: 1,
+    accounts: [
+      {
+        mode: "native",
+        domainUuid: "JournalEntry.dom-adv-1",
+        resourceId: "domain-manager:materials",
+        balanceMinor: 200,
+        baseCapacityMinor: null
+      }
+    ]
+  });
+
+  const env = setupTestEnvironment(record);
+
+  const startCmd: DomainCommand<any> = {
+    contractVersion: COMMAND_CONTRACT_VERSION_V1,
+    commandId: createCommandId(),
+    type: "projects:start-project",
+    payload: {
+      domainUuid: env.rawDoc.uuid,
+      definitionId: "domain-manager:fortified-gate",
+      name: "Gate to Cancel",
+      workRequired: 100
+    },
+    issuedAtReal: Date.now()
+  };
+
+  const startRes = await env.commandBus.execute(startCmd);
+  assert.equal(startRes.ok, true);
+  assert.equal(startRes.value.status, "executed");
+  const projectId = (startRes.value.result as any).project.id;
+
+  const activeResBefore = env.economyService.listReservations({ domainUuid: env.rawDoc.uuid, sourceRef: projectId, status: "active" });
+  assert.equal(activeResBefore.length, 1);
+  const reservationId = activeResBefore[0].id;
+
+  // Cancel via CommandBus
+  const cancelCmd: DomainCommand<any> = {
+    contractVersion: COMMAND_CONTRACT_VERSION_V1,
+    commandId: createCommandId(),
+    type: "projects:cancel-project",
+    payload: {
+      domainUuid: env.rawDoc.uuid,
+      projectId,
+      reason: "Strategic pivot"
+    },
+    issuedAtReal: Date.now()
+  };
+
+  const cancelRes = await env.commandBus.execute(cancelCmd);
+  assert.equal(cancelRes.ok, true);
+  assert.equal(cancelRes.value.status, "executed");
+
+  // Reservation must now be released in ReservationStore
+  const resAfter = env.economyService.getReservation(reservationId);
+  assert.ok(resAfter);
+  assert.equal(resAfter.status, "released", "Reservation must be released in ReservationStore upon cancellation");
+});
+
+// ---------------------------------------------------------------------------
+// TEST 12: G5-REVAL2-003 & G5-REVAL2-004 — Cumulative progressive cost exactness & fail-closed debit
+// ---------------------------------------------------------------------------
+test("G5-REVAL2-003 & G5-REVAL2-004: Cumulative progressive cost tracking debits exact fractions without loss; fails closed on insufficient balance", async () => {
+  let record = createInitialRecord();
+  record = withDomainEconomyData(record, {
+    schemaVersion: 1,
+    accounts: [
+      {
+        mode: "native",
+        domainUuid: "JournalEntry.dom-adv-1",
+        resourceId: "domain-manager:materials",
+        balanceMinor: 10, // Exact 10 materials
+        baseCapacityMinor: null
+      }
+    ]
+  });
+
+  const env = setupTestEnvironment(record);
+
+  env.projectRegistry.register({
+    id: "domain-manager:irrigation-canal",
+    version: 1,
+    label: "Irrigation Canal",
+    tags: ["agriculture"],
+    progressResolverId: "domain-manager:standard",
+    defaultWorkRequired: 100,
+    requirements: [],
+    costs: [
+      { resourceId: "domain-manager:materials", amountMinor: 10, timing: "progressive" }
+    ],
+    rewards: []
+  });
+
+  const startCmd: DomainCommand<any> = {
+    contractVersion: COMMAND_CONTRACT_VERSION_V1,
+    commandId: createCommandId(),
+    type: "projects:start-project",
+    payload: {
+      domainUuid: env.rawDoc.uuid,
+      definitionId: "domain-manager:irrigation-canal",
+      name: "Canal Alpha",
+      workRequired: 100
+    },
+    issuedAtReal: Date.now()
+  };
+
+  const startRes = await env.commandBus.execute(startCmd);
+  assert.equal(startRes.ok, true);
+  const projectId = (startRes.value.result as any).project.id;
+
+  // Step 1: Advance by 33 units (floor(33/100 * 10) - 0 = 3)
+  const adv1Cmd: DomainCommand<any> = {
+    contractVersion: COMMAND_CONTRACT_VERSION_V1,
+    commandId: createCommandId(),
+    type: "projects:advance-project",
+    payload: { domainUuid: env.rawDoc.uuid, projectId, delta: 33 },
+    issuedAtReal: Date.now()
+  };
+  const adv1Res = await env.commandBus.execute(adv1Cmd);
+  assert.equal(adv1Res.ok, true);
+  assert.equal(adv1Res.value.status, "executed");
+
+  let doc = (await env.domains.read(env.rawDoc.id)).value;
+  let matAcc = doc.record.definition.capabilities.config["domain-manager:economy"].accounts.find(
+    (a: any) => a.resourceId === "domain-manager:materials"
+  );
+  assert.equal(matAcc.balanceMinor, 7, "Step 1: 10 - 3 = 7");
+
+  // Step 2: Advance by 33 units (floor(66/100 * 10) - 3 = 6 - 3 = 3)
+  const adv2Cmd: DomainCommand<any> = {
+    contractVersion: COMMAND_CONTRACT_VERSION_V1,
+    commandId: createCommandId(),
+    type: "projects:advance-project",
+    payload: { domainUuid: env.rawDoc.uuid, projectId, delta: 33 },
+    issuedAtReal: Date.now()
+  };
+  const adv2Res = await env.commandBus.execute(adv2Cmd);
+  assert.equal(adv2Res.ok, true);
+  assert.equal(adv2Res.value.status, "executed");
+
+  doc = (await env.domains.read(env.rawDoc.id)).value;
+  matAcc = doc.record.definition.capabilities.config["domain-manager:economy"].accounts.find(
+    (a: any) => a.resourceId === "domain-manager:materials"
+  );
+  assert.equal(matAcc.balanceMinor, 4, "Step 2: 7 - 3 = 4");
+
+  // Step 3: Advance by 34 units (floor(100/100 * 10) - 6 = 10 - 6 = 4)
+  const adv3Cmd: DomainCommand<any> = {
+    contractVersion: COMMAND_CONTRACT_VERSION_V1,
+    commandId: createCommandId(),
+    type: "projects:advance-project",
+    payload: { domainUuid: env.rawDoc.uuid, projectId, delta: 34 },
+    issuedAtReal: Date.now()
+  };
+  const adv3Res = await env.commandBus.execute(adv3Cmd);
+  assert.equal(adv3Res.ok, true);
+  assert.equal(adv3Res.value.status, "executed");
+
+  doc = (await env.domains.read(env.rawDoc.id)).value;
+  matAcc = doc.record.definition.capabilities.config["domain-manager:economy"].accounts.find(
+    (a: any) => a.resourceId === "domain-manager:materials"
+  );
+  assert.equal(matAcc.balanceMinor, 0, "Step 3: 4 - 4 = 0 (Total 10 debited with zero fraction loss)");
+
+  // Step 4: Now test fail-closed: start second canal with 0 balance and try to advance
+  const start2Cmd: DomainCommand<any> = {
+    contractVersion: COMMAND_CONTRACT_VERSION_V1,
+    commandId: createCommandId(),
+    type: "projects:start-project",
+    payload: {
+      domainUuid: env.rawDoc.uuid,
+      definitionId: "domain-manager:irrigation-canal",
+      name: "Canal Beta",
+      workRequired: 100
+    },
+    issuedAtReal: Date.now()
+  };
+  const start2Res = await env.commandBus.execute(start2Cmd);
+  assert.equal(start2Res.ok, true);
+  const project2Id = (start2Res.value.result as any).project.id;
+
+  const advFailCmd: DomainCommand<any> = {
+    contractVersion: COMMAND_CONTRACT_VERSION_V1,
+    commandId: createCommandId(),
+    type: "projects:advance-project",
+    payload: { domainUuid: env.rawDoc.uuid, projectId: project2Id, delta: 50 },
+    issuedAtReal: Date.now()
+  };
+  const advFailRes = await env.commandBus.execute(advFailCmd);
+  assert.equal(advFailRes.ok, true);
+  assert.equal(advFailRes.value.status, "rejected", "Advance with insufficient progressive funds must fail closed");
+  assert.equal(advFailRes.value.error?.code, "DM_PROJECT_ADVANCE_BLOCKED");
+});
+
+// ---------------------------------------------------------------------------
+// TEST 13: G5-REVAL2-005 & G5-REVAL2-006 — Provenance propagation and partial failure recovery
+// ---------------------------------------------------------------------------
+test("G5-REVAL2-005 & G5-REVAL2-006: TransactionRecord receives authorityEpoch !== 1 from CommandBus and transitions to needs-recovery on partial failure", async () => {
+  const env = setupTestEnvironment();
+
+  const customAuthority = new PrimaryAuthorityService(
+    { getUsers: () => [{ id: "gm-user", isGM: true, active: true }], getPreferredUserId: () => null, getCurrentUserId: () => "gm-user" },
+    { authorityUserId: "gm-user", authorityEpoch: 77, initialized: true }
+  );
+
+  const customBus = new CommandBus({
+    registry: env.registry,
+    authorityService: customAuthority,
+    coordinator: env.coordinator
+  });
+
+  // Register project with an unhandled reward type to trigger partial failure
+  env.projectRegistry.register({
+    id: "domain-manager:failing-reward-project",
+    version: 1,
+    label: "Project with Unhandled Reward",
+    tags: ["infrastructure"],
+    progressResolverId: "domain-manager:standard",
+    defaultWorkRequired: 10,
+    requirements: [],
+    costs: [],
+    rewards: [
+      {
+        type: "unknown_side_effect_subsystem",
+        targetRef: "none",
+        value: 100
+      }
+    ]
+  });
+
+  const startCmd: DomainCommand<any> = {
+    contractVersion: COMMAND_CONTRACT_VERSION_V1,
+    commandId: createCommandId(),
+    type: "projects:start-project",
+    payload: {
+      domainUuid: env.rawDoc.uuid,
+      definitionId: "domain-manager:failing-reward-project",
+      name: "Failure Injection Project",
+      workRequired: 10
+    },
+    issuedAtReal: Date.now()
+  };
+
+  const startRes = await customBus.execute(startCmd);
+  assert.equal(startRes.ok, true);
+  const projectId = (startRes.value.result as any).project.id;
+
+  // Advance to completion
+  const advCmd: DomainCommand<any> = {
+    contractVersion: COMMAND_CONTRACT_VERSION_V1,
+    commandId: createCommandId(),
+    type: "projects:advance-project",
+    payload: { domainUuid: env.rawDoc.uuid, projectId, delta: 10 },
+    issuedAtReal: Date.now()
+  };
+  await customBus.execute(advCmd);
+
+  // Complete via CommandBus with authorityEpoch 77
+  const completeCmdId = createCommandId();
+  const compCmd: DomainCommand<any> = {
+    contractVersion: COMMAND_CONTRACT_VERSION_V1,
+    commandId: completeCmdId,
+    type: "projects:complete-project",
+    payload: { domainUuid: env.rawDoc.uuid, projectId },
+    issuedAtReal: Date.now()
+  };
+
+  const compRes = await customBus.execute(compCmd);
+  assert.equal(compRes.ok, true);
+  assert.equal(compRes.value.status, "executed");
+
+  // Verify TransactionRecord provenance and transition to needs-recovery
+  const tx = env.transactionStore.getByCommandId(completeCmdId);
+  assert.ok(tx, "TransactionRecord must be saved for complete-project");
+  assert.equal(tx.authorityEpoch, 77, "authorityEpoch 77 must be propagated from CommandBus to TransactionRecord");
+  assert.equal(tx.state, "needs-recovery", "TransactionRecord must transition to needs-recovery on partial failure");
+});
+
+// ---------------------------------------------------------------------------
+// TEST 14: G5-REVAL2-007 & G5-REVAL2-008 — Downtime validation invariants & non-economy outcome fail closed
+// ---------------------------------------------------------------------------
+test("G5-REVAL2-007 & G5-REVAL2-008: Downtime validates disabled capability, missing facility, busy participant, and non-economy outcome fails closed", async () => {
+  const env = setupTestEnvironment();
+
+  // 1. Missing capability invariant
+  env.downtimeRegistry.register({
+    id: "domain-manager:astral-divination",
+    version: 1,
+    label: "Astral Divination",
+    category: "arcane",
+    scope: "domain",
+    defaultDurationTicks: 10,
+    minParticipants: 1,
+    requiredCapabilities: ["domain-manager:forbidden-arcana"], // Not enabled on domain
+    outcomeDefinitions: []
+  });
+
+  const capRes = await env.downtimeService.startActivity({
+    domainUuid: env.rawDoc.uuid,
+    definitionId: "domain-manager:astral-divination",
+    label: "Star Watching",
+    participants: [{ participantRef: "notable:scout-1", participantType: "notable", role: "participant" }],
+    userId: "gm-user"
+  });
+  assert.equal(capRes.ok, false);
+  assert.equal(capRes.error.code, "DM_DOWNTIME_REQUIRED_CAPABILITY_DISABLED");
+
+  // 2. Participant busy check
+  const dt1Res = await env.downtimeService.startActivity({
+    domainUuid: env.rawDoc.uuid,
+    definitionId: "domain-manager:patrol-and-recon",
+    label: "First Patrol",
+    participants: [
+      { participantRef: "notable:scout-1", participantType: "notable", role: "supervisor" },
+      { participantRef: "notable:scout-2", participantType: "notable", role: "participant" }
+    ],
+    userId: "gm-user"
+  });
+  checkOk(dt1Res, "First Patrol Start");
+
+  // Attempt to assign scout-1 to a concurrent activity while First Patrol is inProgress
+  const busyRes = await env.downtimeService.startActivity({
+    domainUuid: env.rawDoc.uuid,
+    definitionId: "domain-manager:patrol-and-recon",
+    label: "Second Patrol with Same Scout",
+    participants: [
+      { participantRef: "notable:scout-1", participantType: "notable", role: "supervisor" },
+      { participantRef: "notable:scout-3", participantType: "notable", role: "participant" }
+    ],
+    userId: "gm-user"
+  });
+  assert.equal(busyRes.ok, false);
+  assert.equal(busyRes.error.code, "DM_DOWNTIME_PARTICIPANT_BUSY");
+
+  // 3. Non-economy outcome fails closed when no handler is registered
+  env.downtimeRegistry.register({
+    id: "domain-manager:sacred-ritual",
+    version: 1,
+    label: "Sacred Ritual",
+    category: "religious",
+    scope: "domain",
+    defaultDurationTicks: 10,
+    minParticipants: 1,
+    outcomeDefinitions: [
+      {
+        id: "out-blessing",
+        type: "unknown_custom_buff",
+        targetRef: "faith:holy",
+        value: 10
+      }
+    ]
+  });
+
+  const ritualStartRes = await env.downtimeService.startActivity({
+    domainUuid: env.rawDoc.uuid,
+    definitionId: "domain-manager:sacred-ritual",
+    label: "Midsummer Ritual",
+    participants: [{ participantRef: "notable:priest-1", participantType: "notable", role: "participant" }],
+    userId: "gm-user"
+  });
+  checkOk(ritualStartRes, "Ritual Start");
+
+  const ritualCompleteRes = await env.downtimeService.completeActivity({
+    domainUuid: env.rawDoc.uuid,
+    activityId: ritualStartRes.value.activityId,
+    userId: "gm-user"
+  });
+  checkOk(ritualCompleteRes, "Ritual Complete");
+  assert.equal(ritualCompleteRes.value.outcomesApplied.length, 1);
+  assert.equal(ritualCompleteRes.value.outcomesApplied[0].success, false, "Unhandled outcome must fail closed");
+
+  // 4. Operational facility readiness check: register facility with non-ready status
+  env.downtimeRegistry.register({
+    id: "domain-manager:forge-crafting-2",
+    version: 1,
+    label: "Forge Crafting 2",
+    category: "production",
+    scope: "individual",
+    defaultDurationTicks: 10,
+    minParticipants: 1,
+    requiredFacilityDefinitions: ["domain-manager:storehouse"],
+    outcomeDefinitions: []
+  });
+
+  // Create facility with readiness unavailable
+  await env.facilitiesService.createFacility({
+    domainUuid: env.rawDoc.uuid,
+    definitionId: "domain-manager:storehouse",
+    name: "Damaged Granary",
+    level: 1,
+    initialLifecycle: "operational",
+    initialReadiness: "unavailable"
+  });
+
+  const dtDamagedFacRes = await env.downtimeService.startActivity({
+    domainUuid: env.rawDoc.uuid,
+    definitionId: "domain-manager:forge-crafting-2",
+    label: "Unavailable Facility Work",
+    participants: [{ participantRef: "notable:scout-1", participantType: "notable", role: "participant" }],
+    userId: "gm-user"
+  });
+  assert.equal(dtDamagedFacRes.ok, false);
+  assert.equal(dtDamagedFacRes.error.code, "DM_DOWNTIME_REQUIRED_FACILITY_MISSING");
+});
+
+// ---------------------------------------------------------------------------
+// TEST 15: G5-REVAL2-009 — Workforce reservation in DomainPeopleData
+// ---------------------------------------------------------------------------
+test("G5-REVAL2-009: Workforce reservation in DomainPeopleData is allocated on project start and released on cancel/complete", async () => {
+  let record = createInitialRecord();
+  record = withDomainPeopleData(record, {
+    ...createDefaultDomainPeopleData(),
+    populationGroups: [
+      {
+        id: "pop_00000000-0000-0000-0000-000000000005",
+        name: "Builders Guild",
+        count: 20,
+        includedInTotal: true,
+        tags: [],
+        workforceContributions: [{ workforceTypeId: "general", amount: 10 }]
+      }
+    ]
+  });
+
+  const env = setupTestEnvironment(record);
+
+  // Check initial workforce capacity
+  let peopleDoc = (await env.domains.read(env.rawDoc.id)).value;
+  let initialWf = calculateWorkforce(getDomainPeopleData(peopleDoc.record));
+  assert.equal(initialWf.types.general.available, 10, "Initial available workforce should be 10");
+
+  env.projectRegistry.register({
+    id: "domain-manager:bridge-project",
+    version: 1,
+    label: "Stone Bridge",
+    tags: ["infrastructure"],
+    progressResolverId: "domain-manager:standard",
+    defaultWorkRequired: 50,
+    requirements: [],
+    costs: [],
+    rewards: []
+  });
+
+  // Start project with workforceRequired = 4
+  const startCmd: DomainCommand<any> = {
+    contractVersion: COMMAND_CONTRACT_VERSION_V1,
+    commandId: createCommandId(),
+    type: "projects:start-project",
+    payload: {
+      domainUuid: env.rawDoc.uuid,
+      definitionId: "domain-manager:bridge-project",
+      name: "River Bridge",
+      workRequired: 50,
+      workforceRequired: 4
+    },
+    issuedAtReal: Date.now()
+  };
+
+  const startRes = await env.commandBus.execute(startCmd);
+  assert.equal(startRes.ok, true);
+  assert.equal(startRes.value.status, "executed");
+  const projectId = (startRes.value.result as any).project.id;
+
+  // Verify workforce reservation exists in DomainPeopleData
+  peopleDoc = (await env.domains.read(env.rawDoc.id)).value;
+  let peopleData = getDomainPeopleData(peopleDoc.record);
+  const wfResv = peopleData.reservations.find((r) => r.targetRef === `project:${projectId}`);
+  assert.ok(wfResv, "Workforce reservation must exist in DomainPeopleData");
+  assert.equal(wfResv.status, "active");
+  assert.equal(wfResv.amount, 4);
+
+  // Verify available capacity reduced
+  let activeWf = calculateWorkforce(peopleData);
+  assert.equal(activeWf.types.general.available, 6, "Available workforce must be 10 - 4 = 6");
+
+  // Cancel project and verify workforce reservation is released
+  const cancelCmd: DomainCommand<any> = {
+    contractVersion: COMMAND_CONTRACT_VERSION_V1,
+    commandId: createCommandId(),
+    type: "projects:cancel-project",
+    payload: {
+      domainUuid: env.rawDoc.uuid,
+      projectId,
+      reason: "Postponed"
+    },
+    issuedAtReal: Date.now()
+  };
+
+  const cancelRes = await env.commandBus.execute(cancelCmd);
+  assert.equal(cancelRes.ok, true);
+  assert.equal(cancelRes.value.status, "executed");
+
+  peopleDoc = (await env.domains.read(env.rawDoc.id)).value;
+  peopleData = getDomainPeopleData(peopleDoc.record);
+  const releasedResv = peopleData.reservations.find((r) => r.targetRef === `project:${projectId}`);
+  assert.ok(releasedResv);
+  assert.equal(releasedResv.status, "released", "Workforce reservation must be marked 'released'");
+
+  let restoredWf = calculateWorkforce(peopleData);
+  assert.equal(restoredWf.types.general.available, 10, "Available workforce must be restored to 10");
+});
+

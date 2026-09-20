@@ -5,12 +5,13 @@ import { normalizeJournalEntryId } from "../../core/identity/refs.js";
 import type { DomainRepositoryContract } from "../../storage/repositories/domain-repository.js";
 import type { DowntimeDefinitionRegistry } from "../definitions/downtime-registry.js";
 import { createDefaultDowntimeRegistry } from "../definitions/downtime-registry.js";
-import type {
-  DowntimeDefinition,
-  DowntimeInstance,
-  DowntimeLifecycle,
-  DowntimeParticipant,
-  DowntimeScope
+import {
+  type DowntimeDefinition,
+  type DowntimeInstance,
+  type DowntimeLifecycle,
+  type DowntimeParticipant,
+  type DowntimeScope,
+  validateDowntimeParticipant
 } from "../types/downtime-types.js";
 import {
   getDomainDowntimeData,
@@ -21,12 +22,16 @@ import type { EconomyService } from "../../economy/services/economy-service.js";
 import type { FacilitiesService } from "../../facilities/services/facilities-service.js";
 import { getDomainFacilitiesData } from "../../facilities/facility-data.js";
 import type { ChildReceipt } from "../../projects/plans/project-plan-types.js";
+import { tryGetDomainPeopleData } from "../../people/people-data.js";
+
+export type DowntimeOutcomeHandler = (outcome: any) => Promise<ChildReceipt> | ChildReceipt;
 
 export interface DowntimeServiceOptions {
   readonly domains: DomainRepositoryContract;
   readonly downtimeRegistry?: DowntimeDefinitionRegistry;
   readonly economyService?: EconomyService;
   readonly facilitiesService?: FacilitiesService;
+  readonly outcomeHandlers?: Record<string, DowntimeOutcomeHandler>;
 }
 
 export interface StartActivityParams {
@@ -36,8 +41,12 @@ export interface StartActivityParams {
   readonly scope?: DowntimeScope;
   readonly durationTicks?: number | null;
   readonly participantRef?: string;
-  readonly participants?: readonly DowntimeParticipant[];
+  readonly participants?: readonly (DowntimeParticipant | { ref: string; role?: string; name?: string; participantRef?: string; participantType?: any })[];
   readonly userId?: string | null;
+  readonly commandId?: string;
+  readonly correlationId?: string;
+  readonly causationId?: string;
+  readonly authorityEpoch?: number;
 }
 
 export interface AdvanceActivityParams {
@@ -46,6 +55,10 @@ export interface AdvanceActivityParams {
   readonly ticks: number;
   readonly notes?: string;
   readonly userId?: string | null;
+  readonly commandId?: string;
+  readonly correlationId?: string;
+  readonly causationId?: string;
+  readonly authorityEpoch?: number;
 }
 
 export interface CompleteActivityParams {
@@ -54,6 +67,11 @@ export interface CompleteActivityParams {
   readonly outcomeKey?: string;
   readonly notes?: string;
   readonly userId?: string | null;
+  readonly outcomeHandlers?: Record<string, DowntimeOutcomeHandler>;
+  readonly commandId?: string;
+  readonly correlationId?: string;
+  readonly causationId?: string;
+  readonly authorityEpoch?: number;
 }
 
 export class DowntimeService {
@@ -61,12 +79,14 @@ export class DowntimeService {
   readonly #downtimeRegistry: DowntimeDefinitionRegistry;
   readonly #economyService?: EconomyService;
   readonly #facilitiesService?: FacilitiesService;
+  readonly #outcomeHandlers?: Record<string, DowntimeOutcomeHandler>;
 
   constructor(options: DowntimeServiceOptions) {
     this.#domains = options.domains;
     this.#downtimeRegistry = options.downtimeRegistry ?? createDefaultDowntimeRegistry();
     this.#economyService = options.economyService;
     this.#facilitiesService = options.facilitiesService;
+    this.#outcomeHandlers = options.outcomeHandlers;
   }
 
   #cleanId(idOrUuid: string): string {
@@ -128,27 +148,34 @@ export class DowntimeService {
       );
     }
 
-    // Participant verification (G5-REVAL-007)
+    // Participant verification (G5-REVAL-007, G5-REVAL2-007)
     const participants: DowntimeParticipant[] = [];
     if (params.participants && params.participants.length > 0) {
       for (const p of params.participants) {
-        const participantRef = p.participantRef ?? (p as any).ref;
-        const participantType = p.participantType ?? (participantRef?.startsWith("group:") ? "group" : "notable");
-        participants.push({
+        const participantRef = (p as any).participantRef ?? (p as any).ref;
+        const participantType = (p as any).participantType ?? (participantRef?.startsWith("group:") ? "group" : "notable");
+        const role = (p as any).role ?? definition.allowedParticipantRoles?.[0] ?? "lead";
+        const candidate: DowntimeParticipant = {
           participantRef,
           participantType,
-          role: p.role,
-          name: p.name,
-          capacityConsumed: p.capacityConsumed ?? 1
-        });
+          role,
+          name: (p as any).name,
+          capacityConsumed: (p as any).capacityConsumed ?? 1
+        };
+        const valRes = validateDowntimeParticipant(candidate);
+        if (!valRes.ok) return valRes;
+        participants.push(valRes.value);
       }
     } else if (params.participantRef) {
-      participants.push({
+      const candidate: DowntimeParticipant = {
         participantRef: params.participantRef,
         participantType: params.participantRef.startsWith("group:") ? "group" : "notable",
         role: definition.allowedParticipantRoles?.[0] ?? "lead",
         capacityConsumed: 1
-      });
+      };
+      const valRes = validateDowntimeParticipant(candidate);
+      if (!valRes.ok) return valRes;
+      participants.push(valRes.value);
     }
 
     if (definition.minParticipants !== undefined && participants.length < definition.minParticipants) {
@@ -185,32 +212,102 @@ export class DowntimeService {
       }
     }
 
-    if (definition.requiredFacilityDefinitions && definition.requiredFacilityDefinitions.length > 0) {
-      const facData = getDomainFacilitiesData(record);
-      for (const reqFac of definition.requiredFacilityDefinitions) {
-        const hasFac = facData.facilities.some(
-          (f) => f.definitionId === reqFac && (f.lifecycle === "operational" || f.lifecycle === "degraded")
-        );
-        if (!hasFac) {
+    // Required domain capabilities verification (G5-REVAL2-007)
+    if (definition.requiredCapabilities && definition.requiredCapabilities.length > 0) {
+      for (const reqCap of definition.requiredCapabilities) {
+        if (!record.definition.capabilities.enabled.includes(reqCap)) {
           return err(
             createPublicError({
-              code: "DM_DOWNTIME_REQUIRED_FACILITY_MISSING",
+              code: "DM_DOWNTIME_REQUIRED_CAPABILITY_DISABLED",
               category: "conflict",
-              message: `Activity '${definition.label}' requires facility '${reqFac}', but none is available`
+              message: `Activity '${definition.label}' requires capability '${reqCap}' to be enabled on domain`
             })
           );
         }
       }
     }
 
-    // Debit upfront costs via economy service if configured (G5-REVAL-007)
+    // Required facility operational readiness verification (G5-REVAL2-007)
+    if (definition.requiredFacilityDefinitions && definition.requiredFacilityDefinitions.length > 0) {
+      const facData = getDomainFacilitiesData(record);
+      for (const reqFac of definition.requiredFacilityDefinitions) {
+        const hasFac = facData.facilities.some(
+          (f) => f.definitionId === reqFac && f.lifecycle === "operational" && f.readiness !== "unavailable" && (f as any).status !== "blocked"
+        );
+        if (!hasFac) {
+          return err(
+            createPublicError({
+              code: "DM_DOWNTIME_REQUIRED_FACILITY_MISSING",
+              category: "conflict",
+              message: `Activity '${definition.label}' requires operational facility '${reqFac}', but none is available`
+            })
+          );
+        }
+      }
+    }
+
+    // Participant existence verification against domain people data (G5-REVAL2-007)
+    const peopleDataRes = tryGetDomainPeopleData(record);
+    if (peopleDataRes.ok) {
+      const people = peopleDataRes.value;
+      for (const p of participants) {
+        const rawRef = p.participantRef;
+        const cleanRef = rawRef.startsWith("notable:") ? rawRef.slice(8) : rawRef.startsWith("group:") ? rawRef.slice(6) : rawRef;
+        if (p.participantType === "notable" && people.notables.length > 0) {
+          const exists = people.notables.some((n) => n.id === cleanRef || n.id === rawRef || `notable:${n.id}` === rawRef);
+          if (!exists) {
+            return err(
+              createPublicError({
+                code: "DM_DOWNTIME_PARTICIPANT_NOT_FOUND",
+                category: "not-found",
+                message: `Notable participant '${rawRef}' not found in domain people data`
+              })
+            );
+          }
+        } else if (p.participantType === "group" && (people.operationalGroups.length > 0 || people.populationGroups.length > 0)) {
+          const exists =
+            people.operationalGroups.some((g) => g.id === cleanRef || g.id === rawRef || `group:${g.id}` === rawRef) ||
+            people.populationGroups.some((g) => g.id === cleanRef || g.id === rawRef || `group:${g.id}` === rawRef);
+          if (!exists) {
+            return err(
+              createPublicError({
+                code: "DM_DOWNTIME_PARTICIPANT_NOT_FOUND",
+                category: "not-found",
+                message: `Group participant '${rawRef}' not found in domain people data`
+              })
+            );
+          }
+        }
+      }
+    }
+
+    // Participant availability check: busy check against inProgress activities (G5-REVAL2-007)
+    const currentDowntimeData = getDomainDowntimeData(record);
+    const inProgressActivities = currentDowntimeData.activities.filter((a) => a.lifecycle === "inProgress");
+    for (const p of participants) {
+      const busyActivity = inProgressActivities.find((a) =>
+        a.participants.some((ap) => ap.participantRef === p.participantRef)
+      );
+      if (busyActivity) {
+        return err(
+          createPublicError({
+            code: "DM_DOWNTIME_PARTICIPANT_BUSY",
+            category: "conflict",
+            message: `Participant '${p.participantRef}' is already active in downtime activity '${busyActivity.id}' (${busyActivity.name})`
+          })
+        );
+      }
+    }
+
+    // Debit upfront costs via economy service if configured (G5-REVAL-007, G5-REVAL2-001)
     if (this.#economyService && definition.costs && definition.costs.length > 0) {
       for (const cost of definition.costs) {
         const debitRes = await this.#economyService.commitAdjust({
           domainUuid: cleanDomainUuid,
           resourceId: cost.resourceId,
           deltaMinor: -cost.amount,
-          reason: `Cost for starting downtime activity '${params.label ?? definition.label}'`
+          reason: `Cost for starting downtime activity '${params.label ?? definition.label}'`,
+          lockOwner: params.commandId
         });
         if (!debitRes.ok) {
           return debitRes;
@@ -218,7 +315,6 @@ export class DowntimeService {
       }
     }
 
-    const currentDowntimeData = getDomainDowntimeData(record);
     const activityId = `dt-${createOpaqueId("prj").slice(4)}`;
     const now = Date.now();
 
@@ -370,7 +466,8 @@ export class DowntimeService {
               domainUuid: cleanDomainUuid,
               resourceId,
               deltaMinor: amount,
-              reason: `Downtime completion reward: ${outcome.label}`
+              reason: `Downtime completion reward: ${outcome.label}`,
+              lockOwner: params.commandId
             });
             outcomesApplied.push({
               childReceiptId: createOpaqueId("rep"),
@@ -394,15 +491,36 @@ export class DowntimeService {
             });
           }
         } else {
-          outcomesApplied.push({
-            childReceiptId: createOpaqueId("rep"),
-            subsystem: "custom",
-            action: outcome.type,
-            targetRef: outcome.id,
-            payload: outcome.parameters,
-            success: true,
-            appliedAt: Date.now()
-          });
+          // G5-REVAL2-008: Non-economy outcomes fail closed if no handler is registered
+          const handler = params.outcomeHandlers?.[outcome.type] ?? this.#outcomeHandlers?.[outcome.type];
+          if (handler) {
+            try {
+              const res = await handler(outcome);
+              outcomesApplied.push(res);
+            } catch (err: any) {
+              outcomesApplied.push({
+                childReceiptId: createOpaqueId("rep"),
+                subsystem: "custom",
+                action: outcome.type,
+                targetRef: outcome.id,
+                payload: outcome.parameters,
+                success: false,
+                error: err?.message ?? String(err),
+                appliedAt: Date.now()
+              });
+            }
+          } else {
+            outcomesApplied.push({
+              childReceiptId: createOpaqueId("rep"),
+              subsystem: "custom",
+              action: outcome.type,
+              targetRef: outcome.id,
+              payload: outcome.parameters,
+              success: false,
+              error: `No handler registered for outcome type '${outcome.type}'`,
+              appliedAt: Date.now()
+            });
+          }
         }
       }
     }
@@ -439,15 +557,42 @@ export class DowntimeService {
     return ok({ activity: updatedActivity, outcomes, outcomesApplied: Object.freeze(outcomesApplied) });
   }
 
-  async pauseActivity(params: { domainUuid: string; activityId: string; reason?: string; userId?: string | null }): Promise<Result<{ readonly activity: DowntimeInstance }>> {
+  async pauseActivity(params: {
+    readonly domainUuid: string;
+    readonly activityId: string;
+    readonly reason?: string;
+    readonly userId?: string | null;
+    readonly commandId?: string;
+    readonly correlationId?: string;
+    readonly causationId?: string;
+    readonly authorityEpoch?: number;
+  }): Promise<Result<{ readonly activity: DowntimeInstance }>> {
     return this.#mutateLifecycle(this.#cleanId(params.domainUuid), params.activityId, "paused");
   }
 
-  async resumeActivity(params: { domainUuid: string; activityId: string; reason?: string; userId?: string | null }): Promise<Result<{ readonly activity: DowntimeInstance }>> {
+  async resumeActivity(params: {
+    readonly domainUuid: string;
+    readonly activityId: string;
+    readonly reason?: string;
+    readonly userId?: string | null;
+    readonly commandId?: string;
+    readonly correlationId?: string;
+    readonly causationId?: string;
+    readonly authorityEpoch?: number;
+  }): Promise<Result<{ readonly activity: DowntimeInstance }>> {
     return this.#mutateLifecycle(this.#cleanId(params.domainUuid), params.activityId, "inProgress");
   }
 
-  async cancelActivity(params: { domainUuid: string; activityId: string; reason?: string; userId?: string | null }): Promise<Result<{ readonly activity: DowntimeInstance }>> {
+  async cancelActivity(params: {
+    readonly domainUuid: string;
+    readonly activityId: string;
+    readonly reason?: string;
+    readonly userId?: string | null;
+    readonly commandId?: string;
+    readonly correlationId?: string;
+    readonly causationId?: string;
+    readonly authorityEpoch?: number;
+  }): Promise<Result<{ readonly activity: DowntimeInstance }>> {
     return this.#mutateLifecycle(this.#cleanId(params.domainUuid), params.activityId, "cancelled");
   }
 

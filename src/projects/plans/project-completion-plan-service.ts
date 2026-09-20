@@ -332,48 +332,63 @@ export function commitProjectCompletion(
   let partialFailure = false;
 
   for (const effect of plan.sideEffects) {
-    const handler = options?.sideEffectHandlers?.[effect.type];
-    if (handler) {
-      try {
-        const res = handler(effect, { project, domain: { definition: { identity: { id: project.domainUuid } } } as unknown as DomainRecord });
-        if ("ok" in res) {
-          if (res.ok) {
-            childReceipts.push(res.value);
+    if (options?.sideEffectHandlers !== undefined) {
+      const handler = options.sideEffectHandlers[effect.type];
+      if (handler) {
+        try {
+          const res = handler(effect, { project, domain: { definition: { identity: { id: project.domainUuid } } } as unknown as DomainRecord });
+          if ("ok" in res) {
+            if (res.ok) {
+              childReceipts.push(res.value);
+            } else {
+              partialFailure = true;
+              childReceipts.push({
+                childReceiptId: createOpaqueId("rep"),
+                subsystem: effect.type === "facility" ? "facility" : effect.type === "resource" ? "economy" : "custom",
+                action: `apply_${effect.type}_reward`,
+                targetRef: effect.targetRef,
+                payload: effect.value,
+                success: false,
+                appliedAt: now,
+                error: res.error.message
+              });
+            }
           } else {
-            partialFailure = true;
-            childReceipts.push({
-              childReceiptId: createOpaqueId("rep"),
-              subsystem: effect.type === "facility" ? "facility" : effect.type === "resource" ? "economy" : "custom",
-              action: `apply_${effect.type}_reward`,
-              targetRef: effect.targetRef,
-              payload: effect.value,
-              success: false,
-              appliedAt: now,
-              error: res.error.message
-            });
+            childReceipts.push(res);
+            if (!res.success) {
+              partialFailure = true;
+            }
           }
-        } else {
-          childReceipts.push(res);
-          if (!res.success) {
-            partialFailure = true;
-          }
+        } catch (errCatch: unknown) {
+          partialFailure = true;
+          const msg = errCatch instanceof Error ? errCatch.message : String(errCatch);
+          childReceipts.push({
+            childReceiptId: createOpaqueId("rep"),
+            subsystem: effect.type === "facility" ? "facility" : effect.type === "resource" ? "economy" : "custom",
+            action: `apply_${effect.type}_reward`,
+            targetRef: effect.targetRef,
+            payload: effect.value,
+            success: false,
+            appliedAt: now,
+            error: msg
+          });
         }
-      } catch (errCatch: unknown) {
+      } else {
+        // Explicit handlers provided, but none for this effect -> fail closed (G5-REVAL2-005)
         partialFailure = true;
-        const msg = errCatch instanceof Error ? errCatch.message : String(errCatch);
         childReceipts.push({
           childReceiptId: createOpaqueId("rep"),
           subsystem: effect.type === "facility" ? "facility" : effect.type === "resource" ? "economy" : "custom",
-          action: `apply_${effect.type}_reward`,
+          action: `grant_${effect.type}`,
           targetRef: effect.targetRef,
           payload: effect.value,
           success: false,
-          appliedAt: now,
-          error: msg
+          error: `No handler registered for side effect type '${effect.type}'`,
+          appliedAt: now
         });
       }
     } else {
-      // Default: generate standard coordinated child receipt for registered reward
+      // Default (no custom handlers specified): generate standard coordinated child receipt for registered reward
       childReceipts.push({
         childReceiptId: createOpaqueId("rep"),
         subsystem: effect.type === "facility" ? "facility" : effect.type === "resource" ? "economy" : "custom",

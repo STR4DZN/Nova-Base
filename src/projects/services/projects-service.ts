@@ -42,7 +42,8 @@ import type { EconomyService } from "../../economy/services/economy-service.js";
 import type { FacilitiesService } from "../../facilities/services/facilities-service.js";
 import { getDomainEconomyData, tryGetDomainEconomyData } from "../../economy/economy-data.js";
 import { normalizeJournalEntryId } from "../../core/identity/refs.js";
-import { tryGetDomainPeopleData } from "../../people/people-data.js";
+import { getDomainPeopleData, tryGetDomainPeopleData, withDomainPeopleData } from "../../people/people-data.js";
+import type { Reservation as WorkforceReservation } from "../../people/assignments/assignment-types.js";
 import { calculateWorkforce } from "../../people/workforce/workforce-calculator.js";
 
 export interface ProjectsServiceOptions {
@@ -286,7 +287,8 @@ export class ProjectsService {
       );
     }
 
-    // Execute upfront debit and reservation creation (G5-REVAL-005)
+    // Execute upfront debit and reservation creation (G5-REVAL-005, G5-REVAL2-001, G5-REVAL2-002)
+    const createdReservationIds: string[] = [];
     if (this.#economyService) {
       for (const cost of definition.costs) {
         if (cost.timing === "upfront") {
@@ -294,7 +296,8 @@ export class ProjectsService {
             domainUuid: params.domainUuid,
             resourceId: cost.resourceId,
             deltaMinor: -cost.amountMinor,
-            reason: `Upfront cost for project ${draftProject.name}`
+            reason: `Upfront cost for project ${draftProject.name}`,
+            lockOwner: params.commandId
           });
           if (!debitRes.ok) {
             return err(
@@ -311,7 +314,8 @@ export class ProjectsService {
             domainUuid: params.domainUuid,
             resourceId: cost.resourceId,
             amountMinor: cost.amountMinor,
-            source: { type: "project", ref: projectId }
+            source: { type: "project", ref: projectId },
+            lockOwner: params.commandId
           });
           if (!reserveRes.ok) {
             return err(
@@ -323,11 +327,23 @@ export class ProjectsService {
               })
             );
           }
+          createdReservationIds.push(reserveRes.value.id);
         }
       }
     }
 
-    const commitRes = commitProjectStartPlan(plan, draftProject, {
+    const projectToCommit =
+      createdReservationIds.length > 0
+        ? {
+            ...draftProject,
+            metadata: {
+              ...(draftProject.metadata ?? {}),
+              reservationIds: Object.freeze(createdReservationIds)
+            }
+          }
+        : draftProject;
+
+    const commitRes = commitProjectStartPlan(plan, projectToCommit, {
       userId: params.userId
     });
     if (!commitRes.ok) return commitRes;
@@ -337,9 +353,30 @@ export class ProjectsService {
     // Re-read fresh domain document after upfront debits/reservations to avoid revision conflict
     const freshDocRes = await this.#domains.read(domainUuid);
     if (!freshDocRes.ok) return freshDocRes;
-    const freshProjectsData = getDomainProjectsData(freshDocRes.value.record);
+    let freshRecord = freshDocRes.value.record;
 
-    const updatedRecord = withDomainProjectsData(freshDocRes.value.record, {
+    // Reserve workforce capacity in People subsystem (G5-REVAL2-009)
+    if (params.workforceRequired !== undefined && params.workforceRequired > 0) {
+      const peopleData = getDomainPeopleData(freshRecord);
+      const wfResId = createOpaqueId("resv");
+      const workforceReservation: WorkforceReservation = {
+        id: wfResId,
+        sourceRef: `domain:${domainUuid}`,
+        targetRef: `project:${projectId}`,
+        workforceTypeId: "general",
+        amount: params.workforceRequired,
+        status: "active",
+        visibility: "public"
+      };
+      freshRecord = withDomainPeopleData(freshRecord, {
+        ...peopleData,
+        reservations: Object.freeze([...peopleData.reservations, workforceReservation])
+      });
+    }
+
+    const freshProjectsData = getDomainProjectsData(freshRecord);
+
+    const updatedRecord = withDomainProjectsData(freshRecord, {
       ...freshProjectsData,
       projects: Object.freeze([...freshProjectsData.projects, startedProject])
     });
@@ -418,21 +455,33 @@ export class ProjectsService {
     });
     if (!advanceRes.ok) return advanceRes;
 
-    // Progressive costs consumption (G5-REVAL-005)
+    // Progressive costs consumption with deterministic cumulative delta (G5-REVAL2-003, G5-REVAL2-004)
     if (this.#economyService && advanceRes.value.receipt.unitsDelta > 0) {
+      const unitsBefore = project.workCompleted;
+      const unitsAfter = Math.min(project.workRequired, unitsBefore + advanceRes.value.receipt.unitsDelta);
       for (const cost of definition.costs) {
         if (cost.timing === "progressive") {
-          const progAmount = Math.max(
-            0,
-            Math.floor((advanceRes.value.receipt.unitsDelta / project.workRequired) * cost.amountMinor)
-          );
-          if (progAmount > 0) {
-            await this.#economyService.commitAdjust({
+          const dueBefore = Math.floor((unitsBefore / project.workRequired) * cost.amountMinor);
+          const dueAfter = Math.floor((unitsAfter / project.workRequired) * cost.amountMinor);
+          const toDebit = dueAfter - dueBefore;
+          if (toDebit > 0) {
+            const debitRes = await this.#economyService.commitAdjust({
               domainUuid: params.domainUuid,
               resourceId: cost.resourceId,
-              deltaMinor: -progAmount,
-              reason: `Progressive cost for project ${project.name}`
+              deltaMinor: -toDebit,
+              reason: `Progressive cost for project ${project.name}`,
+              lockOwner: params.commandId
             });
+            if (!debitRes.ok) {
+              return err(
+                createPublicError({
+                  code: "DM_PROJECT_ADVANCE_BLOCKED",
+                  category: "conflict",
+                  message: `Insufficient funds for progressive cost '${cost.resourceId}': ${debitRes.error.message}`,
+                  details: debitRes.error
+                })
+              );
+            }
           }
         }
       }
@@ -466,36 +515,90 @@ export class ProjectsService {
     });
   }
 
-  async pauseProject(params: { domainUuid: string; projectId: string; reason?: string; userId?: string | null; expectedRevision?: number; commandId?: string; authorityEpoch?: number }): Promise<Result<{ readonly project: ProjectInstance }>> {
+  async pauseProject(params: {
+    domainUuid: string;
+    projectId: string;
+    reason?: string;
+    userId?: string | null;
+    expectedRevision?: number;
+    commandId?: string;
+    authorityEpoch?: number;
+    correlationId?: string;
+    causationId?: string;
+  }): Promise<Result<{ readonly project: ProjectInstance }>> {
     return this.#mutateLifecycle(params.domainUuid, params.projectId, params.expectedRevision, (p) =>
       planPauseProject(p, { note: params.reason, userId: params.userId })
     );
   }
 
-  async resumeProject(params: { domainUuid: string; projectId: string; reason?: string; userId?: string | null; expectedRevision?: number; commandId?: string; authorityEpoch?: number }): Promise<Result<{ readonly project: ProjectInstance }>> {
+  async resumeProject(params: {
+    domainUuid: string;
+    projectId: string;
+    reason?: string;
+    userId?: string | null;
+    expectedRevision?: number;
+    commandId?: string;
+    authorityEpoch?: number;
+    correlationId?: string;
+    causationId?: string;
+  }): Promise<Result<{ readonly project: ProjectInstance }>> {
     return this.#mutateLifecycle(params.domainUuid, params.projectId, params.expectedRevision, (p) =>
       planResumeProject(p, { note: params.reason, userId: params.userId })
     );
   }
 
   async cancelProject(params: CancelProjectParams): Promise<Result<{ readonly project: ProjectInstance }>> {
-    // Release any active reservations for this project (G5-REVAL-005)
-    if (this.#economyService && "releaseReservation" in this.#economyService) {
-      try {
-        const resList = await (this.#economyService as any).getReservations?.(params.domainUuid);
-        if (resList && resList.ok && Array.isArray(resList.value)) {
-          for (const r of resList.value) {
-            if (r.source?.ref === params.projectId || r.source?.type === "project") {
-              await this.#economyService.releaseReservation({
-                domainUuid: params.domainUuid,
-                reservationId: r.id,
-                reason: params.reason ?? "Project cancelled"
-              });
-            }
+    const domainUuid = this.#cleanId(params.domainUuid);
+    const docRes = await this.#domains.read(domainUuid);
+    if (!docRes.ok) return docRes;
+    const project = getDomainProjectsData(docRes.value.record).projects.find((p) => p.id === params.projectId);
+
+    // 1. Release active economy reservations for this project (G5-REVAL2-002)
+    if (this.#economyService) {
+      const activeReservations: string[] = [];
+      if (project?.metadata?.reservationIds && Array.isArray(project.metadata.reservationIds)) {
+        activeReservations.push(...(project.metadata.reservationIds as string[]));
+      }
+      if ("listReservations" in this.#economyService) {
+        const matching = this.#economyService.listReservations({
+          domainUuid: params.domainUuid,
+          sourceRef: params.projectId,
+          status: "active"
+        });
+        for (const m of matching) {
+          if (!activeReservations.includes(m.id)) {
+            activeReservations.push(m.id);
           }
         }
-      } catch {
-        // best-effort reservation release
+      }
+      for (const resId of activeReservations) {
+        await this.#economyService.releaseReservation({
+          domainUuid: params.domainUuid,
+          reservationId: resId,
+          reason: params.reason ?? "Project cancelled",
+          lockOwner: params.commandId
+        });
+      }
+    }
+
+    // 2. Release people workforce reservation (G5-REVAL2-009)
+    const freshDocRes = await this.#domains.read(domainUuid);
+    if (freshDocRes.ok) {
+      const peopleData = getDomainPeopleData(freshDocRes.value.record);
+      const hasWorkforceRes = peopleData.reservations.some(
+        (r) => r.targetRef === `project:${params.projectId}` && r.status === "active"
+      );
+      if (hasWorkforceRes) {
+        const updatedReservations = peopleData.reservations.map((r) =>
+          r.targetRef === `project:${params.projectId}` && r.status === "active"
+            ? { ...r, status: "released" as const }
+            : r
+        );
+        const updatedRecord = withDomainPeopleData(freshDocRes.value.record, {
+          ...peopleData,
+          reservations: Object.freeze(updatedReservations)
+        });
+        await this.#domains.update({ ...freshDocRes.value, record: updatedRecord });
       }
     }
 
@@ -504,13 +607,33 @@ export class ProjectsService {
     );
   }
 
-  async blockProject(params: { domainUuid: string; projectId: string; reason: string; userId?: string | null; expectedRevision?: number; commandId?: string; authorityEpoch?: number }): Promise<Result<{ readonly project: ProjectInstance }>> {
+  async blockProject(params: {
+    domainUuid: string;
+    projectId: string;
+    reason: string;
+    userId?: string | null;
+    expectedRevision?: number;
+    commandId?: string;
+    authorityEpoch?: number;
+    correlationId?: string;
+    causationId?: string;
+  }): Promise<Result<{ readonly project: ProjectInstance }>> {
     return this.#mutateLifecycle(params.domainUuid, params.projectId, params.expectedRevision, (p) =>
       planBlockProject(p, { reason: params.reason, userId: params.userId, expectedRevision: params.expectedRevision })
     );
   }
 
-  async unblockProject(params: { domainUuid: string; projectId: string; reason?: string; userId?: string | null; expectedRevision?: number; commandId?: string; authorityEpoch?: number }): Promise<Result<{ readonly project: ProjectInstance }>> {
+  async unblockProject(params: {
+    domainUuid: string;
+    projectId: string;
+    reason?: string;
+    userId?: string | null;
+    expectedRevision?: number;
+    commandId?: string;
+    authorityEpoch?: number;
+    correlationId?: string;
+    causationId?: string;
+  }): Promise<Result<{ readonly project: ProjectInstance }>> {
     return this.#mutateLifecycle(params.domainUuid, params.projectId, params.expectedRevision, (p) =>
       planUnblockProject(p, { note: params.reason, userId: params.userId })
     );
@@ -574,127 +697,7 @@ export class ProjectsService {
       );
     }
 
-    // Execute onCompletion costs (G5-REVAL-005)
-    if (this.#economyService) {
-      for (const cost of definition.costs) {
-        if (cost.timing === "onCompletion") {
-          await this.#economyService.commitAdjust({
-            domainUuid: params.domainUuid,
-            resourceId: cost.resourceId,
-            deltaMinor: -cost.amountMinor,
-            reason: `OnCompletion cost for project ${project.name}`
-          });
-        }
-      }
-    }
-
-    // Execute real coordinated side effects (G5-REVAL-003)
-    const executedReceipts: Record<string, ChildReceipt> = {};
-    if (this.#facilitiesService) {
-      for (const effect of plan.sideEffects.filter((e) => e.type === "facility")) {
-        if (!effect.targetRef) continue;
-        const facRes = await this.#facilitiesService.createFacility({
-          domainUuid: params.domainUuid,
-          definitionId: effect.targetRef,
-          name: effect.description
-        });
-        if (facRes.ok) {
-          executedReceipts[effect.id] = {
-            childReceiptId: createOpaqueId("rep"),
-            subsystem: "facility",
-            action: "create_facility",
-            targetRef: facRes.value.facility.id,
-            payload: { definitionId: effect.targetRef, facilityId: facRes.value.facility.id },
-            success: true,
-            appliedAt: Date.now()
-          };
-        } else {
-          executedReceipts[effect.id] = {
-            childReceiptId: createOpaqueId("rep"),
-            subsystem: "facility",
-            action: "create_facility",
-            targetRef: effect.targetRef,
-            payload: effect.value,
-            success: false,
-            error: facRes.error.message,
-            appliedAt: Date.now()
-          };
-        }
-      }
-    }
-
-    if (this.#economyService) {
-      for (const effect of plan.sideEffects.filter((e) => e.type === "resource")) {
-        if (!effect.targetRef) continue;
-        const econRes = await this.#economyService.commitAdjust({
-          domainUuid: params.domainUuid,
-          resourceId: effect.targetRef,
-          deltaMinor: Number(effect.value),
-          reason: `Project completion reward: ${effect.description ?? project.name}`
-        });
-        if (econRes.ok) {
-          executedReceipts[effect.id] = {
-            childReceiptId: createOpaqueId("rep"),
-            subsystem: "economy",
-            action: "credit_resource",
-            targetRef: effect.targetRef,
-            payload: { amountMinor: effect.value },
-            success: true,
-            appliedAt: Date.now()
-          };
-        } else {
-          executedReceipts[effect.id] = {
-            childReceiptId: createOpaqueId("rep"),
-            subsystem: "economy",
-            action: "credit_resource",
-            targetRef: effect.targetRef,
-            payload: { amountMinor: effect.value },
-            success: false,
-            error: econRes.error.message,
-            appliedAt: Date.now()
-          };
-        }
-      }
-    }
-
-    // Build side effect handlers delivering executed real receipts
-    const sideEffectHandlers: Record<string, SideEffectHandler> = {
-      ...(params.options?.sideEffectHandlers ?? {})
-    };
-
-    if (!sideEffectHandlers.facility) {
-      sideEffectHandlers.facility = (effect) => {
-        return (
-          executedReceipts[effect.id] ?? {
-            childReceiptId: createOpaqueId("rep"),
-            subsystem: "facility",
-            action: "create_facility",
-            targetRef: effect.targetRef,
-            payload: effect.value,
-            success: !this.#facilitiesService,
-            appliedAt: Date.now()
-          }
-        );
-      };
-    }
-
-    if (!sideEffectHandlers.resource) {
-      sideEffectHandlers.resource = (effect) => {
-        return (
-          executedReceipts[effect.id] ?? {
-            childReceiptId: createOpaqueId("rep"),
-            subsystem: "economy",
-            action: "credit_resource",
-            targetRef: effect.targetRef,
-            payload: { amountMinor: effect.value },
-            success: !this.#economyService,
-            appliedAt: Date.now()
-          }
-        );
-      };
-    }
-
-    // G4/G5 Transaction integration with REAL command context & epoch (G5-REVAL-011)
+    // 1. Transaction preparation BEFORE child effects (G5-REVAL2-005)
     const txId = createOpaqueId("tx");
     const cmdId: CommandId = params.commandId
       ? (params.commandId.startsWith("cmd_") ? (params.commandId as CommandId) : (`cmd_${params.commandId}` as CommandId))
@@ -712,12 +715,210 @@ export class ProjectsService {
           projectId: project.id,
           planId: plan.planId,
           correlationId: params.correlationId,
-          causationId: params.causationId
+          causationId: params.causationId,
+          status: "prepared"
         }
       });
       this.#transactionStore.save(tx);
       this.#transactionStore.transition(txId, "claimed", epoch);
       this.#transactionStore.transition(txId, "prepared", epoch);
+    }
+
+    // 2. Execute onCompletion costs with fail-closed validation (G5-REVAL2-003, G5-REVAL2-005)
+    if (this.#economyService) {
+      for (const cost of definition.costs) {
+        if (cost.timing === "onCompletion") {
+          const debitRes = await this.#economyService.commitAdjust({
+            domainUuid: params.domainUuid,
+            resourceId: cost.resourceId,
+            deltaMinor: -cost.amountMinor,
+            reason: `OnCompletion cost for project ${project.name}`,
+            lockOwner: params.commandId
+          });
+          if (!debitRes.ok) {
+            if (this.#transactionStore) {
+              this.#transactionStore.transition(txId, "failed", epoch, debitRes.error.message);
+            }
+            return err(
+              createPublicError({
+                code: "DM_PROJECT_COMPLETION_BLOCKED",
+                category: "conflict",
+                message: `Failed to debit onCompletion cost for '${cost.resourceId}': ${debitRes.error.message}`,
+                details: debitRes.error
+              })
+            );
+          }
+        }
+      }
+    }
+
+    // 3. Consume active reservations for this project (G5-REVAL2-002)
+    if (this.#economyService) {
+      const activeReservations: string[] = [];
+      if (project?.metadata?.reservationIds && Array.isArray(project.metadata.reservationIds)) {
+        activeReservations.push(...(project.metadata.reservationIds as string[]));
+      }
+      if ("listReservations" in this.#economyService) {
+        const matching = this.#economyService.listReservations({
+          domainUuid: params.domainUuid,
+          sourceRef: params.projectId,
+          status: "active"
+        });
+        for (const m of matching) {
+          if (!activeReservations.includes(m.id)) {
+            activeReservations.push(m.id);
+          }
+        }
+      }
+      for (const resId of activeReservations) {
+        const resObj = this.#economyService.getReservation(resId);
+        if (resObj && (resObj.status === "active" || resObj.status === "partially-consumed")) {
+          await this.#economyService.consumeReservation({
+            domainUuid: params.domainUuid,
+            reservationId: resId,
+            amountMinor: resObj.remainingAmountMinor,
+            reason: `Project ${project.name} completed`,
+            lockOwner: params.commandId
+          });
+        }
+      }
+    }
+
+    // 4. Execute real coordinated side effects (G5-REVAL-003, G5-REVAL2-005)
+    let partialFailure = false;
+    const executedReceipts: Record<string, ChildReceipt> = {};
+
+    for (const effect of plan.sideEffects.filter((e) => e.type === "facility")) {
+      if (!effect.targetRef) continue;
+      if (!this.#facilitiesService) {
+        partialFailure = true;
+        executedReceipts[effect.id] = {
+          childReceiptId: createOpaqueId("rep"),
+          subsystem: "facility",
+          action: "create_facility",
+          targetRef: effect.targetRef,
+          payload: effect.value,
+          success: false,
+          error: "FacilitiesService not available",
+          appliedAt: Date.now()
+        };
+        continue;
+      }
+      const facRes = await this.#facilitiesService.createFacility({
+        domainUuid: params.domainUuid,
+        definitionId: effect.targetRef,
+        name: effect.description
+      });
+      if (facRes.ok) {
+        executedReceipts[effect.id] = {
+          childReceiptId: createOpaqueId("rep"),
+          subsystem: "facility",
+          action: "create_facility",
+          targetRef: facRes.value.facility.id,
+          payload: { definitionId: effect.targetRef, facilityId: facRes.value.facility.id },
+          success: true,
+          appliedAt: Date.now()
+        };
+      } else {
+        partialFailure = true;
+        executedReceipts[effect.id] = {
+          childReceiptId: createOpaqueId("rep"),
+          subsystem: "facility",
+          action: "create_facility",
+          targetRef: effect.targetRef,
+          payload: effect.value,
+          success: false,
+          error: facRes.error.message,
+          appliedAt: Date.now()
+        };
+      }
+    }
+
+    for (const effect of plan.sideEffects.filter((e) => e.type === "resource")) {
+      if (!effect.targetRef) continue;
+      if (!this.#economyService) {
+        partialFailure = true;
+        executedReceipts[effect.id] = {
+          childReceiptId: createOpaqueId("rep"),
+          subsystem: "economy",
+          action: "credit_resource",
+          targetRef: effect.targetRef,
+          payload: { amountMinor: effect.value },
+          success: false,
+          error: "EconomyService not available",
+          appliedAt: Date.now()
+        };
+        continue;
+      }
+      const econRes = await this.#economyService.commitAdjust({
+        domainUuid: params.domainUuid,
+        resourceId: effect.targetRef,
+        deltaMinor: Number(effect.value),
+        reason: `Project completion reward: ${effect.description ?? project.name}`,
+        lockOwner: params.commandId
+      });
+      if (econRes.ok) {
+        executedReceipts[effect.id] = {
+          childReceiptId: createOpaqueId("rep"),
+          subsystem: "economy",
+          action: "credit_resource",
+          targetRef: effect.targetRef,
+          payload: { amountMinor: effect.value },
+          success: true,
+          appliedAt: Date.now()
+        };
+      } else {
+        partialFailure = true;
+        executedReceipts[effect.id] = {
+          childReceiptId: createOpaqueId("rep"),
+          subsystem: "economy",
+          action: "credit_resource",
+          targetRef: effect.targetRef,
+          payload: { amountMinor: effect.value },
+          success: false,
+          error: econRes.error.message,
+          appliedAt: Date.now()
+        };
+      }
+    }
+
+    // Build side effect handlers delivering executed real receipts
+    const sideEffectHandlers: Record<string, SideEffectHandler> = {
+      ...(params.options?.sideEffectHandlers ?? {})
+    };
+
+    if (!sideEffectHandlers.facility) {
+      sideEffectHandlers.facility = (effect) => {
+        return (
+          executedReceipts[effect.id] ?? {
+            childReceiptId: createOpaqueId("rep"),
+            subsystem: "facility",
+            action: "create_facility",
+            targetRef: effect.targetRef,
+            payload: effect.value,
+            success: false,
+            error: "No facility receipt generated",
+            appliedAt: Date.now()
+          }
+        );
+      };
+    }
+
+    if (!sideEffectHandlers.resource) {
+      sideEffectHandlers.resource = (effect) => {
+        return (
+          executedReceipts[effect.id] ?? {
+            childReceiptId: createOpaqueId("rep"),
+            subsystem: "economy",
+            action: "credit_resource",
+            targetRef: effect.targetRef,
+            payload: { amountMinor: effect.value },
+            success: false,
+            error: "No resource receipt generated",
+            appliedAt: Date.now()
+          }
+        );
+      };
     }
 
     const commitRes = commitProjectCompletion(plan, project, {
@@ -733,31 +934,38 @@ export class ProjectsService {
       return commitRes;
     }
 
-    const { updatedProject, childReceipts, partialFailure } = commitRes.value;
-
-    if (this.#transactionStore) {
-      if (partialFailure) {
-        this.#transactionStore.transition(
-          txId,
-          "needs-recovery",
-          epoch,
-          "Coordinated side effects experienced partial failure"
-        );
-      } else {
-        this.#transactionStore.transition(txId, "committing", epoch);
-      }
+    const { updatedProject, childReceipts } = commitRes.value;
+    if (commitRes.value.partialFailure) {
+      partialFailure = true;
     }
 
-    // Re-read fresh domain document after onCompletion costs and coordinated side effects
+    // 5. Release people workforce reservation (G5-REVAL2-009)
     const freshDocRes = await this.#domains.read(domainUuid);
     if (!freshDocRes.ok) return freshDocRes;
-    const freshProjectsData = getDomainProjectsData(freshDocRes.value.record);
+    let freshRecord = freshDocRes.value.record;
 
+    const peopleData = getDomainPeopleData(freshRecord);
+    const hasWorkforceRes = peopleData.reservations.some(
+      (r) => r.targetRef === `project:${params.projectId}` && r.status === "active"
+    );
+    if (hasWorkforceRes) {
+      const updatedReservations = peopleData.reservations.map((r) =>
+        r.targetRef === `project:${params.projectId}` && r.status === "active"
+          ? { ...r, status: "released" as const }
+          : r
+      );
+      freshRecord = withDomainPeopleData(freshRecord, {
+        ...peopleData,
+        reservations: Object.freeze(updatedReservations)
+      });
+    }
+
+    const freshProjectsData = getDomainProjectsData(freshRecord);
     const updatedProjects = freshProjectsData.projects.map((p) =>
       p.id === params.projectId ? updatedProject : p
     );
 
-    const updatedRecord = withDomainProjectsData(freshDocRes.value.record, {
+    const updatedRecord = withDomainProjectsData(freshRecord, {
       ...freshProjectsData,
       projects: Object.freeze(updatedProjects)
     });
@@ -769,13 +977,23 @@ export class ProjectsService {
 
     if (!saveRes.ok) {
       if (this.#transactionStore) {
-        this.#transactionStore.transition(txId, "failed", epoch, saveRes.error.message);
+        // Child effects were already executed, so failure requires recovery! (G5-REVAL2-005)
+        this.#transactionStore.transition(txId, "needs-recovery", epoch, `Save failed after child effects: ${saveRes.error.message}`);
       }
       return saveRes;
     }
 
-    if (this.#transactionStore && !partialFailure) {
-      this.#transactionStore.transition(txId, "committed", epoch);
+    if (this.#transactionStore) {
+      if (partialFailure) {
+        this.#transactionStore.transition(
+          txId,
+          "needs-recovery",
+          epoch,
+          "Coordinated side effects experienced partial failure"
+        );
+      } else {
+        this.#transactionStore.transition(txId, "committed", epoch);
+      }
     }
 
     return ok({
