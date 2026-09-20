@@ -27,12 +27,18 @@ function findBuiltTests(directory) {
 const testFiles = findTestFiles(testsRoot);
 if (testFiles.length === 0) throw new Error("No test files found");
 
+const filterArg = process.argv.find((a) => a.includes(".test"));
+const targetFiles = filterArg
+  ? testFiles.filter((f) => f.includes(filterArg))
+  : testFiles;
+if (targetFiles.length === 0) throw new Error("No test files found matching: " + filterArg);
+
 rmSync(outputRoot, { recursive: true, force: true });
 mkdirSync(outputRoot, { recursive: true });
 
 try {
   await esbuild.build({
-    entryPoints: testFiles,
+    entryPoints: targetFiles,
     bundle: true,
     format: "esm",
     platform: "node",
@@ -40,7 +46,8 @@ try {
     entryNames: "[name]"
   });
 
-  execFileSync(process.execPath, ["--test", ...findBuiltTests(outputRoot)], {
+  const userArgs = process.argv.slice(2).filter((a) => a !== filterArg);
+  execFileSync(process.execPath, ["--test", ...userArgs, ...findBuiltTests(outputRoot)], {
     stdio: "inherit"
   });
 } finally {

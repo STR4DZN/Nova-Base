@@ -1,6 +1,7 @@
 import { createPublicError, type PublicError } from "../../core/contracts/public-error.js";
 import { err, ok, type Result } from "../../core/contracts/result.js";
 import { createOpaqueId } from "../../core/identity/ids.js";
+import { normalizeJournalEntryId } from "../../core/identity/refs.js";
 import type { DomainRepositoryContract } from "../../storage/repositories/domain-repository.js";
 import type { FacilityDefinitionRegistry } from "../definitions/facility-registry.js";
 import { createDefaultFacilityRegistry } from "../definitions/facility-registry.js";
@@ -10,6 +11,7 @@ import type {
   FacilityLifecycle,
   FacilityReadiness
 } from "../types/facility-types.js";
+import type { FacilityCondition } from "../types/facility-maintenance-types.js";
 import {
   getDomainFacilitiesData,
   FACILITIES_CAPABILITY_ID,
@@ -21,12 +23,16 @@ import {
 } from "../plans/facility-maintenance-plan-service.js";
 import {
   evaluateFacilityRepairPlan,
-  commitFacilityRepair
+  commitFacilityRepair,
+  applyFacilityDamage
 } from "../plans/facility-repair-plan-service.js";
+import type { EconomyService } from "../../economy/services/economy-service.js";
+import { tryGetDomainEconomyData } from "../../economy/economy-data.js";
 
 export interface FacilitiesServiceOptions {
   readonly domains: DomainRepositoryContract;
   readonly facilityRegistry?: FacilityDefinitionRegistry;
+  readonly economyService?: EconomyService;
 }
 
 export interface CreateFacilityParams {
@@ -41,6 +47,7 @@ export interface CreateFacilityParams {
 export interface MaintainFacilityParams {
   readonly domainUuid: string;
   readonly facilityId: string;
+  readonly channelId?: string;
   readonly notes?: string;
   readonly userId?: string | null;
 }
@@ -59,7 +66,7 @@ export interface ApplyDamageParams {
   readonly facilityId: string;
   readonly damage: number;
   readonly conditionId?: string;
-  readonly condition?: import("../types/facility-types.js").FacilityCondition;
+  readonly condition?: FacilityCondition;
   readonly reason?: string;
   readonly userId?: string | null;
 }
@@ -67,10 +74,16 @@ export interface ApplyDamageParams {
 export class FacilitiesService {
   readonly #domains: DomainRepositoryContract;
   readonly #facilityRegistry: FacilityDefinitionRegistry;
+  readonly #economyService?: EconomyService;
 
   constructor(options: FacilitiesServiceOptions) {
     this.#domains = options.domains;
     this.#facilityRegistry = options.facilityRegistry ?? createDefaultFacilityRegistry();
+    this.#economyService = options.economyService;
+  }
+
+  #cleanId(idOrUuid: string): string {
+    return normalizeJournalEntryId(idOrUuid);
   }
 
   get registry(): FacilityDefinitionRegistry {
@@ -78,14 +91,15 @@ export class FacilitiesService {
   }
 
   async getFacilities(domainUuid: string): Promise<Result<readonly FacilityInstance[]>> {
-    const docRes = await this.#domains.read(domainUuid);
+    const docRes = await this.#domains.read(this.#cleanId(domainUuid));
     if (!docRes.ok) return docRes;
     const data = getDomainFacilitiesData(docRes.value.record);
     return ok(data.facilities);
   }
 
   async getFacility(domainUuid: string, facilityId: string): Promise<Result<FacilityInstance>> {
-    const docRes = await this.#domains.read(domainUuid);
+    const cleanDomainUuid = this.#cleanId(domainUuid);
+    const docRes = await this.#domains.read(cleanDomainUuid);
     if (!docRes.ok) return docRes;
     const data = getDomainFacilitiesData(docRes.value.record);
     const f = data.facilities.find((item) => item.id === facilityId);
@@ -102,7 +116,8 @@ export class FacilitiesService {
   }
 
   async createFacility(params: CreateFacilityParams): Promise<Result<{ readonly facility: FacilityInstance }>> {
-    const docRes = await this.#domains.read(params.domainUuid);
+    const cleanDomainUuid = this.#cleanId(params.domainUuid);
+    const docRes = await this.#domains.read(cleanDomainUuid);
     if (!docRes.ok) return docRes;
 
     const record = docRes.value.record;
@@ -134,7 +149,7 @@ export class FacilitiesService {
     const newFacility: FacilityInstance = {
       id: facilityId,
       definitionId: params.definitionId,
-      domainUuid: params.domainUuid,
+      domainUuid: cleanDomainUuid,
       name: params.name || definition.label,
       schemaVersion: 1,
       revision: 0,
@@ -171,7 +186,8 @@ export class FacilitiesService {
   }
 
   async maintainFacility(params: MaintainFacilityParams): Promise<Result<{ readonly facility: FacilityInstance }>> {
-    const docRes = await this.#domains.read(params.domainUuid);
+    const cleanDomainUuid = this.#cleanId(params.domainUuid);
+    const docRes = await this.#domains.read(cleanDomainUuid);
     if (!docRes.ok) return docRes;
 
     const record = docRes.value.record;
@@ -208,17 +224,51 @@ export class FacilitiesService {
       );
     }
 
-    const plan = evaluateFacilityMaintenancePlan({ facility, definition: def });
+    // Evaluate available balances from domain economy data (G5-REVAL-009)
+    let availableBalances: Record<string, number> | undefined = undefined;
+    const econDataRes = tryGetDomainEconomyData(record);
+    if (econDataRes.ok) {
+      availableBalances = {};
+      for (const acct of econDataRes.value.accounts) {
+        if (acct.mode === "native") {
+          const balance = acct.balanceMinor;
+          availableBalances[acct.resourceId] = (availableBalances[acct.resourceId] ?? 0) + balance;
+        }
+      }
+    }
+
+    const plan = evaluateFacilityMaintenancePlan({
+      facility,
+      definition: def,
+      channelId: params.channelId,
+      availableBalances
+    });
     if (!plan.valid) {
       const firstErr = plan.errors?.[0];
       return err(
+        firstErr ??
         createPublicError({
           code: "DM_FACILITY_MAINTENANCE_BLOCKED",
           category: "conflict",
-          message: firstErr?.message ?? "Facility maintenance plan is invalid or blocked",
+          message: "Facility maintenance plan is invalid or blocked",
           details: { errors: plan.errors }
         })
       );
+    }
+
+    // Debit maintenance costs via economy service if configured (G5-REVAL-009)
+    if (this.#economyService && plan.resourceCosts.length > 0) {
+      for (const cost of plan.resourceCosts) {
+        const debitRes = await this.#economyService.commitAdjust({
+          domainUuid: cleanDomainUuid,
+          resourceId: cost.resourceId,
+          deltaMinor: -cost.amount,
+          reason: `Maintenance cost for facility '${facility.name}'`
+        });
+        if (!debitRes.ok) {
+          return debitRes;
+        }
+      }
     }
 
     const commitRes = commitFacilityMaintenance({
@@ -229,17 +279,23 @@ export class FacilitiesService {
     if (!commitRes.ok) return commitRes;
 
     const updatedFacility = commitRes.value.updatedFacility;
-    const updatedFacilities = currentFacilitiesData.facilities.map((f) =>
+
+    // Re-read fresh domain document after economy adjustments to avoid revision conflict and preserve balance mutations
+    const freshDocRes = await this.#domains.read(cleanDomainUuid);
+    if (!freshDocRes.ok) return freshDocRes;
+
+    const freshFacilitiesData = getDomainFacilitiesData(freshDocRes.value.record);
+    const updatedFacilities = freshFacilitiesData.facilities.map((f) =>
       f.id === params.facilityId ? updatedFacility : f
     );
 
-    const updatedRecord = withDomainFacilitiesData(record, {
-      ...currentFacilitiesData,
+    const updatedRecord = withDomainFacilitiesData(freshDocRes.value.record, {
+      ...freshFacilitiesData,
       facilities: Object.freeze(updatedFacilities)
     });
 
     const saveRes = await this.#domains.save({
-      ...docRes.value,
+      ...freshDocRes.value,
       record: updatedRecord
     });
     if (!saveRes.ok) return saveRes;
@@ -248,7 +304,8 @@ export class FacilitiesService {
   }
 
   async repairFacility(params: RepairFacilityParams): Promise<Result<{ readonly facility: FacilityInstance }>> {
-    const docRes = await this.#domains.read(params.domainUuid);
+    const cleanDomainUuid = this.#cleanId(params.domainUuid);
+    const docRes = await this.#domains.read(cleanDomainUuid);
     if (!docRes.ok) return docRes;
 
     const record = docRes.value.record;
@@ -304,6 +361,21 @@ export class FacilitiesService {
       );
     }
 
+    // Debit repair costs via economy service if configured
+    if (this.#economyService && plan.resourceCosts.length > 0) {
+      for (const cost of plan.resourceCosts) {
+        const debitRes = await this.#economyService.commitAdjust({
+          domainUuid: cleanDomainUuid,
+          resourceId: cost.resourceId,
+          deltaMinor: -cost.amount,
+          reason: `Repair cost for facility '${facility.name}'`
+        });
+        if (!debitRes.ok) {
+          return debitRes;
+        }
+      }
+    }
+
     const commitRes = commitFacilityRepair({
       plan,
       facility,
@@ -312,17 +384,23 @@ export class FacilitiesService {
     if (!commitRes.ok) return commitRes;
 
     const updatedFacility = commitRes.value.updatedFacility;
-    const updatedFacilities = currentFacilitiesData.facilities.map((f) =>
+
+    // Re-read fresh domain document after economy adjustments to avoid revision conflict and preserve balance mutations
+    const freshDocRes = await this.#domains.read(cleanDomainUuid);
+    if (!freshDocRes.ok) return freshDocRes;
+
+    const freshFacilitiesData = getDomainFacilitiesData(freshDocRes.value.record);
+    const updatedFacilities = freshFacilitiesData.facilities.map((f) =>
       f.id === params.facilityId ? updatedFacility : f
     );
 
-    const updatedRecord = withDomainFacilitiesData(record, {
-      ...currentFacilitiesData,
+    const updatedRecord = withDomainFacilitiesData(freshDocRes.value.record, {
+      ...freshFacilitiesData,
       facilities: Object.freeze(updatedFacilities)
     });
 
     const saveRes = await this.#domains.save({
-      ...docRes.value,
+      ...freshDocRes.value,
       record: updatedRecord
     });
     if (!saveRes.ok) return saveRes;
@@ -331,7 +409,8 @@ export class FacilitiesService {
   }
 
   async applyDamage(params: ApplyDamageParams): Promise<Result<{ readonly facility: FacilityInstance }>> {
-    const docRes = await this.#domains.read(params.domainUuid);
+    const cleanDomainUuid = this.#cleanId(params.domainUuid);
+    const docRes = await this.#domains.read(cleanDomainUuid);
     if (!docRes.ok) return docRes;
 
     const record = docRes.value.record;
@@ -347,46 +426,28 @@ export class FacilitiesService {
       );
     }
 
-    const max = facility.integrity?.max ?? 100;
-    const current = facility.integrity?.current ?? 100;
-    const newIntegrity = Math.max(0, current - Math.abs(params.damage));
-
-    let newLifecycle: FacilityLifecycle = facility.lifecycle;
-    let newReadiness: FacilityReadiness = facility.readiness;
-
-    if (newIntegrity === 0) {
-      newLifecycle = "disabled";
-      newReadiness = "unavailable";
-    } else if (newIntegrity < max / 2) {
-      newLifecycle = "degraded";
-      newReadiness = "limited";
-    }
-
-    const conditions = [...(facility.conditions ?? [])];
-    if (params.condition) {
-      if (!conditions.some((c) => c.id === params.condition!.id)) {
-        conditions.push(params.condition);
-      }
-    } else if (params.conditionId && !conditions.some((c) => c.id === params.conditionId)) {
-      conditions.push({
+    // Construct condition if only conditionId was provided
+    let condition = params.condition;
+    if (!condition && params.conditionId) {
+      condition = {
         id: params.conditionId,
         type: `domain-manager:${params.conditionId}`,
         label: params.conditionId,
-        severity: newIntegrity === 0 ? "critical" : "major",
+        severity: "major",
         appliedAtTimestamp: Date.now()
-      });
+      };
     }
 
-    const updatedFacility: FacilityInstance = {
-      ...facility,
-      integrity: Object.freeze({ current: newIntegrity, max }),
-      lifecycle: newLifecycle,
-      readiness: newReadiness,
-      conditions: Object.freeze(conditions),
-      revision: facility.revision + 1,
-      updatedAt: Date.now()
-    };
+    // Delegate to canonical applyFacilityDamage (G5-REVAL-010)
+    const damageRes = applyFacilityDamage({
+      facility,
+      deltaIntegrity: Math.abs(params.damage),
+      condition,
+      note: params.reason
+    });
+    if (!damageRes.ok) return damageRes;
 
+    const updatedFacility = damageRes.value;
     const updatedFacilities = currentFacilitiesData.facilities.map((f) =>
       f.id === params.facilityId ? updatedFacility : f
     );
@@ -406,7 +467,8 @@ export class FacilitiesService {
   }
 
   async decommissionFacility(params: { domainUuid: string; facilityId: string; reason?: string; userId?: string | null }): Promise<Result<{ readonly facility: FacilityInstance }>> {
-    const docRes = await this.#domains.read(params.domainUuid);
+    const cleanDomainUuid = this.#cleanId(params.domainUuid);
+    const docRes = await this.#domains.read(cleanDomainUuid);
     if (!docRes.ok) return docRes;
 
     const record = docRes.value.record;

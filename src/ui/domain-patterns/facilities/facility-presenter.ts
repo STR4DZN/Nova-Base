@@ -14,7 +14,7 @@ import type {
   FacilityConditionSeverity,
   FacilityMaintenanceStatus
 } from "../../../facilities/types/facility-maintenance-types.js";
-import type { ViewerIdentity } from "../../../projection/viewer-identity.js";
+import { resolveCurrentViewer, type ViewerIdentity } from "../../../projection/viewer-identity.js";
 
 export interface FacilitiesPresenterOptions {
   readonly viewerIsGm?: boolean;
@@ -155,7 +155,8 @@ export function buildFacilitiesViewModel(
 ): FacilitiesSubsystemViewModel {
   const record: DomainRecord = "record" in domainInput ? domainInput.record : domainInput;
   const domainUuid = "uuid" in domainInput ? domainInput.uuid : "unknown";
-  const viewerIsGm = options.viewerIsGm ?? options.viewer?.isGm ?? false;
+  const resolvedViewer = resolveCurrentViewer(options.viewer ?? (options.viewerIsGm !== undefined ? { isGm: options.viewerIsGm } : undefined));
+  const viewerIsGm = resolvedViewer.isGm;
   const filterReadiness = options.filterReadiness ?? "all";
   const filterLifecycle = options.filterLifecycle ?? "all";
   const searchTerm = (options.searchTerm ?? "").toLowerCase().trim();

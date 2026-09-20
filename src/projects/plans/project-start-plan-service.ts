@@ -3,6 +3,8 @@ import { createPublicError, type PublicError } from "../../core/contracts/public
 import { err, ok, type Result } from "../../core/contracts/result.js";
 import type { DomainRecord } from "../../domains/domain-schema.js";
 import { tryGetDomainEconomyData } from "../../economy/economy-data.js";
+import { tryGetDomainPeopleData } from "../../people/people-data.js";
+import { calculateWorkforce } from "../../people/workforce/workforce-calculator.js";
 import { PROJECTS_CAPABILITY_ID } from "../project-data.js";
 import {
   applyProjectEntry,
@@ -195,20 +197,36 @@ export function evaluateProjectStartPlan(
   // 6. Workforce Intent Evaluation
   let workforceIntent: ProjectWorkforceIntent | null = null;
   const assignedContributors = context.contributors ?? [];
+
+  // Determine available domain workforce capacity if available
+  let domainWorkforceCapacity = 0;
+  const peopleDataRes = tryGetDomainPeopleData(domain);
+  if (peopleDataRes.ok) {
+    const wfReport = calculateWorkforce(peopleDataRes.value);
+    const generalWf = wfReport.types["general"];
+    domainWorkforceCapacity = generalWf?.available ?? 0;
+  }
+
+  const effectiveAvailableWorkforce = assignedContributors.length > 0
+    ? assignedContributors.length
+    : domainWorkforceCapacity;
+
   if (assignedContributors.length > 0 || context.parameters?.workforceRequired) {
     const requiredUnits = typeof context.parameters?.workforceRequired === "number"
       ? (context.parameters.workforceRequired as number)
       : undefined;
     const isSufficient = requiredUnits !== undefined
-      ? assignedContributors.length >= requiredUnits
+      ? effectiveAvailableWorkforce >= requiredUnits
       : true;
 
     if (!isSufficient) {
       blockers.push({
         code: "DM_PROJECT_WORKFORCE_INSUFFICIENT",
         category: "workforce",
-        message: `Assigned contributors (${assignedContributors.length}) does not meet required workforce (${requiredUnits})`,
-        details: { assigned: assignedContributors.length, required: requiredUnits }
+        message: assignedContributors.length > 0
+          ? `Assigned contributors (${assignedContributors.length}) does not meet required workforce (${requiredUnits})`
+          : `Available workforce (${domainWorkforceCapacity}) does not meet required workforce (${requiredUnits})`,
+        details: { assigned: effectiveAvailableWorkforce, required: requiredUnits }
       });
     }
 

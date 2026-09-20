@@ -7,7 +7,8 @@ import {
   type DomainCommand
 } from "../../commands/command-envelope.js";
 import type { DomainReadRepository } from "../../storage/repositories/domain-repository.js";
-import type { ViewerIdentity } from "../../projection/viewer-identity.js";
+import { resolveCurrentViewer, type ViewerIdentity } from "../../projection/viewer-identity.js";
+import { normalizeJournalEntryId } from "../../core/identity/refs.js";
 import type { DomainRecord } from "../../domains/domain-schema.js";
 import type { FacilityInstance } from "../types/facility-types.js";
 import type { FacilityDefinitionRegistry } from "../definitions/facility-registry.js";
@@ -68,11 +69,11 @@ export class DefaultPublicFacilitiesApi implements PublicFacilitiesApi {
   }
 
   async getFacilities(domainUuid: string, viewer?: Partial<ViewerIdentity>): Promise<Result<readonly FacilityInstance[]>> {
-    const cleanId = domainUuid.startsWith("JournalEntry.") ? domainUuid.slice("JournalEntry.".length) : domainUuid;
+    const cleanId = normalizeJournalEntryId(domainUuid);
     const docRes = await this.#domains.read(cleanId);
     if (!docRes.ok) return docRes;
     const data = getDomainFacilitiesData(docRes.value.record);
-    const isGm = viewer?.isGm ?? false;
+    const isGm = resolveCurrentViewer(viewer).isGm;
     if (isGm) return ok(data.facilities);
     return ok(data.facilities.filter((f) => !f.tags.includes("secret")));
   }

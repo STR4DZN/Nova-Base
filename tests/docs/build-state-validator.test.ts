@@ -53,20 +53,20 @@ test("Validator: docs/BUILD_STATE.md é um snapshot canônico sem microtarefas a
     `docs/BUILD_STATE.md deve conter exatamente 1 seção canônica de 'Próxima ação', encontrou ${proximaAcaoMatches.length}`
   );
 
-  // 4. Aponta para Gate G4 (Economy & Resources) após homologação / aceitação do Gate G3
+  // 4. Aponta para Gate G6 (Relations / Reputation / Agreements / Territory) após homologação / aceitação do Gate G5
   const proximaAcaoSection = content.split(/##\s*Próxima\s*ação/i)[1] ?? "";
   assert.ok(
-    proximaAcaoSection.includes("Gate G4"),
-    "A próxima ação canônica deve referenciar Gate G4"
+    proximaAcaoSection.includes("Gate G6"),
+    "A próxima ação canônica deve referenciar Gate G6"
   );
   assert.ok(
-    proximaAcaoSection.includes("Economy") || proximaAcaoSection.includes("Economia") || proximaAcaoSection.includes("Resources"),
-    "A próxima ação canônica deve referenciar Economy / Resources"
+    proximaAcaoSection.includes("Relations") || proximaAcaoSection.includes("Reputation") || proximaAcaoSection.includes("Territory"),
+    "A próxima ação canônica deve referenciar Relations / Reputation / Territory"
   );
   assert.ok(
     proximaAcaoSection.toLowerCase().includes("após a homologação") ||
       proximaAcaoSection.toLowerCase().includes("aceitação") ||
       proximaAcaoSection.toLowerCase().includes("conclusão"),
-    "A transição para Gate G4 deve ser estritamente condicionada à conclusão / homologação / aceitação do G3"
+    "A transição para Gate G6 deve ser estritamente condicionada à conclusão / homologação / aceitação do G5"
   );
 });

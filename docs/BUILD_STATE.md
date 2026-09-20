@@ -3,11 +3,11 @@
 ## Identidade
 
 - Module version: `0.0.5`
-- Gate de código atual: `G5 — Projects / Facilities / Downtime (Concluído)`
+- Gate de código atual: `G5 — Projects / Facilities / Downtime (Remediação de Revalidação Concluída / Aguardando Aceitação Soberana)`
 - Estado local: `GATE_G5_COMPLETED_PENDING_USER_ACCEPTANCE`
 - Estado externo: `GATE_G4_ACCEPTED_GATE_G5_COMPLETED_PENDING_USER_ACCEPTANCE`
 - Schema Domain: `1`
-- Data de conclusão do Gate G5: `2026-09-19`
+- Data de conclusão do Gate G5: `2026-09-20`
 
 ## Estado canônico
 
@@ -16,7 +16,7 @@
 - **Gate G2**: Concluído, auditado, homologado e aceito em ambiente real Foundry VTT v13.351 + Socketlib.
 - **Gate G3**: Concluído, auditado, homologado e aceito soberanamente pelo usuário (`GATE_G3_HOMOLOGATED_AND_ACCEPTED`).
 - **Gate G4**: Concluído, auditado, homologado e aceito pelo usuário. Implementação completa de todos os 10 microbuilds (G4.1 a G4.10) de acordo com o Master Specification (§14, §11–12, §42, DEC-1416–2305) e `Documentos/GATES/14_G4_ECONOMY_RESOURCES.md`.
-- **Gate G5**: Concluído (G5.1 a G5.10) e aguardando aceitação soberana do usuário (`GATE_G5_COMPLETED_PENDING_USER_ACCEPTANCE`).
+- **Gate G5**: Concluído (G5.1 a G5.10, G5-AUD-001 a G5-AUD-010 e G5-REVAL-001 a G5-REVAL-012) e aguardando aceitação soberana do usuário (`GATE_G5_COMPLETED_PENDING_USER_ACCEPTANCE`).
   - **G5.1 (Project model / lifecycle — definition / instance / revision)**: Concluído. Separação formal de `ProjectDefinition` (reutilizável, versionada, catalogada em `ProjectDefinitionRegistry`) e `ProjectInstance` (execução concreta por domínio com `revision`, `workRequired`, `workCompleted`, `lifecycle`, `clampProgress`), cálculo puro de progresso inteiro derivado (`calculateProjectProgress` com clamp de goal por DEC-086, DEC-087, DEC-090), máquina de estados de ciclo de vida (`validateProjectLifecycleTransition` cobrindo os 11 estados canônicos de Master §15.4 e reabertura auditada via `allowReopen`), definições canônicas iniciais (`CANONICAL_PROJECT_DEFINITIONS`), e modelo de capacidade em domínio `domain-manager:projects` (`DomainProjectsData`, `tryGetDomainProjectsData`, `withDomainProjectsData`, `getDomainProjectsData`) validado e registrado no `CapabilityRegistry`.
   - **G5.2 (Progress / resolver / history)**: Concluído. Implementação do modelo de histórico append-oriented (`ProjectEntry`), validação estrita de fontes e metadados (`PROJECT_ENTRY_SOURCE_KINDS`), transição de estado pura (`applyProjectEntry`) com suporte a setbacks negativos (DEC-088) e clamp no objetivo por padrão (DEC-090), regras de compensação/reversão auditada (bloqueio de reversão dupla com `DM_PROJECT_REVERSAL_ALREADY_EXISTS` e proibição de reversão de reversão), contrato extensível de resolução pura de progresso (`ProgressResolver`), implementação padrão (`StandardProgressResolver` / `domain-manager:standard`) sem mutação da instância, e catálogo `ProgressResolverRegistry` com factory e suporte a congelamento (`freeze`).
   - **G5.3 (Start plan)**: Concluído. Implementação do modelo de plano pré-execução (`ProjectStartPlan`), avaliação desacoplada de pré-condições (`evaluateProjectStartPlan`) sem mutação direta de Domain/People/Economy, mapeamento de intenção de reservas econômicas (`ProjectEconomicReservationIntent`) para custos upfront e reserved, avaliação de workforce (`ProjectWorkforceIntent`) e requisitos estruturados (`ProjectRequirementEvaluation` com status satisfied/unsatisfied/unavailable/error), detecção e diagnóstico de blockers (`ProjectBlocker`: capacidade ausente, fundos insuficientes, requisitos insatisfeitos, ciclo de vida inválido e `DM_PROJECT_REVISION_MISMATCH`), e commit atômico (`commitProjectStartPlan`) com suporte aos estados `active` e `initializing`, incremento de revisão e geração de `ProjectEntry` inicial.
@@ -33,11 +33,12 @@
 | Verificação | Resultado |
 |---|---|
 | TypeScript strict (`tsc --noEmit`) | PASS (0 erros) |
-| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 545/545 (0 falhas) |
+| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 554/554 (0 falhas) |
 | Relatório de Aceitação G5 | Gerado (`docs/GATE_G5_ACCEPTANCE_REPORT.md`) |
 | Regressões G0/G1/G2/G3/G4 | 0 (todos os 444 testes anteriores preservados e passando) |
-| Testes novos Gate G5 | 101 testes dedicados (G5.1 a G5.10: 14 em project-model, 15 em progress-resolver, 10 em project-start, 12 em project-advance, 11 em project-completion, 12 em facility-model, 10 em facility-maintenance, 11 em downtime-model, 10 em g5-ui, 11 em g5-acceptance-and-scale, 4 em g5-runtime-vertical) |
+| Testes novos Gate G5 | 110 testes dedicados (G5.1 a G5.10: 101 testes + 9 testes adversários de revalidação em g5-revalidation-adversarial.test.ts) |
 | Remediação de Auditoria G5-AUD-001 a G5-AUD-010 | PASS — 100% remediado, endurecido e verificado |
+| Remediação de Revalidação G5-REVAL-001 a G5-REVAL-012 | PASS — 100% remediado, endurecido e verificado |
 | Build do pacote (`node build.mjs`) | PASS (`dist/main.js` gerado) |
 | Empacotamento (`node scripts/package.mjs`) | PASS (`dist/domain-manager-v0.0.5.zip` gerado) |
 | Validação de pacote (`node scripts/validate-package.mjs`) | PASS |
@@ -179,10 +180,25 @@
 9. **G5-AUD-009 (ALTO — Suíte de Integração Vertical End-to-End)**: Implementação de `tests/runtime/g5-runtime-vertical.test.ts` cobrindo composição do runtime, segurança de autoridade primária vs controller vs estranho não autorizado, controllers ApplicationV2 mutando via CommandBus e sobrevivência à recarga de persistência (4/4 testes passando).
 10. **G5-AUD-010 (BAIXO — Designação Canônica Estrita do Próximo Gate G6)**: Ponteiro do próximo gate corrigido para apontar estritamente para **Gate G6 — Relations / Reputation / Agreements / Territory** (`Documentos/GATES/16_G6_RELATIONS_REPUTATION_AGREEMENTS_TERRITORY.md`).
 
+## Remediação da Revalidação Final — G5-REVAL-001 a G5-REVAL-012
+
+1. **G5-REVAL-001 (CRÍTICO — Resolução Estrita de Documentos de Domínio e Normalização JournalEntry.<id>)**: Normalização formal de identificadores via `normalizeJournalEntryId` e `normalizeDomainId` (`src/core/identity/refs.ts`) integrada ao `DomainRepository`, `ProjectsService`, `FacilitiesService` e `DowntimeService`, assegurando compatibilidade estrita com stores não-tolerantes do Foundry VTT.
+2. **G5-REVAL-002 (CRÍTICO — Resolução Autoritativa de Viewer e Fail-Closed Contra Spoofing)**: `DefaultPublicProjectsApi`, `DefaultPublicFacilitiesApi` e `DefaultPublicDowntimeApi` usam `resolveCurrentViewer(viewer)` para determinar autoridade GM/usuário a partir da sessão real, neutralizando tentativas de spoofing de privilégios (`viewer.isGm: true`) por clientes não-GM.
+3. **G5-REVAL-003 (ALTO — Verificação de Capacidade de Força de Trabalho e Ciclo Transacional de Reservas)**: `ProjectsService.startProject` e `evaluateProjectStartPlan` calculam capacidade via `calculateWorkforce` sobre o subsistema `People`, debitam custos upfront via `economyService.commitAdjust`, criam reservas com `reserve` e liberam em `cancelProject`. Releitura de documento fresco antes de salvar previne conflitos de revisão.
+4. **G5-REVAL-004 (ALTO — Execução Obrigatória de Comandos G5 via MutationCoordinator)**: Comandos de Projects, Facilities e Downtime registrados com `transactional: true`, `mutationDefinition` e `createTransactionalHandler`; despachos em bus sem coordenador falham em modo fechado com `DM_TRANSACTIONAL_COORDINATOR_REQUIRED`.
+5. **G5-REVAL-005 (ALTO — Side Effects de Conclusão Coordenados com Execução Real e Recibos Filhos)**: `ProjectsService.completeProject` executa mutações reais cross-service (criação de facilities via `facilitiesService.createFacility`, crédito de recursos via `economyService.commitAdjust`) emitindo `ChildReceipt`s duráveis com releitura atômica do documento de domínio.
+6. **G5-REVAL-006 (ALTO — Transição Transacional para needs-recovery em Falha Parcial)**: Falhas em side effects registram `partialFailure = true` e transicionam o registro da transação no `TransactionStore` para `needs-recovery`.
+7. **G5-REVAL-007 (ALTO — Imposição de Invariantes de Participantes e Instalações em Downtime)**: `DowntimeService.startActivity` valida limites de participantes (`minParticipants`, `maxParticipants`, papéis permitidos) e instalações requeridas (`DM_DOWNTIME_REQUIRED_FACILITY_MISSING`).
+8. **G5-REVAL-008 (ALTO — Débito Upfront e Execução Real de Desfechos em Downtime)**: Início debita custos upfront da economia e conclusão executa definições de desfechos creditando recursos reais à economia do domínio, gravando `outcomesApplied`.
+9. **G5-REVAL-009 (ALTO — Débito Real de Custos em Manutenção e Reparo de Instalações)**: `FacilitiesService.maintainFacility` e `repairFacility` debitam recursos reais da economia via `economyService.commitAdjust`.
+10. **G5-REVAL-010 (MÉDIO — Histórico Append-Only e Condições Canônicas em Danos de Instalação)**: `FacilitiesService.applyDamage` delega para `applyFacilityDamage`, gravando condições estruturais e anexando entradas ao histórico da instalação.
+11. **G5-REVAL-011 (MÉDIO — Preservação de Identidade Transacional e Época de Autoridade)**: Preserva `commandId`, `authorityEpoch !== 1`, `correlationId` e `causationId` sem fabricação de identificadores artificiais.
+12. **G5-REVAL-012 (CRÍTICO — Suíte de Testes Adversários de Revalidação Dedicada)**: Suíte rigorosa `tests/runtime/g5-revalidation-adversarial.test.ts` (9/9 testes passando) cobrindo todos os 12 achados de revalidação.
+
 ## Próxima ação canônica
 
 - **Aguardar Aceitação Soberana do Usuário para o Gate G5 (Projects / Facilities / Downtime)**:
-  - Todas as 10 microbuilds do Gate G5 (G5.1 a G5.10) e todos os 10 itens de auditoria (G5-AUD-001 a G5-AUD-010) foram integralmente implementados, endurecidos e verificados (545/545 testes passando, 0 erros de compilação TypeScript, validações de pacote e artefato aprovadas).
+  - Todas as 10 microbuilds do Gate G5 (G5.1 a G5.10), todos os 10 itens de auditoria inicial (G5-AUD-001 a G5-AUD-010) e todos os 12 itens de auditoria de revalidação (G5-REVAL-001 a G5-REVAL-012) foram integralmente implementados, endurecidos e verificados (554/554 testes passando, 0 erros de compilação TypeScript, validações de pacote e artefato aprovadas).
   - Relatório formal de aceitação emitido em `docs/GATE_G5_ACCEPTANCE_REPORT.md`.
   - Próximo gate canônico após a aceitação formal do Gate G5 pelo usuário: **Gate G6 — Relations / Reputation / Agreements / Territory** (`Documentos/GATES/16_G6_RELATIONS_REPUTATION_AGREEMENTS_TERRITORY.md`).
   - Rastreabilidade histórica: Gates G0 a G4 concluídos, auditados e homologados.

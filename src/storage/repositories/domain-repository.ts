@@ -1,6 +1,6 @@
 import { err, ok, type Result } from "../../core/contracts/result.js";
 import { createPublicError, type Warning } from "../../core/contracts/public-error.js";
-import { isJournalEntryUuid } from "../../core/identity/refs.js";
+import { isJournalEntryUuid, normalizeJournalEntryId } from "../../core/identity/refs.js";
 import {
   domainCapabilityRegistry,
   validateDomainCapabilities,
@@ -328,8 +328,9 @@ export class DomainRepository implements DomainRepositoryContract {
 
   read(id: string): Result<DomainDocument> {
     if (typeof id !== "string" || id.trim().length === 0) return invalid("Domain document id cannot be empty");
+    const cleanId = normalizeJournalEntryId(id);
     try {
-      const document = this.store.get(id);
+      const document = this.store.get(cleanId);
       if (document === undefined) return notFound(id);
       return toDomainDocument(document);
     } catch {
@@ -409,7 +410,8 @@ export class DomainRepository implements DomainRepositoryContract {
     const expectedRevision = mutationInput.value;
 
     try {
-      const target = this.store.get(normalizedDocument.id);
+      const cleanId = normalizeJournalEntryId(normalizedDocument.id);
+      const target = this.store.get(cleanId);
       if (target === undefined) return notFound(normalizedDocument.id);
       if (target.uuid !== normalizedDocument.uuid) return invalid("Domain document UUID cannot be changed during save");
       const current = toDomainDocument(target);

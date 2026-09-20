@@ -4,8 +4,8 @@
 **Gate:** G5 — Projects / Facilities / Downtime  
 **Normative Authorities:** `Documentos/99_DOMAIN_MANAGER_MASTER_SPECIFICATION_V1.md` (§15, §16, §17, DEC-083 to DEC-097, Anexo 07 DEC-2306 to DEC-3200), `Documentos/GATES/15_G5_PROJECTS_FACILITIES_DOWNTIME.md`  
 **Status:** **GATE_G5_COMPLETED_PENDING_USER_ACCEPTANCE (Aguardando Aceitação Soberana do Usuário — Nunca aceito sem confirmação explícita)**  
-**Date:** 2026-09-19  
-**Test Suite:** 545/545 passing (0 failures, 0 regressions against G4 baseline of 444; +101 dedicated G5 tests)  
+**Date:** 2026-09-20  
+**Test Suite:** 554/554 passing (0 failures, 0 regressions against G4 baseline of 444; +110 dedicated G5 tests)  
 **TypeScript Conformance:** Strict, 0 errors via `npx tsc --noEmit`  
 **Package & Artifact Validation:** PASS (`dist/domain-manager-v0.0.5.zip`, validation scripts verified)
 
@@ -80,7 +80,7 @@ The G5 test suite validates the system against high-scale multi-domain operation
 
 ## 5. Test Suite & Validation Summary
 
-- **Total Test Count**: 545 tests passing (0 failures, 0 regressions across G0–G4 baseline of 444; +101 dedicated G5 tests).
+- **Total Test Count**: 554 tests passing (0 failures, 0 regressions across G0–G4 baseline of 444; +110 dedicated G5 tests).
 - **TypeScript Compilation**: Strict conformance, 0 errors via `node node_modules/typescript/bin/tsc --noEmit`.
 - **Production Build**: `node build.mjs` built cleanly with zero warnings (`dist/main.js`).
 - **Distribution Package**: `node scripts/package.mjs` created `dist/domain-manager-v0.0.5.zip`.
@@ -106,8 +106,28 @@ The G5 test suite validates the system against high-scale multi-domain operation
 
 ---
 
-## 7. Canonical Next Gate Designation
+## 7. Revalidation Audit Remediation Matrix (G5-REVAL-001 to G5-REVAL-012)
 
-Per the Master Specification roadmap, Gate G5 is now complete, fully remediated against all audit findings (G5-AUD-001 to G5-AUD-010), and pending user acceptance:
+| Revalidation Finding | Severity | Description & Root Cause | Architectural Remediation | Verification Evidence |
+|---|---|---|---|---|
+| **G5-REVAL-001** | CRITICAL | Services and repositories failed to normalize canonical `JournalEntry.<id>` identifiers against strict non-tolerant Foundry stores (`game.journal.get(id)` rejects prefix). | Added `normalizeJournalEntryId` and `normalizeDomainId` in `src/core/identity/refs.ts`. Integrated `#cleanId` across `DomainRepository`, `ProjectsService`, `FacilitiesService`, and `DowntimeService`. | `tests/runtime/g5-revalidation-adversarial.test.ts` (Test 1 verifies normalization against mock store rejecting `JournalEntry.` prefix). |
+| **G5-REVAL-002** | CRITICAL | Caller-controlled `viewer.isGm: true` could elevate clearances on public query APIs without validation against real session state. | Replaced ad-hoc `viewer?.isGm` checks with authoritative `resolveCurrentViewer(viewer).isGm` across `DefaultPublicProjectsApi`, `DefaultPublicFacilitiesApi`, and `DefaultPublicDowntimeApi`. Secret entities remain strictly hidden from non-GM callers even if caller passes spoofed `{ isGm: true }`. | `tests/runtime/g5-revalidation-adversarial.test.ts` (Test 2 verifies spoofed viewer fails closed). |
+| **G5-REVAL-003** | HIGH | Projects start plan evaluated workforce solely against caller-supplied contributor array, ignoring domain people workforce capacity; economic reservations and upfront costs lacked full transactional debit/reserve lifecycle. | In `ProjectsService.startProject` and `evaluateProjectStartPlan`, workforce capacity is computed from domain people records via `calculateWorkforce` (`DM_PROJECT_WORKFORCE_INSUFFICIENT`). Upfront costs are debited via `economyService.commitAdjust`, reservations created via `economyService.reserve`, and released on `cancelProject`. Re-reads fresh domain doc before saving to avoid revision conflict. | `tests/runtime/g5-revalidation-adversarial.test.ts` (Test 3 verifies workforce insufficiency rejection, upfront debit, and reservation release). |
+| **G5-REVAL-004** | HIGH | G5 commands lacked transactional coordinator lock wrappers; bus execution without coordinator could allow uncoordinated concurrent mutations. | Registered project, facility, and downtime commands with `transactional: true`, `mutationDefinition`, and `createTransactionalHandler` in command modules. Uncoordinated execution fails closed with `DM_TRANSACTIONAL_COORDINATOR_REQUIRED`. | `tests/runtime/g5-revalidation-adversarial.test.ts` (Test 4 verifies coordinator lock requirement). |
+| **G5-REVAL-005** | HIGH | Project completion side effects (facilities, resources) produced simulated receipts without executing real cross-subsystem mutations. | In `ProjectsService.completeProject`, side effects execute real operations: facilities created via `facilitiesService.createFacility`, resources credited via `economyService.commitAdjust`, generating real `ChildReceipt`s. Fresh domain document is re-read to preserve economic and facility revisions. | `tests/runtime/g5-revalidation-adversarial.test.ts` (Test 5 verifies real facility and resource creation). |
+| **G5-REVAL-006** | HIGH | Coordinated side effect failures during completion did not transition transaction to recovery state. | When a side effect fails, `completeProject` marks `partialFailure = true` and explicitly transitions the transaction in `TransactionStore` to `"needs-recovery"`. | `tests/runtime/g5-revalidation-adversarial.test.ts` (Test 6 verifies partial failure records and transaction state transition). |
+| **G5-REVAL-007** | HIGH | Downtime activities started without enforcing participant constraints (min/max counts, allowed roles) or required facilities. | Enforced participant invariants (`minParticipants`, `maxParticipants`, `allowedParticipantRoles`) and verified facility requirements (`DM_DOWNTIME_REQUIRED_FACILITY_MISSING`) in `DowntimeService.startActivity`. | `tests/runtime/g5-revalidation-adversarial.test.ts` (Test 7 verifies participant and facility invariant enforcement). |
+| **G5-REVAL-008** | HIGH | Downtime activities did not debit upfront costs or execute real outcome definitions upon completion. | In `DowntimeService.startActivity`, upfront economic costs are debited via `economyService.commitAdjust`. In `completeActivity`, outcome definitions execute real resource adjustments and record `outcomesApplied`. Re-reads fresh domain doc before saving. | `tests/runtime/g5-revalidation-adversarial.test.ts` (Test 7 verifies upfront debit and outcome crediting). |
+| **G5-REVAL-009** | HIGH | Facility maintenance and repairs did not execute real economic cost adjustments. | In `FacilitiesService.maintainFacility` and `repairFacility`, maintenance and repair costs are debited via `economyService.commitAdjust`, with fresh domain document re-reading before saving. | `tests/runtime/g5-revalidation-adversarial.test.ts` (Test 8 verifies real resource debit on maintenance). |
+| **G5-REVAL-010** | MEDIUM | Facility damage application used ad-hoc in-place mutation without recording canonical conditions or history. | `FacilitiesService.applyDamage` utilizes canonical `applyFacilityDamage`, generating namespaced conditions and appending damage entries to facility history. | `tests/runtime/g5-revalidation-adversarial.test.ts` (Test 8 verifies append-only history and condition generation). |
+| **G5-REVAL-011** | MEDIUM | Transaction records fabricated command IDs and hardcoded authority epoch to 1, losing caller context. | `ProjectsService.completeProject` and `startProject` preserve real `commandId`, caller `authorityEpoch` (supporting epochs > 1), `correlationId`, and `causationId` without fabricating fake identifiers. | `tests/runtime/g5-revalidation-adversarial.test.ts` (Test 9 verifies preservation of custom commandId and authorityEpoch). |
+| **G5-REVAL-012** | CRITICAL | Absence of dedicated adversarial revalidation test suite covering strict stores, spoofing, and side-effect failures. | Implemented comprehensive adversarial test suite `tests/runtime/g5-revalidation-adversarial.test.ts` covering all 12 revalidation audit findings with strict non-tolerant mock stores and strict assertions. | `tests/runtime/g5-revalidation-adversarial.test.ts` (9/9 tests passing). |
+
+---
+
+## 8. Canonical Next Gate Designation
+
+Per the Master Specification roadmap, Gate G5 is now complete, fully remediated against both initial audit (G5-AUD-001 to G5-AUD-010) and revalidation audit findings (G5-REVAL-001 to G5-REVAL-012), and strictly pending user acceptance:
 - **Current Gate Status**: `GATE_G5_COMPLETED_PENDING_USER_ACCEPTANCE`
 - **Canonical Next Gate**: **Gate G6 — Relations / Reputation / Agreements / Territory** (`Documentos/GATES/16_G6_RELATIONS_REPUTATION_AGREEMENTS_TERRITORY.md`).
+

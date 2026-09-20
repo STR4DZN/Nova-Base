@@ -262,7 +262,8 @@ export function composeDomainManagerRuntime(
 
   const facilitiesService = new FacilitiesService({
     domains: mutableDomainRepo,
-    facilityRegistry
+    facilityRegistry,
+    economyService
   });
   const projectsService = new ProjectsService({
     domains: mutableDomainRepo,
@@ -273,7 +274,9 @@ export function composeDomainManagerRuntime(
   });
   const downtimeService = new DowntimeService({
     domains: mutableDomainRepo,
-    downtimeRegistry
+    downtimeRegistry,
+    economyService,
+    facilitiesService
   });
 
   const registry = new CommandRegistry();
@@ -297,19 +300,22 @@ export function composeDomainManagerRuntime(
     registry,
     projectsService,
     domains: mutableDomainRepo,
-    controllerProvider
+    controllerProvider,
+    coordinator
   });
   registerFacilityCommands({
     registry,
     facilitiesService,
     domains: mutableDomainRepo,
-    controllerProvider
+    controllerProvider,
+    coordinator
   });
   registerDowntimeCommands({
     registry,
     downtimeService,
     domains: mutableDomainRepo,
-    controllerProvider
+    controllerProvider,
+    coordinator
   });
   registry.freeze();
 

@@ -79,6 +79,8 @@ import { FacilitiesService } from "../../src/facilities/services/facilities-serv
 import { registerFacilityCommands } from "../../src/facilities/commands/facility-commands.js";
 import { DowntimeService } from "../../src/downtime/services/downtime-service.js";
 import { registerDowntimeCommands } from "../../src/downtime/commands/downtime-commands.js";
+import { LockManager } from "../../src/mutations/lock-manager.js";
+import { MutationCoordinator } from "../../src/mutations/mutation-coordinator.js";
 
 const testRecord: DomainRecord = {
   schemaVersion: 1,
@@ -174,7 +176,9 @@ function createMockCommandBus(repo?: StorageDomainRepository): CommandBus {
     },
     { authorityUserId: "gm-1", authorityEpoch: 1, initialized: true }
   );
-  const bus = new CommandBus({ registry, authorityService });
+  const lockManager = new LockManager();
+  const coordinator = new MutationCoordinator({ lockManager });
+  const bus = new CommandBus({ registry, authorityService, coordinator });
 
   if (repo) {
     const projectRegistry = createDefaultProjectRegistry();
@@ -256,19 +260,22 @@ function createMockCommandBus(repo?: StorageDomainRepository): CommandBus {
     registerProjectCommands({
       registry,
       projectsService,
-      domains: repo
+      domains: repo,
+      coordinator
     });
 
     registerFacilityCommands({
       registry,
       facilitiesService,
-      domains: repo
+      domains: repo,
+      coordinator
     });
 
     registerDowntimeCommands({
       registry,
       downtimeService,
-      domains: repo
+      domains: repo,
+      coordinator
     });
 
     (bus as any).__downtimeRegistry = downtimeRegistry;

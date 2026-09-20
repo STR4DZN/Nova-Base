@@ -7,7 +7,8 @@ import {
   type DomainCommand
 } from "../../commands/command-envelope.js";
 import type { DomainReadRepository } from "../../storage/repositories/domain-repository.js";
-import type { ViewerIdentity } from "../../projection/viewer-identity.js";
+import { resolveCurrentViewer, type ViewerIdentity } from "../../projection/viewer-identity.js";
+import { normalizeJournalEntryId } from "../../core/identity/refs.js";
 import type { DomainRecord } from "../../domains/domain-schema.js";
 import type { DowntimeInstance } from "../types/downtime-types.js";
 import type { DowntimeDefinitionRegistry } from "../definitions/downtime-registry.js";
@@ -68,11 +69,11 @@ export class DefaultPublicDowntimeApi implements PublicDowntimeApi {
   }
 
   async getActivities(domainUuid: string, viewer?: Partial<ViewerIdentity>): Promise<Result<readonly DowntimeInstance[]>> {
-    const cleanId = domainUuid.startsWith("JournalEntry.") ? domainUuid.slice("JournalEntry.".length) : domainUuid;
+    const cleanId = normalizeJournalEntryId(domainUuid);
     const docRes = await this.#domains.read(cleanId);
     if (!docRes.ok) return docRes;
     const data = getDomainDowntimeData(docRes.value.record);
-    const isGm = viewer?.isGm ?? false;
+    const isGm = resolveCurrentViewer(viewer).isGm;
     if (isGm) return ok(data.activities);
     return ok(data.activities.filter((a) => !a.tags.includes("secret")));
   }

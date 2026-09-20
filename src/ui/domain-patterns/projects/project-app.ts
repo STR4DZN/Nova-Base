@@ -7,7 +7,8 @@ import {
 import { createPublicError } from "../../../core/contracts/public-error.js";
 import { err, ok, type Result } from "../../../core/contracts/result.js";
 import type { DomainReadRepository } from "../../../storage/repositories/domain-repository.js";
-import type { ViewerIdentity } from "../../../projection/viewer-identity.js";
+import { resolveCurrentViewer, type ViewerIdentity } from "../../../projection/viewer-identity.js";
+import { normalizeJournalEntryId } from "../../../core/identity/refs.js";
 import {
   ProjectDefinitionRegistry,
   createDefaultProjectRegistry
@@ -131,16 +132,15 @@ export class ProjectsApplicationController {
   }
 
   async loadViewModel(): Promise<Result<ProjectsSubsystemViewModel>> {
-    const id = this.#domainUuid.startsWith("JournalEntry.")
-      ? this.#domainUuid.slice("JournalEntry.".length)
-      : this.#domainUuid;
+    const id = normalizeJournalEntryId(this.#domainUuid);
 
     const docRes = await this.#domains.read(id);
     if (!docRes.ok) return docRes;
 
-    const isGm = this.#viewer?.isGm ?? false;
+    const isGm = resolveCurrentViewer(this.#viewer).isGm;
     const vm = buildProjectsViewModel(docRes.value, {
       viewerIsGm: isGm,
+      viewer: this.#viewer,
       projectRegistry: this.#projectRegistry,
       filterLifecycle: this.#filterLifecycle,
       searchTerm: this.#searchTerm

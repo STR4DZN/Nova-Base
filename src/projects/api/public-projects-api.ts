@@ -7,7 +7,8 @@ import {
   type DomainCommand
 } from "../../commands/command-envelope.js";
 import type { DomainReadRepository } from "../../storage/repositories/domain-repository.js";
-import type { ViewerIdentity } from "../../projection/viewer-identity.js";
+import { resolveCurrentViewer, type ViewerIdentity } from "../../projection/viewer-identity.js";
+import { normalizeJournalEntryId } from "../../core/identity/refs.js";
 import type { DomainRecord } from "../../domains/domain-schema.js";
 import type { ProjectInstance } from "../types/project-types.js";
 import type { ProjectDefinitionRegistry } from "../definitions/project-registry.js";
@@ -41,10 +42,10 @@ export interface PublicProjectsApi {
   buildViewModel(domainInput: { record: DomainRecord } | DomainRecord, options?: Partial<ProjectsPresenterOptions>): ProjectsSubsystemViewModel;
   startProject(params: StartProjectParams): Promise<Result<unknown>>;
   advanceProject(params: AdvanceProjectParams): Promise<Result<unknown>>;
+  completeProject(params: CompleteProjectParams): Promise<Result<unknown>>;
   pauseProject(params: { domainUuid: string; projectId: string; reason?: string }): Promise<Result<unknown>>;
   resumeProject(params: { domainUuid: string; projectId: string; reason?: string }): Promise<Result<unknown>>;
   cancelProject(params: { domainUuid: string; projectId: string; reason?: string }): Promise<Result<unknown>>;
-  completeProject(params: CompleteProjectParams): Promise<Result<unknown>>;
 }
 
 export interface DefaultPublicProjectsApiOptions {
@@ -68,11 +69,11 @@ export class DefaultPublicProjectsApi implements PublicProjectsApi {
   }
 
   async getProjects(domainUuid: string, viewer?: Partial<ViewerIdentity>): Promise<Result<readonly ProjectInstance[]>> {
-    const cleanId = domainUuid.startsWith("JournalEntry.") ? domainUuid.slice("JournalEntry.".length) : domainUuid;
+    const cleanId = normalizeJournalEntryId(domainUuid);
     const docRes = await this.#domains.read(cleanId);
     if (!docRes.ok) return docRes;
     const data = getDomainProjectsData(docRes.value.record);
-    const isGm = viewer?.isGm ?? false;
+    const isGm = resolveCurrentViewer(viewer).isGm;
     if (isGm) return ok(data.projects);
     // Non-GM filters out secret projects
     return ok(data.projects.filter((p) => !p.tags.includes("secret")));

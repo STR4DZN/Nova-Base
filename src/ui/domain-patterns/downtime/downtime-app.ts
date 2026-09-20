@@ -7,7 +7,8 @@ import {
 import { createPublicError } from "../../../core/contracts/public-error.js";
 import { err, ok, type Result } from "../../../core/contracts/result.js";
 import type { DomainReadRepository } from "../../../storage/repositories/domain-repository.js";
-import type { ViewerIdentity } from "../../../projection/viewer-identity.js";
+import { resolveCurrentViewer, type ViewerIdentity } from "../../../projection/viewer-identity.js";
+import { normalizeJournalEntryId } from "../../../core/identity/refs.js";
 import {
   DowntimeDefinitionRegistry,
   createDefaultDowntimeRegistry
@@ -135,16 +136,15 @@ export class DowntimeApplicationController {
   }
 
   async loadViewModel(): Promise<Result<DowntimeSubsystemViewModel>> {
-    const id = this.#domainUuid.startsWith("JournalEntry.")
-      ? this.#domainUuid.slice("JournalEntry.".length)
-      : this.#domainUuid;
+    const id = normalizeJournalEntryId(this.#domainUuid);
 
     const docRes = await this.#domains.read(id);
     if (!docRes.ok) return docRes;
 
-    const isGm = this.#viewer?.isGm ?? false;
+    const isGm = resolveCurrentViewer(this.#viewer).isGm;
     const vm = buildDowntimeViewModel(docRes.value, {
       viewerIsGm: isGm,
+      viewer: this.#viewer,
       downtimeRegistry: this.#downtimeRegistry,
       filterLifecycle: this.#filterLifecycle,
       searchTerm: this.#searchTerm
@@ -215,6 +215,7 @@ export class DowntimeApplicationController {
     readonly scope?: DowntimeScope;
     readonly durationTicks?: number | null;
     readonly participantRef?: string;
+    readonly participants?: readonly import("../../../downtime/types/downtime-types.js").DowntimeParticipant[];
   }): Promise<Result<unknown>> {
     const cmd = makeCommand("downtime:start-activity", {
       domainUuid: this.#domainUuid,
@@ -222,7 +223,8 @@ export class DowntimeApplicationController {
       label: payload.label,
       scope: payload.scope,
       durationTicks: payload.durationTicks,
-      participantRef: payload.participantRef
+      participantRef: payload.participantRef,
+      participants: payload.participants
     });
     const res = await this.#executeCommand(cmd);
     if (!res.ok) return res;

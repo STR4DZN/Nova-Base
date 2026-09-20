@@ -54,3 +54,23 @@ export function worldActorUuid(id: string): string {
   }
   return `Actor.${id}`;
 }
+
+/**
+ * Normalizes a JournalEntry UUID or local ID to its canonical document ID.
+ * E.g. "JournalEntry.abc123" -> "abc123", "abc123" -> "abc123".
+ */
+export function normalizeJournalEntryId(idOrUuid: string): string {
+  if (typeof idOrUuid !== "string") return "";
+  const trimmed = idOrUuid.trim();
+  if (trimmed.startsWith("JournalEntry.")) {
+    return trimmed.slice("JournalEntry.".length);
+  }
+  return trimmed;
+}
+
+/**
+ * Canonical alias for normalizing a Domain reference (which resides in a JournalEntry) to raw doc id.
+ */
+export function normalizeDomainId(idOrUuid: string): string {
+  return normalizeJournalEntryId(idOrUuid);
+}

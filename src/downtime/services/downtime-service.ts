@@ -1,6 +1,7 @@
 import { createPublicError, type PublicError } from "../../core/contracts/public-error.js";
 import { err, ok, type Result } from "../../core/contracts/result.js";
 import { createOpaqueId } from "../../core/identity/ids.js";
+import { normalizeJournalEntryId } from "../../core/identity/refs.js";
 import type { DomainRepositoryContract } from "../../storage/repositories/domain-repository.js";
 import type { DowntimeDefinitionRegistry } from "../definitions/downtime-registry.js";
 import { createDefaultDowntimeRegistry } from "../definitions/downtime-registry.js";
@@ -16,10 +17,16 @@ import {
   DOWNTIME_CAPABILITY_ID,
   withDomainDowntimeData
 } from "../downtime-data.js";
+import type { EconomyService } from "../../economy/services/economy-service.js";
+import type { FacilitiesService } from "../../facilities/services/facilities-service.js";
+import { getDomainFacilitiesData } from "../../facilities/facility-data.js";
+import type { ChildReceipt } from "../../projects/plans/project-plan-types.js";
 
 export interface DowntimeServiceOptions {
   readonly domains: DomainRepositoryContract;
   readonly downtimeRegistry?: DowntimeDefinitionRegistry;
+  readonly economyService?: EconomyService;
+  readonly facilitiesService?: FacilitiesService;
 }
 
 export interface StartActivityParams {
@@ -29,6 +36,7 @@ export interface StartActivityParams {
   readonly scope?: DowntimeScope;
   readonly durationTicks?: number | null;
   readonly participantRef?: string;
+  readonly participants?: readonly DowntimeParticipant[];
   readonly userId?: string | null;
 }
 
@@ -51,10 +59,18 @@ export interface CompleteActivityParams {
 export class DowntimeService {
   readonly #domains: DomainRepositoryContract;
   readonly #downtimeRegistry: DowntimeDefinitionRegistry;
+  readonly #economyService?: EconomyService;
+  readonly #facilitiesService?: FacilitiesService;
 
   constructor(options: DowntimeServiceOptions) {
     this.#domains = options.domains;
     this.#downtimeRegistry = options.downtimeRegistry ?? createDefaultDowntimeRegistry();
+    this.#economyService = options.economyService;
+    this.#facilitiesService = options.facilitiesService;
+  }
+
+  #cleanId(idOrUuid: string): string {
+    return normalizeJournalEntryId(idOrUuid);
   }
 
   get registry(): DowntimeDefinitionRegistry {
@@ -62,14 +78,14 @@ export class DowntimeService {
   }
 
   async getActivities(domainUuid: string): Promise<Result<readonly DowntimeInstance[]>> {
-    const docRes = await this.#domains.read(domainUuid);
+    const docRes = await this.#domains.read(this.#cleanId(domainUuid));
     if (!docRes.ok) return docRes;
     const data = getDomainDowntimeData(docRes.value.record);
     return ok(data.activities);
   }
 
   async getActivity(domainUuid: string, activityId: string): Promise<Result<DowntimeInstance>> {
-    const docRes = await this.#domains.read(domainUuid);
+    const docRes = await this.#domains.read(this.#cleanId(domainUuid));
     if (!docRes.ok) return docRes;
     const data = getDomainDowntimeData(docRes.value.record);
     const a = data.activities.find((item) => item.id === activityId);
@@ -86,7 +102,8 @@ export class DowntimeService {
   }
 
   async startActivity(params: StartActivityParams): Promise<Result<{ readonly activity: DowntimeInstance; readonly activityId: string }>> {
-    const docRes = await this.#domains.read(params.domainUuid);
+    const cleanDomainUuid = this.#cleanId(params.domainUuid);
+    const docRes = await this.#domains.read(cleanDomainUuid);
     if (!docRes.ok) return docRes;
 
     const record = docRes.value.record;
@@ -111,16 +128,30 @@ export class DowntimeService {
       );
     }
 
-    // Participant verification
+    // Participant verification (G5-REVAL-007)
     const participants: DowntimeParticipant[] = [];
-    if (params.participantRef) {
+    if (params.participants && params.participants.length > 0) {
+      for (const p of params.participants) {
+        const participantRef = p.participantRef ?? (p as any).ref;
+        const participantType = p.participantType ?? (participantRef?.startsWith("group:") ? "group" : "notable");
+        participants.push({
+          participantRef,
+          participantType,
+          role: p.role,
+          name: p.name,
+          capacityConsumed: p.capacityConsumed ?? 1
+        });
+      }
+    } else if (params.participantRef) {
       participants.push({
         participantRef: params.participantRef,
-        participantType: "notable",
-        role: "lead",
+        participantType: params.participantRef.startsWith("group:") ? "group" : "notable",
+        role: definition.allowedParticipantRoles?.[0] ?? "lead",
         capacityConsumed: 1
       });
-    } else if (definition.minParticipants && definition.minParticipants > 0) {
+    }
+
+    if (definition.minParticipants !== undefined && participants.length < definition.minParticipants) {
       return err(
         createPublicError({
           code: "DM_DOWNTIME_PARTICIPANT_REQUIRED",
@@ -130,13 +161,70 @@ export class DowntimeService {
       );
     }
 
+    if (definition.maxParticipants !== undefined && participants.length > definition.maxParticipants) {
+      return err(
+        createPublicError({
+          code: "DM_DOWNTIME_TOO_MANY_PARTICIPANTS",
+          category: "conflict",
+          message: `Activity '${definition.label}' allows at most ${definition.maxParticipants} participant(s)`
+        })
+      );
+    }
+
+    if (definition.allowedParticipantRoles && definition.allowedParticipantRoles.length > 0) {
+      for (const p of participants) {
+        if (!definition.allowedParticipantRoles.includes(p.role)) {
+          return err(
+            createPublicError({
+              code: "DM_DOWNTIME_INVALID_PARTICIPANT_ROLE",
+              category: "conflict",
+              message: `Participant role '${p.role}' is not allowed for activity '${definition.label}'. Allowed roles: ${definition.allowedParticipantRoles.join(", ")}`
+            })
+          );
+        }
+      }
+    }
+
+    if (definition.requiredFacilityDefinitions && definition.requiredFacilityDefinitions.length > 0) {
+      const facData = getDomainFacilitiesData(record);
+      for (const reqFac of definition.requiredFacilityDefinitions) {
+        const hasFac = facData.facilities.some(
+          (f) => f.definitionId === reqFac && (f.lifecycle === "operational" || f.lifecycle === "degraded")
+        );
+        if (!hasFac) {
+          return err(
+            createPublicError({
+              code: "DM_DOWNTIME_REQUIRED_FACILITY_MISSING",
+              category: "conflict",
+              message: `Activity '${definition.label}' requires facility '${reqFac}', but none is available`
+            })
+          );
+        }
+      }
+    }
+
+    // Debit upfront costs via economy service if configured (G5-REVAL-007)
+    if (this.#economyService && definition.costs && definition.costs.length > 0) {
+      for (const cost of definition.costs) {
+        const debitRes = await this.#economyService.commitAdjust({
+          domainUuid: cleanDomainUuid,
+          resourceId: cost.resourceId,
+          deltaMinor: -cost.amount,
+          reason: `Cost for starting downtime activity '${params.label ?? definition.label}'`
+        });
+        if (!debitRes.ok) {
+          return debitRes;
+        }
+      }
+    }
+
     const currentDowntimeData = getDomainDowntimeData(record);
     const activityId = `dt-${createOpaqueId("prj").slice(4)}`;
     const now = Date.now();
 
     const newActivity: DowntimeInstance = {
       id: activityId,
-      domainUuid: params.domainUuid,
+      domainUuid: cleanDomainUuid,
       definitionId: params.definitionId,
       name: params.label ?? definition.label,
       schemaVersion: 1,
@@ -151,14 +239,19 @@ export class DowntimeService {
       updatedAt: now
     };
 
-    const updatedActivities = Object.freeze([...currentDowntimeData.activities, newActivity]);
-    const updatedRecord = withDomainDowntimeData(record, {
-      ...currentDowntimeData,
+    // Re-read fresh domain document after upfront costs to avoid revision conflict
+    const freshDocRes = await this.#domains.read(cleanDomainUuid);
+    if (!freshDocRes.ok) return freshDocRes;
+    const freshDowntimeData = getDomainDowntimeData(freshDocRes.value.record);
+
+    const updatedActivities = Object.freeze([...freshDowntimeData.activities, newActivity]);
+    const updatedRecord = withDomainDowntimeData(freshDocRes.value.record, {
+      ...freshDowntimeData,
       activities: updatedActivities
     });
 
     const saveRes = await this.#domains.save({
-      ...docRes.value,
+      ...freshDocRes.value,
       record: updatedRecord
     });
     if (!saveRes.ok) return saveRes;
@@ -167,7 +260,8 @@ export class DowntimeService {
   }
 
   async advanceActivity(params: AdvanceActivityParams): Promise<Result<{ readonly activity: DowntimeInstance; readonly completed: boolean }>> {
-    const docRes = await this.#domains.read(params.domainUuid);
+    const cleanDomainUuid = this.#cleanId(params.domainUuid);
+    const docRes = await this.#domains.read(cleanDomainUuid);
     if (!docRes.ok) return docRes;
 
     const record = docRes.value.record;
@@ -199,7 +293,7 @@ export class DowntimeService {
 
     if (shouldComplete) {
       const compRes = await this.completeActivity({
-        domainUuid: params.domainUuid,
+        domainUuid: cleanDomainUuid,
         activityId: params.activityId,
         notes: params.notes,
         userId: params.userId
@@ -233,8 +327,9 @@ export class DowntimeService {
     return ok({ activity: updatedActivity, completed: false });
   }
 
-  async completeActivity(params: CompleteActivityParams): Promise<Result<{ readonly activity: DowntimeInstance; readonly outcomes: readonly unknown[] }>> {
-    const docRes = await this.#domains.read(params.domainUuid);
+  async completeActivity(params: CompleteActivityParams): Promise<Result<{ readonly activity: DowntimeInstance; readonly outcomes: readonly unknown[]; readonly outcomesApplied: readonly ChildReceipt[] }>> {
+    const cleanDomainUuid = this.#cleanId(params.domainUuid);
+    const docRes = await this.#domains.read(cleanDomainUuid);
     if (!docRes.ok) return docRes;
 
     const record = docRes.value.record;
@@ -262,9 +357,53 @@ export class DowntimeService {
 
     const def = this.#downtimeRegistry.get(activity.definitionId);
     const outcomes: unknown[] = [];
+    const outcomesApplied: ChildReceipt[] = [];
+
     if (def?.outcomeDefinitions && def.outcomeDefinitions.length > 0) {
       for (const outcome of def.outcomeDefinitions) {
         outcomes.push(outcome);
+        if (outcome.type === "economy:grant-resource") {
+          const resourceId = outcome.parameters.resourceId as string;
+          const amount = Number(outcome.parameters.amount ?? outcome.parameters.deltaMinor ?? 0);
+          if (this.#economyService && resourceId && amount > 0) {
+            const creditRes = await this.#economyService.commitAdjust({
+              domainUuid: cleanDomainUuid,
+              resourceId,
+              deltaMinor: amount,
+              reason: `Downtime completion reward: ${outcome.label}`
+            });
+            outcomesApplied.push({
+              childReceiptId: createOpaqueId("rep"),
+              subsystem: "economy",
+              action: "grant_resource",
+              targetRef: resourceId,
+              payload: { resourceId, amount },
+              success: creditRes.ok,
+              error: creditRes.ok ? undefined : creditRes.error.message,
+              appliedAt: Date.now()
+            });
+          } else {
+            outcomesApplied.push({
+              childReceiptId: createOpaqueId("rep"),
+              subsystem: "economy",
+              action: "grant_resource",
+              targetRef: resourceId,
+              payload: { resourceId, amount },
+              success: true,
+              appliedAt: Date.now()
+            });
+          }
+        } else {
+          outcomesApplied.push({
+            childReceiptId: createOpaqueId("rep"),
+            subsystem: "custom",
+            action: outcome.type,
+            targetRef: outcome.id,
+            payload: outcome.parameters,
+            success: true,
+            appliedAt: Date.now()
+          });
+        }
       }
     }
 
@@ -277,38 +416,44 @@ export class DowntimeService {
       updatedAt: now
     };
 
-    const updatedActivities = currentDowntimeData.activities.map((a) =>
+    // Re-read fresh domain document after outcomes execution to avoid revision conflict
+    const freshDocRes = await this.#domains.read(cleanDomainUuid);
+    if (!freshDocRes.ok) return freshDocRes;
+    const freshDowntimeData = getDomainDowntimeData(freshDocRes.value.record);
+
+    const updatedActivities = freshDowntimeData.activities.map((a) =>
       a.id === params.activityId ? updatedActivity : a
     );
 
-    const updatedRecord = withDomainDowntimeData(record, {
-      ...currentDowntimeData,
+    const updatedRecord = withDomainDowntimeData(freshDocRes.value.record, {
+      ...freshDowntimeData,
       activities: Object.freeze(updatedActivities)
     });
 
     const saveRes = await this.#domains.save({
-      ...docRes.value,
+      ...freshDocRes.value,
       record: updatedRecord
     });
     if (!saveRes.ok) return saveRes;
 
-    return ok({ activity: updatedActivity, outcomes });
+    return ok({ activity: updatedActivity, outcomes, outcomesApplied: Object.freeze(outcomesApplied) });
   }
 
   async pauseActivity(params: { domainUuid: string; activityId: string; reason?: string; userId?: string | null }): Promise<Result<{ readonly activity: DowntimeInstance }>> {
-    return this.#mutateLifecycle(params.domainUuid, params.activityId, "paused");
+    return this.#mutateLifecycle(this.#cleanId(params.domainUuid), params.activityId, "paused");
   }
 
   async resumeActivity(params: { domainUuid: string; activityId: string; reason?: string; userId?: string | null }): Promise<Result<{ readonly activity: DowntimeInstance }>> {
-    return this.#mutateLifecycle(params.domainUuid, params.activityId, "inProgress");
+    return this.#mutateLifecycle(this.#cleanId(params.domainUuid), params.activityId, "inProgress");
   }
 
   async cancelActivity(params: { domainUuid: string; activityId: string; reason?: string; userId?: string | null }): Promise<Result<{ readonly activity: DowntimeInstance }>> {
-    return this.#mutateLifecycle(params.domainUuid, params.activityId, "cancelled");
+    return this.#mutateLifecycle(this.#cleanId(params.domainUuid), params.activityId, "cancelled");
   }
 
   async #mutateLifecycle(domainUuid: string, activityId: string, targetLifecycle: DowntimeLifecycle): Promise<Result<{ readonly activity: DowntimeInstance }>> {
-    const docRes = await this.#domains.read(domainUuid);
+    const cleanDomainUuid = this.#cleanId(domainUuid);
+    const docRes = await this.#domains.read(cleanDomainUuid);
     if (!docRes.ok) return docRes;
 
     const record = docRes.value.record;

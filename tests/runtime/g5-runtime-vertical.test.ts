@@ -121,10 +121,12 @@ test("G5.10 - Composition: composeDomainManagerRuntime wires projects, facilitie
   const doc = createMockDoc("dom-vert-1", "Domain Vertical 1");
   const byKey = new Map<string, IdentifiedJournalEntryDocumentLike>();
   byKey.set(doc.id, doc);
-  byKey.set(doc.uuid, doc);
 
   const domainStore = {
-    get: (id: string) => byKey.get(id),
+    get: (id: string) => {
+      if (id.startsWith("JournalEntry.")) return undefined;
+      return byKey.get(id);
+    },
     list: () => [doc],
     create: async () => { throw new Error("not used"); }
   };
@@ -206,10 +208,12 @@ test("G5.10 - Authority & Security: GM and Domain Controller permissions, unauth
   const doc = createMockDoc("dom-vert-sec", "Domain Security Test");
   const byKey = new Map<string, IdentifiedJournalEntryDocumentLike>();
   byKey.set(doc.id, doc);
-  byKey.set(doc.uuid, doc);
 
   const domainStore = {
-    get: (id: string) => byKey.get(id),
+    get: (id: string) => {
+      if (id.startsWith("JournalEntry.")) return undefined;
+      return byKey.get(id);
+    },
     list: () => [doc],
     create: async () => { throw new Error("not used"); }
   };
@@ -257,7 +261,10 @@ test("G5.10 - Authority & Security: GM and Domain Controller permissions, unauth
         definitionId: "domain-manager:patrol-and-recon",
         label: "GM Patrol",
         durationTicks: 10,
-        participantRef: "notable:scout-1"
+        participants: [
+          { ref: "notable:scout-master", role: "supervisor" },
+          { ref: "notable:scout-1", role: "participant" }
+        ]
       })
     );
     assert.equal(gmDtRes.ok, true);
@@ -344,7 +351,6 @@ test("G5.10 - Vertical Flow & Controller Integration: ApplicationV2 UI controlle
   const doc = createMockDoc("dom-vert-ui", "Domain UI Vertical Test");
   const byKey = new Map<string, IdentifiedJournalEntryDocumentLike>();
   byKey.set(doc.id, doc);
-  byKey.set(doc.uuid, doc);
 
   let directSaveCount = 0;
   const originalUpdate = doc.update;
@@ -354,7 +360,10 @@ test("G5.10 - Vertical Flow & Controller Integration: ApplicationV2 UI controlle
   };
 
   const domainStore = {
-    get: (id: string) => byKey.get(id),
+    get: (id: string) => {
+      if (id.startsWith("JournalEntry.")) return undefined;
+      return byKey.get(id);
+    },
     list: () => [doc],
     create: async () => { throw new Error("not used"); }
   };
@@ -437,7 +446,10 @@ test("G5.10 - Vertical Flow & Controller Integration: ApplicationV2 UI controlle
       definitionId: "domain-manager:patrol-and-recon",
       label: "Border Recon",
       durationTicks: 20,
-      participantRef: "notable:scout-1"
+      participants: [
+        { ref: "notable:scout-master", role: "supervisor" },
+        { ref: "notable:scout-1", role: "participant" }
+      ]
     });
     assert.equal(startDtRes.ok, true);
     const activityId = (startDtRes as any).value.activityId;
@@ -470,10 +482,12 @@ test("G5.10 - Reload & Persistence: Subsystems retain state across runtime reloa
   const doc = createMockDoc("dom-vert-reload", "Domain Reload Test");
   const byKey = new Map<string, IdentifiedJournalEntryDocumentLike>();
   byKey.set(doc.id, doc);
-  byKey.set(doc.uuid, doc);
 
   const domainStore = {
-    get: (id: string) => byKey.get(id),
+    get: (id: string) => {
+      if (id.startsWith("JournalEntry.")) return undefined;
+      return byKey.get(id);
+    },
     list: () => [doc],
     create: async () => { throw new Error("not used"); }
   };
@@ -513,7 +527,10 @@ test("G5.10 - Reload & Persistence: Subsystems retain state across runtime reloa
       definitionId: "domain-manager:patrol-and-recon",
       label: "Border Patrol",
       durationTicks: 30,
-      participantRef: "notable:scout-1"
+      participants: [
+        { ref: "notable:guard-captain", role: "supervisor" },
+        { ref: "notable:scout-1", role: "participant" }
+      ]
     });
     assert.equal(dRes.ok, true);
     activityId = (dRes.value as any).activity.id;
