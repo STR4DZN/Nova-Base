@@ -4,8 +4,8 @@
 **Gate:** G5 — Projects / Facilities / Downtime  
 **Normative Authorities:** `Documentos/99_DOMAIN_MANAGER_MASTER_SPECIFICATION_V1.md` (§15, §16, §17, DEC-083 to DEC-097, Anexo 07 DEC-2306 to DEC-3200), `Documentos/GATES/15_G5_PROJECTS_FACILITIES_DOWNTIME.md`  
 **Status:** **GATE_G5_COMPLETED_PENDING_USER_ACCEPTANCE (Aguardando Aceitação Soberana do Usuário — Nunca aceito sem confirmação explícita)**  
-**Date:** 2026-09-20  
-**Test Suite:** 560/560 passing (0 failures, 0 regressions against G4 baseline of 444; +116 dedicated G5 tests, including 15 adversarial revalidation tests)  
+**Date:** 2026-09-21  
+**Test Suite:** 571/571 passing (0 failures, 0 regressions against G4 baseline of 444; +127 dedicated G5 tests, including 26 adversarial revalidation tests)  
 **TypeScript Conformance:** Strict, 0 errors via `npx tsc --noEmit`  
 **Package & Artifact Validation:** PASS (`dist/domain-manager-v0.0.5.zip`, validation scripts verified)
 
@@ -80,7 +80,7 @@ The G5 test suite validates the system against high-scale multi-domain operation
 
 ## 5. Test Suite & Validation Summary
 
-- **Total Test Count**: 560 tests passing (0 failures, 0 regressions across G0–G4 baseline of 444; +116 dedicated G5 tests).
+- **Total Test Count**: 571 tests passing (0 failures, 0 regressions across G0–G4 baseline of 444; +127 dedicated G5 tests).
 - **TypeScript Compilation**: Strict conformance, 0 errors via `node node_modules/typescript/bin/tsc --noEmit`.
 - **Production Build**: `node build.mjs` built cleanly with zero warnings (`dist/main.js`).
 - **Distribution Package**: `node scripts/package.mjs` created `dist/domain-manager-v0.0.5.zip`.
@@ -142,9 +142,23 @@ The G5 test suite validates the system against high-scale multi-domain operation
 
 ---
 
-## 9. Canonical Next Gate Designation
+## 9. Third Revalidation Audit Remediation Matrix (G5-REVAL3-001 to G5-REVAL3-007)
 
-Per the Master Specification roadmap, Gate G5 is now complete, fully remediated against initial audit (G5-AUD-001 to G5-AUD-010), first revalidation (G5-REVAL-001 to G5-REVAL-012), and second revalidation (G5-REVAL2-001 to G5-REVAL2-010), and strictly pending user acceptance:
+| Revalidation Finding | Severity | Description & Root Cause | Architectural Remediation | Verification Evidence |
+|---|---|---|---|---|
+| **G5-REVAL3-001** | CRITICAL | Cross-subsystem direct mutation violations: ProjectsService directly imported/called EconomyService and FacilitiesService, and wrote directly to `DomainPeopleData.reservations`. Downtime directly called `EconomyService.commitAdjust`. | Replaced direct mutations with coordinated Domain Operation Plans (`executeProjectStartDomainOperationPlan`, `executeProjectCompletionDomainOperationPlan`, `executeDowntimeStartPlan`, `executeDowntimeResolutionPlan`). Inter-subsystem access uses public contracts (`PublicPeopleApi.allocateWorkforceReservation`, `releaseWorkforceReservation`). | `tests/runtime/g5-revalidation-adversarial.test.ts` (Tests 16–26 verify decoupled boundary interactions via plans and public APIs). |
+| **G5-REVAL3-002** | CRITICAL | Multi-step starts, maintenance, and repairs lacked prepared transactions and explicit reverse compensation on failure. | Multi-step operations prepare a `TransactionRecord` upfront before child side effects. On downstream failure (e.g. domain save failure), explicit reverse compensation is guaranteed: workforce reservations released, economic reservations cancelled, and debited costs refunded (`compensateDebits`). | `tests/runtime/g5-revalidation-adversarial.test.ts` (Faults 1, 7, 8, 9 — Tests 16, 22, 23, 24 verify complete refund and rollback on failure). |
+| **G5-REVAL3-003** | HIGH | Ignoring `Result` returns in reservation release/consume in cancellation and completion flows (fail-open risk). | Explicitly checked `releaseReservation`, `releaseWorkforceReservation`, and `consumeReservation` `Result` values with fail-closed semantics. Failed releases abort cancellation/completion and propagate the structured error. | `tests/runtime/g5-revalidation-adversarial.test.ts` (Faults 5, 6 — Tests 20, 21 verify cancellation fail-closed on release failure). |
+| **G5-REVAL3-004** | HIGH | `needs-recovery` in Project Completion lacked durable `recoveryData` and registered compensator in `RecoveryService`. | Durable `recoveryData` (`type: "projects:completion"`, project snapshot, facility IDs, ledger refs, consumed reservations) persisted into `TransactionRecord`. Registered idempotent `"projects:completion"` compensator in `RecoveryService` reversing rewards, refunding costs, rolling back facilities, and restoring project snapshot. | `tests/runtime/g5-revalidation-adversarial.test.ts` (Faults 2, 3, 4 — Tests 17, 18, 19 verify durable recoveryData and idempotent compensation). |
+| **G5-REVAL3-005** | HIGH | Downtime outcome failure silently completed activity instead of failing closed when mandatory outcomes failed. | Added `optional?: boolean` to `DowntimeOutcomeDefinition`. Outcomes default to mandatory. In `executeDowntimeResolutionPlan`, failure of any mandatory outcome aborts completion with `DM_DOWNTIME_MANDATORY_OUTCOME_FAILED`, rolls back credited outcomes, and preserves activity in `inProgress`. | `tests/runtime/g5-revalidation-adversarial.test.ts` (Fault 10 — Test 25 verifies failed mandatory outcome blocks completion). |
+| **G5-REVAL3-006** | HIGH | `facilities:apply-damage` declared GM-only was accessible to non-GM Domain Controllers. | Implemented `validateGmOnlyCommandPermission` enforcing strict GM checks on `facilities:apply-damage`. Dispatch by non-GM Domain Controller is strictly rejected with `DM_SECURITY_PERMISSION_DENIED`. | `tests/runtime/g5-revalidation-adversarial.test.ts` (Fault 11 — Test 26 verifies non-GM controller rejection and GM authorization). |
+| **G5-REVAL3-007** | CRITICAL | Lack of dedicated fault-injection test suite verifying atomic rollback, fail-closed handling, and compensators; documentation test count alignment. | Implemented 11 dedicated fault-injection tests (tests 16 to 26) in `tests/runtime/g5-revalidation-adversarial.test.ts` injecting failures into storage, facilities, economy, and people. Aligned all documentation to 571 tests. | `tests/runtime/g5-revalidation-adversarial.test.ts` (26/26 passing, full suite 571/571 passing). |
+
+---
+
+## 10. Canonical Next Gate Designation
+
+Per the Master Specification roadmap, Gate G5 is now complete, fully remediated against initial audit (G5-AUD-001 to G5-AUD-010), first revalidation (G5-REVAL-001 to G5-REVAL-012), second revalidation (G5-REVAL2-001 to G5-REVAL2-010), and third revalidation (G5-REVAL3-001 to G5-REVAL3-007), and strictly pending user acceptance:
 - **Current Gate Status**: `GATE_G5_COMPLETED_PENDING_USER_ACCEPTANCE`
 - **Canonical Next Gate**: **Gate G6 — Relations / Reputation / Agreements / Territory** (`Documentos/GATES/16_G6_RELATIONS_REPUTATION_AGREEMENTS_TERRITORY.md`).
 

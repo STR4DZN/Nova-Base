@@ -17,6 +17,7 @@ import { renderPeopleSubsystemHtml } from "../../ui/domain-patterns/people/peopl
 import { PeopleApplication } from "../../ui/domain-patterns/people/people-app.js";
 import type { CommandBus } from "../../commands/command-bus.js";
 import { ok, type Result } from "../../core/contracts/result.js";
+import type { PublicError } from "../../core/contracts/public-error.js";
 
 export interface PeopleServiceOptions {
   readonly roleDefinitions?: readonly RoleDefinition[];
@@ -105,6 +106,21 @@ export interface PublicPeopleApi {
     options?: { nowReal?: number; nowWorld?: number }
   ): Promise<Result<readonly Reservation[]>>;
 
+  allocateWorkforceReservation(params: {
+    domainUuid: string;
+    projectId: string;
+    amount: number;
+    workforceTypeId?: string;
+    userId?: string | null;
+  }): Promise<Result<{ readonly reservationId: string }, PublicError>>;
+
+  releaseWorkforceReservation(params: {
+    domainUuid: string;
+    projectId: string;
+    reservationId?: string;
+    userId?: string | null;
+  }): Promise<Result<void, PublicError>>;
+
   getAggregate(
     rootDomainUuid: string,
     options?: PeopleAggregationQueryOptions
@@ -136,7 +152,7 @@ export interface PublicPeopleApi {
 
 export class PeopleService implements PublicPeopleApi {
   readonly #domains: DomainReadRepository;
-  readonly #commandBus?: CommandBus;
+  #commandBus?: CommandBus;
   readonly #repository: PeopleRepository;
   readonly #projection: PeopleProjectionService;
   readonly #aggregation: PeopleAggregationService;
@@ -150,6 +166,10 @@ export class PeopleService implements PublicPeopleApi {
       groupDefinitions: options.groupDefinitions
     });
     this.#aggregation = new PeopleAggregationService(domains);
+  }
+
+  setCommandBus(bus: CommandBus): void {
+    this.#commandBus = bus;
   }
 
   /**
@@ -372,6 +392,34 @@ export class PeopleService implements PublicPeopleApi {
       peopleApi: this,
       domains: this.#domains,
       viewer: options?.viewer
+    });
+  }
+
+  async allocateWorkforceReservation(params: {
+    domainUuid: string;
+    projectId: string;
+    amount: number;
+    workforceTypeId?: string;
+    userId?: string | null;
+  }): Promise<Result<{ readonly reservationId: string }, PublicError>> {
+    return this.#repository.allocateReservation({
+      domainUuid: params.domainUuid,
+      targetRef: `project:${params.projectId}`,
+      amount: params.amount,
+      workforceTypeId: params.workforceTypeId
+    });
+  }
+
+  async releaseWorkforceReservation(params: {
+    domainUuid: string;
+    projectId: string;
+    reservationId?: string;
+    userId?: string | null;
+  }): Promise<Result<void, PublicError>> {
+    return this.#repository.releaseReservation({
+      domainUuid: params.domainUuid,
+      targetRef: `project:${params.projectId}`,
+      reservationId: params.reservationId
     });
   }
 }

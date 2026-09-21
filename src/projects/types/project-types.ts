@@ -121,7 +121,7 @@ export interface ProjectRequirementDefinition {
 }
 
 export interface ProjectRewardDefinition {
-  readonly type: "facility" | "resource" | "capability" | "custom";
+  readonly type: "facility" | "facility:create" | "resource" | "resource:credit" | "capability" | "custom" | string;
   readonly targetRef?: string;
   readonly value?: unknown;
   readonly label?: string;

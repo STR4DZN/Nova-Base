@@ -273,7 +273,21 @@ export class FacilitiesService {
       );
     }
 
-    // Debit maintenance costs via economy service if configured (G5-REVAL-009)
+    // Debit maintenance costs via economy service if configured with explicit rollback (G5-REVAL-009, G5-REVAL3-002)
+    const debitedCosts: { resourceId: string; amount: number }[] = [];
+    const compensateDebits = async (reason: string) => {
+      if (!this.#economyService || debitedCosts.length === 0) return;
+      for (const cost of debitedCosts) {
+        await this.#economyService.commitAdjust({
+          domainUuid: cleanDomainUuid,
+          resourceId: cost.resourceId,
+          deltaMinor: cost.amount,
+          reason: `Compensation: ${reason}`,
+          lockOwner: params.commandId
+        });
+      }
+    };
+
     if (this.#economyService && plan.resourceCosts.length > 0) {
       for (const cost of plan.resourceCosts) {
         const debitRes = await this.#economyService.commitAdjust({
@@ -284,8 +298,10 @@ export class FacilitiesService {
           lockOwner: params.commandId
         });
         if (!debitRes.ok) {
+          await compensateDebits(`maintenance cost debit failed for facility '${facility.name}'`);
           return debitRes;
         }
+        debitedCosts.push({ resourceId: cost.resourceId, amount: cost.amount });
       }
     }
 
@@ -294,13 +310,19 @@ export class FacilitiesService {
       facility,
       note: params.notes
     });
-    if (!commitRes.ok) return commitRes;
+    if (!commitRes.ok) {
+      await compensateDebits(`maintenance commit failed for facility '${facility.name}'`);
+      return commitRes;
+    }
 
     const updatedFacility = commitRes.value.updatedFacility;
 
     // Re-read fresh domain document after economy adjustments to avoid revision conflict and preserve balance mutations
     const freshDocRes = await this.#domains.read(cleanDomainUuid);
-    if (!freshDocRes.ok) return freshDocRes;
+    if (!freshDocRes.ok) {
+      await compensateDebits(`domain read failed after maintenance costs for facility '${facility.name}'`);
+      return freshDocRes;
+    }
 
     const freshFacilitiesData = getDomainFacilitiesData(freshDocRes.value.record);
     const updatedFacilities = freshFacilitiesData.facilities.map((f) =>
@@ -316,7 +338,10 @@ export class FacilitiesService {
       ...freshDocRes.value,
       record: updatedRecord
     });
-    if (!saveRes.ok) return saveRes;
+    if (!saveRes.ok) {
+      await compensateDebits(`domain save failed after maintenance for facility '${facility.name}': ${saveRes.error.message}`);
+      return saveRes;
+    }
 
     return ok({ facility: updatedFacility });
   }
@@ -379,7 +404,21 @@ export class FacilitiesService {
       );
     }
 
-    // Debit repair costs via economy service if configured
+    // Debit repair costs via economy service if configured with explicit rollback (G5-REVAL3-002)
+    const debitedCosts: { resourceId: string; amount: number }[] = [];
+    const compensateDebits = async (reason: string) => {
+      if (!this.#economyService || debitedCosts.length === 0) return;
+      for (const cost of debitedCosts) {
+        await this.#economyService.commitAdjust({
+          domainUuid: cleanDomainUuid,
+          resourceId: cost.resourceId,
+          deltaMinor: cost.amount,
+          reason: `Compensation: ${reason}`,
+          lockOwner: params.commandId
+        });
+      }
+    };
+
     if (this.#economyService && plan.resourceCosts.length > 0) {
       for (const cost of plan.resourceCosts) {
         const debitRes = await this.#economyService.commitAdjust({
@@ -390,8 +429,10 @@ export class FacilitiesService {
           lockOwner: params.commandId
         });
         if (!debitRes.ok) {
+          await compensateDebits(`repair cost debit failed for facility '${facility.name}'`);
           return debitRes;
         }
+        debitedCosts.push({ resourceId: cost.resourceId, amount: cost.amount });
       }
     }
 
@@ -400,13 +441,19 @@ export class FacilitiesService {
       facility,
       note: params.notes
     });
-    if (!commitRes.ok) return commitRes;
+    if (!commitRes.ok) {
+      await compensateDebits(`repair commit failed for facility '${facility.name}'`);
+      return commitRes;
+    }
 
     const updatedFacility = commitRes.value.updatedFacility;
 
     // Re-read fresh domain document after economy adjustments to avoid revision conflict and preserve balance mutations
     const freshDocRes = await this.#domains.read(cleanDomainUuid);
-    if (!freshDocRes.ok) return freshDocRes;
+    if (!freshDocRes.ok) {
+      await compensateDebits(`domain read failed after repair costs for facility '${facility.name}'`);
+      return freshDocRes;
+    }
 
     const freshFacilitiesData = getDomainFacilitiesData(freshDocRes.value.record);
     const updatedFacilities = freshFacilitiesData.facilities.map((f) =>
@@ -422,7 +469,10 @@ export class FacilitiesService {
       ...freshDocRes.value,
       record: updatedRecord
     });
-    if (!saveRes.ok) return saveRes;
+    if (!saveRes.ok) {
+      await compensateDebits(`domain save failed after repair for facility '${facility.name}': ${saveRes.error.message}`);
+      return saveRes;
+    }
 
     return ok({ facility: updatedFacility });
   }

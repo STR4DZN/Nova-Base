@@ -1,9 +1,10 @@
 import type { DomainRepository } from "../../storage/repositories/domain-repository.js";
 import type { PopulationGroup, PopulationResolution, PopulationState } from "../population/population-types.js";
 import { calculatePopulation } from "../population/population-calculator.js";
+import { createPublicError, type PublicError } from "../../core/contracts/public-error.js";
 import { err, ok, type Result } from "../../core/contracts/result.js";
-import { createPublicError } from "../../core/contracts/public-error.js";
-import { tryGetDomainPeopleData, type DomainPeopleData } from "../people-data.js";
+import { createOpaqueId } from "../../core/identity/ids.js";
+import { tryGetDomainPeopleData, withDomainPeopleData, type DomainPeopleData } from "../people-data.js";
 import type { Notable, NotableStatusReport } from "../notables/notable-types.js";
 import { resolveNotableStatus } from "../notables/notable-types.js";
 import type { DomainRole } from "../roles/role-types.js";
@@ -340,5 +341,66 @@ export class PeopleRepository {
       if (hiddenPopGroupIds.has(r.sourceRef) || hiddenOpGroupIds.has(r.sourceRef) || hiddenNotableIds.has(r.sourceRef)) return false;
       return true;
     }));
+  }
+
+  async allocateReservation(params: {
+    domainUuid: string;
+    targetRef: string;
+    amount: number;
+    workforceTypeId?: string;
+    sourceRef?: string;
+    visibility?: "public" | "secret";
+  }): Promise<Result<{ readonly reservationId: string }, PublicError>> {
+    const id = params.domainUuid.startsWith("JournalEntry.") ? params.domainUuid.slice("JournalEntry.".length) : params.domainUuid;
+    const domainRes = await this.#domainRepository.read(id);
+    if (!domainRes.ok) return domainRes;
+    const peopleDataRes = tryGetDomainPeopleData(domainRes.value.record);
+    if (!peopleDataRes.ok) return peopleDataRes;
+    const peopleData = peopleDataRes.value;
+    const resvId = createOpaqueId("resv");
+    const reservation: Reservation = {
+      id: resvId,
+      sourceRef: params.sourceRef ?? `domain:${id}`,
+      targetRef: params.targetRef,
+      workforceTypeId: params.workforceTypeId ?? "general",
+      amount: params.amount,
+      status: "active",
+      visibility: params.visibility ?? "public"
+    };
+    const updatedRecord = withDomainPeopleData(domainRes.value.record, {
+      ...peopleData,
+      reservations: Object.freeze([...peopleData.reservations, reservation])
+    });
+    const updateRes = await this.#domainRepository.update({ ...domainRes.value, record: updatedRecord });
+    if (!updateRes.ok) return updateRes;
+    return ok({ reservationId: resvId });
+  }
+
+  async releaseReservation(params: {
+    domainUuid: string;
+    targetRef?: string;
+    reservationId?: string;
+  }): Promise<Result<void, PublicError>> {
+    const id = params.domainUuid.startsWith("JournalEntry.") ? params.domainUuid.slice("JournalEntry.".length) : params.domainUuid;
+    const domainRes = await this.#domainRepository.read(id);
+    if (!domainRes.ok) return domainRes;
+    const peopleDataRes = tryGetDomainPeopleData(domainRes.value.record);
+    if (!peopleDataRes.ok) return peopleDataRes;
+    const peopleData = peopleDataRes.value;
+    const updatedReservations = peopleData.reservations.map((r) => {
+      const matchTarget = params.targetRef && r.targetRef === params.targetRef;
+      const matchId = params.reservationId && r.id === params.reservationId;
+      if ((matchTarget || matchId) && r.status === "active") {
+        return { ...r, status: "released" as const };
+      }
+      return r;
+    });
+    const updatedRecord = withDomainPeopleData(domainRes.value.record, {
+      ...peopleData,
+      reservations: Object.freeze(updatedReservations)
+    });
+    const updateRes = await this.#domainRepository.update({ ...domainRes.value, record: updatedRecord });
+    if (!updateRes.ok) return updateRes;
+    return ok(undefined);
   }
 }

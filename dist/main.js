@@ -8339,7 +8339,7 @@ var RecoveryService = class {
   /**
    * Idempotently recovers an unresolved transaction.
    */
-  async recoverTransaction(transactionId, currentEpoch, compensator) {
+  async recoverTransaction(transactionId, currentEpoch = 1, compensator) {
     const record = this.#transactionStore.get(transactionId);
     if (!record) {
       return err(
@@ -12338,6 +12338,54 @@ var PeopleRepository = class {
       return true;
     }));
   }
+  async allocateReservation(params) {
+    const id = params.domainUuid.startsWith("JournalEntry.") ? params.domainUuid.slice("JournalEntry.".length) : params.domainUuid;
+    const domainRes = await this.#domainRepository.read(id);
+    if (!domainRes.ok) return domainRes;
+    const peopleDataRes = tryGetDomainPeopleData(domainRes.value.record);
+    if (!peopleDataRes.ok) return peopleDataRes;
+    const peopleData = peopleDataRes.value;
+    const resvId = createOpaqueId("resv");
+    const reservation = {
+      id: resvId,
+      sourceRef: params.sourceRef ?? `domain:${id}`,
+      targetRef: params.targetRef,
+      workforceTypeId: params.workforceTypeId ?? "general",
+      amount: params.amount,
+      status: "active",
+      visibility: params.visibility ?? "public"
+    };
+    const updatedRecord = withDomainPeopleData(domainRes.value.record, {
+      ...peopleData,
+      reservations: Object.freeze([...peopleData.reservations, reservation])
+    });
+    const updateRes = await this.#domainRepository.update({ ...domainRes.value, record: updatedRecord });
+    if (!updateRes.ok) return updateRes;
+    return ok({ reservationId: resvId });
+  }
+  async releaseReservation(params) {
+    const id = params.domainUuid.startsWith("JournalEntry.") ? params.domainUuid.slice("JournalEntry.".length) : params.domainUuid;
+    const domainRes = await this.#domainRepository.read(id);
+    if (!domainRes.ok) return domainRes;
+    const peopleDataRes = tryGetDomainPeopleData(domainRes.value.record);
+    if (!peopleDataRes.ok) return peopleDataRes;
+    const peopleData = peopleDataRes.value;
+    const updatedReservations = peopleData.reservations.map((r) => {
+      const matchTarget = params.targetRef && r.targetRef === params.targetRef;
+      const matchId = params.reservationId && r.id === params.reservationId;
+      if ((matchTarget || matchId) && r.status === "active") {
+        return { ...r, status: "released" };
+      }
+      return r;
+    });
+    const updatedRecord = withDomainPeopleData(domainRes.value.record, {
+      ...peopleData,
+      reservations: Object.freeze(updatedReservations)
+    });
+    const updateRes = await this.#domainRepository.update({ ...domainRes.value, record: updatedRecord });
+    if (!updateRes.ok) return updateRes;
+    return ok(void 0);
+  }
 };
 
 // src/projection/viewer-identity.ts
@@ -13789,6 +13837,9 @@ var PeopleService = class {
     });
     this.#aggregation = new PeopleAggregationService(domains);
   }
+  setCommandBus(bus) {
+    this.#commandBus = bus;
+  }
   /**
    * Internal/Authority-only raw people data access. Not part of PublicPeopleApi.
    */
@@ -13918,6 +13969,21 @@ var PeopleService = class {
       peopleApi: this,
       domains: this.#domains,
       viewer: options?.viewer
+    });
+  }
+  async allocateWorkforceReservation(params) {
+    return this.#repository.allocateReservation({
+      domainUuid: params.domainUuid,
+      targetRef: `project:${params.projectId}`,
+      amount: params.amount,
+      workforceTypeId: params.workforceTypeId
+    });
+  }
+  async releaseWorkforceReservation(params) {
+    return this.#repository.releaseReservation({
+      domainUuid: params.domainUuid,
+      targetRef: `project:${params.projectId}`,
+      reservationId: params.reservationId
     });
   }
 };
@@ -20304,237 +20370,6 @@ function createDefaultProjectRegistry() {
   return registry;
 }
 
-// src/projects/plans/project-start-plan-service.ts
-function evaluateProjectStartPlan(context) {
-  const { project, definition, domain } = context;
-  const blockers = [];
-  const warnings = [];
-  const expectedRevision = context.expectedRevision !== void 0 ? context.expectedRevision : project.revision;
-  const targetLifecycle = context.targetLifecycle ?? "active";
-  if (project.revision !== expectedRevision) {
-    blockers.push({
-      code: "DM_PROJECT_REVISION_MISMATCH",
-      category: "revision",
-      message: `Project revision mismatch: expected ${expectedRevision}, found ${project.revision}`,
-      details: { expected: expectedRevision, actual: project.revision }
-    });
-  }
-  const STARTABLE_LIFECYCLES = ["draft", "planned", "approved", "initializing"];
-  if (!STARTABLE_LIFECYCLES.includes(project.lifecycle)) {
-    blockers.push({
-      code: "DM_PROJECT_INVALID_TRANSITION",
-      category: "lifecycle",
-      message: `Cannot start project from lifecycle '${project.lifecycle}'. Project must be in draft, planned, approved, or initializing state`,
-      details: { from: project.lifecycle, to: targetLifecycle }
-    });
-  }
-  if (targetLifecycle !== "active" && targetLifecycle !== "initializing") {
-    blockers.push({
-      code: "DM_PROJECT_INVALID_TRANSITION",
-      category: "lifecycle",
-      message: `Invalid target lifecycle for start plan: '${targetLifecycle}'. Target must be 'active' or 'initializing'`,
-      details: { from: project.lifecycle, to: targetLifecycle }
-    });
-  }
-  const enabledCaps = domain.definition.capabilities.enabled;
-  if (!enabledCaps.includes(PROJECTS_CAPABILITY_ID)) {
-    blockers.push({
-      code: "DM_PROJECT_CAPABILITY_MISSING",
-      category: "capability",
-      message: `Domain '${project.domainUuid}' does not have the '${PROJECTS_CAPABILITY_ID}' capability enabled`,
-      details: { capabilityId: PROJECTS_CAPABILITY_ID }
-    });
-  }
-  const requirementEvaluations = [];
-  for (const req of definition.requirements) {
-    if (req.category === "start" || req.category === "continuous") {
-      let status = "satisfied";
-      let message;
-      if (req.type === "capability") {
-        const requiredCap = req.targetRef ?? String(req.value ?? "");
-        if (!enabledCaps.includes(requiredCap)) {
-          status = "unsatisfied";
-          message = `Required capability '${requiredCap}' is not enabled on domain`;
-        }
-      } else if (req.type === "facility") {
-        const targetFac = req.targetRef;
-        if (targetFac && context.parameters?.availableFacilities) {
-          const available = context.parameters.availableFacilities;
-          if (!available.includes(targetFac)) {
-            status = "unsatisfied";
-            message = `Required facility '${targetFac}' is not available`;
-          }
-        } else {
-          status = "unavailable";
-          message = `Facility evaluation for '${targetFac ?? "unknown"}' is not currently available`;
-        }
-      } else if (req.type === "custom") {
-        if (context.parameters?.customRequirements) {
-          const customMap = context.parameters.customRequirements;
-          if (customMap[req.id] === false) {
-            status = "unsatisfied";
-            message = `Custom requirement '${req.id}' is unsatisfied`;
-          }
-        }
-      }
-      if (status !== "satisfied") {
-        blockers.push({
-          code: "DM_PROJECT_REQUIREMENT_UNSATISFIED",
-          category: "requirement",
-          message: message ?? `Requirement '${req.id}' (${req.type}) is ${status}`,
-          details: { requirementId: req.id, status, type: req.type }
-        });
-      }
-      requirementEvaluations.push({
-        requirementId: req.id,
-        category: req.category,
-        type: req.type,
-        status,
-        message,
-        targetRef: req.targetRef,
-        value: req.value
-      });
-    }
-  }
-  const economicReservations = [];
-  const economyDataRes = tryGetDomainEconomyData(domain);
-  const domainAccounts = economyDataRes.ok ? economyDataRes.value.accounts : [];
-  for (const cost of definition.costs) {
-    if (cost.timing === "upfront" || cost.timing === "reserved") {
-      let availableMinor = 0;
-      if (context.availableResources && typeof context.availableResources[cost.resourceId] === "number") {
-        availableMinor = context.availableResources[cost.resourceId];
-      } else {
-        const account = domainAccounts.find((a) => a.resourceId === cost.resourceId);
-        if (account && account.mode === "native") {
-          availableMinor = account.balanceMinor;
-        }
-      }
-      const isAvailable = availableMinor >= cost.amountMinor;
-      if (!isAvailable && !cost.optional) {
-        blockers.push({
-          code: "DM_PROJECT_INSUFFICIENT_FUNDS",
-          category: "economy",
-          message: `Insufficient funds for resource '${cost.resourceId}': required ${cost.amountMinor} minor, available ${availableMinor} minor`,
-          details: {
-            resourceId: cost.resourceId,
-            requiredMinor: cost.amountMinor,
-            availableMinor
-          }
-        });
-      }
-      economicReservations.push({
-        resourceId: cost.resourceId,
-        amountMinor: cost.amountMinor,
-        timing: cost.timing,
-        accountAvailableMinor: availableMinor,
-        isAvailable,
-        reason: `${cost.timing} cost for project ${project.id}`
-      });
-    }
-  }
-  let workforceIntent = null;
-  const assignedContributors = context.contributors ?? [];
-  let domainWorkforceCapacity = 0;
-  const peopleDataRes = tryGetDomainPeopleData(domain);
-  if (peopleDataRes.ok) {
-    const wfReport = calculateWorkforce(peopleDataRes.value);
-    const generalWf = wfReport.types["general"];
-    domainWorkforceCapacity = generalWf?.available ?? 0;
-  }
-  const effectiveAvailableWorkforce = assignedContributors.length > 0 ? assignedContributors.length : domainWorkforceCapacity;
-  if (assignedContributors.length > 0 || context.parameters?.workforceRequired) {
-    const requiredUnits = typeof context.parameters?.workforceRequired === "number" ? context.parameters.workforceRequired : void 0;
-    const isSufficient = requiredUnits !== void 0 ? effectiveAvailableWorkforce >= requiredUnits : true;
-    if (!isSufficient) {
-      blockers.push({
-        code: "DM_PROJECT_WORKFORCE_INSUFFICIENT",
-        category: "workforce",
-        message: assignedContributors.length > 0 ? `Assigned contributors (${assignedContributors.length}) does not meet required workforce (${requiredUnits})` : `Available workforce (${domainWorkforceCapacity}) does not meet required workforce (${requiredUnits})`,
-        details: { assigned: effectiveAvailableWorkforce, required: requiredUnits }
-      });
-    }
-    workforceIntent = {
-      requiredUnits,
-      assignedContributors: Object.freeze([...assignedContributors]),
-      isSufficient
-    };
-  }
-  const isSatisfied = blockers.length === 0;
-  return Object.freeze({
-    planId: createOpaqueId("plan"),
-    projectId: project.id,
-    domainUuid: project.domainUuid,
-    expectedRevision,
-    targetLifecycle,
-    requirements: Object.freeze(requirementEvaluations),
-    economicReservations: Object.freeze(economicReservations),
-    workforceIntent,
-    blockers: Object.freeze(blockers),
-    warnings: Object.freeze(warnings),
-    isSatisfied,
-    evaluatedAt: Date.now()
-  });
-}
-function commitProjectStartPlan(plan, project, options) {
-  if (!plan.isSatisfied) {
-    return err(
-      createPublicError({
-        code: "DM_PROJECT_START_BLOCKED",
-        category: "conflict",
-        message: `Project start plan is blocked by ${plan.blockers.length} blocker(s)`,
-        details: { blockers: plan.blockers }
-      })
-    );
-  }
-  if (project.id !== plan.projectId || project.domainUuid !== plan.domainUuid) {
-    return err(
-      createPublicError({
-        code: "DM_PROJECT_MISMATCH",
-        category: "conflict",
-        message: "ProjectInstance does not match ProjectStartPlan"
-      })
-    );
-  }
-  if (project.revision !== plan.expectedRevision) {
-    return err(
-      createPublicError({
-        code: "DM_PROJECT_REVISION_MISMATCH",
-        category: "conflict",
-        message: `Project revision has changed since plan was evaluated: expected ${plan.expectedRevision}, current ${project.revision}`
-      })
-    );
-  }
-  const timestamp = options?.timestamp ?? Date.now();
-  const sequence = (project.entries?.length ?? 0) + 1;
-  const startEntry = {
-    id: createOpaqueId("prj"),
-    projectId: project.id,
-    domainUuid: project.domainUuid,
-    sequence,
-    unitsDelta: 0,
-    unitsBefore: project.workCompleted,
-    unitsAfter: project.workCompleted,
-    sourceKind: "command",
-    reasonCode: "PROJECT_STARTED",
-    requestedByUserId: options?.userId ?? null,
-    timestamp,
-    note: `Project transitioned from '${project.lifecycle}' to '${plan.targetLifecycle}' via plan ${plan.planId}`
-  };
-  const transitioningProject = {
-    ...project,
-    lifecycle: plan.targetLifecycle
-  };
-  const applyRes = applyProjectEntry(transitioningProject, startEntry);
-  if (!applyRes.ok) {
-    return applyRes;
-  }
-  return ok({
-    project: applyRes.value,
-    plan
-  });
-}
-
 // src/projects/plans/project-advance-plan-service.ts
 function evaluateProjectAdvancePlan(context) {
   const { project, definition, domain } = context;
@@ -21160,6 +20995,503 @@ function cancelProject(project, params) {
   });
 }
 
+// src/projects/plans/project-start-plan-service.ts
+function evaluateProjectStartPlan(context) {
+  const { project, definition, domain } = context;
+  const blockers = [];
+  const warnings = [];
+  const expectedRevision = context.expectedRevision !== void 0 ? context.expectedRevision : project.revision;
+  const targetLifecycle = context.targetLifecycle ?? "active";
+  if (project.revision !== expectedRevision) {
+    blockers.push({
+      code: "DM_PROJECT_REVISION_MISMATCH",
+      category: "revision",
+      message: `Project revision mismatch: expected ${expectedRevision}, found ${project.revision}`,
+      details: { expected: expectedRevision, actual: project.revision }
+    });
+  }
+  const STARTABLE_LIFECYCLES = ["draft", "planned", "approved", "initializing"];
+  if (!STARTABLE_LIFECYCLES.includes(project.lifecycle)) {
+    blockers.push({
+      code: "DM_PROJECT_INVALID_TRANSITION",
+      category: "lifecycle",
+      message: `Cannot start project from lifecycle '${project.lifecycle}'. Project must be in draft, planned, approved, or initializing state`,
+      details: { from: project.lifecycle, to: targetLifecycle }
+    });
+  }
+  if (targetLifecycle !== "active" && targetLifecycle !== "initializing") {
+    blockers.push({
+      code: "DM_PROJECT_INVALID_TRANSITION",
+      category: "lifecycle",
+      message: `Invalid target lifecycle for start plan: '${targetLifecycle}'. Target must be 'active' or 'initializing'`,
+      details: { from: project.lifecycle, to: targetLifecycle }
+    });
+  }
+  const enabledCaps = domain.definition.capabilities.enabled;
+  if (!enabledCaps.includes(PROJECTS_CAPABILITY_ID)) {
+    blockers.push({
+      code: "DM_PROJECT_CAPABILITY_MISSING",
+      category: "capability",
+      message: `Domain '${project.domainUuid}' does not have the '${PROJECTS_CAPABILITY_ID}' capability enabled`,
+      details: { capabilityId: PROJECTS_CAPABILITY_ID }
+    });
+  }
+  const requirementEvaluations = [];
+  for (const req of definition.requirements) {
+    if (req.category === "start" || req.category === "continuous") {
+      let status = "satisfied";
+      let message;
+      if (req.type === "capability") {
+        const requiredCap = req.targetRef ?? String(req.value ?? "");
+        if (!enabledCaps.includes(requiredCap)) {
+          status = "unsatisfied";
+          message = `Required capability '${requiredCap}' is not enabled on domain`;
+        }
+      } else if (req.type === "facility") {
+        const targetFac = req.targetRef;
+        if (targetFac && context.parameters?.availableFacilities) {
+          const available = context.parameters.availableFacilities;
+          if (!available.includes(targetFac)) {
+            status = "unsatisfied";
+            message = `Required facility '${targetFac}' is not available`;
+          }
+        } else {
+          status = "unavailable";
+          message = `Facility evaluation for '${targetFac ?? "unknown"}' is not currently available`;
+        }
+      } else if (req.type === "custom") {
+        if (context.parameters?.customRequirements) {
+          const customMap = context.parameters.customRequirements;
+          if (customMap[req.id] === false) {
+            status = "unsatisfied";
+            message = `Custom requirement '${req.id}' is unsatisfied`;
+          }
+        }
+      }
+      if (status !== "satisfied") {
+        blockers.push({
+          code: "DM_PROJECT_REQUIREMENT_UNSATISFIED",
+          category: "requirement",
+          message: message ?? `Requirement '${req.id}' (${req.type}) is ${status}`,
+          details: { requirementId: req.id, status, type: req.type }
+        });
+      }
+      requirementEvaluations.push({
+        requirementId: req.id,
+        category: req.category,
+        type: req.type,
+        status,
+        message,
+        targetRef: req.targetRef,
+        value: req.value
+      });
+    }
+  }
+  const economicReservations = [];
+  const economyDataRes = tryGetDomainEconomyData(domain);
+  const domainAccounts = economyDataRes.ok ? economyDataRes.value.accounts : [];
+  for (const cost of definition.costs) {
+    if (cost.timing === "upfront" || cost.timing === "reserved") {
+      let availableMinor = 0;
+      if (context.availableResources && typeof context.availableResources[cost.resourceId] === "number") {
+        availableMinor = context.availableResources[cost.resourceId];
+      } else {
+        const account = domainAccounts.find((a) => a.resourceId === cost.resourceId);
+        if (account && account.mode === "native") {
+          availableMinor = account.balanceMinor;
+        }
+      }
+      const isAvailable = availableMinor >= cost.amountMinor;
+      if (!isAvailable && !cost.optional) {
+        blockers.push({
+          code: "DM_PROJECT_INSUFFICIENT_FUNDS",
+          category: "economy",
+          message: `Insufficient funds for resource '${cost.resourceId}': required ${cost.amountMinor} minor, available ${availableMinor} minor`,
+          details: {
+            resourceId: cost.resourceId,
+            requiredMinor: cost.amountMinor,
+            availableMinor
+          }
+        });
+      }
+      economicReservations.push({
+        resourceId: cost.resourceId,
+        amountMinor: cost.amountMinor,
+        timing: cost.timing,
+        accountAvailableMinor: availableMinor,
+        isAvailable,
+        reason: `${cost.timing} cost for project ${project.id}`
+      });
+    }
+  }
+  let workforceIntent = null;
+  const assignedContributors = context.contributors ?? [];
+  let domainWorkforceCapacity = 0;
+  const peopleDataRes = tryGetDomainPeopleData(domain);
+  if (peopleDataRes.ok) {
+    const wfReport = calculateWorkforce(peopleDataRes.value);
+    const generalWf = wfReport.types["general"];
+    domainWorkforceCapacity = generalWf?.available ?? 0;
+  }
+  const effectiveAvailableWorkforce = assignedContributors.length > 0 ? assignedContributors.length : domainWorkforceCapacity;
+  if (assignedContributors.length > 0 || context.parameters?.workforceRequired) {
+    const requiredUnits = typeof context.parameters?.workforceRequired === "number" ? context.parameters.workforceRequired : void 0;
+    const isSufficient = requiredUnits !== void 0 ? effectiveAvailableWorkforce >= requiredUnits : true;
+    if (!isSufficient) {
+      blockers.push({
+        code: "DM_PROJECT_WORKFORCE_INSUFFICIENT",
+        category: "workforce",
+        message: assignedContributors.length > 0 ? `Assigned contributors (${assignedContributors.length}) does not meet required workforce (${requiredUnits})` : `Available workforce (${domainWorkforceCapacity}) does not meet required workforce (${requiredUnits})`,
+        details: { assigned: effectiveAvailableWorkforce, required: requiredUnits }
+      });
+    }
+    workforceIntent = {
+      requiredUnits,
+      assignedContributors: Object.freeze([...assignedContributors]),
+      isSufficient
+    };
+  }
+  const isSatisfied = blockers.length === 0;
+  return Object.freeze({
+    planId: createOpaqueId("plan"),
+    projectId: project.id,
+    domainUuid: project.domainUuid,
+    expectedRevision,
+    targetLifecycle,
+    requirements: Object.freeze(requirementEvaluations),
+    economicReservations: Object.freeze(economicReservations),
+    workforceIntent,
+    blockers: Object.freeze(blockers),
+    warnings: Object.freeze(warnings),
+    isSatisfied,
+    evaluatedAt: Date.now()
+  });
+}
+function commitProjectStartPlan(plan, project, options) {
+  if (!plan.isSatisfied) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_START_BLOCKED",
+        category: "conflict",
+        message: `Project start plan is blocked by ${plan.blockers.length} blocker(s)`,
+        details: { blockers: plan.blockers }
+      })
+    );
+  }
+  if (project.id !== plan.projectId || project.domainUuid !== plan.domainUuid) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_MISMATCH",
+        category: "conflict",
+        message: "ProjectInstance does not match ProjectStartPlan"
+      })
+    );
+  }
+  if (project.revision !== plan.expectedRevision) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_REVISION_MISMATCH",
+        category: "conflict",
+        message: `Project revision has changed since plan was evaluated: expected ${plan.expectedRevision}, current ${project.revision}`
+      })
+    );
+  }
+  const timestamp = options?.timestamp ?? Date.now();
+  const sequence = (project.entries?.length ?? 0) + 1;
+  const startEntry = {
+    id: createOpaqueId("prj"),
+    projectId: project.id,
+    domainUuid: project.domainUuid,
+    sequence,
+    unitsDelta: 0,
+    unitsBefore: project.workCompleted,
+    unitsAfter: project.workCompleted,
+    sourceKind: "command",
+    reasonCode: "PROJECT_STARTED",
+    requestedByUserId: options?.userId ?? null,
+    timestamp,
+    note: `Project transitioned from '${project.lifecycle}' to '${plan.targetLifecycle}' via plan ${plan.planId}`
+  };
+  const transitioningProject = {
+    ...project,
+    lifecycle: plan.targetLifecycle
+  };
+  const applyRes = applyProjectEntry(transitioningProject, startEntry);
+  if (!applyRes.ok) {
+    return applyRes;
+  }
+  return ok({
+    project: applyRes.value,
+    plan
+  });
+}
+
+// src/projects/plans/project-start-domain-operation-plan.ts
+async function executeProjectStartDomainOperationPlan(context, params) {
+  const cleanDomainUuid = normalizeJournalEntryId(params.domainUuid);
+  const docRes = await context.domains.read(cleanDomainUuid);
+  if (!docRes.ok) return docRes;
+  const record = docRes.value.record;
+  if (!record.definition.capabilities.enabled.includes(PROJECTS_CAPABILITY_ID)) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_CAPABILITY_DISABLED",
+        category: "conflict",
+        message: `Projects capability '${PROJECTS_CAPABILITY_ID}' is not enabled on domain ${params.domainUuid}`
+      })
+    );
+  }
+  const definition = context.projectRegistry.get(params.definitionId);
+  if (!definition) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_DEFINITION_NOT_FOUND",
+        category: "not-found",
+        message: `Project definition '${params.definitionId}' not found`
+      })
+    );
+  }
+  const currentProjectsData = getDomainProjectsData(record);
+  const projectId = `prj-${createOpaqueId("prj").slice("prj_".length)}`;
+  const now = Date.now();
+  const draftProject = {
+    id: projectId,
+    definitionId: params.definitionId,
+    domainUuid: cleanDomainUuid,
+    name: params.name || definition.label,
+    workRequired: params.workRequired ?? definition.defaultWorkRequired,
+    workCompleted: 0,
+    lifecycle: "draft",
+    clampProgress: true,
+    tags: Object.freeze([...definition.tags ?? []]),
+    createdAt: now,
+    updatedAt: now,
+    revision: 0,
+    schemaVersion: 1,
+    metadata: params.targetRef ? { targetRef: params.targetRef } : void 0
+  };
+  const targetLifecycle = params.initialState === "initializing" ? "initializing" : "active";
+  const plan = evaluateProjectStartPlan({
+    project: draftProject,
+    definition,
+    domain: record,
+    targetLifecycle,
+    expectedRevision: params.expectedRevision,
+    parameters: params.workforceRequired !== void 0 ? { workforceRequired: params.workforceRequired } : void 0
+  });
+  if (!plan.isSatisfied) {
+    const firstBlocker = plan.blockers[0];
+    const code = firstBlocker?.code && firstBlocker.code.startsWith("DM_") ? firstBlocker.code : "DM_PROJECT_START_BLOCKED";
+    return err(
+      createPublicError({
+        code,
+        category: "conflict",
+        message: firstBlocker?.message ?? "Project start preconditions unsatisfied",
+        details: { blockers: plan.blockers }
+      })
+    );
+  }
+  if (context.economyService) {
+    for (const resIntent of plan.economicReservations) {
+      if ("getAccountAvailability" in context.economyService) {
+        const availRes = await context.economyService.getAccountAvailability(
+          cleanDomainUuid,
+          resIntent.resourceId
+        );
+        if (availRes && availRes.ok && availRes.value) {
+          const availableMinor = (availRes.value.balanceMinor ?? 0) - (availRes.value.reservedMinor ?? 0);
+          if (availableMinor < resIntent.amountMinor) {
+            return err(
+              createPublicError({
+                code: "DM_PROJECT_START_BLOCKED",
+                category: "conflict",
+                message: `Insufficient economic resources for project '${draftProject.name}'. Required: ${resIntent.amountMinor}, Available: ${availableMinor} on resource '${resIntent.resourceId}'`,
+                details: {
+                  resourceId: resIntent.resourceId,
+                  requiredMinor: resIntent.amountMinor,
+                  availableMinor
+                }
+              })
+            );
+          }
+        }
+      }
+    }
+  }
+  const txId = createOpaqueId("tx");
+  const cmdId = params.commandId ? params.commandId.startsWith("cmd_") ? params.commandId : `cmd_${params.commandId}` : createCommandId();
+  const epoch = params.authorityEpoch ?? 1;
+  if (context.transactionStore) {
+    const tx = createTransactionRecord({
+      transactionId: txId,
+      commandId: cmdId,
+      authorityEpoch: epoch,
+      lockKeys: [`domain:${cleanDomainUuid}`, `project:${draftProject.id}`],
+      safeAutoRecovery: false,
+      recoveryData: {
+        type: "projects:start",
+        projectId: draftProject.id,
+        planId: plan.planId,
+        domainUuid: cleanDomainUuid,
+        status: "prepared"
+      }
+    });
+    context.transactionStore.save(tx);
+    context.transactionStore.transition(txId, "claimed", epoch);
+    context.transactionStore.transition(txId, "prepared", epoch);
+  }
+  const debitedCosts = [];
+  const createdReservationIds = [];
+  let allocatedWorkforceReservationId;
+  const compensate = async (reason) => {
+    if (allocatedWorkforceReservationId && context.peopleService) {
+      try {
+        await context.peopleService.releaseWorkforceReservation({
+          domainUuid: cleanDomainUuid,
+          projectId: draftProject.id,
+          reservationId: allocatedWorkforceReservationId,
+          userId: params.userId
+        });
+      } catch {
+      }
+    }
+    if (context.economyService) {
+      for (const resId of createdReservationIds) {
+        try {
+          await context.economyService.releaseReservation({
+            domainUuid: cleanDomainUuid,
+            reservationId: resId,
+            reason: `Compensation: ${reason}`,
+            lockOwner: params.commandId
+          });
+        } catch {
+        }
+      }
+      for (const cost of debitedCosts) {
+        try {
+          await context.economyService.commitAdjust({
+            domainUuid: cleanDomainUuid,
+            resourceId: cost.resourceId,
+            deltaMinor: cost.amountMinor,
+            reason: `Compensation refund: ${reason}`,
+            lockOwner: params.commandId
+          });
+        } catch {
+        }
+      }
+    }
+    if (context.transactionStore) {
+      context.transactionStore.transition(txId, "failed", epoch, reason);
+    }
+  };
+  if (context.economyService) {
+    for (const cost of definition.costs) {
+      if (cost.timing === "upfront") {
+        const debitRes = await context.economyService.commitAdjust({
+          domainUuid: cleanDomainUuid,
+          resourceId: cost.resourceId,
+          deltaMinor: -cost.amountMinor,
+          reason: `Upfront cost for project ${draftProject.name}`,
+          lockOwner: params.commandId
+        });
+        if (!debitRes.ok) {
+          await compensate(`Failed to debit upfront cost for '${cost.resourceId}': ${debitRes.error.message}`);
+          return err(
+            createPublicError({
+              code: "DM_PROJECT_START_BLOCKED",
+              category: "conflict",
+              message: `Failed to debit upfront cost for '${cost.resourceId}': ${debitRes.error.message}`,
+              details: debitRes.error
+            })
+          );
+        }
+        debitedCosts.push({ resourceId: cost.resourceId, amountMinor: cost.amountMinor });
+      } else if (cost.timing === "reserved") {
+        const reserveRes = await context.economyService.reserve({
+          domainUuid: cleanDomainUuid,
+          resourceId: cost.resourceId,
+          amountMinor: cost.amountMinor,
+          source: { type: "project", ref: projectId },
+          lockOwner: params.commandId
+        });
+        if (!reserveRes.ok) {
+          await compensate(`Failed to create reservation for '${cost.resourceId}': ${reserveRes.error.message}`);
+          return err(
+            createPublicError({
+              code: "DM_PROJECT_START_BLOCKED",
+              category: "conflict",
+              message: `Failed to create reservation for '${cost.resourceId}': ${reserveRes.error.message}`,
+              details: reserveRes.error
+            })
+          );
+        }
+        createdReservationIds.push(reserveRes.value.id);
+      }
+    }
+  }
+  if (params.workforceRequired !== void 0 && params.workforceRequired > 0) {
+    const peopleService = context.peopleService ?? new PeopleService(context.domains);
+    const wfRes = await peopleService.allocateWorkforceReservation({
+      domainUuid: cleanDomainUuid,
+      projectId: draftProject.id,
+      amount: params.workforceRequired,
+      workforceTypeId: "general",
+      userId: params.userId
+    });
+    if (!wfRes.ok) {
+      await compensate(`Failed to allocate workforce reservation: ${wfRes.error.message}`);
+      return err(
+        createPublicError({
+          code: "DM_PROJECT_START_BLOCKED",
+          category: "conflict",
+          message: `Failed to allocate workforce reservation: ${wfRes.error.message}`,
+          details: wfRes.error
+        })
+      );
+    }
+    allocatedWorkforceReservationId = wfRes.value.reservationId;
+  }
+  const projectToCommit = createdReservationIds.length > 0 ? {
+    ...draftProject,
+    metadata: {
+      ...draftProject.metadata ?? {},
+      reservationIds: Object.freeze(createdReservationIds)
+    }
+  } : draftProject;
+  const commitRes = commitProjectStartPlan(plan, projectToCommit, {
+    userId: params.userId
+  });
+  if (!commitRes.ok) {
+    await compensate(`commitProjectStartPlan failed: ${commitRes.error.message}`);
+    return commitRes;
+  }
+  const startedProject = commitRes.value.project;
+  const freshDocRes = await context.domains.read(cleanDomainUuid);
+  if (!freshDocRes.ok) {
+    await compensate(`Failed to re-read domain doc: ${freshDocRes.error.message}`);
+    return freshDocRes;
+  }
+  const freshRecord = freshDocRes.value.record;
+  const freshProjectsData = getDomainProjectsData(freshRecord);
+  const updatedRecord = withDomainProjectsData(freshRecord, {
+    ...freshProjectsData,
+    projects: Object.freeze([...freshProjectsData.projects, startedProject])
+  });
+  const updateRes = await context.domains.update({
+    ...freshDocRes.value,
+    record: updatedRecord
+  });
+  if (!updateRes.ok) {
+    await compensate(`Domain update failed during project start: ${updateRes.error.message}`);
+    return updateRes;
+  }
+  if (context.transactionStore) {
+    context.transactionStore.transition(txId, "committing", epoch);
+    context.transactionStore.transition(txId, "committed", epoch);
+  }
+  return ok({ project: startedProject });
+}
+
 // src/projects/plans/project-completion-plan-service.ts
 function evaluateProjectCompletionPlan(context) {
   const { project, definition, domain } = context;
@@ -21481,19 +21813,466 @@ function commitProjectCompletion(plan, project, options) {
   });
 }
 
+// src/projects/plans/project-completion-domain-operation-plan.ts
+async function executeProjectCompletionDomainOperationPlan(context, params) {
+  const cleanDomainUuid = normalizeJournalEntryId(params.domainUuid);
+  const docRes = await context.domains.read(cleanDomainUuid);
+  if (!docRes.ok) return docRes;
+  const record = docRes.value.record;
+  const currentProjectsData = getDomainProjectsData(record);
+  const project = currentProjectsData.projects.find((p) => p.id === params.projectId);
+  if (!project) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_NOT_FOUND",
+        category: "not-found",
+        message: `Project ${params.projectId} not found in domain ${params.domainUuid}`
+      })
+    );
+  }
+  if (params.expectedRevision !== void 0 && project.revision !== params.expectedRevision) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_REVISION_MISMATCH",
+        category: "conflict",
+        message: `Project revision mismatch: expected ${params.expectedRevision}, found ${project.revision}`
+      })
+    );
+  }
+  const definition = context.projectRegistry.get(project.definitionId);
+  if (!definition) {
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_DEFINITION_NOT_FOUND",
+        category: "not-found",
+        message: `Project definition ${project.definitionId} not found`
+      })
+    );
+  }
+  const plan = evaluateProjectCompletionPlan({
+    project,
+    definition,
+    domain: record,
+    expectedRevision: params.expectedRevision
+  });
+  if (!plan.isSatisfied) {
+    const firstBlocker = plan.blockers[0];
+    return err(
+      createPublicError({
+        code: "DM_PROJECT_COMPLETION_BLOCKED",
+        category: "conflict",
+        message: firstBlocker?.message ?? "Project completion preconditions unsatisfied",
+        details: { blockers: plan.blockers }
+      })
+    );
+  }
+  const txId = createOpaqueId("tx");
+  const cmdId = params.commandId ? params.commandId.startsWith("cmd_") ? params.commandId : `cmd_${params.commandId}` : createCommandId();
+  const epoch = params.authorityEpoch ?? 1;
+  const createdFacilityIds = [];
+  const debitedCostRefs = [];
+  const creditedResourceRefs = [];
+  const consumedReservationIds = [];
+  const buildRecoveryData = (status) => ({
+    type: "projects:completion",
+    projectId: project.id,
+    planId: plan.planId,
+    domainUuid: cleanDomainUuid,
+    projectSnapshot: project,
+    createdFacilityIds: Object.freeze([...createdFacilityIds]),
+    debitedCostRefs: Object.freeze([...debitedCostRefs]),
+    creditedResourceRefs: Object.freeze([...creditedResourceRefs]),
+    consumedReservationIds: Object.freeze([...consumedReservationIds]),
+    authorityEpoch: epoch,
+    correlationId: params.correlationId,
+    causationId: params.causationId,
+    status
+  });
+  if (context.transactionStore) {
+    const tx = createTransactionRecord({
+      transactionId: txId,
+      commandId: cmdId,
+      authorityEpoch: epoch,
+      lockKeys: [`domain:${cleanDomainUuid}`, `project:${project.id}`],
+      safeAutoRecovery: false,
+      recoveryData: buildRecoveryData("prepared")
+    });
+    context.transactionStore.save(tx);
+    context.transactionStore.transition(txId, "claimed", epoch);
+    context.transactionStore.transition(txId, "prepared", epoch);
+  }
+  if (context.economyService) {
+    for (const cost of definition.costs) {
+      if (cost.timing === "onCompletion") {
+        const debitRes = await context.economyService.commitAdjust({
+          domainUuid: cleanDomainUuid,
+          resourceId: cost.resourceId,
+          deltaMinor: -cost.amountMinor,
+          reason: `OnCompletion cost for project ${project.name}`,
+          lockOwner: params.commandId
+        });
+        if (!debitRes.ok) {
+          if (context.transactionStore) {
+            context.transactionStore.transition(txId, "failed", epoch, debitRes.error.message);
+          }
+          return err(
+            createPublicError({
+              code: "DM_PROJECT_COMPLETION_BLOCKED",
+              category: "conflict",
+              message: `Failed to debit onCompletion cost for '${cost.resourceId}': ${debitRes.error.message}`,
+              details: debitRes.error
+            })
+          );
+        }
+        debitedCostRefs.push({ resourceId: cost.resourceId, amountMinor: cost.amountMinor });
+      }
+    }
+  }
+  if (context.economyService) {
+    const activeReservations = [];
+    if (project?.metadata?.reservationIds && Array.isArray(project.metadata.reservationIds)) {
+      activeReservations.push(...project.metadata.reservationIds);
+    }
+    if ("listReservations" in context.economyService) {
+      const matching = context.economyService.listReservations({
+        domainUuid: cleanDomainUuid,
+        sourceRef: params.projectId,
+        status: "active"
+      });
+      for (const m of matching) {
+        if (!activeReservations.includes(m.id)) {
+          activeReservations.push(m.id);
+        }
+      }
+    }
+    for (const resId of activeReservations) {
+      const resObj = context.economyService.getReservation(resId);
+      if (resObj && (resObj.status === "active" || resObj.status === "partially-consumed")) {
+        const consumeRes = await context.economyService.consumeReservation({
+          domainUuid: cleanDomainUuid,
+          reservationId: resId,
+          amountMinor: resObj.remainingAmountMinor,
+          reason: `Project ${project.name} completed`,
+          lockOwner: params.commandId
+        });
+        if (!consumeRes.ok) {
+          if (context.transactionStore) {
+            const tx = context.transactionStore.get(txId);
+            if (tx) {
+              context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("needs-recovery") });
+            }
+            context.transactionStore.transition(txId, "needs-recovery", epoch, consumeRes.error.message);
+          }
+          return err(
+            createPublicError({
+              code: "DM_PROJECT_COMPLETION_BLOCKED",
+              category: "conflict",
+              message: `Failed to consume reservation '${resId}': ${consumeRes.error.message}`,
+              details: consumeRes.error
+            })
+          );
+        }
+        consumedReservationIds.push(resId);
+      }
+    }
+  }
+  if (context.peopleService) {
+    const wfRelRes = await context.peopleService.releaseWorkforceReservation({
+      domainUuid: cleanDomainUuid,
+      projectId: project.id,
+      userId: params.userId
+    });
+    if (!wfRelRes.ok) {
+    }
+  }
+  let partialFailure = false;
+  const executedReceipts = {};
+  for (const effect of plan.sideEffects.filter((e) => e.type === "facility" || e.type === "facility:create")) {
+    if (!effect.targetRef) continue;
+    if (!context.facilitiesService) {
+      partialFailure = true;
+      executedReceipts[effect.id] = {
+        childReceiptId: createOpaqueId("rep"),
+        subsystem: "facility",
+        action: "create_facility",
+        targetRef: effect.targetRef,
+        payload: effect.value,
+        success: false,
+        error: "FacilitiesService not available",
+        appliedAt: Date.now()
+      };
+      continue;
+    }
+    const facRes = await context.facilitiesService.createFacility({
+      domainUuid: cleanDomainUuid,
+      definitionId: effect.targetRef,
+      name: effect.description
+    });
+    if (facRes.ok) {
+      createdFacilityIds.push(facRes.value.facility.id);
+      executedReceipts[effect.id] = {
+        childReceiptId: createOpaqueId("rep"),
+        subsystem: "facility",
+        action: "create_facility",
+        targetRef: facRes.value.facility.id,
+        payload: { definitionId: effect.targetRef, facilityId: facRes.value.facility.id },
+        success: true,
+        appliedAt: Date.now()
+      };
+    } else {
+      partialFailure = true;
+      executedReceipts[effect.id] = {
+        childReceiptId: createOpaqueId("rep"),
+        subsystem: "facility",
+        action: "create_facility",
+        targetRef: effect.targetRef,
+        payload: effect.value,
+        success: false,
+        error: facRes.error.message,
+        appliedAt: Date.now()
+      };
+    }
+  }
+  for (const effect of plan.sideEffects.filter((e) => e.type === "resource" || e.type === "resource:credit")) {
+    if (!effect.targetRef) continue;
+    if (!context.economyService) {
+      partialFailure = true;
+      executedReceipts[effect.id] = {
+        childReceiptId: createOpaqueId("rep"),
+        subsystem: "economy",
+        action: "credit_resource",
+        targetRef: effect.targetRef,
+        payload: { amountMinor: effect.value },
+        success: false,
+        error: "EconomyService not available",
+        appliedAt: Date.now()
+      };
+      continue;
+    }
+    const deltaMinor = Number(effect.value);
+    const econRes = await context.economyService.commitAdjust({
+      domainUuid: cleanDomainUuid,
+      resourceId: effect.targetRef,
+      deltaMinor,
+      reason: `Project completion reward: ${effect.description ?? project.name}`,
+      lockOwner: params.commandId
+    });
+    if (econRes.ok) {
+      creditedResourceRefs.push({ resourceId: effect.targetRef, amountMinor: deltaMinor });
+      executedReceipts[effect.id] = {
+        childReceiptId: createOpaqueId("rep"),
+        subsystem: "economy",
+        action: "credit_resource",
+        targetRef: effect.targetRef,
+        payload: { amountMinor: effect.value },
+        success: true,
+        appliedAt: Date.now()
+      };
+    } else {
+      partialFailure = true;
+      executedReceipts[effect.id] = {
+        childReceiptId: createOpaqueId("rep"),
+        subsystem: "economy",
+        action: "credit_resource",
+        targetRef: effect.targetRef,
+        payload: { amountMinor: effect.value },
+        success: false,
+        error: econRes.error.message,
+        appliedAt: Date.now()
+      };
+    }
+  }
+  for (const effect of plan.sideEffects.filter((e) => e.type !== "facility" && e.type !== "facility:create" && e.type !== "resource" && e.type !== "resource:credit")) {
+    if (params.sideEffectHandlers && params.sideEffectHandlers[effect.type]) {
+      try {
+        const handlerRes = await params.sideEffectHandlers[effect.type](effect, {
+          domain: record,
+          project
+        });
+        if (typeof handlerRes === "object" && handlerRes !== null && "ok" in handlerRes) {
+          if (handlerRes.ok) {
+            executedReceipts[effect.id] = handlerRes.value;
+          } else {
+            partialFailure = true;
+            executedReceipts[effect.id] = {
+              childReceiptId: createOpaqueId("rep"),
+              subsystem: "custom",
+              action: "custom_side_effect",
+              targetRef: effect.targetRef ?? effect.id,
+              payload: effect.value,
+              success: false,
+              error: handlerRes.error.message,
+              appliedAt: Date.now()
+            };
+          }
+        } else {
+          const rec = handlerRes;
+          executedReceipts[effect.id] = rec;
+          if (!rec.success) {
+            partialFailure = true;
+          }
+        }
+      } catch (err3) {
+        partialFailure = true;
+        executedReceipts[effect.id] = {
+          childReceiptId: createOpaqueId("rep"),
+          subsystem: "custom",
+          action: "custom_side_effect",
+          targetRef: effect.targetRef ?? effect.id,
+          payload: effect.value,
+          success: false,
+          error: err3 instanceof Error ? err3.message : "Side effect handler threw",
+          appliedAt: Date.now()
+        };
+      }
+    } else if (params.sideEffectHandlers !== void 0) {
+      partialFailure = true;
+      executedReceipts[effect.id] = {
+        childReceiptId: createOpaqueId("rep"),
+        subsystem: "custom",
+        action: "custom_side_effect",
+        targetRef: effect.targetRef ?? effect.id,
+        payload: effect.value,
+        success: false,
+        error: `No handler registered for side effect type '${effect.type}'`,
+        appliedAt: Date.now()
+      };
+    }
+  }
+  if (context.transactionStore) {
+    const tx = context.transactionStore.get(txId);
+    if (tx) {
+      context.transactionStore.save({
+        ...tx,
+        recoveryData: buildRecoveryData(partialFailure ? "needs-recovery" : "executing")
+      });
+    }
+  }
+  const sideEffectHandlers = {
+    ...params.sideEffectHandlers ?? {}
+  };
+  if (!sideEffectHandlers.facility) {
+    sideEffectHandlers.facility = (effect) => {
+      return executedReceipts[effect.id] ?? {
+        childReceiptId: createOpaqueId("rep"),
+        subsystem: "facility",
+        action: "create_facility",
+        targetRef: effect.targetRef,
+        payload: effect.value,
+        success: false,
+        error: "No facility receipt generated",
+        appliedAt: Date.now()
+      };
+    };
+  }
+  if (!sideEffectHandlers["facility:create"]) {
+    sideEffectHandlers["facility:create"] = sideEffectHandlers.facility;
+  }
+  if (!sideEffectHandlers.resource) {
+    sideEffectHandlers.resource = (effect) => {
+      return executedReceipts[effect.id] ?? {
+        childReceiptId: createOpaqueId("rep"),
+        subsystem: "economy",
+        action: "credit_resource",
+        targetRef: effect.targetRef,
+        payload: { amountMinor: effect.value },
+        success: false,
+        error: "No resource receipt generated",
+        appliedAt: Date.now()
+      };
+    };
+  }
+  if (!sideEffectHandlers["resource:credit"]) {
+    sideEffectHandlers["resource:credit"] = sideEffectHandlers.resource;
+  }
+  const commitRes = commitProjectCompletion(plan, project, {
+    userId: params.userId,
+    sideEffectHandlers
+  });
+  if (!commitRes.ok) {
+    if (context.transactionStore) {
+      context.transactionStore.transition(txId, "needs-recovery", epoch, commitRes.error.message);
+    }
+    return commitRes;
+  }
+  if (commitRes.value.partialFailure) {
+    partialFailure = true;
+  }
+  const completedProject = commitRes.value.updatedProject;
+  if (context.peopleService) {
+    const releaseWfRes = await context.peopleService.releaseWorkforceReservation({
+      domainUuid: cleanDomainUuid,
+      projectId: project.id,
+      userId: params.userId
+    });
+    if (!releaseWfRes.ok) {
+      partialFailure = true;
+    }
+  }
+  const freshDocRes = await context.domains.read(cleanDomainUuid);
+  if (!freshDocRes.ok) {
+    if (context.transactionStore) {
+      context.transactionStore.transition(txId, "needs-recovery", epoch, freshDocRes.error.message);
+    }
+    return freshDocRes;
+  }
+  const freshProjectsData = getDomainProjectsData(freshDocRes.value.record);
+  const updatedProjects = freshProjectsData.projects.map(
+    (p) => p.id === project.id ? completedProject : p
+  );
+  const updatedRecord = withDomainProjectsData(freshDocRes.value.record, {
+    ...freshProjectsData,
+    projects: Object.freeze(updatedProjects)
+  });
+  const updateRes = await context.domains.save({
+    ...freshDocRes.value,
+    record: updatedRecord
+  });
+  if (!updateRes.ok) {
+    if (context.transactionStore) {
+      context.transactionStore.transition(txId, "needs-recovery", epoch, updateRes.error.message);
+    }
+    return updateRes;
+  }
+  if (context.transactionStore) {
+    if (partialFailure) {
+      context.transactionStore.transition(
+        txId,
+        "needs-recovery",
+        epoch,
+        "Project completed with one or more child side effect failures"
+      );
+    } else {
+      context.transactionStore.transition(txId, "committing", epoch);
+      context.transactionStore.transition(txId, "committed", epoch);
+    }
+  }
+  return ok({
+    project: completedProject,
+    childReceipts: commitRes.value.childReceipts
+  });
+}
+
 // src/projects/services/projects-service.ts
 var ProjectsService = class {
   #domains;
   #projectRegistry;
   #economyService;
   #facilitiesService;
+  #peopleService;
   #transactionStore;
+  #recoveryService;
   constructor(options) {
     this.#domains = options.domains;
     this.#projectRegistry = options.projectRegistry ?? createDefaultProjectRegistry();
     this.#economyService = options.economyService;
     this.#facilitiesService = options.facilitiesService;
+    this.#peopleService = options.peopleService ?? new PeopleService(this.#domains);
     this.#transactionStore = options.transactionStore;
+    this.#recoveryService = options.recoveryService;
+    if (this.#recoveryService) {
+      this.registerRecoveryCompensators(this.#recoveryService);
+    }
   }
   get registry() {
     return this.#projectRegistry;
@@ -21524,208 +22303,16 @@ var ProjectsService = class {
     return ok(p);
   }
   async startProject(params) {
-    const domainUuid = this.#cleanId(params.domainUuid);
-    const docRes = await this.#domains.read(domainUuid);
-    if (!docRes.ok) return docRes;
-    const record = docRes.value.record;
-    if (!record.definition.capabilities.enabled.includes(PROJECTS_CAPABILITY_ID)) {
-      return err(
-        createPublicError({
-          code: "DM_PROJECT_CAPABILITY_DISABLED",
-          category: "conflict",
-          message: `Projects capability '${PROJECTS_CAPABILITY_ID}' is not enabled on domain ${params.domainUuid}`
-        })
-      );
-    }
-    const definition = this.#projectRegistry.get(params.definitionId);
-    if (!definition) {
-      return err(
-        createPublicError({
-          code: "DM_PROJECT_DEFINITION_NOT_FOUND",
-          category: "not-found",
-          message: `Project definition '${params.definitionId}' not found`
-        })
-      );
-    }
-    let availableWorkforce = 0;
-    const peopleDataRes = tryGetDomainPeopleData(record);
-    if (peopleDataRes.ok) {
-      const wfReport = calculateWorkforce(peopleDataRes.value);
-      const generalWf = wfReport.types["general"];
-      availableWorkforce = generalWf?.available ?? 0;
-    }
-    if (params.workforceRequired !== void 0 && params.workforceRequired > 0) {
-      if (availableWorkforce < params.workforceRequired) {
-        return err(
-          createPublicError({
-            code: "DM_PROJECT_WORKFORCE_INSUFFICIENT",
-            category: "conflict",
-            message: `Insufficient workforce for project '${params.name ?? definition.label}': required ${params.workforceRequired}, available ${availableWorkforce}`,
-            details: { required: params.workforceRequired, available: availableWorkforce }
-          })
-        );
-      }
-    }
-    const currentProjectsData = getDomainProjectsData(record);
-    const projectId = `proj-${createOpaqueId("prj")}`;
-    const now = Date.now();
-    const draftProject = {
-      id: projectId,
-      domainUuid: params.domainUuid,
-      definitionId: params.definitionId,
-      name: params.name ?? definition.label,
-      schemaVersion: 1,
-      revision: 0,
-      lifecycle: "draft",
-      workRequired: params.workRequired ?? definition.defaultWorkRequired,
-      workCompleted: 0,
-      clampProgress: true,
-      tags: Object.freeze([...definition.tags ?? []]),
-      createdAt: now,
-      updatedAt: now,
-      metadata: params.targetRef ? { targetRef: params.targetRef } : void 0
-    };
-    const mappedContributors = params.contributors?.map(
-      (c) => typeof c === "string" ? { type: "notable", ref: c } : c
+    return executeProjectStartDomainOperationPlan(
+      {
+        domains: this.#domains,
+        projectRegistry: this.#projectRegistry,
+        economyService: this.#economyService,
+        peopleService: this.#peopleService,
+        transactionStore: this.#transactionStore
+      },
+      params
     );
-    const plan = evaluateProjectStartPlan({
-      project: draftProject,
-      definition,
-      domain: record,
-      expectedRevision: params.expectedRevision ?? 0,
-      targetLifecycle: params.initialState === "initializing" ? "initializing" : "active",
-      contributors: mappedContributors,
-      parameters: params.workforceRequired !== void 0 ? { workforceRequired: params.workforceRequired } : void 0
-    });
-    const econData = getDomainEconomyData(record);
-    for (const resIntent of plan.economicReservations) {
-      const account = econData.accounts.find(
-        (a) => a.resourceId === resIntent.resourceId && a.mode === "native"
-      );
-      const balanceMinor = account && "balanceMinor" in account ? account.balanceMinor : 0;
-      let reservedMinor = 0;
-      if (this.#economyService && "getAccountAvailability" in this.#economyService) {
-        const availRes = await this.#economyService.getAccountAvailability(
-          params.domainUuid,
-          resIntent.resourceId
-        );
-        if (availRes && availRes.ok && availRes.value) {
-          reservedMinor = availRes.value.reservedMinor ?? 0;
-        }
-      }
-      const availableMinor = balanceMinor - reservedMinor;
-      if (availableMinor < resIntent.amountMinor) {
-        return err(
-          createPublicError({
-            code: "DM_PROJECT_START_BLOCKED",
-            category: "conflict",
-            message: `Insufficient economic resources for project '${draftProject.name}'. Required: ${resIntent.amountMinor}, Available: ${availableMinor} on resource '${resIntent.resourceId}'`,
-            details: {
-              resourceId: resIntent.resourceId,
-              requiredMinor: resIntent.amountMinor,
-              availableMinor
-            }
-          })
-        );
-      }
-    }
-    if (!plan.isSatisfied) {
-      const firstBlocker = plan.blockers[0];
-      return err(
-        createPublicError({
-          code: "DM_PROJECT_START_BLOCKED",
-          category: "conflict",
-          message: firstBlocker?.message ?? "Project start preconditions unsatisfied",
-          details: { blockers: plan.blockers }
-        })
-      );
-    }
-    const createdReservationIds = [];
-    if (this.#economyService) {
-      for (const cost of definition.costs) {
-        if (cost.timing === "upfront") {
-          const debitRes = await this.#economyService.commitAdjust({
-            domainUuid: params.domainUuid,
-            resourceId: cost.resourceId,
-            deltaMinor: -cost.amountMinor,
-            reason: `Upfront cost for project ${draftProject.name}`,
-            lockOwner: params.commandId
-          });
-          if (!debitRes.ok) {
-            return err(
-              createPublicError({
-                code: "DM_PROJECT_START_BLOCKED",
-                category: "conflict",
-                message: `Failed to debit upfront cost for '${cost.resourceId}': ${debitRes.error.message}`,
-                details: debitRes.error
-              })
-            );
-          }
-        } else if (cost.timing === "reserved") {
-          const reserveRes = await this.#economyService.reserve({
-            domainUuid: params.domainUuid,
-            resourceId: cost.resourceId,
-            amountMinor: cost.amountMinor,
-            source: { type: "project", ref: projectId },
-            lockOwner: params.commandId
-          });
-          if (!reserveRes.ok) {
-            return err(
-              createPublicError({
-                code: "DM_PROJECT_START_BLOCKED",
-                category: "conflict",
-                message: `Failed to create reservation for '${cost.resourceId}': ${reserveRes.error.message}`,
-                details: reserveRes.error
-              })
-            );
-          }
-          createdReservationIds.push(reserveRes.value.id);
-        }
-      }
-    }
-    const projectToCommit = createdReservationIds.length > 0 ? {
-      ...draftProject,
-      metadata: {
-        ...draftProject.metadata ?? {},
-        reservationIds: Object.freeze(createdReservationIds)
-      }
-    } : draftProject;
-    const commitRes = commitProjectStartPlan(plan, projectToCommit, {
-      userId: params.userId
-    });
-    if (!commitRes.ok) return commitRes;
-    const startedProject = commitRes.value.project;
-    const freshDocRes = await this.#domains.read(domainUuid);
-    if (!freshDocRes.ok) return freshDocRes;
-    let freshRecord = freshDocRes.value.record;
-    if (params.workforceRequired !== void 0 && params.workforceRequired > 0) {
-      const peopleData = getDomainPeopleData(freshRecord);
-      const wfResId = createOpaqueId("resv");
-      const workforceReservation = {
-        id: wfResId,
-        sourceRef: `domain:${domainUuid}`,
-        targetRef: `project:${projectId}`,
-        workforceTypeId: "general",
-        amount: params.workforceRequired,
-        status: "active",
-        visibility: "public"
-      };
-      freshRecord = withDomainPeopleData(freshRecord, {
-        ...peopleData,
-        reservations: Object.freeze([...peopleData.reservations, workforceReservation])
-      });
-    }
-    const freshProjectsData = getDomainProjectsData(freshRecord);
-    const updatedRecord = withDomainProjectsData(freshRecord, {
-      ...freshProjectsData,
-      projects: Object.freeze([...freshProjectsData.projects, startedProject])
-    });
-    const saveRes = await this.#domains.save({
-      ...freshDocRes.value,
-      record: updatedRecord
-    });
-    if (!saveRes.ok) return saveRes;
-    return ok({ project: startedProject });
   }
   async advanceProject(params) {
     const domainUuid = this.#cleanId(params.domainUuid);
@@ -21875,29 +22462,46 @@ var ProjectsService = class {
         }
       }
       for (const resId of activeReservations) {
-        await this.#economyService.releaseReservation({
-          domainUuid: params.domainUuid,
+        const releaseRes = await this.#economyService.releaseReservation({
+          domainUuid,
           reservationId: resId,
           reason: params.reason ?? "Project cancelled",
           lockOwner: params.commandId
         });
+        if (!releaseRes.ok) {
+          return releaseRes;
+        }
       }
     }
-    const freshDocRes = await this.#domains.read(domainUuid);
-    if (freshDocRes.ok) {
-      const peopleData = getDomainPeopleData(freshDocRes.value.record);
-      const hasWorkforceRes = peopleData.reservations.some(
-        (r) => r.targetRef === `project:${params.projectId}` && r.status === "active"
-      );
-      if (hasWorkforceRes) {
-        const updatedReservations = peopleData.reservations.map(
-          (r) => r.targetRef === `project:${params.projectId}` && r.status === "active" ? { ...r, status: "released" } : r
-        );
-        const updatedRecord = withDomainPeopleData(freshDocRes.value.record, {
-          ...peopleData,
-          reservations: Object.freeze(updatedReservations)
-        });
-        await this.#domains.update({ ...freshDocRes.value, record: updatedRecord });
+    if (this.#peopleService) {
+      const releaseWfRes = await this.#peopleService.releaseWorkforceReservation({
+        domainUuid,
+        projectId: params.projectId,
+        userId: params.userId
+      });
+      if (!releaseWfRes.ok) {
+        return releaseWfRes;
+      }
+    } else {
+      const freshDocRes = await this.#domains.read(domainUuid);
+      if (freshDocRes.ok) {
+        const peopleDataRes = tryGetDomainPeopleData(freshDocRes.value.record);
+        if (peopleDataRes.ok) {
+          const peopleData = peopleDataRes.value;
+          const hasWorkforceRes = peopleData.reservations.some(
+            (r) => r.targetRef === `project:${params.projectId}` && r.status === "active"
+          );
+          if (hasWorkforceRes) {
+            const updatedReservations = peopleData.reservations.map(
+              (r) => r.targetRef === `project:${params.projectId}` && r.status === "active" ? { ...r, status: "released" } : r
+            );
+            const updatedRecord = withDomainPeopleData(freshDocRes.value.record, {
+              ...peopleData,
+              reservations: Object.freeze(updatedReservations)
+            });
+            await this.#domains.save({ ...freshDocRes.value, record: updatedRecord });
+          }
+        }
       }
     }
     return this.#mutateLifecycle(
@@ -21924,325 +22528,17 @@ var ProjectsService = class {
     );
   }
   async completeProject(params) {
-    const domainUuid = this.#cleanId(params.domainUuid);
-    const docRes = await this.#domains.read(domainUuid);
-    if (!docRes.ok) return docRes;
-    const record = docRes.value.record;
-    const currentProjectsData = getDomainProjectsData(record);
-    const project = currentProjectsData.projects.find((p) => p.id === params.projectId);
-    if (!project) {
-      return err(
-        createPublicError({
-          code: "DM_PROJECT_NOT_FOUND",
-          category: "not-found",
-          message: `Project ${params.projectId} not found in domain ${params.domainUuid}`
-        })
-      );
-    }
-    if (params.expectedRevision !== void 0 && project.revision !== params.expectedRevision) {
-      return err(
-        createPublicError({
-          code: "DM_PROJECT_REVISION_MISMATCH",
-          category: "conflict",
-          message: `Project revision mismatch: expected ${params.expectedRevision}, found ${project.revision}`
-        })
-      );
-    }
-    const definition = this.#projectRegistry.get(project.definitionId);
-    if (!definition) {
-      return err(
-        createPublicError({
-          code: "DM_PROJECT_DEFINITION_NOT_FOUND",
-          category: "not-found",
-          message: `Project definition ${project.definitionId} not found`
-        })
-      );
-    }
-    const plan = evaluateProjectCompletionPlan({
-      project,
-      definition,
-      domain: record,
-      expectedRevision: params.expectedRevision
-    });
-    if (!plan.isSatisfied) {
-      const firstBlocker = plan.blockers[0];
-      return err(
-        createPublicError({
-          code: "DM_PROJECT_COMPLETION_BLOCKED",
-          category: "conflict",
-          message: firstBlocker?.message ?? "Project completion preconditions unsatisfied",
-          details: { blockers: plan.blockers }
-        })
-      );
-    }
-    const txId = createOpaqueId("tx");
-    const cmdId = params.commandId ? params.commandId.startsWith("cmd_") ? params.commandId : `cmd_${params.commandId}` : createCommandId();
-    const epoch = params.authorityEpoch ?? 1;
-    if (this.#transactionStore) {
-      const tx = createTransactionRecord({
-        transactionId: txId,
-        commandId: cmdId,
-        authorityEpoch: epoch,
-        lockKeys: [`domain:${domainUuid}`, `project:${project.id}`],
-        safeAutoRecovery: false,
-        recoveryData: {
-          projectId: project.id,
-          planId: plan.planId,
-          correlationId: params.correlationId,
-          causationId: params.causationId,
-          status: "prepared"
-        }
-      });
-      this.#transactionStore.save(tx);
-      this.#transactionStore.transition(txId, "claimed", epoch);
-      this.#transactionStore.transition(txId, "prepared", epoch);
-    }
-    if (this.#economyService) {
-      for (const cost of definition.costs) {
-        if (cost.timing === "onCompletion") {
-          const debitRes = await this.#economyService.commitAdjust({
-            domainUuid: params.domainUuid,
-            resourceId: cost.resourceId,
-            deltaMinor: -cost.amountMinor,
-            reason: `OnCompletion cost for project ${project.name}`,
-            lockOwner: params.commandId
-          });
-          if (!debitRes.ok) {
-            if (this.#transactionStore) {
-              this.#transactionStore.transition(txId, "failed", epoch, debitRes.error.message);
-            }
-            return err(
-              createPublicError({
-                code: "DM_PROJECT_COMPLETION_BLOCKED",
-                category: "conflict",
-                message: `Failed to debit onCompletion cost for '${cost.resourceId}': ${debitRes.error.message}`,
-                details: debitRes.error
-              })
-            );
-          }
-        }
-      }
-    }
-    if (this.#economyService) {
-      const activeReservations = [];
-      if (project?.metadata?.reservationIds && Array.isArray(project.metadata.reservationIds)) {
-        activeReservations.push(...project.metadata.reservationIds);
-      }
-      if ("listReservations" in this.#economyService) {
-        const matching = this.#economyService.listReservations({
-          domainUuid: params.domainUuid,
-          sourceRef: params.projectId,
-          status: "active"
-        });
-        for (const m of matching) {
-          if (!activeReservations.includes(m.id)) {
-            activeReservations.push(m.id);
-          }
-        }
-      }
-      for (const resId of activeReservations) {
-        const resObj = this.#economyService.getReservation(resId);
-        if (resObj && (resObj.status === "active" || resObj.status === "partially-consumed")) {
-          await this.#economyService.consumeReservation({
-            domainUuid: params.domainUuid,
-            reservationId: resId,
-            amountMinor: resObj.remainingAmountMinor,
-            reason: `Project ${project.name} completed`,
-            lockOwner: params.commandId
-          });
-        }
-      }
-    }
-    let partialFailure = false;
-    const executedReceipts = {};
-    for (const effect of plan.sideEffects.filter((e) => e.type === "facility")) {
-      if (!effect.targetRef) continue;
-      if (!this.#facilitiesService) {
-        partialFailure = true;
-        executedReceipts[effect.id] = {
-          childReceiptId: createOpaqueId("rep"),
-          subsystem: "facility",
-          action: "create_facility",
-          targetRef: effect.targetRef,
-          payload: effect.value,
-          success: false,
-          error: "FacilitiesService not available",
-          appliedAt: Date.now()
-        };
-        continue;
-      }
-      const facRes = await this.#facilitiesService.createFacility({
-        domainUuid: params.domainUuid,
-        definitionId: effect.targetRef,
-        name: effect.description
-      });
-      if (facRes.ok) {
-        executedReceipts[effect.id] = {
-          childReceiptId: createOpaqueId("rep"),
-          subsystem: "facility",
-          action: "create_facility",
-          targetRef: facRes.value.facility.id,
-          payload: { definitionId: effect.targetRef, facilityId: facRes.value.facility.id },
-          success: true,
-          appliedAt: Date.now()
-        };
-      } else {
-        partialFailure = true;
-        executedReceipts[effect.id] = {
-          childReceiptId: createOpaqueId("rep"),
-          subsystem: "facility",
-          action: "create_facility",
-          targetRef: effect.targetRef,
-          payload: effect.value,
-          success: false,
-          error: facRes.error.message,
-          appliedAt: Date.now()
-        };
-      }
-    }
-    for (const effect of plan.sideEffects.filter((e) => e.type === "resource")) {
-      if (!effect.targetRef) continue;
-      if (!this.#economyService) {
-        partialFailure = true;
-        executedReceipts[effect.id] = {
-          childReceiptId: createOpaqueId("rep"),
-          subsystem: "economy",
-          action: "credit_resource",
-          targetRef: effect.targetRef,
-          payload: { amountMinor: effect.value },
-          success: false,
-          error: "EconomyService not available",
-          appliedAt: Date.now()
-        };
-        continue;
-      }
-      const econRes = await this.#economyService.commitAdjust({
-        domainUuid: params.domainUuid,
-        resourceId: effect.targetRef,
-        deltaMinor: Number(effect.value),
-        reason: `Project completion reward: ${effect.description ?? project.name}`,
-        lockOwner: params.commandId
-      });
-      if (econRes.ok) {
-        executedReceipts[effect.id] = {
-          childReceiptId: createOpaqueId("rep"),
-          subsystem: "economy",
-          action: "credit_resource",
-          targetRef: effect.targetRef,
-          payload: { amountMinor: effect.value },
-          success: true,
-          appliedAt: Date.now()
-        };
-      } else {
-        partialFailure = true;
-        executedReceipts[effect.id] = {
-          childReceiptId: createOpaqueId("rep"),
-          subsystem: "economy",
-          action: "credit_resource",
-          targetRef: effect.targetRef,
-          payload: { amountMinor: effect.value },
-          success: false,
-          error: econRes.error.message,
-          appliedAt: Date.now()
-        };
-      }
-    }
-    const sideEffectHandlers = {
-      ...params.options?.sideEffectHandlers ?? {}
-    };
-    if (!sideEffectHandlers.facility) {
-      sideEffectHandlers.facility = (effect) => {
-        return executedReceipts[effect.id] ?? {
-          childReceiptId: createOpaqueId("rep"),
-          subsystem: "facility",
-          action: "create_facility",
-          targetRef: effect.targetRef,
-          payload: effect.value,
-          success: false,
-          error: "No facility receipt generated",
-          appliedAt: Date.now()
-        };
-      };
-    }
-    if (!sideEffectHandlers.resource) {
-      sideEffectHandlers.resource = (effect) => {
-        return executedReceipts[effect.id] ?? {
-          childReceiptId: createOpaqueId("rep"),
-          subsystem: "economy",
-          action: "credit_resource",
-          targetRef: effect.targetRef,
-          payload: { amountMinor: effect.value },
-          success: false,
-          error: "No resource receipt generated",
-          appliedAt: Date.now()
-        };
-      };
-    }
-    const commitRes = commitProjectCompletion(plan, project, {
-      ...params.options,
-      userId: params.userId,
-      sideEffectHandlers
-    });
-    if (!commitRes.ok) {
-      if (this.#transactionStore) {
-        this.#transactionStore.transition(txId, "failed", epoch, commitRes.error.message);
-      }
-      return commitRes;
-    }
-    const { updatedProject, childReceipts } = commitRes.value;
-    if (commitRes.value.partialFailure) {
-      partialFailure = true;
-    }
-    const freshDocRes = await this.#domains.read(domainUuid);
-    if (!freshDocRes.ok) return freshDocRes;
-    let freshRecord = freshDocRes.value.record;
-    const peopleData = getDomainPeopleData(freshRecord);
-    const hasWorkforceRes = peopleData.reservations.some(
-      (r) => r.targetRef === `project:${params.projectId}` && r.status === "active"
+    return executeProjectCompletionDomainOperationPlan(
+      {
+        domains: this.#domains,
+        projectRegistry: this.#projectRegistry,
+        economyService: this.#economyService,
+        facilitiesService: this.#facilitiesService,
+        peopleService: this.#peopleService,
+        transactionStore: this.#transactionStore
+      },
+      params
     );
-    if (hasWorkforceRes) {
-      const updatedReservations = peopleData.reservations.map(
-        (r) => r.targetRef === `project:${params.projectId}` && r.status === "active" ? { ...r, status: "released" } : r
-      );
-      freshRecord = withDomainPeopleData(freshRecord, {
-        ...peopleData,
-        reservations: Object.freeze(updatedReservations)
-      });
-    }
-    const freshProjectsData = getDomainProjectsData(freshRecord);
-    const updatedProjects = freshProjectsData.projects.map(
-      (p) => p.id === params.projectId ? updatedProject : p
-    );
-    const updatedRecord = withDomainProjectsData(freshRecord, {
-      ...freshProjectsData,
-      projects: Object.freeze(updatedProjects)
-    });
-    const saveRes = await this.#domains.save({
-      ...freshDocRes.value,
-      record: updatedRecord
-    });
-    if (!saveRes.ok) {
-      if (this.#transactionStore) {
-        this.#transactionStore.transition(txId, "needs-recovery", epoch, `Save failed after child effects: ${saveRes.error.message}`);
-      }
-      return saveRes;
-    }
-    if (this.#transactionStore) {
-      if (partialFailure) {
-        this.#transactionStore.transition(
-          txId,
-          "needs-recovery",
-          epoch,
-          "Coordinated side effects experienced partial failure"
-        );
-      } else {
-        this.#transactionStore.transition(txId, "committed", epoch);
-      }
-    }
-    return ok({
-      project: updatedProject,
-      childReceipts
-    });
   }
   async #mutateLifecycle(rawDomainUuid, projectId, expectedRevision, mutator) {
     const domainUuid = this.#cleanId(rawDomainUuid);
@@ -22285,6 +22581,77 @@ var ProjectsService = class {
     });
     if (!saveRes.ok) return saveRes;
     return ok({ project: updatedProject });
+  }
+  registerRecoveryCompensators(recoveryService) {
+    const recovery = recoveryService ?? this.#recoveryService;
+    if (!recovery) return;
+    recovery.registerCompensator("projects:completion", async (record) => {
+      const data = record.recoveryData;
+      if (!data || data.type !== "projects:completion") {
+        return ok(void 0);
+      }
+      if (this.#economyService && data.creditedResourceRefs && data.creditedResourceRefs.length > 0) {
+        for (const cred of data.creditedResourceRefs) {
+          await this.#economyService.commitAdjust({
+            domainUuid: data.domainUuid,
+            resourceId: cred.resourceId,
+            deltaMinor: -cred.amountMinor,
+            reason: `Recovery: reverse completion reward for project ${data.projectId}`,
+            lockOwner: record.transactionId
+          });
+        }
+      }
+      if (this.#economyService && data.debitedCostRefs && data.debitedCostRefs.length > 0) {
+        for (const deb of data.debitedCostRefs) {
+          await this.#economyService.commitAdjust({
+            domainUuid: data.domainUuid,
+            resourceId: deb.resourceId,
+            deltaMinor: deb.amountMinor,
+            reason: `Recovery: refund completion cost for project ${data.projectId}`,
+            lockOwner: record.transactionId
+          });
+        }
+      }
+      if (data.createdFacilityIds && data.createdFacilityIds.length > 0) {
+        const cleanDomainUuid = normalizeJournalEntryId(data.domainUuid);
+        const docRes = await this.#domains.read(cleanDomainUuid);
+        if (docRes.ok) {
+          const facData = getDomainFacilitiesData(docRes.value.record);
+          const remainingFacilities = facData.facilities.filter(
+            (f) => !data.createdFacilityIds.includes(f.id)
+          );
+          if (remainingFacilities.length !== facData.facilities.length) {
+            const updatedRecord = withDomainFacilitiesData(docRes.value.record, {
+              ...facData,
+              facilities: Object.freeze(remainingFacilities)
+            });
+            await this.#domains.save({
+              ...docRes.value,
+              record: updatedRecord
+            });
+          }
+        }
+      }
+      if (data.projectSnapshot) {
+        const cleanDomainUuid = normalizeJournalEntryId(data.domainUuid);
+        const docRes = await this.#domains.read(cleanDomainUuid);
+        if (docRes.ok) {
+          const prjData = getDomainProjectsData(docRes.value.record);
+          const restoredProjects = prjData.projects.map(
+            (p) => p.id === data.projectId ? { ...data.projectSnapshot, updatedAt: Date.now() } : p
+          );
+          const updatedRecord = withDomainProjectsData(docRes.value.record, {
+            ...prjData,
+            projects: Object.freeze(restoredProjects)
+          });
+          await this.#domains.save({
+            ...docRes.value,
+            record: updatedRecord
+          });
+        }
+      }
+      return ok(void 0);
+    });
   }
 };
 
@@ -23703,6 +24070,19 @@ var FacilitiesService = class {
         })
       );
     }
+    const debitedCosts = [];
+    const compensateDebits = async (reason) => {
+      if (!this.#economyService || debitedCosts.length === 0) return;
+      for (const cost of debitedCosts) {
+        await this.#economyService.commitAdjust({
+          domainUuid: cleanDomainUuid,
+          resourceId: cost.resourceId,
+          deltaMinor: cost.amount,
+          reason: `Compensation: ${reason}`,
+          lockOwner: params.commandId
+        });
+      }
+    };
     if (this.#economyService && plan.resourceCosts.length > 0) {
       for (const cost of plan.resourceCosts) {
         const debitRes = await this.#economyService.commitAdjust({
@@ -23713,8 +24093,10 @@ var FacilitiesService = class {
           lockOwner: params.commandId
         });
         if (!debitRes.ok) {
+          await compensateDebits(`maintenance cost debit failed for facility '${facility.name}'`);
           return debitRes;
         }
+        debitedCosts.push({ resourceId: cost.resourceId, amount: cost.amount });
       }
     }
     const commitRes = commitFacilityMaintenance({
@@ -23722,10 +24104,16 @@ var FacilitiesService = class {
       facility,
       note: params.notes
     });
-    if (!commitRes.ok) return commitRes;
+    if (!commitRes.ok) {
+      await compensateDebits(`maintenance commit failed for facility '${facility.name}'`);
+      return commitRes;
+    }
     const updatedFacility = commitRes.value.updatedFacility;
     const freshDocRes = await this.#domains.read(cleanDomainUuid);
-    if (!freshDocRes.ok) return freshDocRes;
+    if (!freshDocRes.ok) {
+      await compensateDebits(`domain read failed after maintenance costs for facility '${facility.name}'`);
+      return freshDocRes;
+    }
     const freshFacilitiesData = getDomainFacilitiesData(freshDocRes.value.record);
     const updatedFacilities = freshFacilitiesData.facilities.map(
       (f) => f.id === params.facilityId ? updatedFacility : f
@@ -23738,7 +24126,10 @@ var FacilitiesService = class {
       ...freshDocRes.value,
       record: updatedRecord
     });
-    if (!saveRes.ok) return saveRes;
+    if (!saveRes.ok) {
+      await compensateDebits(`domain save failed after maintenance for facility '${facility.name}': ${saveRes.error.message}`);
+      return saveRes;
+    }
     return ok({ facility: updatedFacility });
   }
   async repairFacility(params) {
@@ -23793,6 +24184,19 @@ var FacilitiesService = class {
         })
       );
     }
+    const debitedCosts = [];
+    const compensateDebits = async (reason) => {
+      if (!this.#economyService || debitedCosts.length === 0) return;
+      for (const cost of debitedCosts) {
+        await this.#economyService.commitAdjust({
+          domainUuid: cleanDomainUuid,
+          resourceId: cost.resourceId,
+          deltaMinor: cost.amount,
+          reason: `Compensation: ${reason}`,
+          lockOwner: params.commandId
+        });
+      }
+    };
     if (this.#economyService && plan.resourceCosts.length > 0) {
       for (const cost of plan.resourceCosts) {
         const debitRes = await this.#economyService.commitAdjust({
@@ -23803,8 +24207,10 @@ var FacilitiesService = class {
           lockOwner: params.commandId
         });
         if (!debitRes.ok) {
+          await compensateDebits(`repair cost debit failed for facility '${facility.name}'`);
           return debitRes;
         }
+        debitedCosts.push({ resourceId: cost.resourceId, amount: cost.amount });
       }
     }
     const commitRes = commitFacilityRepair({
@@ -23812,10 +24218,16 @@ var FacilitiesService = class {
       facility,
       note: params.notes
     });
-    if (!commitRes.ok) return commitRes;
+    if (!commitRes.ok) {
+      await compensateDebits(`repair commit failed for facility '${facility.name}'`);
+      return commitRes;
+    }
     const updatedFacility = commitRes.value.updatedFacility;
     const freshDocRes = await this.#domains.read(cleanDomainUuid);
-    if (!freshDocRes.ok) return freshDocRes;
+    if (!freshDocRes.ok) {
+      await compensateDebits(`domain read failed after repair costs for facility '${facility.name}'`);
+      return freshDocRes;
+    }
     const freshFacilitiesData = getDomainFacilitiesData(freshDocRes.value.record);
     const updatedFacilities = freshFacilitiesData.facilities.map(
       (f) => f.id === params.facilityId ? updatedFacility : f
@@ -23828,7 +24240,10 @@ var FacilitiesService = class {
       ...freshDocRes.value,
       record: updatedRecord
     });
-    if (!saveRes.ok) return saveRes;
+    if (!saveRes.ok) {
+      await compensateDebits(`domain save failed after repair for facility '${facility.name}': ${saveRes.error.message}`);
+      return saveRes;
+    }
     return ok({ facility: updatedFacility });
   }
   async applyDamage(params) {
@@ -24204,6 +24619,24 @@ var DefaultPublicFacilitiesApi = class {
   }
 };
 
+// src/facilities/commands/facility-permissions.ts
+function validateGmOnlyCommandPermission(ctx) {
+  if (ctx.senderUserId === null || ctx.senderUserId === ctx.authorityUserId) {
+    return ok(true);
+  }
+  const gameUser = globalThis.game?.users?.get?.(ctx.senderUserId);
+  if (gameUser?.isGM) {
+    return ok(true);
+  }
+  return err(
+    createPublicError({
+      code: "DM_SECURITY_PERMISSION_DENIED",
+      category: "permission",
+      message: `Permission denied: command '${ctx.command?.type ?? "operation"}' requires Game Master privileges`
+    })
+  );
+}
+
 // src/facilities/commands/facility-commands.ts
 function registerFacilityCommands(options) {
   const { registry, facilitiesService, domains, controllerProvider, coordinator } = options;
@@ -24531,9 +24964,7 @@ function registerFacilityCommands(options) {
         causationId: p.causationId ?? ctx.command.causationId ?? ctx.command.commandId
       });
     },
-    permissionValidator: (ctx) => validatePeopleCommandPermission(ctx, domains, (p) => p.domainUuid, {
-      controllerProvider
-    })
+    permissionValidator: (ctx) => validateGmOnlyCommandPermission(ctx)
   });
   const decommissionMutation = makeMutationDef(
     (p) => [`domain:${normalizeJournalEntryId(p.domainUuid)}`, `facility:${p.facilityId}`],
@@ -24733,18 +25164,556 @@ function createDefaultDowntimeRegistry() {
   return registry;
 }
 
+// src/downtime/plans/downtime-start-plan.ts
+async function executeDowntimeStartPlan(context, params) {
+  const cleanDomainUuid = normalizeJournalEntryId(params.domainUuid);
+  const docRes = await context.domains.read(cleanDomainUuid);
+  if (!docRes.ok) return docRes;
+  const record = docRes.value.record;
+  if (!record.definition.capabilities.enabled.includes(DOWNTIME_CAPABILITY_ID)) {
+    return err(
+      createPublicError({
+        code: "DM_DOWNTIME_CAPABILITY_DISABLED",
+        category: "conflict",
+        message: `Downtime capability '${DOWNTIME_CAPABILITY_ID}' is not enabled on domain ${params.domainUuid}`
+      })
+    );
+  }
+  const definition = context.downtimeRegistry.get(params.definitionId);
+  if (!definition) {
+    return err(
+      createPublicError({
+        code: "DM_DOWNTIME_DEFINITION_NOT_FOUND",
+        category: "not-found",
+        message: `Downtime definition '${params.definitionId}' not found`
+      })
+    );
+  }
+  const participants = [];
+  if (params.participants && params.participants.length > 0) {
+    for (const p of params.participants) {
+      const participantRef = p.participantRef ?? p.ref;
+      const participantType = p.participantType ?? (participantRef?.startsWith("group:") ? "group" : "notable");
+      const role = p.role ?? definition.allowedParticipantRoles?.[0] ?? "lead";
+      const candidate = {
+        participantRef,
+        participantType,
+        role,
+        name: p.name,
+        capacityConsumed: p.capacityConsumed ?? 1
+      };
+      const valRes = validateDowntimeParticipant(candidate);
+      if (!valRes.ok) return valRes;
+      participants.push(valRes.value);
+    }
+  } else if (params.participantRef) {
+    const candidate = {
+      participantRef: params.participantRef,
+      participantType: params.participantRef.startsWith("group:") ? "group" : "notable",
+      role: definition.allowedParticipantRoles?.[0] ?? "lead",
+      capacityConsumed: 1
+    };
+    const valRes = validateDowntimeParticipant(candidate);
+    if (!valRes.ok) return valRes;
+    participants.push(valRes.value);
+  }
+  if (definition.minParticipants !== void 0 && participants.length < definition.minParticipants) {
+    return err(
+      createPublicError({
+        code: "DM_DOWNTIME_PARTICIPANT_REQUIRED",
+        category: "conflict",
+        message: `Activity '${definition.label}' requires at least ${definition.minParticipants} participant(s)`
+      })
+    );
+  }
+  if (definition.maxParticipants !== void 0 && participants.length > definition.maxParticipants) {
+    return err(
+      createPublicError({
+        code: "DM_DOWNTIME_TOO_MANY_PARTICIPANTS",
+        category: "conflict",
+        message: `Activity '${definition.label}' allows at most ${definition.maxParticipants} participant(s)`
+      })
+    );
+  }
+  if (definition.allowedParticipantRoles && definition.allowedParticipantRoles.length > 0) {
+    for (const p of participants) {
+      if (!definition.allowedParticipantRoles.includes(p.role)) {
+        return err(
+          createPublicError({
+            code: "DM_DOWNTIME_INVALID_PARTICIPANT_ROLE",
+            category: "conflict",
+            message: `Participant role '${p.role}' is not allowed for activity '${definition.label}'. Allowed roles: ${definition.allowedParticipantRoles.join(", ")}`
+          })
+        );
+      }
+    }
+  }
+  if (definition.requiredCapabilities && definition.requiredCapabilities.length > 0) {
+    for (const reqCap of definition.requiredCapabilities) {
+      if (!record.definition.capabilities.enabled.includes(reqCap)) {
+        return err(
+          createPublicError({
+            code: "DM_DOWNTIME_REQUIRED_CAPABILITY_DISABLED",
+            category: "conflict",
+            message: `Activity '${definition.label}' requires capability '${reqCap}' to be enabled on domain`
+          })
+        );
+      }
+    }
+  }
+  if (definition.requiredFacilityDefinitions && definition.requiredFacilityDefinitions.length > 0) {
+    const facData = getDomainFacilitiesData(record);
+    for (const reqFac of definition.requiredFacilityDefinitions) {
+      const hasFac = facData.facilities.some(
+        (f) => f.definitionId === reqFac && f.lifecycle === "operational" && f.readiness !== "unavailable" && f.status !== "blocked"
+      );
+      if (!hasFac) {
+        return err(
+          createPublicError({
+            code: "DM_DOWNTIME_REQUIRED_FACILITY_MISSING",
+            category: "conflict",
+            message: `Activity '${definition.label}' requires operational facility '${reqFac}', but none is available`
+          })
+        );
+      }
+    }
+  }
+  const peopleDataRes = tryGetDomainPeopleData(record);
+  if (peopleDataRes.ok) {
+    const people = peopleDataRes.value;
+    for (const p of participants) {
+      const rawRef = p.participantRef;
+      const cleanRef = rawRef.startsWith("notable:") ? rawRef.slice(8) : rawRef.startsWith("group:") ? rawRef.slice(6) : rawRef;
+      if (p.participantType === "notable" && people.notables.length > 0) {
+        const exists = people.notables.some(
+          (n) => n.id === cleanRef || n.id === rawRef || `notable:${n.id}` === rawRef
+        );
+        if (!exists) {
+          return err(
+            createPublicError({
+              code: "DM_DOWNTIME_PARTICIPANT_NOT_FOUND",
+              category: "not-found",
+              message: `Notable participant '${rawRef}' not found in domain people data`
+            })
+          );
+        }
+      } else if (p.participantType === "group" && (people.operationalGroups.length > 0 || people.populationGroups.length > 0)) {
+        const exists = people.operationalGroups.some(
+          (g) => g.id === cleanRef || g.id === rawRef || `group:${g.id}` === rawRef
+        ) || people.populationGroups.some(
+          (g) => g.id === cleanRef || g.id === rawRef || `group:${g.id}` === rawRef
+        );
+        if (!exists) {
+          return err(
+            createPublicError({
+              code: "DM_DOWNTIME_PARTICIPANT_NOT_FOUND",
+              category: "not-found",
+              message: `Group participant '${rawRef}' not found in domain people data`
+            })
+          );
+        }
+      }
+    }
+  }
+  const currentDowntimeData = getDomainDowntimeData(record);
+  const inProgressActivities = currentDowntimeData.activities.filter(
+    (a) => a.lifecycle === "inProgress"
+  );
+  for (const p of participants) {
+    const busyActivity = inProgressActivities.find(
+      (a) => a.participants.some((ap) => ap.participantRef === p.participantRef)
+    );
+    if (busyActivity) {
+      return err(
+        createPublicError({
+          code: "DM_DOWNTIME_PARTICIPANT_BUSY",
+          category: "conflict",
+          message: `Participant '${p.participantRef}' is already active in downtime activity '${busyActivity.id}' (${busyActivity.name})`
+        })
+      );
+    }
+  }
+  const txId = createOpaqueId("tx");
+  const cmdId = params.commandId ? params.commandId.startsWith("cmd_") ? params.commandId : `cmd_${params.commandId}` : createCommandId();
+  const epoch = params.authorityEpoch ?? 1;
+  if (context.transactionStore) {
+    const tx = createTransactionRecord({
+      transactionId: txId,
+      commandId: cmdId,
+      authorityEpoch: epoch,
+      lockKeys: [`domain:${cleanDomainUuid}`],
+      safeAutoRecovery: false,
+      recoveryData: {
+        type: "downtime:start",
+        domainUuid: cleanDomainUuid,
+        definitionId: params.definitionId,
+        correlationId: params.correlationId,
+        causationId: params.causationId,
+        status: "prepared"
+      }
+    });
+    context.transactionStore.save(tx);
+    context.transactionStore.transition(txId, "claimed", epoch);
+    context.transactionStore.transition(txId, "prepared", epoch);
+  }
+  const debitedCosts = [];
+  const compensateDebits = async (reason) => {
+    if (!context.economyService || debitedCosts.length === 0) return;
+    for (const cost of debitedCosts) {
+      await context.economyService.commitAdjust({
+        domainUuid: cleanDomainUuid,
+        resourceId: cost.resourceId,
+        deltaMinor: cost.amount,
+        reason: `Compensation: ${reason}`,
+        lockOwner: params.commandId
+      });
+    }
+  };
+  if (context.economyService && definition.costs && definition.costs.length > 0) {
+    for (const cost of definition.costs) {
+      const debitRes = await context.economyService.commitAdjust({
+        domainUuid: cleanDomainUuid,
+        resourceId: cost.resourceId,
+        deltaMinor: -cost.amount,
+        reason: `Cost for starting downtime activity '${params.label ?? definition.label}'`,
+        lockOwner: params.commandId
+      });
+      if (!debitRes.ok) {
+        await compensateDebits(`rollback failed start for activity '${definition.label}'`);
+        if (context.transactionStore) {
+          context.transactionStore.transition(txId, "failed", epoch, debitRes.error.message);
+        }
+        return debitRes;
+      }
+      debitedCosts.push({ resourceId: cost.resourceId, amount: cost.amount });
+    }
+  }
+  const activityId = `dt-${createOpaqueId("prj").slice(4)}`;
+  const now = Date.now();
+  const newActivity = {
+    id: activityId,
+    domainUuid: cleanDomainUuid,
+    definitionId: params.definitionId,
+    name: params.label ?? definition.label,
+    schemaVersion: 1,
+    revision: 0,
+    scope: params.scope ?? definition.scope ?? "domain",
+    lifecycle: "inProgress",
+    elapsedTicks: 0,
+    durationTicks: params.durationTicks ?? definition.defaultDurationTicks ?? 10,
+    participants: Object.freeze(participants),
+    tags: Object.freeze([...definition.tags ?? []]),
+    createdAt: now,
+    updatedAt: now
+  };
+  const freshDocRes = await context.domains.read(cleanDomainUuid);
+  if (!freshDocRes.ok) {
+    await compensateDebits("domain read failed after upfront debits");
+    if (context.transactionStore) {
+      context.transactionStore.transition(txId, "failed", epoch, freshDocRes.error.message);
+    }
+    return freshDocRes;
+  }
+  const freshDowntimeData = getDomainDowntimeData(freshDocRes.value.record);
+  const updatedActivities = Object.freeze([...freshDowntimeData.activities, newActivity]);
+  const updatedRecord = withDomainDowntimeData(freshDocRes.value.record, {
+    ...freshDowntimeData,
+    activities: updatedActivities
+  });
+  const saveRes = await context.domains.save({
+    ...freshDocRes.value,
+    record: updatedRecord
+  });
+  if (!saveRes.ok) {
+    await compensateDebits(`domain save failed for activity '${activityId}': ${saveRes.error.message}`);
+    if (context.transactionStore) {
+      context.transactionStore.transition(txId, "failed", epoch, saveRes.error.message);
+    }
+    return saveRes;
+  }
+  if (context.transactionStore) {
+    context.transactionStore.transition(txId, "committed", epoch);
+  }
+  return ok({ activity: newActivity });
+}
+
+// src/downtime/plans/downtime-resolution-plan.ts
+async function executeDowntimeResolutionPlan(context, params) {
+  const cleanDomainUuid = normalizeJournalEntryId(params.domainUuid);
+  const docRes = await context.domains.read(cleanDomainUuid);
+  if (!docRes.ok) return docRes;
+  const record = docRes.value.record;
+  const currentDowntimeData = getDomainDowntimeData(record);
+  const activity = currentDowntimeData.activities.find((a) => a.id === params.activityId);
+  if (!activity) {
+    return err(
+      createPublicError({
+        code: "DM_DOWNTIME_NOT_FOUND",
+        category: "not-found",
+        message: `Downtime activity '${params.activityId}' not found in domain ${params.domainUuid}`
+      })
+    );
+  }
+  if (activity.lifecycle !== "inProgress") {
+    return err(
+      createPublicError({
+        code: "DM_DOWNTIME_INVALID_LIFECYCLE_TRANSITION",
+        category: "conflict",
+        message: `Cannot complete activity '${params.activityId}' with lifecycle '${activity.lifecycle}'. Must be 'inProgress'`
+      })
+    );
+  }
+  const definition = context.downtimeRegistry.get(activity.definitionId);
+  const candidateOutcomes = definition?.outcomeDefinitions ? [...definition.outcomeDefinitions] : [];
+  const outcomesToExecute = params.outcomeKey ? candidateOutcomes.filter((o) => o.id === params.outcomeKey) : candidateOutcomes;
+  const txId = createOpaqueId("tx");
+  const cmdId = params.commandId ? params.commandId.startsWith("cmd_") ? params.commandId : `cmd_${params.commandId}` : createCommandId();
+  const epoch = params.authorityEpoch ?? 1;
+  if (context.transactionStore) {
+    const tx = createTransactionRecord({
+      transactionId: txId,
+      commandId: cmdId,
+      authorityEpoch: epoch,
+      lockKeys: [`domain:${cleanDomainUuid}`, `activity:${activity.id}`],
+      safeAutoRecovery: false,
+      recoveryData: {
+        type: "downtime:resolution",
+        domainUuid: cleanDomainUuid,
+        activityId: activity.id,
+        definitionId: activity.definitionId,
+        correlationId: params.correlationId,
+        causationId: params.causationId,
+        status: "prepared"
+      }
+    });
+    context.transactionStore.save(tx);
+    context.transactionStore.transition(txId, "claimed", epoch);
+    context.transactionStore.transition(txId, "prepared", epoch);
+  }
+  const creditedResources = [];
+  const outcomesApplied = [];
+  const failedMandatoryOutcomes = [];
+  const compensateCredits = async (reason) => {
+    if (!context.economyService || creditedResources.length === 0) return;
+    for (const cred of creditedResources) {
+      await context.economyService.commitAdjust({
+        domainUuid: cleanDomainUuid,
+        resourceId: cred.resourceId,
+        deltaMinor: -cred.amount,
+        reason: `Compensation: ${reason}`,
+        lockOwner: params.commandId
+      });
+    }
+  };
+  for (const outcome of outcomesToExecute) {
+    const isOptional = outcome.optional === true;
+    if (outcome.type === "economy:grant-resource") {
+      const resourceId = outcome.parameters?.resourceId ?? "credits";
+      const amount = Number(outcome.parameters?.amount ?? 0);
+      if (context.economyService && amount > 0) {
+        const creditRes = await context.economyService.commitAdjust({
+          domainUuid: cleanDomainUuid,
+          resourceId,
+          deltaMinor: amount,
+          reason: `Outcome of downtime activity '${activity.name}': ${outcome.label}`,
+          lockOwner: params.commandId
+        });
+        if (creditRes.ok) {
+          creditedResources.push({ resourceId, amount });
+          outcomesApplied.push({
+            childReceiptId: createOpaqueId("rep"),
+            subsystem: "economy",
+            action: "grant_resource",
+            targetRef: resourceId,
+            payload: { resourceId, amount },
+            success: true,
+            appliedAt: Date.now()
+          });
+        } else {
+          outcomesApplied.push({
+            childReceiptId: createOpaqueId("rep"),
+            subsystem: "economy",
+            action: "grant_resource",
+            targetRef: resourceId,
+            payload: { resourceId, amount },
+            success: false,
+            error: creditRes.error.message,
+            appliedAt: Date.now()
+          });
+          if (!isOptional) {
+            failedMandatoryOutcomes.push({
+              outcome,
+              error: `Economy credit failed: ${creditRes.error.message}`
+            });
+          }
+        }
+      } else if (!context.economyService && amount > 0) {
+        outcomesApplied.push({
+          childReceiptId: createOpaqueId("rep"),
+          subsystem: "economy",
+          action: "grant_resource",
+          targetRef: resourceId,
+          payload: { resourceId, amount },
+          success: false,
+          error: "EconomyService not available",
+          appliedAt: Date.now()
+        });
+        if (!isOptional) {
+          failedMandatoryOutcomes.push({
+            outcome,
+            error: "EconomyService not available for mandatory grant-resource outcome"
+          });
+        }
+      } else {
+        outcomesApplied.push({
+          childReceiptId: createOpaqueId("rep"),
+          subsystem: "economy",
+          action: "grant_resource",
+          targetRef: resourceId,
+          payload: { resourceId, amount },
+          success: true,
+          appliedAt: Date.now()
+        });
+      }
+    } else {
+      const handler = params.outcomeHandlers?.[outcome.type] ?? context.defaultOutcomeHandlers?.[outcome.type];
+      if (handler) {
+        try {
+          const res = await handler(outcome);
+          outcomesApplied.push(res);
+          if (!res.success && !isOptional) {
+            failedMandatoryOutcomes.push({
+              outcome,
+              error: res.error ?? "Outcome handler reported failure"
+            });
+          }
+        } catch (err3) {
+          const errMsg = err3?.message ?? String(err3);
+          outcomesApplied.push({
+            childReceiptId: createOpaqueId("rep"),
+            subsystem: "custom",
+            action: outcome.type,
+            targetRef: outcome.id,
+            payload: outcome.parameters,
+            success: false,
+            error: errMsg,
+            appliedAt: Date.now()
+          });
+          if (!isOptional) {
+            failedMandatoryOutcomes.push({
+              outcome,
+              error: `Handler threw error: ${errMsg}`
+            });
+          }
+        }
+      } else if (outcome.type === "narrative:event") {
+        outcomesApplied.push({
+          childReceiptId: createOpaqueId("rep"),
+          subsystem: "custom",
+          action: outcome.type,
+          targetRef: outcome.id,
+          payload: outcome.parameters,
+          success: true,
+          appliedAt: Date.now()
+        });
+      } else {
+        outcomesApplied.push({
+          childReceiptId: createOpaqueId("rep"),
+          subsystem: "custom",
+          action: outcome.type,
+          targetRef: outcome.id,
+          payload: outcome.parameters,
+          success: false,
+          error: `No handler registered for outcome type '${outcome.type}'`,
+          appliedAt: Date.now()
+        });
+        if (!isOptional) {
+          failedMandatoryOutcomes.push({
+            outcome,
+            error: `No handler registered for mandatory outcome type '${outcome.type}'`
+          });
+        }
+      }
+    }
+  }
+  if (failedMandatoryOutcomes.length > 0) {
+    await compensateCredits("rollback outcome credits after mandatory outcome failure");
+    if (context.transactionStore) {
+      context.transactionStore.transition(
+        txId,
+        "failed",
+        epoch,
+        `Mandatory outcome(s) failed: ${failedMandatoryOutcomes.map((f) => f.outcome.label).join(", ")}`
+      );
+    }
+    return err(
+      createPublicError({
+        code: "DM_DOWNTIME_MANDATORY_OUTCOME_FAILED",
+        category: "conflict",
+        message: `Downtime completion blocked: mandatory outcome(s) failed: ${failedMandatoryOutcomes.map((f) => `${f.outcome.label} (${f.error})`).join("; ")}`,
+        details: { failedOutcomes: failedMandatoryOutcomes }
+      })
+    );
+  }
+  const now = Date.now();
+  const updatedActivity = {
+    ...activity,
+    lifecycle: "completed",
+    completedAt: now,
+    revision: activity.revision + 1,
+    updatedAt: now
+  };
+  const freshDocRes = await context.domains.read(cleanDomainUuid);
+  if (!freshDocRes.ok) {
+    await compensateCredits("domain read failed after outcome execution");
+    if (context.transactionStore) {
+      context.transactionStore.transition(txId, "failed", epoch, freshDocRes.error.message);
+    }
+    return freshDocRes;
+  }
+  const freshDowntimeData = getDomainDowntimeData(freshDocRes.value.record);
+  const updatedActivities = freshDowntimeData.activities.map(
+    (a) => a.id === params.activityId ? updatedActivity : a
+  );
+  const updatedRecord = withDomainDowntimeData(freshDocRes.value.record, {
+    ...freshDowntimeData,
+    activities: Object.freeze(updatedActivities)
+  });
+  const saveRes = await context.domains.save({
+    ...freshDocRes.value,
+    record: updatedRecord
+  });
+  if (!saveRes.ok) {
+    await compensateCredits(`domain save failed for activity completion: ${saveRes.error.message}`);
+    if (context.transactionStore) {
+      context.transactionStore.transition(txId, "failed", epoch, saveRes.error.message);
+    }
+    return saveRes;
+  }
+  if (context.transactionStore) {
+    context.transactionStore.transition(txId, "committed", epoch);
+  }
+  return ok({
+    activity: updatedActivity,
+    outcomes: Object.freeze(outcomesToExecute),
+    outcomesApplied: Object.freeze(outcomesApplied)
+  });
+}
+
 // src/downtime/services/downtime-service.ts
 var DowntimeService = class {
   #domains;
   #downtimeRegistry;
   #economyService;
   #facilitiesService;
+  #transactionStore;
   #outcomeHandlers;
   constructor(options) {
     this.#domains = options.domains;
     this.#downtimeRegistry = options.downtimeRegistry ?? createDefaultDowntimeRegistry();
     this.#economyService = options.economyService;
     this.#facilitiesService = options.facilitiesService;
+    this.#transactionStore = options.transactionStore;
     this.#outcomeHandlers = options.outcomeHandlers;
   }
   #cleanId(idOrUuid) {
@@ -24776,211 +25745,18 @@ var DowntimeService = class {
     return ok(a);
   }
   async startActivity(params) {
-    const cleanDomainUuid = this.#cleanId(params.domainUuid);
-    const docRes = await this.#domains.read(cleanDomainUuid);
-    if (!docRes.ok) return docRes;
-    const record = docRes.value.record;
-    if (!record.definition.capabilities.enabled.includes(DOWNTIME_CAPABILITY_ID)) {
-      return err(
-        createPublicError({
-          code: "DM_DOWNTIME_CAPABILITY_DISABLED",
-          category: "conflict",
-          message: `Downtime capability '${DOWNTIME_CAPABILITY_ID}' is not enabled on domain ${params.domainUuid}`
-        })
-      );
-    }
-    const definition = this.#downtimeRegistry.get(params.definitionId);
-    if (!definition) {
-      return err(
-        createPublicError({
-          code: "DM_DOWNTIME_DEFINITION_NOT_FOUND",
-          category: "not-found",
-          message: `Downtime definition '${params.definitionId}' not found`
-        })
-      );
-    }
-    const participants = [];
-    if (params.participants && params.participants.length > 0) {
-      for (const p of params.participants) {
-        const participantRef = p.participantRef ?? p.ref;
-        const participantType = p.participantType ?? (participantRef?.startsWith("group:") ? "group" : "notable");
-        const role = p.role ?? definition.allowedParticipantRoles?.[0] ?? "lead";
-        const candidate = {
-          participantRef,
-          participantType,
-          role,
-          name: p.name,
-          capacityConsumed: p.capacityConsumed ?? 1
-        };
-        const valRes = validateDowntimeParticipant(candidate);
-        if (!valRes.ok) return valRes;
-        participants.push(valRes.value);
-      }
-    } else if (params.participantRef) {
-      const candidate = {
-        participantRef: params.participantRef,
-        participantType: params.participantRef.startsWith("group:") ? "group" : "notable",
-        role: definition.allowedParticipantRoles?.[0] ?? "lead",
-        capacityConsumed: 1
-      };
-      const valRes = validateDowntimeParticipant(candidate);
-      if (!valRes.ok) return valRes;
-      participants.push(valRes.value);
-    }
-    if (definition.minParticipants !== void 0 && participants.length < definition.minParticipants) {
-      return err(
-        createPublicError({
-          code: "DM_DOWNTIME_PARTICIPANT_REQUIRED",
-          category: "conflict",
-          message: `Activity '${definition.label}' requires at least ${definition.minParticipants} participant(s)`
-        })
-      );
-    }
-    if (definition.maxParticipants !== void 0 && participants.length > definition.maxParticipants) {
-      return err(
-        createPublicError({
-          code: "DM_DOWNTIME_TOO_MANY_PARTICIPANTS",
-          category: "conflict",
-          message: `Activity '${definition.label}' allows at most ${definition.maxParticipants} participant(s)`
-        })
-      );
-    }
-    if (definition.allowedParticipantRoles && definition.allowedParticipantRoles.length > 0) {
-      for (const p of participants) {
-        if (!definition.allowedParticipantRoles.includes(p.role)) {
-          return err(
-            createPublicError({
-              code: "DM_DOWNTIME_INVALID_PARTICIPANT_ROLE",
-              category: "conflict",
-              message: `Participant role '${p.role}' is not allowed for activity '${definition.label}'. Allowed roles: ${definition.allowedParticipantRoles.join(", ")}`
-            })
-          );
-        }
-      }
-    }
-    if (definition.requiredCapabilities && definition.requiredCapabilities.length > 0) {
-      for (const reqCap of definition.requiredCapabilities) {
-        if (!record.definition.capabilities.enabled.includes(reqCap)) {
-          return err(
-            createPublicError({
-              code: "DM_DOWNTIME_REQUIRED_CAPABILITY_DISABLED",
-              category: "conflict",
-              message: `Activity '${definition.label}' requires capability '${reqCap}' to be enabled on domain`
-            })
-          );
-        }
-      }
-    }
-    if (definition.requiredFacilityDefinitions && definition.requiredFacilityDefinitions.length > 0) {
-      const facData = getDomainFacilitiesData(record);
-      for (const reqFac of definition.requiredFacilityDefinitions) {
-        const hasFac = facData.facilities.some(
-          (f) => f.definitionId === reqFac && f.lifecycle === "operational" && f.readiness !== "unavailable" && f.status !== "blocked"
-        );
-        if (!hasFac) {
-          return err(
-            createPublicError({
-              code: "DM_DOWNTIME_REQUIRED_FACILITY_MISSING",
-              category: "conflict",
-              message: `Activity '${definition.label}' requires operational facility '${reqFac}', but none is available`
-            })
-          );
-        }
-      }
-    }
-    const peopleDataRes = tryGetDomainPeopleData(record);
-    if (peopleDataRes.ok) {
-      const people = peopleDataRes.value;
-      for (const p of participants) {
-        const rawRef = p.participantRef;
-        const cleanRef = rawRef.startsWith("notable:") ? rawRef.slice(8) : rawRef.startsWith("group:") ? rawRef.slice(6) : rawRef;
-        if (p.participantType === "notable" && people.notables.length > 0) {
-          const exists = people.notables.some((n) => n.id === cleanRef || n.id === rawRef || `notable:${n.id}` === rawRef);
-          if (!exists) {
-            return err(
-              createPublicError({
-                code: "DM_DOWNTIME_PARTICIPANT_NOT_FOUND",
-                category: "not-found",
-                message: `Notable participant '${rawRef}' not found in domain people data`
-              })
-            );
-          }
-        } else if (p.participantType === "group" && (people.operationalGroups.length > 0 || people.populationGroups.length > 0)) {
-          const exists = people.operationalGroups.some((g) => g.id === cleanRef || g.id === rawRef || `group:${g.id}` === rawRef) || people.populationGroups.some((g) => g.id === cleanRef || g.id === rawRef || `group:${g.id}` === rawRef);
-          if (!exists) {
-            return err(
-              createPublicError({
-                code: "DM_DOWNTIME_PARTICIPANT_NOT_FOUND",
-                category: "not-found",
-                message: `Group participant '${rawRef}' not found in domain people data`
-              })
-            );
-          }
-        }
-      }
-    }
-    const currentDowntimeData = getDomainDowntimeData(record);
-    const inProgressActivities = currentDowntimeData.activities.filter((a) => a.lifecycle === "inProgress");
-    for (const p of participants) {
-      const busyActivity = inProgressActivities.find(
-        (a) => a.participants.some((ap) => ap.participantRef === p.participantRef)
-      );
-      if (busyActivity) {
-        return err(
-          createPublicError({
-            code: "DM_DOWNTIME_PARTICIPANT_BUSY",
-            category: "conflict",
-            message: `Participant '${p.participantRef}' is already active in downtime activity '${busyActivity.id}' (${busyActivity.name})`
-          })
-        );
-      }
-    }
-    if (this.#economyService && definition.costs && definition.costs.length > 0) {
-      for (const cost of definition.costs) {
-        const debitRes = await this.#economyService.commitAdjust({
-          domainUuid: cleanDomainUuid,
-          resourceId: cost.resourceId,
-          deltaMinor: -cost.amount,
-          reason: `Cost for starting downtime activity '${params.label ?? definition.label}'`,
-          lockOwner: params.commandId
-        });
-        if (!debitRes.ok) {
-          return debitRes;
-        }
-      }
-    }
-    const activityId = `dt-${createOpaqueId("prj").slice(4)}`;
-    const now = Date.now();
-    const newActivity = {
-      id: activityId,
-      domainUuid: cleanDomainUuid,
-      definitionId: params.definitionId,
-      name: params.label ?? definition.label,
-      schemaVersion: 1,
-      revision: 0,
-      scope: params.scope ?? definition.scope ?? "domain",
-      lifecycle: "inProgress",
-      elapsedTicks: 0,
-      durationTicks: params.durationTicks ?? definition.defaultDurationTicks ?? 10,
-      participants: Object.freeze(participants),
-      tags: Object.freeze([...definition.tags ?? []]),
-      createdAt: now,
-      updatedAt: now
-    };
-    const freshDocRes = await this.#domains.read(cleanDomainUuid);
-    if (!freshDocRes.ok) return freshDocRes;
-    const freshDowntimeData = getDomainDowntimeData(freshDocRes.value.record);
-    const updatedActivities = Object.freeze([...freshDowntimeData.activities, newActivity]);
-    const updatedRecord = withDomainDowntimeData(freshDocRes.value.record, {
-      ...freshDowntimeData,
-      activities: updatedActivities
-    });
-    const saveRes = await this.#domains.save({
-      ...freshDocRes.value,
-      record: updatedRecord
-    });
-    if (!saveRes.ok) return saveRes;
-    return ok({ activity: newActivity, activityId });
+    const res = await executeDowntimeStartPlan(
+      {
+        domains: this.#domains,
+        downtimeRegistry: this.#downtimeRegistry,
+        economyService: this.#economyService,
+        facilitiesService: this.#facilitiesService,
+        transactionStore: this.#transactionStore
+      },
+      params
+    );
+    if (!res.ok) return res;
+    return ok({ activity: res.value.activity, activityId: res.value.activity.id });
   }
   async advanceActivity(params) {
     const cleanDomainUuid = this.#cleanId(params.domainUuid);
@@ -25041,125 +25817,17 @@ var DowntimeService = class {
     return ok({ activity: updatedActivity, completed: false });
   }
   async completeActivity(params) {
-    const cleanDomainUuid = this.#cleanId(params.domainUuid);
-    const docRes = await this.#domains.read(cleanDomainUuid);
-    if (!docRes.ok) return docRes;
-    const record = docRes.value.record;
-    const currentDowntimeData = getDomainDowntimeData(record);
-    const activity = currentDowntimeData.activities.find((a) => a.id === params.activityId);
-    if (!activity) {
-      return err(
-        createPublicError({
-          code: "DM_DOWNTIME_NOT_FOUND",
-          category: "not-found",
-          message: `Downtime activity ${params.activityId} not found in domain ${params.domainUuid}`
-        })
-      );
-    }
-    if (activity.lifecycle === "completed") {
-      return err(
-        createPublicError({
-          code: "DM_DOWNTIME_ALREADY_COMPLETED",
-          category: "conflict",
-          message: `Downtime activity ${params.activityId} is already completed`
-        })
-      );
-    }
-    const def = this.#downtimeRegistry.get(activity.definitionId);
-    const outcomes = [];
-    const outcomesApplied = [];
-    if (def?.outcomeDefinitions && def.outcomeDefinitions.length > 0) {
-      for (const outcome of def.outcomeDefinitions) {
-        outcomes.push(outcome);
-        if (outcome.type === "economy:grant-resource") {
-          const resourceId = outcome.parameters.resourceId;
-          const amount = Number(outcome.parameters.amount ?? outcome.parameters.deltaMinor ?? 0);
-          if (this.#economyService && resourceId && amount > 0) {
-            const creditRes = await this.#economyService.commitAdjust({
-              domainUuid: cleanDomainUuid,
-              resourceId,
-              deltaMinor: amount,
-              reason: `Downtime completion reward: ${outcome.label}`,
-              lockOwner: params.commandId
-            });
-            outcomesApplied.push({
-              childReceiptId: createOpaqueId("rep"),
-              subsystem: "economy",
-              action: "grant_resource",
-              targetRef: resourceId,
-              payload: { resourceId, amount },
-              success: creditRes.ok,
-              error: creditRes.ok ? void 0 : creditRes.error.message,
-              appliedAt: Date.now()
-            });
-          } else {
-            outcomesApplied.push({
-              childReceiptId: createOpaqueId("rep"),
-              subsystem: "economy",
-              action: "grant_resource",
-              targetRef: resourceId,
-              payload: { resourceId, amount },
-              success: true,
-              appliedAt: Date.now()
-            });
-          }
-        } else {
-          const handler = params.outcomeHandlers?.[outcome.type] ?? this.#outcomeHandlers?.[outcome.type];
-          if (handler) {
-            try {
-              const res = await handler(outcome);
-              outcomesApplied.push(res);
-            } catch (err3) {
-              outcomesApplied.push({
-                childReceiptId: createOpaqueId("rep"),
-                subsystem: "custom",
-                action: outcome.type,
-                targetRef: outcome.id,
-                payload: outcome.parameters,
-                success: false,
-                error: err3?.message ?? String(err3),
-                appliedAt: Date.now()
-              });
-            }
-          } else {
-            outcomesApplied.push({
-              childReceiptId: createOpaqueId("rep"),
-              subsystem: "custom",
-              action: outcome.type,
-              targetRef: outcome.id,
-              payload: outcome.parameters,
-              success: false,
-              error: `No handler registered for outcome type '${outcome.type}'`,
-              appliedAt: Date.now()
-            });
-          }
-        }
-      }
-    }
-    const now = Date.now();
-    const updatedActivity = {
-      ...activity,
-      lifecycle: "completed",
-      completedAt: now,
-      revision: activity.revision + 1,
-      updatedAt: now
-    };
-    const freshDocRes = await this.#domains.read(cleanDomainUuid);
-    if (!freshDocRes.ok) return freshDocRes;
-    const freshDowntimeData = getDomainDowntimeData(freshDocRes.value.record);
-    const updatedActivities = freshDowntimeData.activities.map(
-      (a) => a.id === params.activityId ? updatedActivity : a
+    return executeDowntimeResolutionPlan(
+      {
+        domains: this.#domains,
+        downtimeRegistry: this.#downtimeRegistry,
+        economyService: this.#economyService,
+        facilitiesService: this.#facilitiesService,
+        transactionStore: this.#transactionStore,
+        defaultOutcomeHandlers: this.#outcomeHandlers
+      },
+      params
     );
-    const updatedRecord = withDomainDowntimeData(freshDocRes.value.record, {
-      ...freshDowntimeData,
-      activities: Object.freeze(updatedActivities)
-    });
-    const saveRes = await this.#domains.save({
-      ...freshDocRes.value,
-      record: updatedRecord
-    });
-    if (!saveRes.ok) return saveRes;
-    return ok({ activity: updatedActivity, outcomes, outcomesApplied: Object.freeze(outcomesApplied) });
   }
   async pauseActivity(params) {
     return this.#mutateLifecycle(this.#cleanId(params.domainUuid), params.activityId, "paused");
@@ -29605,6 +30273,21 @@ var DowntimeApplication = class _DowntimeApplication extends BaseApp5 {
 function composeDomainManagerRuntime(options = {}) {
   const domainStore = options.domainStore ?? new FoundryDomainDocumentStore();
   const mutableDomainRepo = new DomainRepository(domainStore);
+  const readOnlyDomains = Object.freeze({
+    read: (id) => mutableDomainRepo.read(id),
+    load: (id) => mutableDomainRepo.load(id),
+    query: (query) => mutableDomainRepo.query(query),
+    checkIntegrity: () => mutableDomainRepo.checkIntegrity(),
+    getIndex: () => {
+      const liveIndex = mutableDomainRepo.getIndex();
+      return Object.freeze({
+        get: (id) => liveIndex.get(id),
+        list: () => liveIndex.list(),
+        query: (q) => liveIndex.query(q)
+      });
+    }
+  });
+  const people = new PeopleService(readOnlyDomains);
   const authority = options.authority ?? new FoundryPrimaryAuthorityAdapter();
   const lockManager = options.lockManager ?? new LockManager();
   const coordinator = new MutationCoordinator({ lockManager });
@@ -29651,13 +30334,16 @@ function composeDomainManagerRuntime(options = {}) {
     projectRegistry,
     economyService,
     facilitiesService,
-    transactionStore
+    peopleService: people,
+    transactionStore,
+    recoveryService: recovery
   });
   const downtimeService = new DowntimeService({
     domains: mutableDomainRepo,
     downtimeRegistry,
     economyService,
-    facilitiesService
+    facilitiesService,
+    transactionStore
   });
   const registry = new CommandRegistry();
   registerDomainCommandHandlers(registry, coordinator, mutableDomainRepo);
@@ -29722,24 +30408,10 @@ function composeDomainManagerRuntime(options = {}) {
     transport,
     rateLimiter
   });
-  const readOnlyDomains = Object.freeze({
-    read: (id) => mutableDomainRepo.read(id),
-    load: (id) => mutableDomainRepo.load(id),
-    query: (query) => mutableDomainRepo.query(query),
-    checkIntegrity: () => mutableDomainRepo.checkIntegrity(),
-    getIndex: () => {
-      const liveIndex = mutableDomainRepo.getIndex();
-      return Object.freeze({
-        get: (id) => liveIndex.get(id),
-        list: () => liveIndex.list(),
-        query: (q) => liveIndex.query(q)
-      });
-    }
-  });
   const unregisterPolicy = registerDomainControllerPolicy((domainId, userId, context) => {
     return controllerProvider.isDomainController(domainId, userId, context);
   });
-  const people = new PeopleService(readOnlyDomains, { commandBus });
+  people.setCommandBus(commandBus);
   const repairTool = new PeopleRepairTool(commandBus);
   const publicEconomy = new DefaultPublicEconomyApi({
     domains: readOnlyDomains,

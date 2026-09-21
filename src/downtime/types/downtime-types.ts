@@ -195,6 +195,7 @@ export interface DowntimeOutcomeDefinition {
   readonly label: string;
   readonly parameters: Readonly<Record<string, unknown>>;
   readonly visibility?: "public" | "gm-only";
+  readonly optional?: boolean;
 }
 
 /**

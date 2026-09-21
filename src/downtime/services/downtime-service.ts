@@ -23,6 +23,9 @@ import type { FacilitiesService } from "../../facilities/services/facilities-ser
 import { getDomainFacilitiesData } from "../../facilities/facility-data.js";
 import type { ChildReceipt } from "../../projects/plans/project-plan-types.js";
 import { tryGetDomainPeopleData } from "../../people/people-data.js";
+import type { TransactionStore } from "../../mutations/transaction-store.js";
+import { executeDowntimeStartPlan } from "../plans/downtime-start-plan.js";
+import { executeDowntimeResolutionPlan } from "../plans/downtime-resolution-plan.js";
 
 export type DowntimeOutcomeHandler = (outcome: any) => Promise<ChildReceipt> | ChildReceipt;
 
@@ -31,6 +34,7 @@ export interface DowntimeServiceOptions {
   readonly downtimeRegistry?: DowntimeDefinitionRegistry;
   readonly economyService?: EconomyService;
   readonly facilitiesService?: FacilitiesService;
+  readonly transactionStore?: TransactionStore;
   readonly outcomeHandlers?: Record<string, DowntimeOutcomeHandler>;
 }
 
@@ -79,6 +83,7 @@ export class DowntimeService {
   readonly #downtimeRegistry: DowntimeDefinitionRegistry;
   readonly #economyService?: EconomyService;
   readonly #facilitiesService?: FacilitiesService;
+  readonly #transactionStore?: TransactionStore;
   readonly #outcomeHandlers?: Record<string, DowntimeOutcomeHandler>;
 
   constructor(options: DowntimeServiceOptions) {
@@ -86,6 +91,7 @@ export class DowntimeService {
     this.#downtimeRegistry = options.downtimeRegistry ?? createDefaultDowntimeRegistry();
     this.#economyService = options.economyService;
     this.#facilitiesService = options.facilitiesService;
+    this.#transactionStore = options.transactionStore;
     this.#outcomeHandlers = options.outcomeHandlers;
   }
 
@@ -122,237 +128,18 @@ export class DowntimeService {
   }
 
   async startActivity(params: StartActivityParams): Promise<Result<{ readonly activity: DowntimeInstance; readonly activityId: string }>> {
-    const cleanDomainUuid = this.#cleanId(params.domainUuid);
-    const docRes = await this.#domains.read(cleanDomainUuid);
-    if (!docRes.ok) return docRes;
-
-    const record = docRes.value.record;
-    if (!record.definition.capabilities.enabled.includes(DOWNTIME_CAPABILITY_ID)) {
-      return err(
-        createPublicError({
-          code: "DM_DOWNTIME_CAPABILITY_DISABLED",
-          category: "conflict",
-          message: `Downtime capability '${DOWNTIME_CAPABILITY_ID}' is not enabled on domain ${params.domainUuid}`
-        })
-      );
-    }
-
-    const definition = this.#downtimeRegistry.get(params.definitionId);
-    if (!definition) {
-      return err(
-        createPublicError({
-          code: "DM_DOWNTIME_DEFINITION_NOT_FOUND",
-          category: "not-found",
-          message: `Downtime definition '${params.definitionId}' not found`
-        })
-      );
-    }
-
-    // Participant verification (G5-REVAL-007, G5-REVAL2-007)
-    const participants: DowntimeParticipant[] = [];
-    if (params.participants && params.participants.length > 0) {
-      for (const p of params.participants) {
-        const participantRef = (p as any).participantRef ?? (p as any).ref;
-        const participantType = (p as any).participantType ?? (participantRef?.startsWith("group:") ? "group" : "notable");
-        const role = (p as any).role ?? definition.allowedParticipantRoles?.[0] ?? "lead";
-        const candidate: DowntimeParticipant = {
-          participantRef,
-          participantType,
-          role,
-          name: (p as any).name,
-          capacityConsumed: (p as any).capacityConsumed ?? 1
-        };
-        const valRes = validateDowntimeParticipant(candidate);
-        if (!valRes.ok) return valRes;
-        participants.push(valRes.value);
-      }
-    } else if (params.participantRef) {
-      const candidate: DowntimeParticipant = {
-        participantRef: params.participantRef,
-        participantType: params.participantRef.startsWith("group:") ? "group" : "notable",
-        role: definition.allowedParticipantRoles?.[0] ?? "lead",
-        capacityConsumed: 1
-      };
-      const valRes = validateDowntimeParticipant(candidate);
-      if (!valRes.ok) return valRes;
-      participants.push(valRes.value);
-    }
-
-    if (definition.minParticipants !== undefined && participants.length < definition.minParticipants) {
-      return err(
-        createPublicError({
-          code: "DM_DOWNTIME_PARTICIPANT_REQUIRED",
-          category: "conflict",
-          message: `Activity '${definition.label}' requires at least ${definition.minParticipants} participant(s)`
-        })
-      );
-    }
-
-    if (definition.maxParticipants !== undefined && participants.length > definition.maxParticipants) {
-      return err(
-        createPublicError({
-          code: "DM_DOWNTIME_TOO_MANY_PARTICIPANTS",
-          category: "conflict",
-          message: `Activity '${definition.label}' allows at most ${definition.maxParticipants} participant(s)`
-        })
-      );
-    }
-
-    if (definition.allowedParticipantRoles && definition.allowedParticipantRoles.length > 0) {
-      for (const p of participants) {
-        if (!definition.allowedParticipantRoles.includes(p.role)) {
-          return err(
-            createPublicError({
-              code: "DM_DOWNTIME_INVALID_PARTICIPANT_ROLE",
-              category: "conflict",
-              message: `Participant role '${p.role}' is not allowed for activity '${definition.label}'. Allowed roles: ${definition.allowedParticipantRoles.join(", ")}`
-            })
-          );
-        }
-      }
-    }
-
-    // Required domain capabilities verification (G5-REVAL2-007)
-    if (definition.requiredCapabilities && definition.requiredCapabilities.length > 0) {
-      for (const reqCap of definition.requiredCapabilities) {
-        if (!record.definition.capabilities.enabled.includes(reqCap)) {
-          return err(
-            createPublicError({
-              code: "DM_DOWNTIME_REQUIRED_CAPABILITY_DISABLED",
-              category: "conflict",
-              message: `Activity '${definition.label}' requires capability '${reqCap}' to be enabled on domain`
-            })
-          );
-        }
-      }
-    }
-
-    // Required facility operational readiness verification (G5-REVAL2-007)
-    if (definition.requiredFacilityDefinitions && definition.requiredFacilityDefinitions.length > 0) {
-      const facData = getDomainFacilitiesData(record);
-      for (const reqFac of definition.requiredFacilityDefinitions) {
-        const hasFac = facData.facilities.some(
-          (f) => f.definitionId === reqFac && f.lifecycle === "operational" && f.readiness !== "unavailable" && (f as any).status !== "blocked"
-        );
-        if (!hasFac) {
-          return err(
-            createPublicError({
-              code: "DM_DOWNTIME_REQUIRED_FACILITY_MISSING",
-              category: "conflict",
-              message: `Activity '${definition.label}' requires operational facility '${reqFac}', but none is available`
-            })
-          );
-        }
-      }
-    }
-
-    // Participant existence verification against domain people data (G5-REVAL2-007)
-    const peopleDataRes = tryGetDomainPeopleData(record);
-    if (peopleDataRes.ok) {
-      const people = peopleDataRes.value;
-      for (const p of participants) {
-        const rawRef = p.participantRef;
-        const cleanRef = rawRef.startsWith("notable:") ? rawRef.slice(8) : rawRef.startsWith("group:") ? rawRef.slice(6) : rawRef;
-        if (p.participantType === "notable" && people.notables.length > 0) {
-          const exists = people.notables.some((n) => n.id === cleanRef || n.id === rawRef || `notable:${n.id}` === rawRef);
-          if (!exists) {
-            return err(
-              createPublicError({
-                code: "DM_DOWNTIME_PARTICIPANT_NOT_FOUND",
-                category: "not-found",
-                message: `Notable participant '${rawRef}' not found in domain people data`
-              })
-            );
-          }
-        } else if (p.participantType === "group" && (people.operationalGroups.length > 0 || people.populationGroups.length > 0)) {
-          const exists =
-            people.operationalGroups.some((g) => g.id === cleanRef || g.id === rawRef || `group:${g.id}` === rawRef) ||
-            people.populationGroups.some((g) => g.id === cleanRef || g.id === rawRef || `group:${g.id}` === rawRef);
-          if (!exists) {
-            return err(
-              createPublicError({
-                code: "DM_DOWNTIME_PARTICIPANT_NOT_FOUND",
-                category: "not-found",
-                message: `Group participant '${rawRef}' not found in domain people data`
-              })
-            );
-          }
-        }
-      }
-    }
-
-    // Participant availability check: busy check against inProgress activities (G5-REVAL2-007)
-    const currentDowntimeData = getDomainDowntimeData(record);
-    const inProgressActivities = currentDowntimeData.activities.filter((a) => a.lifecycle === "inProgress");
-    for (const p of participants) {
-      const busyActivity = inProgressActivities.find((a) =>
-        a.participants.some((ap) => ap.participantRef === p.participantRef)
-      );
-      if (busyActivity) {
-        return err(
-          createPublicError({
-            code: "DM_DOWNTIME_PARTICIPANT_BUSY",
-            category: "conflict",
-            message: `Participant '${p.participantRef}' is already active in downtime activity '${busyActivity.id}' (${busyActivity.name})`
-          })
-        );
-      }
-    }
-
-    // Debit upfront costs via economy service if configured (G5-REVAL-007, G5-REVAL2-001)
-    if (this.#economyService && definition.costs && definition.costs.length > 0) {
-      for (const cost of definition.costs) {
-        const debitRes = await this.#economyService.commitAdjust({
-          domainUuid: cleanDomainUuid,
-          resourceId: cost.resourceId,
-          deltaMinor: -cost.amount,
-          reason: `Cost for starting downtime activity '${params.label ?? definition.label}'`,
-          lockOwner: params.commandId
-        });
-        if (!debitRes.ok) {
-          return debitRes;
-        }
-      }
-    }
-
-    const activityId = `dt-${createOpaqueId("prj").slice(4)}`;
-    const now = Date.now();
-
-    const newActivity: DowntimeInstance = {
-      id: activityId,
-      domainUuid: cleanDomainUuid,
-      definitionId: params.definitionId,
-      name: params.label ?? definition.label,
-      schemaVersion: 1,
-      revision: 0,
-      scope: params.scope ?? definition.scope ?? "domain",
-      lifecycle: "inProgress",
-      elapsedTicks: 0,
-      durationTicks: params.durationTicks ?? definition.defaultDurationTicks ?? 10,
-      participants: Object.freeze(participants),
-      tags: Object.freeze([...(definition.tags ?? [])]),
-      createdAt: now,
-      updatedAt: now
-    };
-
-    // Re-read fresh domain document after upfront costs to avoid revision conflict
-    const freshDocRes = await this.#domains.read(cleanDomainUuid);
-    if (!freshDocRes.ok) return freshDocRes;
-    const freshDowntimeData = getDomainDowntimeData(freshDocRes.value.record);
-
-    const updatedActivities = Object.freeze([...freshDowntimeData.activities, newActivity]);
-    const updatedRecord = withDomainDowntimeData(freshDocRes.value.record, {
-      ...freshDowntimeData,
-      activities: updatedActivities
-    });
-
-    const saveRes = await this.#domains.save({
-      ...freshDocRes.value,
-      record: updatedRecord
-    });
-    if (!saveRes.ok) return saveRes;
-
-    return ok({ activity: newActivity, activityId });
+    const res = await executeDowntimeStartPlan(
+      {
+        domains: this.#domains,
+        downtimeRegistry: this.#downtimeRegistry,
+        economyService: this.#economyService,
+        facilitiesService: this.#facilitiesService,
+        transactionStore: this.#transactionStore
+      },
+      params
+    );
+    if (!res.ok) return res;
+    return ok({ activity: res.value.activity, activityId: res.value.activity.id });
   }
 
   async advanceActivity(params: AdvanceActivityParams): Promise<Result<{ readonly activity: DowntimeInstance; readonly completed: boolean }>> {
@@ -424,137 +211,17 @@ export class DowntimeService {
   }
 
   async completeActivity(params: CompleteActivityParams): Promise<Result<{ readonly activity: DowntimeInstance; readonly outcomes: readonly unknown[]; readonly outcomesApplied: readonly ChildReceipt[] }>> {
-    const cleanDomainUuid = this.#cleanId(params.domainUuid);
-    const docRes = await this.#domains.read(cleanDomainUuid);
-    if (!docRes.ok) return docRes;
-
-    const record = docRes.value.record;
-    const currentDowntimeData = getDomainDowntimeData(record);
-    const activity = currentDowntimeData.activities.find((a) => a.id === params.activityId);
-    if (!activity) {
-      return err(
-        createPublicError({
-          code: "DM_DOWNTIME_NOT_FOUND",
-          category: "not-found",
-          message: `Downtime activity ${params.activityId} not found in domain ${params.domainUuid}`
-        })
-      );
-    }
-
-    if (activity.lifecycle === "completed") {
-      return err(
-        createPublicError({
-          code: "DM_DOWNTIME_ALREADY_COMPLETED",
-          category: "conflict",
-          message: `Downtime activity ${params.activityId} is already completed`
-        })
-      );
-    }
-
-    const def = this.#downtimeRegistry.get(activity.definitionId);
-    const outcomes: unknown[] = [];
-    const outcomesApplied: ChildReceipt[] = [];
-
-    if (def?.outcomeDefinitions && def.outcomeDefinitions.length > 0) {
-      for (const outcome of def.outcomeDefinitions) {
-        outcomes.push(outcome);
-        if (outcome.type === "economy:grant-resource") {
-          const resourceId = outcome.parameters.resourceId as string;
-          const amount = Number(outcome.parameters.amount ?? outcome.parameters.deltaMinor ?? 0);
-          if (this.#economyService && resourceId && amount > 0) {
-            const creditRes = await this.#economyService.commitAdjust({
-              domainUuid: cleanDomainUuid,
-              resourceId,
-              deltaMinor: amount,
-              reason: `Downtime completion reward: ${outcome.label}`,
-              lockOwner: params.commandId
-            });
-            outcomesApplied.push({
-              childReceiptId: createOpaqueId("rep"),
-              subsystem: "economy",
-              action: "grant_resource",
-              targetRef: resourceId,
-              payload: { resourceId, amount },
-              success: creditRes.ok,
-              error: creditRes.ok ? undefined : creditRes.error.message,
-              appliedAt: Date.now()
-            });
-          } else {
-            outcomesApplied.push({
-              childReceiptId: createOpaqueId("rep"),
-              subsystem: "economy",
-              action: "grant_resource",
-              targetRef: resourceId,
-              payload: { resourceId, amount },
-              success: true,
-              appliedAt: Date.now()
-            });
-          }
-        } else {
-          // G5-REVAL2-008: Non-economy outcomes fail closed if no handler is registered
-          const handler = params.outcomeHandlers?.[outcome.type] ?? this.#outcomeHandlers?.[outcome.type];
-          if (handler) {
-            try {
-              const res = await handler(outcome);
-              outcomesApplied.push(res);
-            } catch (err: any) {
-              outcomesApplied.push({
-                childReceiptId: createOpaqueId("rep"),
-                subsystem: "custom",
-                action: outcome.type,
-                targetRef: outcome.id,
-                payload: outcome.parameters,
-                success: false,
-                error: err?.message ?? String(err),
-                appliedAt: Date.now()
-              });
-            }
-          } else {
-            outcomesApplied.push({
-              childReceiptId: createOpaqueId("rep"),
-              subsystem: "custom",
-              action: outcome.type,
-              targetRef: outcome.id,
-              payload: outcome.parameters,
-              success: false,
-              error: `No handler registered for outcome type '${outcome.type}'`,
-              appliedAt: Date.now()
-            });
-          }
-        }
-      }
-    }
-
-    const now = Date.now();
-    const updatedActivity: DowntimeInstance = {
-      ...activity,
-      lifecycle: "completed",
-      completedAt: now,
-      revision: activity.revision + 1,
-      updatedAt: now
-    };
-
-    // Re-read fresh domain document after outcomes execution to avoid revision conflict
-    const freshDocRes = await this.#domains.read(cleanDomainUuid);
-    if (!freshDocRes.ok) return freshDocRes;
-    const freshDowntimeData = getDomainDowntimeData(freshDocRes.value.record);
-
-    const updatedActivities = freshDowntimeData.activities.map((a) =>
-      a.id === params.activityId ? updatedActivity : a
+    return executeDowntimeResolutionPlan(
+      {
+        domains: this.#domains,
+        downtimeRegistry: this.#downtimeRegistry,
+        economyService: this.#economyService,
+        facilitiesService: this.#facilitiesService,
+        transactionStore: this.#transactionStore,
+        defaultOutcomeHandlers: this.#outcomeHandlers
+      },
+      params
     );
-
-    const updatedRecord = withDomainDowntimeData(freshDocRes.value.record, {
-      ...freshDowntimeData,
-      activities: Object.freeze(updatedActivities)
-    });
-
-    const saveRes = await this.#domains.save({
-      ...freshDocRes.value,
-      record: updatedRecord
-    });
-    if (!saveRes.ok) return saveRes;
-
-    return ok({ activity: updatedActivity, outcomes, outcomesApplied: Object.freeze(outcomesApplied) });
   }
 
   async pauseActivity(params: {

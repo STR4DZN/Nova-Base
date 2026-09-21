@@ -468,6 +468,9 @@ test("G5.10 - Vertical Flow & Controller Integration: ApplicationV2 UI controlle
 
     // Complete downtime
     const compDtRes = await dtController.dispatchCompleteDowntime(activityId);
+    if (!compDtRes.ok) {
+      console.log("DEBUG compDtRes ERROR:", JSON.stringify(compDtRes, null, 2));
+    }
     assert.equal(compDtRes.ok, true);
     assert.equal((await dtController.loadViewModel()).value.activities[0].lifecycle, "completed");
 

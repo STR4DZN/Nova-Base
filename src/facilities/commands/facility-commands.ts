@@ -9,6 +9,7 @@ import type { DomainDocument, DomainRepositoryContract } from "../../storage/rep
 import type { DomainControllerProvider } from "../../domains/domain-controller-provider.js";
 import type { FacilitiesService } from "../services/facilities-service.js";
 import { validatePeopleCommandPermission } from "../../people/commands/people-permissions.js";
+import { validateGmOnlyCommandPermission } from "./facility-permissions.js";
 import type {
   FreshStateWithRevision,
   MutationCoordinator,
@@ -381,10 +382,7 @@ export function registerFacilityCommands(options: RegisterFacilityCommandsOption
             causationId: (p as any).causationId ?? (ctx.command as any).causationId ?? ctx.command.commandId
           });
         },
-    permissionValidator: (ctx) =>
-      validatePeopleCommandPermission(ctx, domains, (p) => p.domainUuid, {
-        controllerProvider
-      })
+    permissionValidator: (ctx) => validateGmOnlyCommandPermission(ctx)
   });
 
   // 5. facilities:decommission-facility

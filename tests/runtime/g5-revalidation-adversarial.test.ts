@@ -13,6 +13,8 @@ import { LockManager } from "../../src/mutations/lock-manager.js";
 import { MutationCoordinator } from "../../src/mutations/mutation-coordinator.js";
 import { TransactionStore } from "../../src/mutations/transaction-store.js";
 import { InMemoryTransactionStorageAdapter } from "../../src/mutations/transaction-storage-adapter.js";
+import { createTransactionRecord } from "../../src/mutations/transaction-record.js";
+import { createOpaqueId } from "../../src/core/identity/ids.js";
 import {
   DomainRepository,
   type DomainDocument,
@@ -32,6 +34,7 @@ import {
   withDomainEconomyData
 } from "../../src/economy/economy-data.js";
 import { ProjectsService } from "../../src/projects/services/projects-service.js";
+import { PeopleService } from "../../src/people/services/people-service.js";
 import { registerProjectCommands } from "../../src/projects/commands/project-commands.js";
 import { DefaultPublicProjectsApi } from "../../src/projects/api/public-projects-api.js";
 import { FacilitiesService } from "../../src/facilities/services/facilities-service.js";
@@ -61,11 +64,11 @@ import { ProjectsApplicationController } from "../../src/ui/domain-patterns/proj
 import { FacilitiesApplicationController } from "../../src/ui/domain-patterns/facilities/facility-app.js";
 import { DowntimeApplicationController } from "../../src/ui/domain-patterns/downtime/downtime-app.js";
 import type { DomainRecord } from "../../src/domains/domain-schema.js";
-import { withDomainFacilitiesData } from "../../src/facilities/facility-data.js";
+import { withDomainFacilitiesData, getDomainFacilitiesData } from "../../src/facilities/facility-data.js";
 import { withDomainPeopleData, createDefaultDomainPeopleData, getDomainPeopleData } from "../../src/people/people-data.js";
 import { calculateWorkforce } from "../../src/people/workforce/workforce-calculator.js";
-import { withDomainProjectsData } from "../../src/projects/project-data.js";
-import { withDomainDowntimeData } from "../../src/downtime/downtime-data.js";
+import { withDomainProjectsData, getDomainProjectsData } from "../../src/projects/project-data.js";
+import { withDomainDowntimeData, getDomainDowntimeData } from "../../src/downtime/downtime-data.js";
 import { ok, err } from "../../src/core/contracts/result.js";
 import { createPublicError } from "../../src/core/contracts/public-error.js";
 
@@ -269,19 +272,24 @@ function setupTestEnvironment(record: DomainRecord = createInitialRecord()) {
     economyService
   });
 
+  const peopleService = new PeopleService(domains);
+
   const projectsService = new ProjectsService({
     domains,
     projectRegistry,
     economyService,
     facilitiesService,
-    transactionStore
+    peopleService,
+    transactionStore,
+    recoveryService
   });
 
   const downtimeService = new DowntimeService({
     domains,
     downtimeRegistry,
     economyService,
-    facilitiesService
+    facilitiesService,
+    transactionStore
   });
 
   const registry = new CommandRegistry();
@@ -293,13 +301,20 @@ function setupTestEnvironment(record: DomainRecord = createInitialRecord()) {
     {
       getUsers: () => [
         { id: "gm-user", isGM: true, active: true },
-        { id: "player-1", isGM: false, active: true }
+        { id: "player-1", isGM: false, active: true },
+        { id: "player-controller", isGM: false, active: true }
       ],
       getPreferredUserId: () => null,
       getCurrentUserId: () => "gm-user"
     },
     { authorityUserId: "gm-user", authorityEpoch: 1, initialized: true }
   );
+
+  (globalThis as any).game = {
+    users: {
+      get: (id: string) => (id === "gm-user" ? { id: "gm-user", isGM: true } : { id, isGM: false })
+    }
+  };
 
   const commandBus = new CommandBus({ registry, authorityService, coordinator });
 
@@ -332,6 +347,8 @@ function setupTestEnvironment(record: DomainRecord = createInitialRecord()) {
     projectsService,
     facilitiesService,
     downtimeService,
+    peopleService,
+    recoveryService,
     publicProjects,
     publicFacilities,
     publicDowntime,
@@ -1403,7 +1420,8 @@ test("G5-REVAL2-007 & G5-REVAL2-008: Downtime validates disabled capability, mis
         id: "out-blessing",
         type: "unknown_custom_buff",
         targetRef: "faith:holy",
-        value: 10
+        value: 10,
+        optional: true
       }
     ]
   });
@@ -1556,4 +1574,801 @@ test("G5-REVAL2-009: Workforce reservation in DomainPeopleData is allocated on p
   let restoredWf = calculateWorkforce(peopleData);
   assert.equal(restoredWf.types.general.available, 10, "Available workforce must be restored to 10");
 });
+
+// ===========================================================================
+// REVALIDATION 3 FAULT-INJECTION SUITE (G5-REVAL3-001 TO G5-REVAL3-007)
+// ===========================================================================
+
+// TEST 16 (Fault 1): G5-REVAL3-001/002 — Project start rolls back reservations and workforce when domain save fails
+test("G5-REVAL3-001 & 002 (Fault 1): Project start rolls back reservations and workforce when domain save fails", async () => {
+  let record = createInitialRecord();
+  record = withDomainEconomyData(record, {
+    schemaVersion: 1,
+    accounts: [
+      {
+        mode: "native",
+        domainUuid: "JournalEntry.dom-adv-1",
+        resourceId: "domain-manager:materials",
+        balanceMinor: 200,
+        baseCapacityMinor: null
+      }
+    ]
+  });
+  record = withDomainPeopleData(record, {
+    ...createDefaultDomainPeopleData(),
+    populationGroups: [
+      {
+        id: "pop_00000000-0000-0000-0000-000000000009",
+        name: "Engineers",
+        count: 50,
+        includedInTotal: true,
+        tags: [],
+        workforceContributions: [{ workforceTypeId: "general", amount: 10 }]
+      }
+    ]
+  });
+
+  const env = setupTestEnvironment(record);
+
+  env.projectRegistry.register({
+    id: "domain-manager:fault-start-project",
+    version: 1,
+    label: "Fault Start Project",
+    tags: ["infrastructure"],
+    progressResolverId: "domain-manager:standard",
+    defaultWorkRequired: 100,
+    requirements: [],
+    costs: [
+      { resourceId: "domain-manager:materials", amountMinor: 50, timing: "upfront" },
+      { resourceId: "domain-manager:materials", amountMinor: 30, timing: "reserved" }
+    ],
+    rewards: []
+  });
+
+  // Inject save failure on domain save
+  const originalSave = env.domains.save.bind(env.domains);
+  let saveAttempted = false;
+  env.domains.save = async () => {
+    saveAttempted = true;
+    return err(
+      createPublicError({
+        code: "DM_STORAGE_INJECTED_FAULT",
+        category: "internal",
+        message: "Injected disk write failure during project start save"
+      })
+    );
+  };
+
+  const startRes = await env.projectsService.startProject({
+    domainUuid: env.rawDoc.uuid,
+    definitionId: "domain-manager:fault-start-project",
+    name: "Fault Project",
+    workRequired: 100,
+    workforceRequired: 4,
+    userId: "gm-user"
+  });
+
+  assert.equal(startRes.ok, false, "Project start must fail closed when domain save fails");
+  assert.equal(saveAttempted, true, "Save must have been attempted");
+
+  // Restore save method
+  env.domains.save = originalSave;
+
+  // Verify economic upfront cost was compensated/refunded (balance remains 200)
+  const doc = (await env.domains.read(env.rawDoc.id)).value;
+  const matAcc = doc.record.definition.capabilities.config["domain-manager:economy"].accounts.find(
+    (a: any) => a.resourceId === "domain-manager:materials"
+  );
+  assert.equal(matAcc.balanceMinor, 200, "Upfront debit must be compensated/refunded");
+
+  // Verify economic reservation was cancelled/released
+  const reservations = env.economyService.listReservations({ domainUuid: env.rawDoc.uuid, status: "active" });
+  assert.equal(reservations.length, 0, "Economic reservation must be released/cancelled on failure");
+
+  // Verify workforce reservation was released / available capacity restored
+  const peopleData = getDomainPeopleData(doc.record);
+  const activeWfResvs = peopleData.reservations.filter((r) => r.status === "active");
+  assert.equal(activeWfResvs.length, 0, "Workforce reservation must be released on failure");
+  const wf = calculateWorkforce(peopleData);
+  assert.equal(wf.types.general.available, 10, "Workforce available must remain 10");
+});
+
+// TEST 17 (Fault 2): G5-REVAL3-002/004 — Project completion transitions to needs-recovery when child facility creation fails
+test("G5-REVAL3-002 & 004 (Fault 2): Project completion transitions to needs-recovery when child facility creation fails", async () => {
+  const env = setupTestEnvironment();
+
+  env.projectRegistry.register({
+    id: "domain-manager:facility-maker-project",
+    version: 1,
+    label: "Facility Maker Project",
+    tags: ["infrastructure"],
+    progressResolverId: "domain-manager:standard",
+    defaultWorkRequired: 10,
+    requirements: [],
+    costs: [],
+    rewards: [
+      {
+        type: "facility:create",
+        targetRef: "domain-manager:storehouse",
+        value: 1
+      }
+    ]
+  });
+
+  const startRes = await env.projectsService.startProject({
+    domainUuid: env.rawDoc.uuid,
+    definitionId: "domain-manager:facility-maker-project",
+    name: "Maker Project",
+    workRequired: 10,
+    userId: "gm-user"
+  });
+  checkOk(startRes, "Maker Project Start");
+  const projectId = startRes.value.project.id;
+
+  await env.projectsService.advanceProject({
+    domainUuid: env.rawDoc.uuid,
+    projectId,
+    delta: 10,
+    userId: "gm-user"
+  });
+
+  // Inject failure into facilitiesService.createFacility
+  const originalCreate = env.facilitiesService.createFacility.bind(env.facilitiesService);
+  env.facilitiesService.createFacility = async () => {
+    return err(
+      createPublicError({
+        code: "DM_FACILITY_INJECTED_FAULT",
+        category: "internal",
+        message: "Injected facility creation fault"
+      })
+    );
+  };
+
+  const compCmdId = "cmd_comp_fault_fac" as CommandId;
+  await env.projectsService.completeProject({
+    domainUuid: env.rawDoc.uuid,
+    projectId,
+    commandId: compCmdId,
+    authorityEpoch: 5,
+    userId: "gm-user"
+  });
+
+  env.facilitiesService.createFacility = originalCreate;
+
+  // The operation had a partial failure on child facility creation
+  // Transaction must transition to needs-recovery with durable recoveryData
+  const tx = env.transactionStore.getByCommandId(compCmdId);
+  assert.ok(tx, "TransactionRecord must transition to needs-recovery");
+  assert.equal(tx.state, "needs-recovery");
+  assert.ok(tx.recoveryData, "Transaction must store durable recoveryData");
+  assert.equal((tx.recoveryData as any).type, "projects:completion");
+  assert.equal((tx.recoveryData as any).projectId, projectId);
+});
+
+// TEST 18 (Fault 3): G5-REVAL3-002/004 — Project completion transitions to needs-recovery when domain save fails after child effects
+test("G5-REVAL3-002 & 004 (Fault 3): Project completion transitions to needs-recovery when domain save fails after child effects", async () => {
+  const env = setupTestEnvironment();
+
+  env.projectRegistry.register({
+    id: "domain-manager:reward-project",
+    version: 1,
+    label: "Reward Project",
+    tags: ["infrastructure"],
+    progressResolverId: "domain-manager:standard",
+    defaultWorkRequired: 10,
+    requirements: [],
+    costs: [],
+    rewards: [
+      {
+        type: "facility:create",
+        targetRef: "domain-manager:storehouse",
+        value: 1
+      },
+      {
+        type: "resource",
+        targetRef: "domain-manager:materials",
+        value: 100
+      }
+    ]
+  });
+
+  const startRes = await env.projectsService.startProject({
+    domainUuid: env.rawDoc.uuid,
+    definitionId: "domain-manager:reward-project",
+    name: "Save Fault Project",
+    workRequired: 10,
+    userId: "gm-user"
+  });
+  checkOk(startRes, "Save Fault Project Start");
+  const projectId = startRes.value.project.id;
+
+  await env.projectsService.advanceProject({
+    domainUuid: env.rawDoc.uuid,
+    projectId,
+    delta: 10,
+    userId: "gm-user"
+  });
+
+  // Inject failure on domains.save during final project completion save (after child effects succeed)
+  const originalSave = env.domains.save.bind(env.domains);
+  env.domains.save = async (doc: any) => {
+    const prj = getDomainProjectsData(doc.record).projects.find((p: any) => p.id === projectId);
+    if (prj?.lifecycle === "completed") {
+      return err(
+        createPublicError({
+          code: "DM_STORAGE_INJECTED_FAULT",
+          category: "internal",
+          message: "Injected disk write failure during project completion save"
+        })
+      );
+    }
+    return originalSave(doc);
+  };
+
+  const compCmdId = "cmd_comp_fault_save" as CommandId;
+  const compRes = await env.projectsService.completeProject({
+    domainUuid: env.rawDoc.uuid,
+    projectId,
+    commandId: compCmdId,
+    authorityEpoch: 3,
+    userId: "gm-user"
+  });
+
+  env.domains.save = originalSave;
+
+  assert.equal(compRes.ok, false, "Completion must fail closed when domain save fails");
+  const tx = env.transactionStore.getByCommandId(compCmdId);
+  assert.ok(tx, "Transaction must exist in store");
+  assert.equal(tx.state, "needs-recovery");
+  assert.ok(tx.recoveryData);
+  assert.equal((tx.recoveryData as any).type, "projects:completion");
+  assert.equal((tx.recoveryData as any).projectId, projectId);
+  assert.ok((tx.recoveryData as any).createdFacilityIds.length > 0, "Created facility IDs must be recorded");
+  assert.ok((tx.recoveryData as any).creditedResourceRefs.length > 0, "Credited resource refs must be recorded");
+});
+
+// TEST 19 (Fault 4): G5-REVAL3-004 — RecoveryService.recoverTransaction idempotently recovers projects:completion transaction
+test("G5-REVAL3-004 (Fault 4): RecoveryService.recoverTransaction idempotently recovers projects:completion transaction", async () => {
+  let record = createInitialRecord();
+  record = withDomainEconomyData(record, {
+    schemaVersion: 1,
+    accounts: [
+      {
+        mode: "native",
+        domainUuid: "JournalEntry.dom-adv-1",
+        resourceId: "domain-manager:materials",
+        balanceMinor: 200,
+        baseCapacityMinor: null
+      }
+    ]
+  });
+  const env = setupTestEnvironment(record);
+
+  // Register compensator
+  env.projectsService.registerRecoveryCompensators(env.recoveryService);
+
+  // Create a facility and credit 100 materials to simulate completed child effects
+  const facRes = await env.facilitiesService.createFacility({
+    domainUuid: env.rawDoc.uuid,
+    definitionId: "domain-manager:storehouse",
+    name: "Temporary Storehouse",
+    level: 1,
+    initialLifecycle: "operational"
+  });
+  checkOk(facRes, "Create facility for recovery test");
+  const createdFacilityId = facRes.value.facility.id;
+
+  const creditRes = await env.economyService.commitAdjust({
+    domainUuid: env.rawDoc.uuid,
+    resourceId: "domain-manager:materials",
+    deltaMinor: 100,
+    reason: "Completion reward to be recovered"
+  });
+  checkOk(creditRes, "Credit resources for recovery test");
+
+  // Verify economy has 300 materials
+  let doc = (await env.domains.read(env.rawDoc.id)).value;
+  let matAcc = doc.record.definition.capabilities.config["domain-manager:economy"].accounts.find(
+    (a: any) => a.resourceId === "domain-manager:materials"
+  );
+  assert.equal(matAcc.balanceMinor, 300);
+
+  // Create synthetic needs-recovery transaction with recoveryData
+  const txId = createOpaqueId("tx");
+  const txCmdId = createCommandId();
+  const initialSnapshot: any = {
+    id: "prj-recovered-1",
+    definitionId: "domain-manager:fortified-gate",
+    domainUuid: env.rawDoc.id,
+    name: "Recovered Project",
+    workRequired: 100,
+    workCompleted: 100,
+    lifecycle: "active",
+    revision: 1
+  };
+
+  const recoveryData = {
+    type: "projects:completion",
+    domainUuid: env.rawDoc.uuid,
+    projectId: initialSnapshot.id,
+    initialProjectSnapshot: initialSnapshot,
+    createdFacilityIds: [createdFacilityId],
+    creditedResourceRefs: [{ resourceId: "domain-manager:materials", amountMinor: 100 }],
+    debitedCostRefs: []
+  };
+
+  const txRecord = createTransactionRecord({
+    transactionId: txId,
+    commandId: txCmdId,
+    lockKeys: [`domain:${env.rawDoc.id}`],
+    authorityEpoch: 1,
+    recoveryData
+  });
+
+  env.transactionStore.save({
+    ...txRecord,
+    state: "needs-recovery"
+  });
+
+  // Execute recovery
+  const recRes = await env.recoveryService.recoverTransaction(txId);
+  checkOk(recRes, "RecoveryService.recoverTransaction");
+
+  // Verify recovery effects:
+  // 1. Created facility was rolled back (deleted)
+  doc = (await env.domains.read(env.rawDoc.id)).value;
+  const facs = getDomainFacilitiesData(doc.record).facilities;
+  assert.equal(facs.find((f) => f.id === createdFacilityId), undefined, "Created facility must be rolled back");
+
+  // 2. Credited 100 materials was reverted (balance restored to 200)
+  matAcc = doc.record.definition.capabilities.config["domain-manager:economy"].accounts.find(
+    (a: any) => a.resourceId === "domain-manager:materials"
+  );
+  assert.equal(matAcc.balanceMinor, 200, "Credited reward must be debited back");
+
+  // 3. Transaction transitioned to compensated
+  const txAfter = env.transactionStore.get(txId);
+  assert.equal(txAfter?.state, "compensated", "Transaction must be marked 'compensated'");
+
+  // 4. Idempotency check: recovering again must succeed without double-debiting
+  const recRes2 = await env.recoveryService.recoverTransaction(txId);
+  checkOk(recRes2, "Subsequent recovery must be idempotent");
+  doc = (await env.domains.read(env.rawDoc.id)).value;
+  matAcc = doc.record.definition.capabilities.config["domain-manager:economy"].accounts.find(
+    (a: any) => a.resourceId === "domain-manager:materials"
+  );
+  assert.equal(matAcc.balanceMinor, 200, "Balance must remain unchanged after idempotent recovery");
+});
+
+// TEST 20 (Fault 5): G5-REVAL3-003 — Project cancel fails closed when economy reservation release fails
+test("G5-REVAL3-003 (Fault 5): Project cancel fails closed when economy reservation release fails", async () => {
+  let record = createInitialRecord();
+  record = withDomainEconomyData(record, {
+    schemaVersion: 1,
+    accounts: [
+      {
+        mode: "native",
+        domainUuid: "JournalEntry.dom-adv-1",
+        resourceId: "domain-manager:materials",
+        balanceMinor: 200,
+        baseCapacityMinor: null
+      }
+    ]
+  });
+  const env = setupTestEnvironment(record);
+
+  const startRes = await env.projectsService.startProject({
+    domainUuid: env.rawDoc.uuid,
+    definitionId: "domain-manager:fortified-gate",
+    name: "Cancel Fail Project",
+    workRequired: 100,
+    userId: "gm-user"
+  });
+  checkOk(startRes, "Project Start");
+  const projectId = startRes.value.project.id;
+
+  // Stub economyService.releaseReservation to return failure
+  const originalRelease = env.economyService.releaseReservation.bind(env.economyService);
+  env.economyService.releaseReservation = async () => {
+    return err(
+      createPublicError({
+        code: "DM_ECON_RELEASE_FAILED",
+        category: "internal",
+        message: "Injected economy reservation release failure"
+      })
+    );
+  };
+
+  const cancelRes = await env.projectsService.cancelProject({
+    domainUuid: env.rawDoc.uuid,
+    projectId,
+    reason: "Abort",
+    userId: "gm-user"
+  });
+
+  env.economyService.releaseReservation = originalRelease;
+
+  assert.equal(cancelRes.ok, false, "Cancel must fail closed when reservation release fails");
+  assert.equal(cancelRes.error.code, "DM_ECON_RELEASE_FAILED");
+
+  // Verify project is still active in domain (NOT cancelled)
+  const doc = (await env.domains.read(env.rawDoc.id)).value;
+  const project = getDomainProjectsData(doc.record).projects.find((p) => p.id === projectId);
+  assert.equal(project?.lifecycle, "active", "Project must remain active when cancel fails closed");
+});
+
+// TEST 21 (Fault 6): G5-REVAL3-003 — Project cancel fails closed when workforce release fails
+test("G5-REVAL3-003 (Fault 6): Project cancel fails closed when workforce release fails", async () => {
+  let record = createInitialRecord();
+  record = withDomainPeopleData(record, {
+    ...createDefaultDomainPeopleData(),
+    populationGroups: [
+      {
+        id: "pop_00000000-0000-0000-0000-000000000010",
+        name: "Artisans",
+        count: 50,
+        includedInTotal: true,
+        tags: [],
+        workforceContributions: [{ workforceTypeId: "general", amount: 10 }]
+      }
+    ]
+  });
+  const env = setupTestEnvironment(record);
+
+  env.projectRegistry.register({
+    id: "domain-manager:labor-project",
+    version: 1,
+    label: "Labor Project",
+    tags: ["labor"],
+    progressResolverId: "domain-manager:standard",
+    defaultWorkRequired: 50,
+    requirements: [],
+    costs: [],
+    rewards: []
+  });
+
+  const startRes = await env.projectsService.startProject({
+    domainUuid: env.rawDoc.uuid,
+    definitionId: "domain-manager:labor-project",
+    name: "Labor Project",
+    workRequired: 50,
+    workforceRequired: 4,
+    userId: "gm-user"
+  });
+  checkOk(startRes, "Labor Project Start");
+  const projectId = startRes.value.project.id;
+
+  // Stub peopleService.releaseWorkforceReservation to return failure
+  const originalWfRelease = env.peopleService.releaseWorkforceReservation.bind(env.peopleService);
+  env.peopleService.releaseWorkforceReservation = async () => {
+    return err(
+      createPublicError({
+        code: "DM_PEOPLE_RELEASE_FAILED",
+        category: "internal",
+        message: "Injected workforce release failure"
+      })
+    );
+  };
+
+  const cancelRes = await env.projectsService.cancelProject({
+    domainUuid: env.rawDoc.uuid,
+    projectId,
+    reason: "Abort",
+    userId: "gm-user"
+  });
+
+  env.peopleService.releaseWorkforceReservation = originalWfRelease;
+
+  assert.equal(cancelRes.ok, false, "Cancel must fail closed when workforce release fails");
+  assert.equal(cancelRes.error.code, "DM_PEOPLE_RELEASE_FAILED");
+
+  // Verify project is still active in domain (NOT cancelled)
+  const doc = (await env.domains.read(env.rawDoc.id)).value;
+  const project = getDomainProjectsData(doc.record).projects.find((p) => p.id === projectId);
+  assert.equal(project?.lifecycle, "active", "Project must remain active when cancel fails closed");
+});
+
+// TEST 22 (Fault 7): G5-REVAL3-002 — Facility maintenance refunds debited costs when domain save fails
+test("G5-REVAL3-002 (Fault 7): Facility maintenance refunds debited costs when domain save fails", async () => {
+  let record = createInitialRecord();
+  record = withDomainEconomyData(record, {
+    schemaVersion: 1,
+    accounts: [
+      {
+        mode: "native",
+        domainUuid: "JournalEntry.dom-adv-1",
+        resourceId: "domain-manager:materials",
+        balanceMinor: 100,
+        baseCapacityMinor: null
+      }
+    ]
+  });
+  const env = setupTestEnvironment(record);
+
+  // Create facility
+  const facRes = await env.facilitiesService.createFacility({
+    domainUuid: env.rawDoc.uuid,
+    definitionId: "domain-manager:storehouse",
+    name: "Maintenance Storehouse",
+    level: 1,
+    initialLifecycle: "operational"
+  });
+  checkOk(facRes, "Create facility for maintenance");
+  const facilityId = facRes.value.facility.id;
+
+  // Inject failure on domains.save during maintainFacility
+  const originalSave = env.domains.save.bind(env.domains);
+  env.domains.save = async () => {
+    return err(
+      createPublicError({
+        code: "DM_STORAGE_INJECTED_FAULT",
+        category: "internal",
+        message: "Injected disk write failure during maintenance save"
+      })
+    );
+  };
+
+  const maintainRes = await env.facilitiesService.maintainFacility({
+    domainUuid: env.rawDoc.uuid,
+    facilityId,
+    userId: "gm-user"
+  });
+
+  env.domains.save = originalSave;
+
+  assert.equal(maintainRes.ok, false, "Maintenance must fail closed when save fails");
+
+  // Verify economy cost was compensated/refunded (balance remains 100)
+  const doc = (await env.domains.read(env.rawDoc.id)).value;
+  const matAcc = doc.record.definition.capabilities.config["domain-manager:economy"].accounts.find(
+    (a: any) => a.resourceId === "domain-manager:materials"
+  );
+  assert.equal(matAcc.balanceMinor, 100, "Maintenance debited cost must be refunded on save failure");
+});
+
+// TEST 23 (Fault 8): G5-REVAL3-002 — Facility repair refunds debited costs when domain save fails
+test("G5-REVAL3-002 (Fault 8): Facility repair refunds debited costs when domain save fails", async () => {
+  let record = createInitialRecord();
+  record = withDomainEconomyData(record, {
+    schemaVersion: 1,
+    accounts: [
+      {
+        mode: "native",
+        domainUuid: "JournalEntry.dom-adv-1",
+        resourceId: "domain-manager:materials",
+        balanceMinor: 100,
+        baseCapacityMinor: null
+      }
+    ]
+  });
+  const env = setupTestEnvironment(record);
+
+  // Create damaged facility (integrity 50)
+  const facRes = await env.facilitiesService.createFacility({
+    domainUuid: env.rawDoc.uuid,
+    definitionId: "domain-manager:storehouse",
+    name: "Repair Storehouse",
+    level: 1,
+    initialLifecycle: "operational"
+  });
+  checkOk(facRes, "Create facility for repair");
+  const facilityId = facRes.value.facility.id;
+
+  await env.facilitiesService.applyDamage({
+    domainUuid: env.rawDoc.uuid,
+    facilityId,
+    damage: 50,
+    userId: "gm-user"
+  });
+
+  // Verify balance before repair is 100
+  let doc = (await env.domains.read(env.rawDoc.id)).value;
+  let matAcc = doc.record.definition.capabilities.config["domain-manager:economy"].accounts.find(
+    (a: any) => a.resourceId === "domain-manager:materials"
+  );
+  assert.equal(matAcc.balanceMinor, 100);
+
+  // Inject failure on domains.save during repairFacility
+  const originalSave = env.domains.save.bind(env.domains);
+  env.domains.save = async () => {
+    return err(
+      createPublicError({
+        code: "DM_STORAGE_INJECTED_FAULT",
+        category: "internal",
+        message: "Injected disk write failure during repair save"
+      })
+    );
+  };
+
+  const repairRes = await env.facilitiesService.repairFacility({
+    domainUuid: env.rawDoc.uuid,
+    facilityId,
+    userId: "gm-user"
+  });
+
+  env.domains.save = originalSave;
+
+  assert.equal(repairRes.ok, false, "Repair must fail closed when save fails");
+
+  // Verify economy cost was compensated/refunded (balance remains 100)
+  doc = (await env.domains.read(env.rawDoc.id)).value;
+  matAcc = doc.record.definition.capabilities.config["domain-manager:economy"].accounts.find(
+    (a: any) => a.resourceId === "domain-manager:materials"
+  );
+  assert.equal(matAcc.balanceMinor, 100, "Repair debited cost must be refunded on save failure");
+});
+
+// TEST 24 (Fault 9): G5-REVAL3-002 — Downtime start refunds debited upfront costs when domain save fails
+test("G5-REVAL3-002 (Fault 9): Downtime start refunds debited upfront costs when domain save fails", async () => {
+  let record = createInitialRecord();
+  record = withDomainEconomyData(record, {
+    schemaVersion: 1,
+    accounts: [
+      {
+        mode: "native",
+        domainUuid: "JournalEntry.dom-adv-1",
+        resourceId: "domain-manager:materials",
+        balanceMinor: 50,
+        baseCapacityMinor: null
+      }
+    ]
+  });
+  const env = setupTestEnvironment(record);
+
+  // Inject failure on domains.save during downtime start
+  const originalSave = env.domains.save.bind(env.domains);
+  env.domains.save = async () => {
+    return err(
+      createPublicError({
+        code: "DM_STORAGE_INJECTED_FAULT",
+        category: "internal",
+        message: "Injected disk write failure during downtime start save"
+      })
+    );
+  };
+
+  const startDtRes = await env.downtimeService.startActivity({
+    domainUuid: env.rawDoc.uuid,
+    definitionId: "domain-manager:crafting", // Costs 10 materials upfront
+    label: "Fault Crafting",
+    participants: [{ participantRef: "notable:crafter-1", participantType: "notable", role: "owner" }],
+    userId: "gm-user"
+  });
+
+  env.domains.save = originalSave;
+
+  assert.equal(startDtRes.ok, false, "Downtime start must fail closed when save fails");
+
+  // Verify economy cost was compensated/refunded (balance remains 50)
+  const doc = (await env.domains.read(env.rawDoc.id)).value;
+  const matAcc = doc.record.definition.capabilities.config["domain-manager:economy"].accounts.find(
+    (a: any) => a.resourceId === "domain-manager:materials"
+  );
+  assert.equal(matAcc.balanceMinor, 50, "Upfront cost (10 materials) must be refunded on downtime save failure");
+});
+
+// TEST 25 (Fault 10): G5-REVAL3-005 — Downtime completion with failed mandatory outcome fails closed and does not complete
+test("G5-REVAL3-005 (Fault 10): Downtime completion with failed mandatory outcome fails closed and does not complete", async () => {
+  const env = setupTestEnvironment();
+
+  env.downtimeRegistry.register({
+    id: "domain-manager:failing-mandatory-outcome",
+    version: 1,
+    label: "Mandatory Outcome Activity",
+    category: "production",
+    scope: "individual",
+    defaultDurationTicks: 5,
+    minParticipants: 1,
+    outcomeDefinitions: [
+      {
+        id: "mandatory-buff",
+        type: "unknown_mandatory_side_effect",
+        label: "Mandatory Buff",
+        parameters: { buffId: "strength" },
+        visibility: "public" as const,
+        optional: false // Strictly mandatory!
+      }
+    ]
+  });
+
+  const startRes = await env.downtimeService.startActivity({
+    domainUuid: env.rawDoc.uuid,
+    definitionId: "domain-manager:failing-mandatory-outcome",
+    label: "Buff Exercise",
+    participants: [{ participantRef: "notable:warrior-1", participantType: "notable", role: "participant" }],
+    userId: "gm-user"
+  });
+  checkOk(startRes, "Start Mandatory Outcome Activity");
+  const activityId = startRes.value.activityId;
+
+  // Complete activity without registered handler for unknown_mandatory_side_effect
+  const compRes = await env.downtimeService.completeActivity({
+    domainUuid: env.rawDoc.uuid,
+    activityId,
+    userId: "gm-user"
+  });
+
+  assert.equal(compRes.ok, false, "Completion must fail closed when mandatory outcome fails");
+  assert.equal(compRes.error.code, "DM_DOWNTIME_MANDATORY_OUTCOME_FAILED");
+
+  // Verify activity is NOT marked completed in domain data
+  const doc = (await env.domains.read(env.rawDoc.id)).value;
+  const activity = getDomainDowntimeData(doc.record).activities.find((a) => a.id === activityId);
+  assert.ok(activity);
+  assert.equal(activity.lifecycle, "inProgress", "Activity lifecycle must remain inProgress, NOT completed");
+});
+
+// TEST 26 (Fault 11): G5-REVAL3-006 — facilities:apply-damage rejects non-GM Domain Controller with DM_SECURITY_PERMISSION_DENIED
+test("G5-REVAL3-006 (Fault 11): facilities:apply-damage rejects non-GM Domain Controller with DM_SECURITY_PERMISSION_DENIED", async () => {
+  const env = setupTestEnvironment();
+
+  // Create facility as GM
+  const facRes = await env.facilitiesService.createFacility({
+    domainUuid: env.rawDoc.uuid,
+    definitionId: "domain-manager:storehouse",
+    name: "Guarded Storehouse",
+    level: 1,
+    initialLifecycle: "operational"
+  });
+  checkOk(facRes, "Create facility for GM damage test");
+  const facilityId = facRes.value.facility.id;
+
+  // Non-GM Domain Controller attempts to apply damage
+  const playerDmgCmd: DomainCommand<any> = {
+    contractVersion: COMMAND_CONTRACT_VERSION_V1,
+    commandId: createCommandId(),
+    type: "facilities:apply-damage",
+    payload: {
+      domainUuid: env.rawDoc.uuid,
+      facilityId,
+      damage: 25,
+      reason: "Sabotage attempt"
+    },
+    issuedAtReal: Date.now()
+  };
+
+  // Dispatch inbound through commandBus as remote player-controller (ownership 3, but isGM: false)
+  const playerRes = await env.commandBus.dispatchInbound({
+    rawEnvelope: playerDmgCmd,
+    transportContext: {
+      senderUserId: "player-controller",
+      transportName: "socketlib",
+      transportTimestamp: Date.now()
+    }
+  });
+  assert.equal(playerRes.ok, true);
+  assert.equal(playerRes.value.status, "rejected", "Non-GM controller must be rejected");
+  assert.equal(playerRes.value.error?.code, "DM_SECURITY_PERMISSION_DENIED");
+
+  // Game Master applies damage
+  const gmDmgCmd: DomainCommand<any> = {
+    contractVersion: COMMAND_CONTRACT_VERSION_V1,
+    commandId: createCommandId(),
+    type: "facilities:apply-damage",
+    payload: {
+      domainUuid: env.rawDoc.uuid,
+      facilityId,
+      damage: 25,
+      reason: "Official GM disaster"
+    },
+    issuedAtReal: Date.now()
+  };
+
+  const gmRes = await env.commandBus.dispatchInbound({
+    rawEnvelope: gmDmgCmd,
+    transportContext: {
+      senderUserId: "gm-user",
+      transportName: "socketlib",
+      transportTimestamp: Date.now()
+    }
+  });
+  assert.equal(gmRes.ok, true);
+  assert.equal(gmRes.value.status, "executed", "GM must be permitted to apply damage");
+
+  // Verify damage applied
+  const doc = (await env.domains.read(env.rawDoc.id)).value;
+  const facility = getDomainFacilitiesData(doc.record).facilities.find((f) => f.id === facilityId);
+  assert.equal(facility?.integrity?.current, 75, "Integrity must be reduced by 25");
+});
+
 

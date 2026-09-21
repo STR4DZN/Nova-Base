@@ -203,6 +203,24 @@ export function composeDomainManagerRuntime(
   const domainStore = options.domainStore ?? new FoundryDomainDocumentStore();
   const mutableDomainRepo: DomainRepositoryContract = new DomainRepository(domainStore);
 
+  // G2-AUD-008: Physical read-only facade for domains, preventing any mutable operations in runtime
+  const readOnlyDomains: DomainReadRepository = Object.freeze({
+    read: (id: string) => mutableDomainRepo.read(id),
+    load: (id: string) => mutableDomainRepo.load(id),
+    query: (query?: any) => mutableDomainRepo.query(query),
+    checkIntegrity: () => mutableDomainRepo.checkIntegrity(),
+    getIndex: () => {
+      const liveIndex = mutableDomainRepo.getIndex();
+      return Object.freeze({
+        get: (id: string) => liveIndex.get(id),
+        list: () => liveIndex.list(),
+        query: (q?: any) => liveIndex.query(q)
+      }) as any;
+    }
+  });
+
+  const people = new PeopleService(readOnlyDomains);
+
   const authority = options.authority ?? new FoundryPrimaryAuthorityAdapter();
   const lockManager = options.lockManager ?? new LockManager();
   const coordinator = new MutationCoordinator({ lockManager });
@@ -270,13 +288,16 @@ export function composeDomainManagerRuntime(
     projectRegistry,
     economyService,
     facilitiesService,
-    transactionStore
+    peopleService: people,
+    transactionStore,
+    recoveryService: recovery
   });
   const downtimeService = new DowntimeService({
     domains: mutableDomainRepo,
     downtimeRegistry,
     economyService,
-    facilitiesService
+    facilitiesService,
+    transactionStore
   });
 
   const registry = new CommandRegistry();
@@ -349,28 +370,12 @@ export function composeDomainManagerRuntime(
     rateLimiter
   });
 
-  // G2-AUD-008: Physical read-only facade for domains, preventing any mutable operations in runtime
-  const readOnlyDomains: DomainReadRepository = Object.freeze({
-    read: (id: string) => mutableDomainRepo.read(id),
-    load: (id: string) => mutableDomainRepo.load(id),
-    query: (query?: any) => mutableDomainRepo.query(query),
-    checkIntegrity: () => mutableDomainRepo.checkIntegrity(),
-    getIndex: () => {
-      const liveIndex = mutableDomainRepo.getIndex();
-      return Object.freeze({
-        get: (id: string) => liveIndex.get(id),
-        list: () => liveIndex.list(),
-        query: (q?: any) => liveIndex.query(q)
-      }) as any;
-    }
-  });
-
   // Wire canonical DomainControllerPolicy for the runtime
   const unregisterPolicy = registerDomainControllerPolicy((domainId, userId, context) => {
     return controllerProvider.isDomainController(domainId, userId, context);
   });
 
-  const people = new PeopleService(readOnlyDomains, { commandBus });
+  people.setCommandBus(commandBus);
   const repairTool = new PeopleRepairTool(commandBus);
 
   // G4-AUD-004: Public Economy API facade prevents raw mutable store access

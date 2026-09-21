@@ -91,7 +91,7 @@ export class RecoveryService {
    */
   async recoverTransaction(
     transactionId: string,
-    currentEpoch: number,
+    currentEpoch: number = 1,
     compensator?: TransactionCompensator
   ): Promise<Result<TransactionRecord, PublicError>> {
     const record = this.#transactionStore.get(transactionId);
