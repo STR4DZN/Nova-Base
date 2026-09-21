@@ -157,7 +157,7 @@ export async function executeProjectStartDomainOperationPlan(
     }
   }
 
-  // 1. Transaction preparation BEFORE child writes (G5-REVAL3-002)
+  // 1. Transaction preparation BEFORE child writes (G5-REVAL3-002, G5-REVAL4-001, G5-REVAL4-002)
   const txId = createOpaqueId("tx");
   const cmdId: CommandId = params.commandId
     ? (params.commandId.startsWith("cmd_") ? (params.commandId as CommandId) : (`cmd_${params.commandId}` as CommandId))
@@ -180,64 +180,80 @@ export async function executeProjectStartDomainOperationPlan(
       }
     });
     context.transactionStore.save(tx);
-    context.transactionStore.transition(txId, "claimed", epoch);
-    context.transactionStore.transition(txId, "prepared", epoch);
+    const claimRes = context.transactionStore.transition(txId, "claimed", epoch);
+    if (!claimRes.ok) return claimRes;
+    const prepRes = context.transactionStore.transition(txId, "prepared", epoch);
+    if (!prepRes.ok) return prepRes;
+
+    // G5-REVAL4-002: Flush transaction to durable storage BEFORE executing child writes
+    try {
+      await context.transactionStore.flush();
+    } catch (flushErr) {
+      context.transactionStore.transition(txId, "failed", epoch, "Persistence flush failed");
+      return err(
+        createPublicError({
+          code: "DM_DOMAIN_STORAGE_ERROR",
+          category: "internal",
+          message: `Failed to flush transaction preparation to storage: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+          details: flushErr
+        })
+      );
+    }
   }
 
   // Tracking for rollback / compensation on failure
   const debitedCosts: Array<{ resourceId: string; amountMinor: number }> = [];
   const createdReservationIds: string[] = [];
   let allocatedWorkforceReservationId: string | undefined;
+  let compensationFailed = false;
 
   // Compensation helper to cleanly roll back all prior child effects
   const compensate = async (reason: string) => {
     // 1. Release workforce reservation
     if (allocatedWorkforceReservationId && context.peopleService) {
-      try {
-        await context.peopleService.releaseWorkforceReservation({
-          domainUuid: cleanDomainUuid,
-          projectId: draftProject.id,
-          reservationId: allocatedWorkforceReservationId,
-          userId: params.userId
-        });
-      } catch {
-        // Suppress during rollback
+      const relWfRes = await context.peopleService.releaseWorkforceReservation({
+        domainUuid: cleanDomainUuid,
+        projectId: draftProject.id,
+        reservationId: allocatedWorkforceReservationId,
+        userId: params.userId
+      });
+      if (!relWfRes.ok) {
+        compensationFailed = true;
       }
     }
 
     // 2. Release economic reservations
     if (context.economyService) {
       for (const resId of createdReservationIds) {
-        try {
-          await context.economyService.releaseReservation({
-            domainUuid: cleanDomainUuid,
-            reservationId: resId,
-            reason: `Compensation: ${reason}`,
-            lockOwner: params.commandId
-          });
-        } catch {
-          // Suppress during rollback
+        const relRes = await context.economyService.releaseReservation({
+          domainUuid: cleanDomainUuid,
+          reservationId: resId,
+          reason: `Compensation: ${reason}`,
+          lockOwner: params.commandId
+        });
+        if (!relRes.ok) {
+          compensationFailed = true;
         }
       }
 
       // 3. Refund debited costs
       for (const cost of debitedCosts) {
-        try {
-          await context.economyService.commitAdjust({
-            domainUuid: cleanDomainUuid,
-            resourceId: cost.resourceId,
-            deltaMinor: cost.amountMinor,
-            reason: `Compensation refund: ${reason}`,
-            lockOwner: params.commandId
-          });
-        } catch {
-          // Suppress during rollback
+        const refundRes = await context.economyService.commitAdjust({
+          domainUuid: cleanDomainUuid,
+          resourceId: cost.resourceId,
+          deltaMinor: cost.amountMinor,
+          reason: `Compensation refund: ${reason}`,
+          lockOwner: params.commandId
+        });
+        if (!refundRes.ok) {
+          compensationFailed = true;
         }
       }
     }
 
     if (context.transactionStore) {
-      context.transactionStore.transition(txId, "failed", epoch, reason);
+      const targetState = compensationFailed ? "needs-recovery" : "failed";
+      context.transactionStore.transition(txId, targetState, epoch, reason);
     }
   };
 
@@ -289,13 +305,16 @@ export async function executeProjectStartDomainOperationPlan(
   }
 
   // Step 3: Allocate workforce reservation via People API (G5-REVAL3-001)
-  if (params.workforceRequired !== undefined && params.workforceRequired > 0) {
+  const wfRequired =
+    params.workforceRequired ??
+    (params.workforceAllocations?.reduce((sum, a) => sum + a.count, 0) ?? 0);
+  if (wfRequired > 0) {
     const peopleService = context.peopleService ?? new PeopleService(context.domains);
     const wfRes = await peopleService.allocateWorkforceReservation({
       domainUuid: cleanDomainUuid,
       projectId: draftProject.id,
-      amount: params.workforceRequired,
-      workforceTypeId: "general",
+      amount: wfRequired,
+      workforceTypeId: params.workforceAllocations?.[0]?.workforceTypeId ?? "general",
       userId: params.userId
     });
     if (!wfRes.ok) {
@@ -348,6 +367,14 @@ export async function executeProjectStartDomainOperationPlan(
     projects: Object.freeze([...freshProjectsData.projects, startedProject])
   });
 
+  if (context.transactionStore) {
+    const committingRes = context.transactionStore.transition(txId, "committing", epoch);
+    if (!committingRes.ok) {
+      await compensate(`transition to committing failed: ${committingRes.error.message}`);
+      return committingRes;
+    }
+  }
+
   const updateRes = await context.domains.update({
     ...freshDocRes.value,
     record: updatedRecord
@@ -359,8 +386,13 @@ export async function executeProjectStartDomainOperationPlan(
   }
 
   if (context.transactionStore) {
-    context.transactionStore.transition(txId, "committing", epoch);
-    context.transactionStore.transition(txId, "committed", epoch);
+    const committedRes = context.transactionStore.transition(txId, "committed", epoch);
+    if (!committedRes.ok) return committedRes;
+    try {
+      await context.transactionStore.flush();
+    } catch {
+      // already committed
+    }
   }
 
   return ok({ project: startedProject });

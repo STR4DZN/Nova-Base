@@ -31,6 +31,7 @@ import { createDefaultDomainFacilitiesData } from "../../src/facilities/facility
 import { createDefaultDomainDowntimeData } from "../../src/downtime/downtime-data.js";
 import {
   createDefaultDomainEconomyData,
+  tryGetDomainEconomyData,
   withDomainEconomyData
 } from "../../src/economy/economy-data.js";
 import { ProjectsService } from "../../src/projects/services/projects-service.js";
@@ -269,7 +270,9 @@ function setupTestEnvironment(record: DomainRecord = createInitialRecord()) {
   const facilitiesService = new FacilitiesService({
     domains,
     facilityRegistry,
-    economyService
+    economyService,
+    transactionStore,
+    recoveryService
   });
 
   const peopleService = new PeopleService(domains);
@@ -2370,5 +2373,550 @@ test("G5-REVAL3-006 (Fault 11): facilities:apply-damage rejects non-GM Domain Co
   const facility = getDomainFacilitiesData(doc.record).facilities.find((f) => f.id === facilityId);
   assert.equal(facility?.integrity?.current, 75, "Integrity must be reduced by 25");
 });
+
+// TEST 27: G5-REVAL4-001 (Fault 1): Downtime start transitions canonical lifecycle prepared -> committing -> committed
+test("G5-REVAL4-001 (Fault 1): Downtime start transitions canonical lifecycle prepared -> committing -> committed", async () => {
+  const env = setupTestEnvironment();
+  await env.economyService.commitAdjust({
+    domainUuid: env.rawDoc.uuid,
+    resourceId: "domain-manager:materials",
+    deltaMinor: 500,
+    reason: "Initial materials for downtime"
+  });
+
+  const startRes = await env.downtimeService.startActivity({
+    domainUuid: env.rawDoc.uuid,
+    definitionId: "domain-manager:crafting",
+    activityName: "Forging weapons",
+    duration: 5,
+    participants: [
+      { participantRef: "notable:blacksmith-1", participantType: "notable", role: "owner" }
+    ],
+    commandId: "cmd_dt_start_canonical"
+  });
+  checkOk(startRes, "Downtime start should succeed");
+
+  const tx = env.transactionStore.getByCommandId("cmd_dt_start_canonical" as any);
+  assert.ok(tx, "Transaction must exist in store");
+  assert.equal(tx.state, "committed", "Transaction must be committed");
+
+  const transitions = tx.history.map((h) => `${h.fromState}->${h.toState}`);
+  assert.deepEqual(transitions, [
+    "planned->claimed",
+    "claimed->prepared",
+    "prepared->committing",
+    "committing->committed"
+  ], "Canonical transitions must include prepared -> committing -> committed");
+});
+
+// TEST 28: G5-REVAL4-001 (Fault 2): Downtime resolution transitions canonical lifecycle prepared -> committing -> committed
+test("G5-REVAL4-001 (Fault 2): Downtime resolution transitions canonical lifecycle prepared -> committing -> committed", async () => {
+  const env = setupTestEnvironment();
+  await env.economyService.commitAdjust({
+    domainUuid: env.rawDoc.uuid,
+    resourceId: "domain-manager:materials",
+    deltaMinor: 500,
+    reason: "Initial materials for downtime"
+  });
+
+  const startRes = await env.downtimeService.startActivity({
+    domainUuid: env.rawDoc.uuid,
+    definitionId: "domain-manager:crafting",
+    activityName: "Forging shields",
+    duration: 1,
+    participants: [
+      { participantRef: "notable:blacksmith-1", participantType: "notable", role: "owner" }
+    ]
+  });
+  checkOk(startRes, "Start activity");
+
+  const compRes = await env.downtimeService.completeActivity({
+    domainUuid: env.rawDoc.uuid,
+    activityId: startRes.value.activity.id,
+    commandId: "cmd_dt_comp_canonical"
+  });
+  checkOk(compRes, "Complete activity");
+
+  const tx = env.transactionStore.getByCommandId("cmd_dt_comp_canonical" as any);
+  assert.ok(tx, "Resolution transaction must exist in store");
+  assert.equal(tx.state, "committed", "Transaction must be committed");
+
+  const transitions = tx.history.map((h) => `${h.fromState}->${h.toState}`);
+  assert.deepEqual(transitions, [
+    "planned->claimed",
+    "claimed->prepared",
+    "prepared->committing",
+    "committing->committed"
+  ], "Canonical transitions must include prepared -> committing -> committed");
+});
+
+// TEST 29: G5-REVAL4-002 (Fault 3): Flush failure immediately after prepared aborts without child writes
+test("G5-REVAL4-002 (Fault 3): Flush failure immediately after prepared aborts without child writes", async () => {
+  const env = setupTestEnvironment();
+  await env.economyService.commitAdjust({
+    domainUuid: env.rawDoc.uuid,
+    resourceId: "domain-manager:materials",
+    deltaMinor: 500,
+    reason: "Initial materials"
+  });
+
+  const originalFlush = env.transactionStore.flush.bind(env.transactionStore);
+  env.transactionStore.flush = async () => {
+    throw new Error("Simulated storage write error during prepare flush");
+  };
+
+  const startRes = await env.downtimeService.startActivity({
+    domainUuid: env.rawDoc.uuid,
+    definitionId: "domain-manager:crafting",
+    activityName: "Aborted activity",
+    duration: 5,
+    participants: [
+      { participantRef: "notable:blacksmith-1", participantType: "notable", role: "owner" }
+    ],
+    commandId: "cmd_dt_flush_fail"
+  });
+
+  assert.equal(startRes.ok, false);
+  assert.equal(startRes.error.code, "DM_DOMAIN_STORAGE_ERROR");
+
+  env.transactionStore.flush = originalFlush;
+
+  // Domain must NOT have been mutated
+  const doc = (await env.domains.read(env.rawDoc.id)).value;
+  const downtimeData = getDomainDowntimeData(doc.record);
+  assert.equal(downtimeData.activities.length, 0, "No activities must be added on prepare flush failure");
+
+  const tx = env.transactionStore.getByCommandId("cmd_dt_flush_fail" as any);
+  assert.ok(tx);
+  assert.equal(tx.state, "failed", "Transaction must transition to failed on prepare flush failure");
+});
+
+// TEST 30: G5-REVAL4-003 (Fault 4): Failed compensation transitions transaction to needs-recovery
+test("G5-REVAL4-003 (Fault 4): Failed compensation transitions transaction to needs-recovery", async () => {
+  const env = setupTestEnvironment();
+  await env.economyService.commitAdjust({
+    domainUuid: env.rawDoc.uuid,
+    resourceId: "domain-manager:materials",
+    deltaMinor: 500,
+    reason: "Initial materials"
+  });
+
+  const facRes = await env.facilitiesService.createFacility({
+    domainUuid: env.rawDoc.uuid,
+    definitionId: "domain-manager:storehouse",
+    name: "Test Facility for compensation failure"
+  });
+  checkOk(facRes, "Create facility");
+  const facilityId = facRes.value.facility.id;
+
+  // Inject failure in domain save after maintenance debits
+  let debitSaveDone = false;
+  const originalSave = env.domains.save.bind(env.domains);
+  env.domains.save = async (params) => {
+    if (!debitSaveDone) {
+      debitSaveDone = true;
+      return originalSave(params);
+    }
+    return err(createPublicError({
+      code: "DM_DOMAIN_SAVE_FAILED",
+      category: "storage",
+      message: "Simulated save failure during maintenance commit"
+    }));
+  };
+
+  // Inject failure in commitAdjust during compensation (refund)
+  const originalCommitAdjust = env.economyService.commitAdjust.bind(env.economyService);
+  env.economyService.commitAdjust = async (params) => {
+    if (params.deltaMinor !== undefined && params.deltaMinor > 0 && params.reason.startsWith("Compensation:")) {
+      return err(createPublicError({
+        code: "DM_ECONOMY_ADJUST_FAILED",
+        category: "internal",
+        message: "Simulated compensation failure"
+      }));
+    }
+    return originalCommitAdjust(params);
+  };
+
+  const maintRes = await env.facilitiesService.maintainFacility({
+    domainUuid: env.rawDoc.uuid,
+    facilityId,
+    commandId: "cmd_fac_comp_fail"
+  });
+  assert.equal(maintRes.ok, false);
+
+  env.domains.save = originalSave;
+  env.economyService.commitAdjust = originalCommitAdjust;
+
+  const tx = env.transactionStore.getByCommandId("cmd_fac_comp_fail" as any);
+  assert.ok(tx);
+  assert.equal(tx.state, "needs-recovery", "Transaction must end in needs-recovery when compensation fails");
+});
+
+// TEST 31: G5-REVAL4-004 (Fault 5): Recovery execution with recovery_<txId> lockOwner avoids self-deadlock
+test("G5-REVAL4-004 (Fault 5): Recovery execution with recovery_<txId> lockOwner avoids self-deadlock", async () => {
+  const env = setupTestEnvironment();
+  await env.economyService.commitAdjust({
+    domainUuid: env.rawDoc.uuid,
+    resourceId: "domain-manager:materials",
+    deltaMinor: 500,
+    reason: "Initial materials"
+  });
+
+  const facRes = await env.facilitiesService.createFacility({
+    domainUuid: env.rawDoc.uuid,
+    definitionId: "domain-manager:storehouse",
+    name: "Storehouse for recovery deadlock test"
+  });
+  checkOk(facRes, "Create facility");
+  const facilityId = facRes.value.facility.id;
+
+  const txId = createOpaqueId("tx");
+  const cmdId = createCommandId();
+  const txRecord = createTransactionRecord({
+    transactionId: txId,
+    commandId: cmdId,
+    authorityEpoch: 1,
+    lockKeys: [`domain:${normalizeJournalEntryId(env.rawDoc.uuid)}`, `facility:${facilityId}`],
+    recoveryData: {
+      type: "facilities:maintenance",
+      facilityId,
+      domainUuid: normalizeJournalEntryId(env.rawDoc.uuid),
+      debitedCosts: [{ resourceId: "domain-manager:materials", amount: 10 }],
+      authorityEpoch: 1,
+      status: "executing"
+    }
+  });
+  env.transactionStore.save(txRecord);
+  env.transactionStore.transition(txId, "claimed", 1);
+  env.transactionStore.transition(txId, "prepared", 1);
+  env.transactionStore.transition(txId, "needs-recovery", 1, "Simulated crash");
+
+  const scanRecords = await env.recoveryService.scanOnStartup(1);
+  assert.equal(scanRecords.length, 1, "Must find 1 unresolved transaction");
+
+  const recRes = await env.recoveryService.recoverTransaction(txId, 1);
+  checkOk(recRes, "Recovery should succeed under recovery_<txId> lock");
+
+  const recoveredTx = env.transactionStore.get(txId);
+  assert.equal(recoveredTx?.state, "compensated", "Transaction must be marked compensated");
+});
+
+// TEST 32: G5-REVAL4-005 (Fault 6): Partial failure during recovery compensation preserves needs-recovery state
+test("G5-REVAL4-005 (Fault 6): Partial failure during recovery compensation preserves needs-recovery state", async () => {
+  const env = setupTestEnvironment();
+  const txId = createOpaqueId("tx");
+  const cmdId = createCommandId();
+  const txRecord = createTransactionRecord({
+    transactionId: txId,
+    commandId: cmdId,
+    authorityEpoch: 1,
+    lockKeys: [`domain:${normalizeJournalEntryId(env.rawDoc.uuid)}`],
+    recoveryData: {
+      type: "facilities:maintenance",
+      facilityId: "fac-123",
+      domainUuid: normalizeJournalEntryId(env.rawDoc.uuid),
+      debitedCosts: [{ resourceId: "domain-manager:materials", amount: 20 }],
+      authorityEpoch: 1,
+      status: "executing"
+    }
+  });
+  env.transactionStore.save(txRecord);
+  env.transactionStore.transition(txId, "claimed", 1);
+  env.transactionStore.transition(txId, "prepared", 1);
+  env.transactionStore.transition(txId, "needs-recovery", 1, "Simulated crash");
+
+  const originalAdjust = env.economyService.commitAdjust.bind(env.economyService);
+  env.economyService.commitAdjust = async () => {
+    return err(createPublicError({
+      code: "DM_RECOVERY_ADJUST_FAILED",
+      category: "internal",
+      message: "Database connection failed during recovery"
+    }));
+  };
+
+  const recRes = await env.recoveryService.recoverTransaction(txId);
+  assert.equal(recRes.ok, false);
+
+  env.economyService.commitAdjust = originalAdjust;
+
+  const currentTx = env.transactionStore.get(txId);
+  assert.equal(currentTx?.state, "needs-recovery", "Transaction must remain in needs-recovery after failed recovery attempt");
+});
+
+// TEST 33: G5-REVAL4-006 (Fault 7): Project completion recovery restores consumed economic reservations and released workforce
+test("G5-REVAL4-006 (Fault 7): Project completion recovery restores consumed economic reservations and released workforce", async () => {
+  const env = setupTestEnvironment();
+  await env.economyService.commitAdjust({
+    domainUuid: env.rawDoc.uuid,
+    resourceId: "domain-manager:materials",
+    deltaMinor: 500,
+    reason: "Initial materials for project"
+  });
+
+  const startRes = await env.projectsService.startProject({
+    domainUuid: env.rawDoc.uuid,
+    definitionId: "domain-manager:fortified-gate",
+    name: "Gate Alpha",
+    workforceRequired: 2
+  });
+  checkOk(startRes, "Project start");
+  const project = startRes.value.project;
+
+  const advRes = await env.projectsService.advanceProject({
+    domainUuid: env.rawDoc.uuid,
+    projectId: project.id,
+    delta: 100
+  });
+  checkOk(advRes, "Advance project");
+
+  const compRes = await env.projectsService.completeProject({
+    domainUuid: env.rawDoc.uuid,
+    projectId: project.id,
+    commandId: "cmd_complete_for_rec"
+  });
+  checkOk(compRes, "Complete project");
+
+  const tx = env.transactionStore.getByCommandId("cmd_complete_for_rec" as any);
+  assert.ok(tx);
+  const recoveryData = tx.recoveryData as any;
+  assert.ok(recoveryData.consumedReservationSnapshots?.length > 0, "Must have snapshotted consumed economic reservation");
+  assert.ok(recoveryData.releasedWorkforceSnapshots?.length > 0, "Must have snapshotted released workforce reservation");
+
+  // Re-create as needs-recovery transaction with the snapshot data to test recovery execution
+  const recTxId = createOpaqueId("tx");
+  const recTx = createTransactionRecord({
+    transactionId: recTxId,
+    commandId: createCommandId(),
+    authorityEpoch: 1,
+    lockKeys: tx.lockKeys,
+    recoveryData: tx.recoveryData
+  });
+  env.transactionStore.save(recTx);
+  env.transactionStore.transition(recTxId, "claimed", 1);
+  env.transactionStore.transition(recTxId, "prepared", 1);
+  env.transactionStore.transition(recTxId, "needs-recovery", 1, "Simulated crash after completion");
+
+  const recRes = await env.recoveryService.recoverTransaction(recTxId);
+  checkOk(recRes, "Recovery should succeed");
+
+  const resSnapshot = recoveryData.consumedReservationSnapshots[0].reservation;
+  const restoredRes = env.economyService.getReservation(resSnapshot.id);
+  assert.equal(restoredRes?.status, "active", "Economic reservation must be restored to active");
+
+  const doc = (await env.domains.read(env.rawDoc.id)).value;
+  const peopleData = getDomainPeopleData(doc.record);
+  const wfRes = peopleData.reservations.find((r) => r.id === recoveryData.releasedWorkforceSnapshots[0].reservationId);
+  assert.equal(wfRes?.status, "active", "Workforce reservation must be restored to active");
+});
+
+// TEST 34: G5-REVAL4-007 (Fault 8): Project advance atomic plan refunds progressive costs on save failure
+test("G5-REVAL4-007 (Fault 8): Project advance atomic plan refunds progressive costs on save failure", async () => {
+  const env = setupTestEnvironment();
+  env.projectRegistry.register({
+    id: "domain-manager:long-canal",
+    version: 1,
+    label: "Long Canal",
+    tags: ["civil"],
+    progressResolverId: "domain-manager:standard",
+    defaultWorkRequired: 100,
+    requirements: [],
+    costs: [
+      { resourceId: "domain-manager:materials", amountMinor: 100, timing: "progressive" }
+    ],
+    rewards: []
+  });
+
+  await env.economyService.commitAdjust({
+    domainUuid: env.rawDoc.uuid,
+    resourceId: "domain-manager:materials",
+    deltaMinor: 500,
+    reason: "Initial materials for canal"
+  });
+
+  const startRes = await env.projectsService.startProject({
+    domainUuid: env.rawDoc.uuid,
+    definitionId: "domain-manager:long-canal",
+    name: "Great Canal"
+  });
+  checkOk(startRes, "Start canal project");
+  const projectId = startRes.value.project.id;
+
+  const docBefore = (await env.domains.read(env.rawDoc.id)).value;
+  const econBefore = tryGetDomainEconomyData(docBefore.record).value;
+  const balanceBefore = econBefore.accounts.find((a) => a.resourceId === "domain-manager:materials")!.balanceMinor;
+
+  const originalSave = env.domains.save.bind(env.domains);
+  env.domains.save = async () => {
+    return err(createPublicError({
+      code: "DM_DOMAIN_SAVE_FAILED",
+      category: "storage",
+      message: "Simulated save failure during advance"
+    }));
+  };
+
+  const advRes = await env.projectsService.advanceProject({
+    domainUuid: env.rawDoc.uuid,
+    projectId,
+    delta: 50,
+    commandId: "cmd_adv_save_fail"
+  });
+  assert.equal(advRes.ok, false);
+
+  env.domains.save = originalSave;
+
+  const docAfter = (await env.domains.read(env.rawDoc.id)).value;
+  const econAfter = tryGetDomainEconomyData(docAfter.record).value;
+  const balanceAfter = econAfter.accounts.find((a) => a.resourceId === "domain-manager:materials")!.balanceMinor;
+  assert.equal(balanceAfter, balanceBefore, "Progressive cost must be completely refunded on save failure");
+
+  const tx = env.transactionStore.getByCommandId("cmd_adv_save_fail" as any);
+  assert.ok(tx);
+  assert.equal(tx.state, "failed", "Transaction must be marked failed after successful compensation");
+});
+
+// TEST 35: G5-REVAL4-008 (Fault 9): Project cancel atomic plan restores reservations and workforce on save failure
+test("G5-REVAL4-008 (Fault 9): Project cancel atomic plan restores reservations and workforce on save failure", async () => {
+  const env = setupTestEnvironment();
+  await env.economyService.commitAdjust({
+    domainUuid: env.rawDoc.uuid,
+    resourceId: "domain-manager:materials",
+    deltaMinor: 500,
+    reason: "Initial materials"
+  });
+
+  const startRes = await env.projectsService.startProject({
+    domainUuid: env.rawDoc.uuid,
+    definitionId: "domain-manager:fortified-gate",
+    name: "Gate for cancel test",
+    workforceRequired: 2
+  });
+  checkOk(startRes, "Project start");
+  const projectId = startRes.value.project.id;
+
+  const originalSave = env.domains.save.bind(env.domains);
+  env.domains.save = async () => {
+    return err(createPublicError({
+      code: "DM_DOMAIN_SAVE_FAILED",
+      category: "storage",
+      message: "Simulated save failure during cancel"
+    }));
+  };
+
+  const cancelRes = await env.projectsService.cancelProject({
+    domainUuid: env.rawDoc.uuid,
+    projectId,
+    commandId: "cmd_cancel_save_fail"
+  });
+  assert.equal(cancelRes.ok, false);
+
+  env.domains.save = originalSave;
+
+  const doc = (await env.domains.read(env.rawDoc.id)).value;
+  const peopleData = getDomainPeopleData(doc.record);
+  const wfRes = peopleData.reservations.find((r) => r.targetRef === `project:${projectId}`);
+  assert.equal(wfRes?.status, "active", "Workforce reservation must remain active after cancel failure");
+
+  const tx = env.transactionStore.getByCommandId("cmd_cancel_save_fail" as any);
+  assert.ok(tx);
+  assert.equal(tx.state, "failed", "Transaction must be marked failed after successful restoration");
+});
+
+// TEST 36: G5-REVAL4-009 & G5-REVAL4-010 (Fault 10): Downtime auto-complete forwards execution context; Facilities maintenance & repair write transactions with recovery
+test("G5-REVAL4-009 & G5-REVAL4-010 (Fault 10): Downtime auto-complete forwards execution context; Facilities maintenance & repair write transactions with recovery", async () => {
+  const env = setupTestEnvironment();
+  await env.economyService.commitAdjust({
+    domainUuid: env.rawDoc.uuid,
+    resourceId: "domain-manager:materials",
+    deltaMinor: 500,
+    reason: "Initial materials"
+  });
+
+  // 1. Downtime auto-complete context forwarding
+  const startDtRes = await env.downtimeService.startActivity({
+    domainUuid: env.rawDoc.uuid,
+    definitionId: "domain-manager:crafting",
+    label: "Short craft",
+    durationTicks: 2,
+    participants: [
+      { participantRef: "notable:blacksmith-1", participantType: "notable", role: "owner" }
+    ]
+  });
+  checkOk(startDtRes, "Start short downtime");
+  const activityId = startDtRes.value.activity.id;
+
+  const advDtRes = await env.downtimeService.advanceActivity({
+    domainUuid: env.rawDoc.uuid,
+    activityId,
+    ticks: 2,
+    commandId: "cmd_dt_auto_comp_1",
+    authorityEpoch: 4,
+    correlationId: "corr_auto_1",
+    causationId: "caus_auto_1"
+  });
+  checkOk(advDtRes, "Advance short downtime to completion");
+
+  const dtResTx = env.transactionStore.getByCommandId("cmd_dt_auto_comp_1" as any);
+  assert.ok(dtResTx, "Resolution transaction must exist with forwarded commandId");
+  assert.equal(dtResTx.authorityEpoch, 4, "Resolution transaction must preserve forwarded authorityEpoch");
+
+  // 2. Facilities maintenance writes TransactionRecord
+  const facRes = await env.facilitiesService.createFacility({
+    domainUuid: env.rawDoc.uuid,
+    definitionId: "domain-manager:storehouse",
+    name: "Storehouse for transactional test"
+  });
+  checkOk(facRes, "Create facility");
+  const facilityId = facRes.value.facility.id;
+
+  const maintRes = await env.facilitiesService.maintainFacility({
+    domainUuid: env.rawDoc.uuid,
+    facilityId,
+    commandId: "cmd_maint_tx_1",
+    authorityEpoch: 2
+  });
+  checkOk(maintRes, "Maintain facility");
+
+  const maintTx = env.transactionStore.getByCommandId("cmd_maint_tx_1" as any);
+  assert.ok(maintTx, "Maintenance transaction must be stored");
+  assert.equal(maintTx.state, "committed");
+  assert.equal(maintTx.authorityEpoch, 2);
+  const maintHistory = maintTx.history.map((h) => `${h.fromState}->${h.toState}`);
+  assert.deepEqual(maintHistory, [
+    "planned->claimed",
+    "claimed->prepared",
+    "prepared->committing",
+    "committing->committed"
+  ]);
+
+  // 3. Facilities repair writes TransactionRecord
+  await env.facilitiesService.applyDamage({
+    domainUuid: env.rawDoc.uuid,
+    facilityId,
+    damage: 10,
+    reason: "Wear and tear"
+  });
+
+  const repRes = await env.facilitiesService.repairFacility({
+    domainUuid: env.rawDoc.uuid,
+    facilityId,
+    restoreIntegrity: 10,
+    commandId: "cmd_repair_tx_1",
+    authorityEpoch: 3
+  });
+  checkOk(repRes, "Repair facility");
+
+  const repTx = env.transactionStore.getByCommandId("cmd_repair_tx_1" as any);
+  assert.ok(repTx, "Repair transaction must be stored");
+  assert.equal(repTx.state, "committed");
+  assert.equal(repTx.authorityEpoch, 3);
+  const repHistory = repTx.history.map((h) => `${h.fromState}->${h.toState}`);
+  assert.deepEqual(repHistory, [
+    "planned->claimed",
+    "claimed->prepared",
+    "prepared->committing",
+    "committing->committed"
+  ]);
+});
+
 
 

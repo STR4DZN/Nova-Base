@@ -14,6 +14,7 @@ import {
   type SideEffectHandler
 } from "./project-completion-plan-service.js";
 import type { ChildReceipt } from "./project-plan-types.js";
+import type { Reservation } from "../../economy/reservations/reservation-types.js";
 import type { EconomyService } from "../../economy/services/economy-service.js";
 import type { FacilitiesService } from "../../facilities/services/facilities-service.js";
 import type { PublicPeopleApi } from "../../people/services/people-service.js";
@@ -51,6 +52,8 @@ export interface ProjectCompletionRecoveryData {
   readonly debitedCostRefs: readonly { resourceId: string; amountMinor: number }[];
   readonly creditedResourceRefs: readonly { resourceId: string; amountMinor: number }[];
   readonly consumedReservationIds: readonly string[];
+  readonly consumedReservationSnapshots?: readonly { reservation: Reservation; consumedAmount: number }[];
+  readonly releasedWorkforceSnapshots?: readonly { reservationId: string; amount: number; workforceTypeId: string }[];
   readonly authorityEpoch: number;
   readonly correlationId?: string;
   readonly causationId?: string;
@@ -139,6 +142,8 @@ export async function executeProjectCompletionDomainOperationPlan(
   const debitedCostRefs: Array<{ resourceId: string; amountMinor: number }> = [];
   const creditedResourceRefs: Array<{ resourceId: string; amountMinor: number }> = [];
   const consumedReservationIds: string[] = [];
+  const consumedReservationSnapshots: Array<{ reservation: Reservation; consumedAmount: number }> = [];
+  const releasedWorkforceSnapshots: Array<{ reservationId: string; amount: number; workforceTypeId: string }> = [];
 
   const buildRecoveryData = (status: ProjectCompletionRecoveryData["status"]): ProjectCompletionRecoveryData => ({
     type: "projects:completion",
@@ -150,6 +155,8 @@ export async function executeProjectCompletionDomainOperationPlan(
     debitedCostRefs: Object.freeze([...debitedCostRefs]),
     creditedResourceRefs: Object.freeze([...creditedResourceRefs]),
     consumedReservationIds: Object.freeze([...consumedReservationIds]),
+    consumedReservationSnapshots: Object.freeze([...consumedReservationSnapshots]),
+    releasedWorkforceSnapshots: Object.freeze([...releasedWorkforceSnapshots]),
     authorityEpoch: epoch,
     correlationId: params.correlationId,
     causationId: params.causationId,
@@ -166,8 +173,25 @@ export async function executeProjectCompletionDomainOperationPlan(
       recoveryData: buildRecoveryData("prepared")
     });
     context.transactionStore.save(tx);
-    context.transactionStore.transition(txId, "claimed", epoch);
-    context.transactionStore.transition(txId, "prepared", epoch);
+    const claimRes = context.transactionStore.transition(txId, "claimed", epoch);
+    if (!claimRes.ok) return claimRes;
+    const prepRes = context.transactionStore.transition(txId, "prepared", epoch);
+    if (!prepRes.ok) return prepRes;
+
+    // G5-REVAL4-002: Flush transaction to durable storage BEFORE executing child writes
+    try {
+      await context.transactionStore.flush();
+    } catch (flushErr) {
+      context.transactionStore.transition(txId, "failed", epoch, "Persistence flush failed");
+      return err(
+        createPublicError({
+          code: "DM_DOMAIN_STORAGE_ERROR",
+          category: "internal",
+          message: `Failed to flush transaction preparation to storage: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+          details: flushErr
+        })
+      );
+    }
   }
 
   // 2. Execute onCompletion costs with fail-closed validation (G5-REVAL2-003, G5-REVAL3-002)
@@ -220,10 +244,12 @@ export async function executeProjectCompletionDomainOperationPlan(
     for (const resId of activeReservations) {
       const resObj = context.economyService.getReservation(resId);
       if (resObj && (resObj.status === "active" || resObj.status === "partially-consumed")) {
+        const consumedAmount = resObj.remainingAmountMinor;
+        const snapshotCopy: Reservation = { ...resObj };
         const consumeRes = await context.economyService.consumeReservation({
           domainUuid: cleanDomainUuid,
           reservationId: resId,
-          amountMinor: resObj.remainingAmountMinor,
+          amountMinor: consumedAmount,
           reason: `Project ${project.name} completed`,
           lockOwner: params.commandId
         });
@@ -246,12 +272,33 @@ export async function executeProjectCompletionDomainOperationPlan(
           );
         }
         consumedReservationIds.push(resId);
+        consumedReservationSnapshots.push({ reservation: snapshotCopy, consumedAmount });
+        if (context.transactionStore) {
+          const tx = context.transactionStore.get(txId);
+          if (tx) {
+            context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
+          }
+        }
       }
     }
   }
 
-  // 4. Release workforce reservations via People API (G5-REVAL3-001, G5-REVAL3-003)
+  // 4. Release workforce reservations via People API (G5-REVAL3-001, G5-REVAL3-003, G5-REVAL4-006)
   if (context.peopleService) {
+    if ("getReservations" in context.peopleService) {
+      const pRes = await context.peopleService.getReservations(cleanDomainUuid);
+      if (pRes.ok) {
+        for (const r of pRes.value) {
+          if (r.targetRef === `project:${project.id}` && r.status === "active") {
+            releasedWorkforceSnapshots.push({
+              reservationId: r.id,
+              amount: r.amount,
+              workforceTypeId: r.workforceTypeId
+            });
+          }
+        }
+      }
+    }
     const wfRelRes = await context.peopleService.releaseWorkforceReservation({
       domainUuid: cleanDomainUuid,
       projectId: project.id,
@@ -259,6 +306,11 @@ export async function executeProjectCompletionDomainOperationPlan(
     });
     if (!wfRelRes.ok) {
       // Non-fatal if domain doesn't track workforce reservations, but log if error
+    } else if (releasedWorkforceSnapshots.length > 0 && context.transactionStore) {
+      const tx = context.transactionStore.get(txId);
+      if (tx) {
+        context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
+      }
     }
   }
 
@@ -495,23 +547,14 @@ export async function executeProjectCompletionDomainOperationPlan(
 
   const completedProject = commitRes.value.updatedProject;
 
-  // Release workforce reservation via public People API if configured (G5-REVAL2-009, G5-REVAL3-001)
-  if (context.peopleService) {
-    const releaseWfRes = await context.peopleService.releaseWorkforceReservation({
-      domainUuid: cleanDomainUuid,
-      projectId: project.id,
-      userId: params.userId
-    });
-    if (!releaseWfRes.ok) {
-      // Non-fatal for completion persistence, but flag for transaction audit
-      partialFailure = true;
-    }
-  }
-
   // Re-read fresh document AFTER child effects and workforce release to avoid revision collision
   const freshDocRes = await context.domains.read(cleanDomainUuid);
   if (!freshDocRes.ok) {
     if (context.transactionStore) {
+      const tx = context.transactionStore.get(txId);
+      if (tx) {
+        context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("needs-recovery") });
+      }
       context.transactionStore.transition(txId, "needs-recovery", epoch, freshDocRes.error.message);
     }
     return freshDocRes;
@@ -528,6 +571,18 @@ export async function executeProjectCompletionDomainOperationPlan(
     projects: Object.freeze(updatedProjects)
   });
 
+  if (context.transactionStore) {
+    const committingRes = context.transactionStore.transition(txId, "committing", epoch);
+    if (!committingRes.ok) {
+      const tx = context.transactionStore.get(txId);
+      if (tx) {
+        context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("needs-recovery") });
+      }
+      context.transactionStore.transition(txId, "needs-recovery", epoch, committingRes.error.message);
+      return committingRes;
+    }
+  }
+
   const updateRes = await context.domains.save({
     ...freshDocRes.value,
     record: updatedRecord
@@ -535,6 +590,10 @@ export async function executeProjectCompletionDomainOperationPlan(
 
   if (!updateRes.ok) {
     if (context.transactionStore) {
+      const tx = context.transactionStore.get(txId);
+      if (tx) {
+        context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("needs-recovery") });
+      }
       context.transactionStore.transition(txId, "needs-recovery", epoch, updateRes.error.message);
     }
     return updateRes;
@@ -543,6 +602,10 @@ export async function executeProjectCompletionDomainOperationPlan(
   // Final transaction state: needs-recovery if any partial failure occurred, else committed
   if (context.transactionStore) {
     if (partialFailure) {
+      const tx = context.transactionStore.get(txId);
+      if (tx) {
+        context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("needs-recovery") });
+      }
       context.transactionStore.transition(
         txId,
         "needs-recovery",
@@ -550,8 +613,13 @@ export async function executeProjectCompletionDomainOperationPlan(
         "Project completed with one or more child side effect failures"
       );
     } else {
-      context.transactionStore.transition(txId, "committing", epoch);
-      context.transactionStore.transition(txId, "committed", epoch);
+      const committedRes = context.transactionStore.transition(txId, "committed", epoch);
+      if (!committedRes.ok) return committedRes;
+      try {
+        await context.transactionStore.flush();
+      } catch {
+        // already committed
+      }
     }
   }
 

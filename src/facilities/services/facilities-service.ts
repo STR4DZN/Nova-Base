@@ -28,11 +28,17 @@ import {
 } from "../plans/facility-repair-plan-service.js";
 import type { EconomyService } from "../../economy/services/economy-service.js";
 import { tryGetDomainEconomyData } from "../../economy/economy-data.js";
+import type { TransactionStore } from "../../mutations/transaction-store.js";
+import { createTransactionRecord } from "../../mutations/transaction-record.js";
+import type { RecoveryService } from "../../mutations/recovery-service.js";
+import { createCommandId, type CommandId } from "../../commands/command-envelope.js";
 
 export interface FacilitiesServiceOptions {
   readonly domains: DomainRepositoryContract;
   readonly facilityRegistry?: FacilityDefinitionRegistry;
   readonly economyService?: EconomyService;
+  readonly transactionStore?: TransactionStore;
+  readonly recoveryService?: RecoveryService;
 }
 
 export interface CreateFacilityParams {
@@ -88,15 +94,33 @@ export interface ApplyDamageParams {
   readonly authorityEpoch?: number;
 }
 
+export interface FacilityOperationRecoveryData {
+  readonly type: "facilities:maintenance" | "facilities:repair";
+  readonly facilityId: string;
+  readonly domainUuid: string;
+  readonly debitedCosts: readonly { readonly resourceId: string; readonly amount: number }[];
+  readonly authorityEpoch: number;
+  readonly correlationId?: string;
+  readonly causationId?: string;
+  readonly status: "prepared" | "executing" | "completed" | "needs-recovery" | "failed";
+}
+
 export class FacilitiesService {
   readonly #domains: DomainRepositoryContract;
   readonly #facilityRegistry: FacilityDefinitionRegistry;
   readonly #economyService?: EconomyService;
+  readonly #transactionStore?: TransactionStore;
+  readonly #recoveryService?: RecoveryService;
 
   constructor(options: FacilitiesServiceOptions) {
     this.#domains = options.domains;
     this.#facilityRegistry = options.facilityRegistry ?? createDefaultFacilityRegistry();
     this.#economyService = options.economyService;
+    this.#transactionStore = options.transactionStore;
+    this.#recoveryService = options.recoveryService;
+    if (this.#recoveryService) {
+      this.registerRecoveryCompensators(this.#recoveryService);
+    }
   }
 
   #cleanId(idOrUuid: string): string {
@@ -273,18 +297,71 @@ export class FacilitiesService {
       );
     }
 
-    // Debit maintenance costs via economy service if configured with explicit rollback (G5-REVAL-009, G5-REVAL3-002)
+    // 1. Transaction preparation BEFORE child writes (G5-REVAL4-002, G5-REVAL4-010)
+    const txId = createOpaqueId("tx");
+    const cmdId: CommandId = params.commandId
+      ? (params.commandId.startsWith("cmd_") ? (params.commandId as CommandId) : (`cmd_${params.commandId}` as CommandId))
+      : createCommandId();
+    const epoch = params.authorityEpoch ?? 1;
+
     const debitedCosts: { resourceId: string; amount: number }[] = [];
+
+    const buildRecoveryData = (status: FacilityOperationRecoveryData["status"]): FacilityOperationRecoveryData => ({
+      type: "facilities:maintenance",
+      facilityId: facility.id,
+      domainUuid: cleanDomainUuid,
+      debitedCosts: Object.freeze([...debitedCosts]),
+      authorityEpoch: epoch,
+      correlationId: params.correlationId,
+      causationId: params.causationId,
+      status
+    });
+
+    if (this.#transactionStore) {
+      const tx = createTransactionRecord({
+        transactionId: txId,
+        commandId: cmdId,
+        authorityEpoch: epoch,
+        lockKeys: [`domain:${cleanDomainUuid}`, `facility:${facility.id}`],
+        safeAutoRecovery: false,
+        recoveryData: buildRecoveryData("prepared")
+      });
+      this.#transactionStore.save(tx);
+      const claimRes = this.#transactionStore.transition(txId, "claimed", epoch);
+      if (!claimRes.ok) return claimRes;
+      const prepRes = this.#transactionStore.transition(txId, "prepared", epoch);
+      if (!prepRes.ok) return prepRes;
+
+      // G5-REVAL4-002: Durable flush barrier BEFORE child mutations
+      try {
+        await this.#transactionStore.flush();
+      } catch (flushErr) {
+        this.#transactionStore.transition(txId, "failed", epoch, "Persistence flush failed");
+        return err(
+          createPublicError({
+            code: "DM_DOMAIN_STORAGE_ERROR",
+            category: "internal",
+            message: `Failed to flush transaction preparation to storage: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+            details: flushErr
+          })
+        );
+      }
+    }
+
+    let compensationFailed = false;
     const compensateDebits = async (reason: string) => {
       if (!this.#economyService || debitedCosts.length === 0) return;
       for (const cost of debitedCosts) {
-        await this.#economyService.commitAdjust({
+        const refundRes = await this.#economyService.commitAdjust({
           domainUuid: cleanDomainUuid,
           resourceId: cost.resourceId,
           deltaMinor: cost.amount,
           reason: `Compensation: ${reason}`,
           lockOwner: params.commandId
         });
+        if (!refundRes.ok) {
+          compensationFailed = true;
+        }
       }
     };
 
@@ -299,9 +376,19 @@ export class FacilitiesService {
         });
         if (!debitRes.ok) {
           await compensateDebits(`maintenance cost debit failed for facility '${facility.name}'`);
+          if (this.#transactionStore) {
+            const targetState = compensationFailed ? "needs-recovery" : "failed";
+            this.#transactionStore.transition(txId, targetState, epoch, debitRes.error.message);
+          }
           return debitRes;
         }
         debitedCosts.push({ resourceId: cost.resourceId, amount: cost.amount });
+        if (this.#transactionStore) {
+          const tx = this.#transactionStore.get(txId);
+          if (tx) {
+            this.#transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
+          }
+        }
       }
     }
 
@@ -312,6 +399,10 @@ export class FacilitiesService {
     });
     if (!commitRes.ok) {
       await compensateDebits(`maintenance commit failed for facility '${facility.name}'`);
+      if (this.#transactionStore) {
+        const targetState = compensationFailed ? "needs-recovery" : "failed";
+        this.#transactionStore.transition(txId, targetState, epoch, commitRes.error.message);
+      }
       return commitRes;
     }
 
@@ -321,6 +412,10 @@ export class FacilitiesService {
     const freshDocRes = await this.#domains.read(cleanDomainUuid);
     if (!freshDocRes.ok) {
       await compensateDebits(`domain read failed after maintenance costs for facility '${facility.name}'`);
+      if (this.#transactionStore) {
+        const targetState = compensationFailed ? "needs-recovery" : "failed";
+        this.#transactionStore.transition(txId, targetState, epoch, freshDocRes.error.message);
+      }
       return freshDocRes;
     }
 
@@ -334,13 +429,39 @@ export class FacilitiesService {
       facilities: Object.freeze(updatedFacilities)
     });
 
+    // Transition to committing before save
+    if (this.#transactionStore) {
+      const committingRes = this.#transactionStore.transition(txId, "committing", epoch);
+      if (!committingRes.ok) {
+        await compensateDebits(`transition to committing failed: ${committingRes.error.message}`);
+        const targetState = compensationFailed ? "needs-recovery" : "failed";
+        this.#transactionStore.transition(txId, targetState, epoch, committingRes.error.message);
+        return committingRes;
+      }
+    }
+
     const saveRes = await this.#domains.save({
       ...freshDocRes.value,
       record: updatedRecord
     });
     if (!saveRes.ok) {
       await compensateDebits(`domain save failed after maintenance for facility '${facility.name}': ${saveRes.error.message}`);
+      if (this.#transactionStore) {
+        const targetState = compensationFailed ? "needs-recovery" : "failed";
+        this.#transactionStore.transition(txId, targetState, epoch, saveRes.error.message);
+      }
       return saveRes;
+    }
+
+    // Final transition to committed
+    if (this.#transactionStore) {
+      const committedRes = this.#transactionStore.transition(txId, "committed", epoch);
+      if (!committedRes.ok) return committedRes;
+      try {
+        await this.#transactionStore.flush();
+      } catch {
+        // already committed
+      }
     }
 
     return ok({ facility: updatedFacility });
@@ -404,18 +525,71 @@ export class FacilitiesService {
       );
     }
 
-    // Debit repair costs via economy service if configured with explicit rollback (G5-REVAL3-002)
+    // 1. Transaction preparation BEFORE child writes (G5-REVAL4-002, G5-REVAL4-010)
+    const txId = createOpaqueId("tx");
+    const cmdId: CommandId = params.commandId
+      ? (params.commandId.startsWith("cmd_") ? (params.commandId as CommandId) : (`cmd_${params.commandId}` as CommandId))
+      : createCommandId();
+    const epoch = params.authorityEpoch ?? 1;
+
     const debitedCosts: { resourceId: string; amount: number }[] = [];
+
+    const buildRecoveryData = (status: FacilityOperationRecoveryData["status"]): FacilityOperationRecoveryData => ({
+      type: "facilities:repair",
+      facilityId: facility.id,
+      domainUuid: cleanDomainUuid,
+      debitedCosts: Object.freeze([...debitedCosts]),
+      authorityEpoch: epoch,
+      correlationId: params.correlationId,
+      causationId: params.causationId,
+      status
+    });
+
+    if (this.#transactionStore) {
+      const tx = createTransactionRecord({
+        transactionId: txId,
+        commandId: cmdId,
+        authorityEpoch: epoch,
+        lockKeys: [`domain:${cleanDomainUuid}`, `facility:${facility.id}`],
+        safeAutoRecovery: false,
+        recoveryData: buildRecoveryData("prepared")
+      });
+      this.#transactionStore.save(tx);
+      const claimRes = this.#transactionStore.transition(txId, "claimed", epoch);
+      if (!claimRes.ok) return claimRes;
+      const prepRes = this.#transactionStore.transition(txId, "prepared", epoch);
+      if (!prepRes.ok) return prepRes;
+
+      // G5-REVAL4-002: Durable flush barrier BEFORE child mutations
+      try {
+        await this.#transactionStore.flush();
+      } catch (flushErr) {
+        this.#transactionStore.transition(txId, "failed", epoch, "Persistence flush failed");
+        return err(
+          createPublicError({
+            code: "DM_DOMAIN_STORAGE_ERROR",
+            category: "internal",
+            message: `Failed to flush transaction preparation to storage: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+            details: flushErr
+          })
+        );
+      }
+    }
+
+    let compensationFailed = false;
     const compensateDebits = async (reason: string) => {
       if (!this.#economyService || debitedCosts.length === 0) return;
       for (const cost of debitedCosts) {
-        await this.#economyService.commitAdjust({
+        const refundRes = await this.#economyService.commitAdjust({
           domainUuid: cleanDomainUuid,
           resourceId: cost.resourceId,
           deltaMinor: cost.amount,
           reason: `Compensation: ${reason}`,
           lockOwner: params.commandId
         });
+        if (!refundRes.ok) {
+          compensationFailed = true;
+        }
       }
     };
 
@@ -430,9 +604,19 @@ export class FacilitiesService {
         });
         if (!debitRes.ok) {
           await compensateDebits(`repair cost debit failed for facility '${facility.name}'`);
+          if (this.#transactionStore) {
+            const targetState = compensationFailed ? "needs-recovery" : "failed";
+            this.#transactionStore.transition(txId, targetState, epoch, debitRes.error.message);
+          }
           return debitRes;
         }
         debitedCosts.push({ resourceId: cost.resourceId, amount: cost.amount });
+        if (this.#transactionStore) {
+          const tx = this.#transactionStore.get(txId);
+          if (tx) {
+            this.#transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
+          }
+        }
       }
     }
 
@@ -443,6 +627,10 @@ export class FacilitiesService {
     });
     if (!commitRes.ok) {
       await compensateDebits(`repair commit failed for facility '${facility.name}'`);
+      if (this.#transactionStore) {
+        const targetState = compensationFailed ? "needs-recovery" : "failed";
+        this.#transactionStore.transition(txId, targetState, epoch, commitRes.error.message);
+      }
       return commitRes;
     }
 
@@ -452,6 +640,10 @@ export class FacilitiesService {
     const freshDocRes = await this.#domains.read(cleanDomainUuid);
     if (!freshDocRes.ok) {
       await compensateDebits(`domain read failed after repair costs for facility '${facility.name}'`);
+      if (this.#transactionStore) {
+        const targetState = compensationFailed ? "needs-recovery" : "failed";
+        this.#transactionStore.transition(txId, targetState, epoch, freshDocRes.error.message);
+      }
       return freshDocRes;
     }
 
@@ -465,13 +657,39 @@ export class FacilitiesService {
       facilities: Object.freeze(updatedFacilities)
     });
 
+    // Transition to committing before save
+    if (this.#transactionStore) {
+      const committingRes = this.#transactionStore.transition(txId, "committing", epoch);
+      if (!committingRes.ok) {
+        await compensateDebits(`transition to committing failed: ${committingRes.error.message}`);
+        const targetState = compensationFailed ? "needs-recovery" : "failed";
+        this.#transactionStore.transition(txId, targetState, epoch, committingRes.error.message);
+        return committingRes;
+      }
+    }
+
     const saveRes = await this.#domains.save({
       ...freshDocRes.value,
       record: updatedRecord
     });
     if (!saveRes.ok) {
       await compensateDebits(`domain save failed after repair for facility '${facility.name}': ${saveRes.error.message}`);
+      if (this.#transactionStore) {
+        const targetState = compensationFailed ? "needs-recovery" : "failed";
+        this.#transactionStore.transition(txId, targetState, epoch, saveRes.error.message);
+      }
       return saveRes;
+    }
+
+    // Final transition to committed
+    if (this.#transactionStore) {
+      const committedRes = this.#transactionStore.transition(txId, "committed", epoch);
+      if (!committedRes.ok) return committedRes;
+      try {
+        await this.#transactionStore.flush();
+      } catch {
+        // already committed
+      }
     }
 
     return ok({ facility: updatedFacility });
@@ -586,5 +804,52 @@ export class FacilitiesService {
     if (!saveRes.ok) return saveRes;
 
     return ok({ facility: updatedFacility });
+  }
+
+  registerRecoveryCompensators(recoveryService?: RecoveryService): void {
+    const recovery = recoveryService ?? this.#recoveryService;
+    if (!recovery) return;
+
+    recovery.registerCompensator("facilities:maintenance", async (record) => {
+      const data = record.recoveryData as Record<string, any> | undefined;
+      if (!data || data.type !== "facilities:maintenance") {
+        return ok(undefined);
+      }
+      const recoveryLockOwner = `recovery_${record.transactionId}`;
+      if (this.#economyService && data.debitedCosts && Array.isArray(data.debitedCosts)) {
+        for (const cost of data.debitedCosts) {
+          const refRes = await this.#economyService.commitAdjust({
+            domainUuid: data.domainUuid,
+            resourceId: cost.resourceId,
+            deltaMinor: cost.amount,
+            reason: `Recovery: refund maintenance cost for facility ${data.facilityId}`,
+            lockOwner: recoveryLockOwner
+          });
+          if (!refRes.ok) return refRes;
+        }
+      }
+      return ok(undefined);
+    });
+
+    recovery.registerCompensator("facilities:repair", async (record) => {
+      const data = record.recoveryData as Record<string, any> | undefined;
+      if (!data || data.type !== "facilities:repair") {
+        return ok(undefined);
+      }
+      const recoveryLockOwner = `recovery_${record.transactionId}`;
+      if (this.#economyService && data.debitedCosts && Array.isArray(data.debitedCosts)) {
+        for (const cost of data.debitedCosts) {
+          const refRes = await this.#economyService.commitAdjust({
+            domainUuid: data.domainUuid,
+            resourceId: cost.resourceId,
+            deltaMinor: cost.amount,
+            reason: `Recovery: refund repair cost for facility ${data.facilityId}`,
+            lockOwner: recoveryLockOwner
+          });
+          if (!refRes.ok) return refRes;
+        }
+      }
+      return ok(undefined);
+    });
   }
 }

@@ -105,7 +105,7 @@ export async function executeDowntimeResolutionPlan(
     ? candidateOutcomes.filter((o) => o.id === params.outcomeKey)
     : candidateOutcomes;
 
-  // 1. Transaction preparation BEFORE child effects (G5-REVAL3-002)
+  // 1. Transaction preparation BEFORE child effects (G5-REVAL3-002, G5-REVAL4-001, G5-REVAL4-002)
   const txId = createOpaqueId("tx");
   const cmdId: CommandId = params.commandId
     ? params.commandId.startsWith("cmd_")
@@ -132,25 +132,46 @@ export async function executeDowntimeResolutionPlan(
       }
     });
     context.transactionStore.save(tx);
-    context.transactionStore.transition(txId, "claimed", epoch);
-    context.transactionStore.transition(txId, "prepared", epoch);
+    const claimRes = context.transactionStore.transition(txId, "claimed", epoch);
+    if (!claimRes.ok) return claimRes;
+    const prepRes = context.transactionStore.transition(txId, "prepared", epoch);
+    if (!prepRes.ok) return prepRes;
+
+    // G5-REVAL4-002: Flush transaction to durable storage BEFORE executing child writes
+    try {
+      await context.transactionStore.flush();
+    } catch (flushErr) {
+      context.transactionStore.transition(txId, "failed", epoch, "Persistence flush failed");
+      return err(
+        createPublicError({
+          code: "DM_DOMAIN_STORAGE_ERROR",
+          category: "internal",
+          message: `Failed to flush transaction preparation to storage: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+          details: flushErr
+        })
+      );
+    }
   }
 
   // Track executed credits for rollback on mandatory failure or persistence error
   const creditedResources: { resourceId: string; amount: number }[] = [];
   const outcomesApplied: ChildReceipt[] = [];
   const failedMandatoryOutcomes: { outcome: DowntimeOutcomeDefinition; error: string }[] = [];
+  let compensationFailed = false;
 
   const compensateCredits = async (reason: string) => {
     if (!context.economyService || creditedResources.length === 0) return;
     for (const cred of creditedResources) {
-      await context.economyService.commitAdjust({
+      const refundRes = await context.economyService.commitAdjust({
         domainUuid: cleanDomainUuid,
         resourceId: cred.resourceId,
         deltaMinor: -cred.amount,
         reason: `Compensation: ${reason}`,
         lockOwner: params.commandId
       });
+      if (!refundRes.ok) {
+        compensationFailed = true;
+      }
     }
   };
 
@@ -305,9 +326,10 @@ export async function executeDowntimeResolutionPlan(
     await compensateCredits("rollback outcome credits after mandatory outcome failure");
 
     if (context.transactionStore) {
+      const targetState = compensationFailed ? "needs-recovery" : "failed";
       context.transactionStore.transition(
         txId,
-        "failed",
+        targetState,
         epoch,
         `Mandatory outcome(s) failed: ${failedMandatoryOutcomes.map((f) => f.outcome.label).join(", ")}`
       );
@@ -338,7 +360,8 @@ export async function executeDowntimeResolutionPlan(
   if (!freshDocRes.ok) {
     await compensateCredits("domain read failed after outcome execution");
     if (context.transactionStore) {
-      context.transactionStore.transition(txId, "failed", epoch, freshDocRes.error.message);
+      const targetState = compensationFailed ? "needs-recovery" : "failed";
+      context.transactionStore.transition(txId, targetState, epoch, freshDocRes.error.message);
     }
     return freshDocRes;
   }
@@ -353,6 +376,16 @@ export async function executeDowntimeResolutionPlan(
     activities: Object.freeze(updatedActivities)
   });
 
+  if (context.transactionStore) {
+    const committingRes = context.transactionStore.transition(txId, "committing", epoch);
+    if (!committingRes.ok) {
+      await compensateCredits(`transition to committing failed: ${committingRes.error.message}`);
+      const targetState = compensationFailed ? "needs-recovery" : "failed";
+      context.transactionStore.transition(txId, targetState, epoch, committingRes.error.message);
+      return committingRes;
+    }
+  }
+
   const saveRes = await context.domains.save({
     ...freshDocRes.value,
     record: updatedRecord
@@ -361,13 +394,20 @@ export async function executeDowntimeResolutionPlan(
   if (!saveRes.ok) {
     await compensateCredits(`domain save failed for activity completion: ${saveRes.error.message}`);
     if (context.transactionStore) {
-      context.transactionStore.transition(txId, "failed", epoch, saveRes.error.message);
+      const targetState = compensationFailed ? "needs-recovery" : "failed";
+      context.transactionStore.transition(txId, targetState, epoch, saveRes.error.message);
     }
     return saveRes;
   }
 
   if (context.transactionStore) {
-    context.transactionStore.transition(txId, "committed", epoch);
+    const committedRes = context.transactionStore.transition(txId, "committed", epoch);
+    if (!committedRes.ok) return committedRes;
+    try {
+      await context.transactionStore.flush();
+    } catch {
+      // already committed
+    }
   }
 
   return ok({

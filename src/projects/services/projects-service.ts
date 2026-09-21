@@ -41,12 +41,13 @@ import type { EconomyService } from "../../economy/services/economy-service.js";
 import type { FacilitiesService } from "../../facilities/services/facilities-service.js";
 import { getDomainFacilitiesData, withDomainFacilitiesData } from "../../facilities/facility-data.js";
 import { normalizeJournalEntryId } from "../../core/identity/refs.js";
-import { getDomainPeopleData, tryGetDomainPeopleData, withDomainPeopleData } from "../../people/people-data.js";
 import { executeProjectStartDomainOperationPlan } from "../plans/project-start-domain-operation-plan.js";
 import {
   executeProjectCompletionDomainOperationPlan,
   type ProjectCompletionRecoveryData
 } from "../plans/project-completion-domain-operation-plan.js";
+import { executeProjectAdvanceDomainOperationPlan } from "../plans/project-advance-domain-operation-plan.js";
+import { executeProjectCancelDomainOperationPlan } from "../plans/project-cancel-domain-operation-plan.js";
 import { PeopleService, type PublicPeopleApi } from "../../people/services/people-service.js";
 import type { RecoveryService } from "../../mutations/recovery-service.js";
 
@@ -182,128 +183,26 @@ export class ProjectsService {
   }
 
   async advanceProject(params: AdvanceProjectParams): Promise<Result<{ readonly project: ProjectInstance; readonly deltaApplied: number }>> {
-    const domainUuid = this.#cleanId(params.domainUuid);
-    const docRes = await this.#domains.read(domainUuid);
-    if (!docRes.ok) return docRes;
-
-    const record = docRes.value.record;
-    const currentProjectsData = getDomainProjectsData(record);
-    const project = currentProjectsData.projects.find((p) => p.id === params.projectId);
-    if (!project) {
-      return err(
-        createPublicError({
-          code: "DM_PROJECT_NOT_FOUND",
-          category: "not-found",
-          message: `Project ${params.projectId} not found in domain ${params.domainUuid}`
-        })
-      );
-    }
-
-    if (params.expectedRevision !== undefined && project.revision !== params.expectedRevision) {
-      return err(
-        createPublicError({
-          code: "DM_PROJECT_REVISION_MISMATCH",
-          category: "conflict",
-          message: `Project revision mismatch: expected ${params.expectedRevision}, found ${project.revision}`
-        })
-      );
-    }
-
-    const definition = this.#projectRegistry.get(project.definitionId);
-    if (!definition) {
-      return err(
-        createPublicError({
-          code: "DM_PROJECT_DEFINITION_NOT_FOUND",
-          category: "not-found",
-          message: `Project definition ${project.definitionId} not found`
-        })
-      );
-    }
-
-    const plan = evaluateProjectAdvancePlan({
-      project,
-      definition,
-      domain: record,
-      proposedDelta: params.delta,
-      expectedRevision: params.expectedRevision
-    });
-
-    if (!plan.isSatisfied) {
-      const firstBlocker = plan.blockers[0];
-      return err(
-        createPublicError({
-          code: "DM_PROJECT_ADVANCE_BLOCKED",
-          category: "conflict",
-          message: firstBlocker?.message ?? "Project advance blocked",
-          details: { blockers: plan.blockers }
-        })
-      );
-    }
-
-    const advanceRes = commitProjectAdvance(plan, project, {
-      userId: params.userId,
-      note: params.notes
-    });
-    if (!advanceRes.ok) return advanceRes;
-
-    // Progressive costs consumption with deterministic cumulative delta (G5-REVAL2-003, G5-REVAL2-004)
-    if (this.#economyService && advanceRes.value.receipt.unitsDelta > 0) {
-      const unitsBefore = project.workCompleted;
-      const unitsAfter = Math.min(project.workRequired, unitsBefore + advanceRes.value.receipt.unitsDelta);
-      for (const cost of definition.costs) {
-        if (cost.timing === "progressive") {
-          const dueBefore = Math.floor((unitsBefore / project.workRequired) * cost.amountMinor);
-          const dueAfter = Math.floor((unitsAfter / project.workRequired) * cost.amountMinor);
-          const toDebit = dueAfter - dueBefore;
-          if (toDebit > 0) {
-            const debitRes = await this.#economyService.commitAdjust({
-              domainUuid: params.domainUuid,
-              resourceId: cost.resourceId,
-              deltaMinor: -toDebit,
-              reason: `Progressive cost for project ${project.name}`,
-              lockOwner: params.commandId
-            });
-            if (!debitRes.ok) {
-              return err(
-                createPublicError({
-                  code: "DM_PROJECT_ADVANCE_BLOCKED",
-                  category: "conflict",
-                  message: `Insufficient funds for progressive cost '${cost.resourceId}': ${debitRes.error.message}`,
-                  details: debitRes.error
-                })
-              );
-            }
-          }
-        }
+    return executeProjectAdvanceDomainOperationPlan(
+      {
+        domains: this.#domains,
+        projectRegistry: this.#projectRegistry,
+        economyService: this.#economyService,
+        transactionStore: this.#transactionStore
+      },
+      {
+        domainUuid: params.domainUuid,
+        projectId: params.projectId,
+        unitsToAdvance: params.delta,
+        expectedRevision: params.expectedRevision,
+        notes: params.notes,
+        userId: params.userId,
+        commandId: params.commandId,
+        authorityEpoch: params.authorityEpoch,
+        correlationId: params.correlationId,
+        causationId: params.causationId
       }
-    }
-
-    const updatedProject = advanceRes.value.updatedProject;
-
-    // Re-read fresh domain document after progressive cost debits to avoid revision conflict
-    const freshDocRes = await this.#domains.read(domainUuid);
-    if (!freshDocRes.ok) return freshDocRes;
-    const freshProjectsData = getDomainProjectsData(freshDocRes.value.record);
-
-    const updatedProjects = freshProjectsData.projects.map((p) =>
-      p.id === params.projectId ? updatedProject : p
     );
-
-    const updatedRecord = withDomainProjectsData(freshDocRes.value.record, {
-      ...freshProjectsData,
-      projects: Object.freeze(updatedProjects)
-    });
-
-    const saveRes = await this.#domains.save({
-      ...freshDocRes.value,
-      record: updatedRecord
-    });
-    if (!saveRes.ok) return saveRes;
-
-    return ok({
-      project: updatedProject,
-      deltaApplied: advanceRes.value.receipt.unitsDelta
-    });
   }
 
   async pauseProject(params: {
@@ -339,80 +238,14 @@ export class ProjectsService {
   }
 
   async cancelProject(params: CancelProjectParams): Promise<Result<{ readonly project: ProjectInstance }>> {
-    const domainUuid = this.#cleanId(params.domainUuid);
-    const docRes = await this.#domains.read(domainUuid);
-    if (!docRes.ok) return docRes;
-    const project = getDomainProjectsData(docRes.value.record).projects.find((p) => p.id === params.projectId);
-
-    // 1. Release active economy reservations for this project with fail-closed validation (G5-REVAL2-002, G5-REVAL3-003)
-    if (this.#economyService) {
-      const activeReservations: string[] = [];
-      if (project?.metadata?.reservationIds && Array.isArray(project.metadata.reservationIds)) {
-        activeReservations.push(...(project.metadata.reservationIds as string[]));
-      }
-      if ("listReservations" in this.#economyService) {
-        const matching = this.#economyService.listReservations({
-          domainUuid: params.domainUuid,
-          sourceRef: params.projectId,
-          status: "active"
-        });
-        for (const m of matching) {
-          if (!activeReservations.includes(m.id)) {
-            activeReservations.push(m.id);
-          }
-        }
-      }
-      for (const resId of activeReservations) {
-        const releaseRes = await this.#economyService.releaseReservation({
-          domainUuid,
-          reservationId: resId,
-          reason: params.reason ?? "Project cancelled",
-          lockOwner: params.commandId
-        });
-        if (!releaseRes.ok) {
-          return releaseRes;
-        }
-      }
-    }
-
-    // 2. Release people workforce reservation via public People API (G5-REVAL2-009, G5-REVAL3-001, G5-REVAL3-003)
-    if (this.#peopleService) {
-      const releaseWfRes = await this.#peopleService.releaseWorkforceReservation({
-        domainUuid,
-        projectId: params.projectId,
-        userId: params.userId
-      });
-      if (!releaseWfRes.ok) {
-        return releaseWfRes;
-      }
-    } else {
-      // Fallback for tests running ProjectsService without peopleService dependency
-      const freshDocRes = await this.#domains.read(domainUuid);
-      if (freshDocRes.ok) {
-        const peopleDataRes = tryGetDomainPeopleData(freshDocRes.value.record);
-        if (peopleDataRes.ok) {
-          const peopleData = peopleDataRes.value;
-          const hasWorkforceRes = peopleData.reservations.some(
-            (r) => r.targetRef === `project:${params.projectId}` && r.status === "active"
-          );
-          if (hasWorkforceRes) {
-            const updatedReservations = peopleData.reservations.map((r) =>
-              r.targetRef === `project:${params.projectId}` && r.status === "active"
-                ? { ...r, status: "released" as const }
-                : r
-            );
-            const updatedRecord = withDomainPeopleData(freshDocRes.value.record, {
-              ...peopleData,
-              reservations: Object.freeze(updatedReservations)
-            });
-            await this.#domains.save({ ...freshDocRes.value, record: updatedRecord });
-          }
-        }
-      }
-    }
-
-    return this.#mutateLifecycle(params.domainUuid, params.projectId, params.expectedRevision, (p) =>
-      planCancelProject(p, { note: params.reason, userId: params.userId })
+    return executeProjectCancelDomainOperationPlan(
+      {
+        domains: this.#domains,
+        economyService: this.#economyService,
+        peopleService: this.#peopleService,
+        transactionStore: this.#transactionStore
+      },
+      params
     );
   }
 
@@ -527,74 +360,157 @@ export class ProjectsService {
         return ok(undefined);
       }
 
+      const recoveryLockOwner = `recovery_${record.transactionId}`;
+
       // 1. Revert credited resources (debit them back)
       if (this.#economyService && data.creditedResourceRefs && data.creditedResourceRefs.length > 0) {
         for (const cred of data.creditedResourceRefs) {
-          await this.#economyService.commitAdjust({
+          const adjRes = await this.#economyService.commitAdjust({
             domainUuid: data.domainUuid,
             resourceId: cred.resourceId,
             deltaMinor: -cred.amountMinor,
             reason: `Recovery: reverse completion reward for project ${data.projectId}`,
-            lockOwner: record.transactionId
+            lockOwner: recoveryLockOwner
           });
+          if (!adjRes.ok) return adjRes;
         }
       }
 
       // 2. Refund debited costs (credit them back)
       if (this.#economyService && data.debitedCostRefs && data.debitedCostRefs.length > 0) {
         for (const deb of data.debitedCostRefs) {
-          await this.#economyService.commitAdjust({
+          const refRes = await this.#economyService.commitAdjust({
             domainUuid: data.domainUuid,
             resourceId: deb.resourceId,
             deltaMinor: deb.amountMinor,
             reason: `Recovery: refund completion cost for project ${data.projectId}`,
-            lockOwner: record.transactionId
+            lockOwner: recoveryLockOwner
           });
+          if (!refRes.ok) return refRes;
         }
       }
 
-      // 3. Rollback created facilities
+      // 3. Restore consumed economic reservations (G5-REVAL4-006)
+      if (this.#economyService && data.consumedReservationSnapshots && data.consumedReservationSnapshots.length > 0) {
+        for (const snap of data.consumedReservationSnapshots) {
+          const restRes = await this.#economyService.restoreReservation({
+            domainUuid: data.domainUuid,
+            reservationSnapshot: snap.reservation,
+            consumedAmount: snap.consumedAmount,
+            reason: `Recovery: restore consumed reservation ${snap.reservation.id} for project ${data.projectId}`,
+            lockOwner: recoveryLockOwner
+          });
+          if (!restRes.ok) return restRes;
+        }
+      }
+
+      // 4. Restore released workforce reservations (G5-REVAL4-006)
+      if (this.#peopleService && data.releasedWorkforceSnapshots && data.releasedWorkforceSnapshots.length > 0) {
+        for (const wf of data.releasedWorkforceSnapshots) {
+          const restWf = await this.#peopleService.restoreWorkforceReservation({
+            domainUuid: data.domainUuid,
+            projectId: data.projectId,
+            reservationId: wf.reservationId
+          });
+          if (!restWf.ok) return restWf;
+        }
+      }
+
+      // 5. Rollback created facilities
       if (data.createdFacilityIds && data.createdFacilityIds.length > 0) {
         const cleanDomainUuid = normalizeJournalEntryId(data.domainUuid);
         const docRes = await this.#domains.read(cleanDomainUuid);
-        if (docRes.ok) {
-          const facData = getDomainFacilitiesData(docRes.value.record);
-          const remainingFacilities = facData.facilities.filter(
-            (f) => !data.createdFacilityIds.includes(f.id)
-          );
-          if (remainingFacilities.length !== facData.facilities.length) {
-            const updatedRecord = withDomainFacilitiesData(docRes.value.record, {
-              ...facData,
-              facilities: Object.freeze(remainingFacilities)
-            });
-            await this.#domains.save({
-              ...docRes.value,
-              record: updatedRecord
-            });
-          }
-        }
-      }
-
-      // 4. Restore project snapshot
-      if (data.projectSnapshot) {
-        const cleanDomainUuid = normalizeJournalEntryId(data.domainUuid);
-        const docRes = await this.#domains.read(cleanDomainUuid);
-        if (docRes.ok) {
-          const prjData = getDomainProjectsData(docRes.value.record);
-          const restoredProjects = prjData.projects.map((p) =>
-            p.id === data.projectId ? { ...data.projectSnapshot, updatedAt: Date.now() } : p
-          );
-          const updatedRecord = withDomainProjectsData(docRes.value.record, {
-            ...prjData,
-            projects: Object.freeze(restoredProjects)
+        if (!docRes.ok) return docRes;
+        const facData = getDomainFacilitiesData(docRes.value.record);
+        const remainingFacilities = facData.facilities.filter(
+          (f) => !data.createdFacilityIds.includes(f.id)
+        );
+        if (remainingFacilities.length !== facData.facilities.length) {
+          const updatedRecord = withDomainFacilitiesData(docRes.value.record, {
+            ...facData,
+            facilities: Object.freeze(remainingFacilities)
           });
-          await this.#domains.save({
+          const saveRes = await this.#domains.save({
             ...docRes.value,
             record: updatedRecord
           });
+          if (!saveRes.ok) return saveRes;
         }
       }
 
+      // 6. Restore project snapshot
+      if (data.projectSnapshot) {
+        const cleanDomainUuid = normalizeJournalEntryId(data.domainUuid);
+        const docRes = await this.#domains.read(cleanDomainUuid);
+        if (!docRes.ok) return docRes;
+        const prjData = getDomainProjectsData(docRes.value.record);
+        const restoredProjects = prjData.projects.map((p) =>
+          p.id === data.projectId ? { ...data.projectSnapshot, updatedAt: Date.now() } : p
+        );
+        const updatedRecord = withDomainProjectsData(docRes.value.record, {
+          ...prjData,
+          projects: Object.freeze(restoredProjects)
+        });
+        const saveRes = await this.#domains.save({
+          ...docRes.value,
+          record: updatedRecord
+        });
+        if (!saveRes.ok) return saveRes;
+      }
+
+      return ok(undefined);
+    });
+
+    // Compensator for projects:advance (G5-REVAL4-007)
+    recovery.registerCompensator("projects:advance", async (record) => {
+      const data = record.recoveryData as Record<string, any> | undefined;
+      if (!data || data.type !== "projects:advance") {
+        return ok(undefined);
+      }
+      const recoveryLockOwner = `recovery_${record.transactionId}`;
+      if (this.#economyService && data.debitedCosts && Array.isArray(data.debitedCosts)) {
+        for (const cost of data.debitedCosts) {
+          const refRes = await this.#economyService.commitAdjust({
+            domainUuid: data.domainUuid,
+            resourceId: cost.resourceId,
+            deltaMinor: cost.amountMinor,
+            reason: `Recovery: refund progressive cost for project ${data.projectId}`,
+            lockOwner: recoveryLockOwner
+          });
+          if (!refRes.ok) return refRes;
+        }
+      }
+      return ok(undefined);
+    });
+
+    // Compensator for projects:cancel (G5-REVAL4-008)
+    recovery.registerCompensator("projects:cancel", async (record) => {
+      const data = record.recoveryData as Record<string, any> | undefined;
+      if (!data || data.type !== "projects:cancel") {
+        return ok(undefined);
+      }
+      const recoveryLockOwner = `recovery_${record.transactionId}`;
+      if (this.#economyService && data.releasedReservationSnapshots && Array.isArray(data.releasedReservationSnapshots)) {
+        for (const snap of data.releasedReservationSnapshots) {
+          const restRes = await this.#economyService.restoreReservation({
+            domainUuid: data.domainUuid,
+            reservationSnapshot: snap,
+            reason: `Recovery: restore cancelled reservation for project ${data.projectId}`,
+            lockOwner: recoveryLockOwner
+          });
+          if (!restRes.ok) return restRes;
+        }
+      }
+      if (this.#peopleService && data.releasedWorkforceSnapshots && Array.isArray(data.releasedWorkforceSnapshots)) {
+        for (const wf of data.releasedWorkforceSnapshots) {
+          const restWf = await this.#peopleService.restoreWorkforceReservation({
+            domainUuid: data.domainUuid,
+            projectId: data.projectId,
+            reservationId: wf.reservationId
+          });
+          if (!restWf.ok) return restWf;
+        }
+      }
       return ok(undefined);
     });
   }

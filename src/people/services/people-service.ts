@@ -121,6 +121,13 @@ export interface PublicPeopleApi {
     userId?: string | null;
   }): Promise<Result<void, PublicError>>;
 
+  restoreWorkforceReservation(params: {
+    domainUuid: string;
+    projectId: string;
+    reservationId?: string;
+    userId?: string | null;
+  }): Promise<Result<void, PublicError>>;
+
   getAggregate(
     rootDomainUuid: string,
     options?: PeopleAggregationQueryOptions
@@ -417,6 +424,19 @@ export class PeopleService implements PublicPeopleApi {
     userId?: string | null;
   }): Promise<Result<void, PublicError>> {
     return this.#repository.releaseReservation({
+      domainUuid: params.domainUuid,
+      targetRef: `project:${params.projectId}`,
+      reservationId: params.reservationId
+    });
+  }
+
+  async restoreWorkforceReservation(params: {
+    domainUuid: string;
+    projectId: string;
+    reservationId?: string;
+    userId?: string | null;
+  }): Promise<Result<void, PublicError>> {
+    return this.#repository.restoreReservation({
       domainUuid: params.domainUuid,
       targetRef: `project:${params.projectId}`,
       reservationId: params.reservationId

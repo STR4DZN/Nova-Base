@@ -403,4 +403,35 @@ export class PeopleRepository {
     if (!updateRes.ok) return updateRes;
     return ok(undefined);
   }
+
+  async restoreReservation(params: {
+    domainUuid: string;
+    targetRef?: string;
+    reservationId?: string;
+  }): Promise<Result<void, PublicError>> {
+    const id = params.domainUuid.startsWith("JournalEntry.") ? params.domainUuid.slice("JournalEntry.".length) : params.domainUuid;
+    const domainRes = await this.#domainRepository.read(id);
+    if (!domainRes.ok) return domainRes;
+    const peopleDataRes = tryGetDomainPeopleData(domainRes.value.record);
+    if (!peopleDataRes.ok) return peopleDataRes;
+    const peopleData = peopleDataRes.value;
+    let modified = false;
+    const updatedReservations = peopleData.reservations.map((r) => {
+      const matchTarget = params.targetRef && r.targetRef === params.targetRef;
+      const matchId = params.reservationId && r.id === params.reservationId;
+      if ((matchTarget || matchId) && r.status === "released") {
+        modified = true;
+        return { ...r, status: "active" as const };
+      }
+      return r;
+    });
+    if (!modified) return ok(undefined);
+    const updatedRecord = withDomainPeopleData(domainRes.value.record, {
+      ...peopleData,
+      reservations: Object.freeze(updatedReservations)
+    });
+    const updateRes = await this.#domainRepository.update({ ...domainRes.value, record: updatedRecord });
+    if (!updateRes.ok) return updateRes;
+    return ok(undefined);
+  }
 }

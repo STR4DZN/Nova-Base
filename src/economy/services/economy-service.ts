@@ -157,6 +157,15 @@ export interface ReleaseReservationParams {
   readonly lockOwner?: string;
 }
 
+export interface RestoreReservationParams {
+  readonly domainUuid: string;
+  readonly reservationSnapshot: Reservation;
+  readonly consumedAmount?: number;
+  readonly reason?: string;
+  readonly userId?: string;
+  readonly lockOwner?: string;
+}
+
 export interface ReversalParams {
   readonly domainUuid: string;
   readonly entryId: string;
@@ -1985,6 +1994,42 @@ export class EconomyService {
     } finally {
       await lockRes.value.release();
     }
+  }
+
+  async restoreReservation(
+    params: RestoreReservationParams
+  ): Promise<Result<Reservation, PublicError>> {
+    const cleanDomainUuid = this.#cleanUuid(params.domainUuid);
+    const snapshot = params.reservationSnapshot;
+
+    // 1. If consumedAmount > 0, restore balance via commitAdjust
+    const consumedAmount = params.consumedAmount ?? 0;
+    if (consumedAmount > 0) {
+      const adjustRes = await this.commitAdjust({
+        domainUuid: cleanDomainUuid,
+        resourceId: snapshot.resourceId,
+        deltaMinor: consumedAmount,
+        reason: params.reason ?? `Recovery: restore consumed reservation ${snapshot.id}`,
+        lockOwner: params.lockOwner,
+        userId: params.userId
+      });
+      if (!adjustRes.ok) return adjustRes;
+    }
+
+    // 2. Restore reservation in ReservationStore
+    const restoreRes = consumedAmount > 0
+      ? this.#reservationStore.rollbackConsume(snapshot, consumedAmount, {
+          reason: params.reason ?? "Recovery: rollback consumed reservation",
+          userId: params.userId
+        })
+      : this.#reservationStore.restore(snapshot, params.reason ?? "Recovery: restore reservation", {
+          userId: params.userId
+        });
+
+    if (!restoreRes.ok) return restoreRes;
+
+    await this.#reservationStore.flush();
+    return restoreRes;
   }
 
   async reverseLedgerEntry(

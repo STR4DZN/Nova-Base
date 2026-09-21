@@ -179,7 +179,11 @@ export class DowntimeService {
         domainUuid: cleanDomainUuid,
         activityId: params.activityId,
         notes: params.notes,
-        userId: params.userId
+        userId: params.userId,
+        commandId: params.commandId,
+        correlationId: params.correlationId,
+        causationId: params.causationId,
+        authorityEpoch: params.authorityEpoch
       });
       if (!compRes.ok) return compRes;
       return ok({ activity: compRes.value.activity, completed: true });

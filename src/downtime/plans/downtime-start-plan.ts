@@ -262,7 +262,7 @@ export async function executeDowntimeStartPlan(
     }
   }
 
-  // 6. Transaction preparation BEFORE child effects (G5-REVAL3-002)
+  // 6. Transaction preparation BEFORE child effects (G5-REVAL3-002, G5-REVAL4-001, G5-REVAL4-002)
   const txId = createOpaqueId("tx");
   const cmdId: CommandId = params.commandId
     ? params.commandId.startsWith("cmd_")
@@ -288,23 +288,44 @@ export async function executeDowntimeStartPlan(
       }
     });
     context.transactionStore.save(tx);
-    context.transactionStore.transition(txId, "claimed", epoch);
-    context.transactionStore.transition(txId, "prepared", epoch);
+    const claimRes = context.transactionStore.transition(txId, "claimed", epoch);
+    if (!claimRes.ok) return claimRes;
+    const prepRes = context.transactionStore.transition(txId, "prepared", epoch);
+    if (!prepRes.ok) return prepRes;
+
+    // G5-REVAL4-002: Flush transaction to durable storage BEFORE executing child writes
+    try {
+      await context.transactionStore.flush();
+    } catch (flushErr) {
+      context.transactionStore.transition(txId, "failed", epoch, "Persistence flush failed");
+      return err(
+        createPublicError({
+          code: "DM_DOMAIN_STORAGE_ERROR",
+          category: "internal",
+          message: `Failed to flush transaction preparation to storage: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+          details: flushErr
+        })
+      );
+    }
   }
 
   // Track debited upfront costs for explicit compensation on failure
   const debitedCosts: { resourceId: string; amount: number }[] = [];
+  let compensationFailed = false;
 
   const compensateDebits = async (reason: string) => {
     if (!context.economyService || debitedCosts.length === 0) return;
     for (const cost of debitedCosts) {
-      await context.economyService.commitAdjust({
+      const refundRes = await context.economyService.commitAdjust({
         domainUuid: cleanDomainUuid,
         resourceId: cost.resourceId,
         deltaMinor: cost.amount,
         reason: `Compensation: ${reason}`,
         lockOwner: params.commandId
       });
+      if (!refundRes.ok) {
+        compensationFailed = true;
+      }
     }
   };
 
@@ -321,7 +342,8 @@ export async function executeDowntimeStartPlan(
       if (!debitRes.ok) {
         await compensateDebits(`rollback failed start for activity '${definition.label}'`);
         if (context.transactionStore) {
-          context.transactionStore.transition(txId, "failed", epoch, debitRes.error.message);
+          const targetState = compensationFailed ? "needs-recovery" : "failed";
+          context.transactionStore.transition(txId, targetState, epoch, debitRes.error.message);
         }
         return debitRes;
       }
@@ -354,7 +376,8 @@ export async function executeDowntimeStartPlan(
   if (!freshDocRes.ok) {
     await compensateDebits("domain read failed after upfront debits");
     if (context.transactionStore) {
-      context.transactionStore.transition(txId, "failed", epoch, freshDocRes.error.message);
+      const targetState = compensationFailed ? "needs-recovery" : "failed";
+      context.transactionStore.transition(txId, targetState, epoch, freshDocRes.error.message);
     }
     return freshDocRes;
   }
@@ -366,6 +389,16 @@ export async function executeDowntimeStartPlan(
     activities: updatedActivities
   });
 
+  if (context.transactionStore) {
+    const committingRes = context.transactionStore.transition(txId, "committing", epoch);
+    if (!committingRes.ok) {
+      await compensateDebits(`transition to committing failed: ${committingRes.error.message}`);
+      const targetState = compensationFailed ? "needs-recovery" : "failed";
+      context.transactionStore.transition(txId, targetState, epoch, committingRes.error.message);
+      return committingRes;
+    }
+  }
+
   const saveRes = await context.domains.save({
     ...freshDocRes.value,
     record: updatedRecord
@@ -374,13 +407,20 @@ export async function executeDowntimeStartPlan(
   if (!saveRes.ok) {
     await compensateDebits(`domain save failed for activity '${activityId}': ${saveRes.error.message}`);
     if (context.transactionStore) {
-      context.transactionStore.transition(txId, "failed", epoch, saveRes.error.message);
+      const targetState = compensationFailed ? "needs-recovery" : "failed";
+      context.transactionStore.transition(txId, targetState, epoch, saveRes.error.message);
     }
     return saveRes;
   }
 
   if (context.transactionStore) {
-    context.transactionStore.transition(txId, "committed", epoch);
+    const committedRes = context.transactionStore.transition(txId, "committed", epoch);
+    if (!committedRes.ok) return committedRes;
+    try {
+      await context.transactionStore.flush();
+    } catch {
+      // already committed
+    }
   }
 
   return ok({ activity: newActivity });

@@ -281,7 +281,9 @@ export function composeDomainManagerRuntime(
   const facilitiesService = new FacilitiesService({
     domains: mutableDomainRepo,
     facilityRegistry,
-    economyService
+    economyService,
+    transactionStore,
+    recoveryService: recovery
   });
   const projectsService = new ProjectsService({
     domains: mutableDomainRepo,
