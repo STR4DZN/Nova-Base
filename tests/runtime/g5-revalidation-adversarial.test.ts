@@ -292,7 +292,8 @@ function setupTestEnvironment(record: DomainRecord = createInitialRecord()) {
     downtimeRegistry,
     economyService,
     facilitiesService,
-    transactionStore
+    transactionStore,
+    recoveryService
   });
 
   const registry = new CommandRegistry();
@@ -2915,6 +2916,322 @@ test("G5-REVAL4-009 & G5-REVAL4-010 (Fault 10): Downtime auto-complete forwards 
     "prepared->committing",
     "committing->committed"
   ]);
+});
+
+// ---------------------------------------------------------------------------
+// TEST 37: G5-REVAL4-008 Scenario A — Project cancel fails at People stage
+// ---------------------------------------------------------------------------
+test("G5-REVAL4-008 Scenario A: Project cancel fails at People stage (Economy released, People fails -> Economy restored)", async () => {
+  const env = setupTestEnvironment();
+  await env.economyService.commitAdjust({
+    domainUuid: env.rawDoc.uuid,
+    resourceId: "domain-manager:materials",
+    deltaMinor: 500,
+    reason: "Initial materials"
+  });
+
+  const startRes = await env.projectsService.startProject({
+    domainUuid: env.rawDoc.uuid,
+    definitionId: "domain-manager:fortified-gate",
+    name: "Gate for cancel people fail",
+    workforceRequired: 2
+  });
+  checkOk(startRes, "Project start");
+  const projectId = startRes.value.project.id;
+
+  const resBefore = env.economyService.listReservations({
+    domainUuid: env.rawDoc.id,
+    sourceRef: projectId,
+    status: "active"
+  });
+  assert.ok(resBefore.length > 0, "Economy reservation must exist");
+
+  const origReleaseWf = env.peopleService.releaseWorkforceReservation.bind(env.peopleService);
+  env.peopleService.releaseWorkforceReservation = async () => {
+    return err(createPublicError({
+      code: "DM_PEOPLE_RELEASE_FAILED",
+      category: "conflict",
+      message: "Simulated People stage failure during project cancellation"
+    }));
+  };
+
+  const cancelRes = await env.projectsService.cancelProject({
+    domainUuid: env.rawDoc.uuid,
+    projectId,
+    commandId: "cmd_cancel_people_fail"
+  });
+  assert.equal(cancelRes.ok, false, "Cancel must fail when People stage fails");
+
+  env.peopleService.releaseWorkforceReservation = origReleaseWf;
+
+  const restoredRes = env.economyService.listReservations({
+    domainUuid: env.rawDoc.id,
+    sourceRef: projectId,
+    status: "active"
+  });
+  assert.ok(restoredRes.length > 0, "Reservation must be restored to active status");
+
+  const tx = env.transactionStore.getByCommandId("cmd_cancel_people_fail" as any);
+  assert.ok(tx);
+  assert.equal(tx.state, "failed", "Transaction must be marked failed after successful compensation");
+});
+
+// ---------------------------------------------------------------------------
+// TEST 38: G5-REVAL4-009 Scenario B — Downtime advance auto-completes with economic outcome
+// ---------------------------------------------------------------------------
+test("G5-REVAL4-009 Scenario B: Downtime advance auto-completes with economic outcome dispatched via CommandBus", async () => {
+  const env = setupTestEnvironment();
+  await env.economyService.commitAdjust({
+    domainUuid: env.rawDoc.uuid,
+    resourceId: "domain-manager:materials",
+    deltaMinor: 500,
+    reason: "Initial materials"
+  });
+
+  const startRes = await env.downtimeService.startActivity({
+    domainUuid: env.rawDoc.uuid,
+    definitionId: "domain-manager:crafting",
+    label: "Crafting for bus test",
+    durationTicks: 2,
+    participants: [
+      { participantRef: "notable:blacksmith-1", participantType: "notable", role: "owner" }
+    ]
+  });
+  checkOk(startRes, "Start downtime");
+  const activityId = startRes.value.activity.id;
+
+  const docBefore = (await env.domains.read(env.rawDoc.id)).value;
+  const econBefore = tryGetDomainEconomyData(docBefore.record).value;
+  const suppliesBefore = econBefore.accounts.find((a) => a.resourceId === "domain-manager:supplies")?.balanceMinor ?? 0;
+
+  const advRes = await env.publicDowntime.advanceActivity({
+    domainUuid: env.rawDoc.uuid,
+    activityId,
+    ticks: 2
+  });
+  checkOk(advRes, "Dispatch downtime:advance via CommandBus");
+
+  const docAfter = (await env.domains.read(env.rawDoc.id)).value;
+  const econAfter = tryGetDomainEconomyData(docAfter.record).value;
+  const suppliesAfter = econAfter.accounts.find((a) => a.resourceId === "domain-manager:supplies")?.balanceMinor ?? 0;
+  assert.equal(suppliesAfter, suppliesBefore + 15, "Crafting completion outcome must grant 15 supplies through CommandBus dispatch");
+
+  const dtAfter = getDomainDowntimeData(docAfter.record);
+  const actAfter = dtAfter.activities.find((a) => a.id === activityId);
+  assert.ok(actAfter);
+  assert.equal(actAfter.lifecycle, "completed");
+});
+
+// ---------------------------------------------------------------------------
+// TEST 39: G5-REVAL4-010 Scenario C — Facility repair crash recovery
+// ---------------------------------------------------------------------------
+test("G5-REVAL4-010 Scenario C: Facility repair crash after debit recovers cleanly via recoverAll(1)", async () => {
+  const env = setupTestEnvironment();
+  await env.economyService.commitAdjust({
+    domainUuid: env.rawDoc.uuid,
+    resourceId: "domain-manager:materials",
+    deltaMinor: 500,
+    reason: "Initial materials"
+  });
+
+  const facRes = await env.facilitiesService.createFacility({
+    domainUuid: env.rawDoc.uuid,
+    definitionId: "domain-manager:storehouse",
+    name: "Storehouse for crash recovery test"
+  });
+  checkOk(facRes, "Create facility");
+  const facilityId = facRes.value.facility.id;
+
+  await env.facilitiesService.applyDamage({
+    domainUuid: env.rawDoc.uuid,
+    facilityId,
+    damage: 20,
+    reason: "Testing crash recovery"
+  });
+
+  const docBefore = (await env.domains.read(env.rawDoc.id)).value;
+  const econBefore = tryGetDomainEconomyData(docBefore.record).value;
+  const materialsBefore = econBefore.accounts.find((a) => a.resourceId === "domain-manager:materials")!.balanceMinor;
+
+  const repairTxId = "tx_simulated_repair_crash_1";
+  const repairAmount = 15;
+  await env.economyService.commitAdjust({
+    domainUuid: env.rawDoc.uuid,
+    resourceId: "domain-manager:materials",
+    deltaMinor: -repairAmount,
+    reason: `Repair cost for facility '${facilityId}'`
+  });
+
+  const txRecord = createTransactionRecord({
+    transactionId: repairTxId,
+    commandId: "cmd_sim_repair_crash" as any,
+    authorityEpoch: 1,
+    lockKeys: [`domain:${env.rawDoc.id}`, `facility:${facilityId}`],
+    recoveryData: {
+      type: "facilities:repair",
+      facilityId,
+      domainUuid: env.rawDoc.id,
+      debitedCosts: [{ resourceId: "domain-manager:materials", amount: repairAmount }],
+      authorityEpoch: 1,
+      status: "executing"
+    }
+  });
+  env.transactionStore.save(txRecord);
+  env.transactionStore.transition(repairTxId, "claimed", 1);
+  env.transactionStore.transition(repairTxId, "prepared", 1);
+  await env.transactionStore.flush();
+
+  const docDuring = (await env.domains.read(env.rawDoc.id)).value;
+  const econDuring = tryGetDomainEconomyData(docDuring.record).value;
+  const materialsDuring = econDuring.accounts.find((a) => a.resourceId === "domain-manager:materials")!.balanceMinor;
+  assert.equal(materialsDuring, materialsBefore - repairAmount);
+
+  const recoveryResults = await env.recoveryService.recoverAll(1);
+  assert.equal(recoveryResults.length, 1);
+  checkOk(recoveryResults[0], "Recovery must succeed");
+
+  const docAfter = (await env.domains.read(env.rawDoc.id)).value;
+  const econAfter = tryGetDomainEconomyData(docAfter.record).value;
+  const materialsAfter = econAfter.accounts.find((a) => a.resourceId === "domain-manager:materials")!.balanceMinor;
+  assert.equal(materialsAfter, materialsBefore, "Materials must be refunded after recovery");
+
+  const recoveredTx = env.transactionStore.get(repairTxId);
+  assert.ok(recoveredTx);
+  assert.equal(recoveredTx.state, "compensated");
+});
+
+// ---------------------------------------------------------------------------
+// TEST 40: G5-REVAL4-004 & G5-REVAL4-006 Scenario D — Project start crash recovery
+// ---------------------------------------------------------------------------
+test("G5-REVAL4-004 & G5-REVAL4-006 Scenario D: Project start crash after upfront debit recovers cleanly via recoverAll(1)", async () => {
+  const env = setupTestEnvironment();
+  await env.economyService.commitAdjust({
+    domainUuid: env.rawDoc.uuid,
+    resourceId: "domain-manager:materials",
+    deltaMinor: 500,
+    reason: "Initial materials"
+  });
+
+  const docBefore = (await env.domains.read(env.rawDoc.id)).value;
+  const econBefore = tryGetDomainEconomyData(docBefore.record).value;
+  const materialsBefore = econBefore.accounts.find((a) => a.resourceId === "domain-manager:materials")!.balanceMinor;
+
+  const projectId = "prj-crash-test-1";
+  const startTxId = "tx_simulated_prj_start_crash_1";
+  const upfrontAmount = 50;
+
+  await env.economyService.commitAdjust({
+    domainUuid: env.rawDoc.uuid,
+    resourceId: "domain-manager:materials",
+    deltaMinor: -upfrontAmount,
+    reason: `Cost for starting project ${projectId}`
+  });
+
+  const wfRes = await env.peopleService.allocateWorkforceReservation({
+    domainUuid: env.rawDoc.uuid,
+    projectId,
+    amount: 2,
+    workforceTypeId: "general"
+  });
+  checkOk(wfRes, "Reserve workforce");
+  const wfResId = wfRes.value.reservationId;
+
+  const txRecord = createTransactionRecord({
+    transactionId: startTxId,
+    commandId: "cmd_sim_prj_start_crash" as any,
+    authorityEpoch: 1,
+    lockKeys: [`domain:${env.rawDoc.id}`, `project:${projectId}`],
+    recoveryData: {
+      type: "projects:start",
+      projectId,
+      domainUuid: env.rawDoc.id,
+      debitedCosts: [{ resourceId: "domain-manager:materials", amountMinor: upfrontAmount }],
+      createdReservationIds: [],
+      allocatedWorkforceReservationId: wfResId,
+      authorityEpoch: 1,
+      status: "executing"
+    }
+  });
+  env.transactionStore.save(txRecord);
+  env.transactionStore.transition(startTxId, "claimed", 1);
+  env.transactionStore.transition(startTxId, "prepared", 1);
+  await env.transactionStore.flush();
+
+  const recoveryResults = await env.recoveryService.recoverAll(1);
+  assert.equal(recoveryResults.length, 1);
+  checkOk(recoveryResults[0], "Project start recovery must succeed");
+
+  const docAfter = (await env.domains.read(env.rawDoc.id)).value;
+  const econAfter = tryGetDomainEconomyData(docAfter.record).value;
+  const materialsAfter = econAfter.accounts.find((a) => a.resourceId === "domain-manager:materials")!.balanceMinor;
+  assert.equal(materialsAfter, materialsBefore, "Materials must be refunded after recovery");
+
+  const peopleDocAfter = (await env.domains.read(env.rawDoc.id)).value;
+  const peopleDataAfter = getDomainPeopleData(peopleDocAfter.record);
+  const wfResAfter = peopleDataAfter.reservations.find((r) => r.id === wfResId);
+  assert.equal(wfResAfter?.status, "released", "Workforce reservation must be released after recovery");
+
+  const recoveredTx = env.transactionStore.get(startTxId);
+  assert.ok(recoveredTx);
+  assert.equal(recoveredTx.state, "compensated");
+});
+
+// ---------------------------------------------------------------------------
+// TEST 41: G5-REVAL4-001 & G5-REVAL4-004 Scenario E — Downtime start crash recovery
+// ---------------------------------------------------------------------------
+test("G5-REVAL4-001 & G5-REVAL4-004 Scenario E: Downtime start crash after upfront debit recovers cleanly via recoverAll(1)", async () => {
+  const env = setupTestEnvironment();
+  await env.economyService.commitAdjust({
+    domainUuid: env.rawDoc.uuid,
+    resourceId: "domain-manager:materials",
+    deltaMinor: 500,
+    reason: "Initial materials"
+  });
+
+  const docBefore = (await env.domains.read(env.rawDoc.id)).value;
+  const econBefore = tryGetDomainEconomyData(docBefore.record).value;
+  const materialsBefore = econBefore.accounts.find((a) => a.resourceId === "domain-manager:materials")!.balanceMinor;
+
+  const dtTxId = "tx_simulated_dt_start_crash_1";
+  const costAmount = 10;
+
+  await env.economyService.commitAdjust({
+    domainUuid: env.rawDoc.uuid,
+    resourceId: "domain-manager:materials",
+    deltaMinor: -costAmount,
+    reason: "Cost for starting downtime activity"
+  });
+
+  const txRecord = createTransactionRecord({
+    transactionId: dtTxId,
+    commandId: "cmd_sim_dt_start_crash" as any,
+    authorityEpoch: 1,
+    lockKeys: [`domain:${env.rawDoc.id}`],
+    recoveryData: {
+      type: "downtime:start",
+      domainUuid: env.rawDoc.id,
+      definitionId: "domain-manager:crafting",
+      debitedCosts: [{ resourceId: "domain-manager:materials", amount: costAmount }],
+      status: "executing"
+    }
+  });
+  env.transactionStore.save(txRecord);
+  env.transactionStore.transition(dtTxId, "claimed", 1);
+  env.transactionStore.transition(dtTxId, "prepared", 1);
+  await env.transactionStore.flush();
+
+  const recoveryResults = await env.recoveryService.recoverAll(1);
+  assert.equal(recoveryResults.length, 1);
+  checkOk(recoveryResults[0], "Downtime start recovery must succeed");
+
+  const docAfter = (await env.domains.read(env.rawDoc.id)).value;
+  const econAfter = tryGetDomainEconomyData(docAfter.record).value;
+  const materialsAfter = econAfter.accounts.find((a) => a.resourceId === "domain-manager:materials")!.balanceMinor;
+  assert.equal(materialsAfter, materialsBefore, "Materials must be refunded after downtime recovery");
+
+  const recoveredTx = env.transactionStore.get(dtTxId);
+  assert.ok(recoveredTx);
+  assert.equal(recoveredTx.state, "compensated");
 });
 
 

@@ -194,6 +194,20 @@ export async function executeDowntimeResolutionPlan(
 
         if (creditRes.ok) {
           creditedResources.push({ resourceId, amount });
+          if (context.transactionStore) {
+            const tx = context.transactionStore.get(txId);
+            if (tx) {
+              context.transactionStore.save({
+                ...tx,
+                recoveryData: {
+                  ...(tx.recoveryData as any),
+                  creditedResources: Object.freeze([...creditedResources]),
+                  status: "executing"
+                }
+              });
+              await context.transactionStore.flush();
+            }
+          }
           outcomesApplied.push({
             childReceiptId: createOpaqueId("rep"),
             subsystem: "economy",

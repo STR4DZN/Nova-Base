@@ -387,6 +387,7 @@ export class FacilitiesService {
           const tx = this.#transactionStore.get(txId);
           if (tx) {
             this.#transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
+            await this.#transactionStore.flush();
           }
         }
       }
@@ -615,6 +616,7 @@ export class FacilitiesService {
           const tx = this.#transactionStore.get(txId);
           if (tx) {
             this.#transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
+            await this.#transactionStore.flush();
           }
         }
       }

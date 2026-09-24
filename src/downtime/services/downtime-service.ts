@@ -24,6 +24,7 @@ import { getDomainFacilitiesData } from "../../facilities/facility-data.js";
 import type { ChildReceipt } from "../../projects/plans/project-plan-types.js";
 import { tryGetDomainPeopleData } from "../../people/people-data.js";
 import type { TransactionStore } from "../../mutations/transaction-store.js";
+import type { RecoveryService } from "../../mutations/recovery-service.js";
 import { executeDowntimeStartPlan } from "../plans/downtime-start-plan.js";
 import { executeDowntimeResolutionPlan } from "../plans/downtime-resolution-plan.js";
 
@@ -35,6 +36,7 @@ export interface DowntimeServiceOptions {
   readonly economyService?: EconomyService;
   readonly facilitiesService?: FacilitiesService;
   readonly transactionStore?: TransactionStore;
+  readonly recoveryService?: RecoveryService;
   readonly outcomeHandlers?: Record<string, DowntimeOutcomeHandler>;
 }
 
@@ -84,6 +86,7 @@ export class DowntimeService {
   readonly #economyService?: EconomyService;
   readonly #facilitiesService?: FacilitiesService;
   readonly #transactionStore?: TransactionStore;
+  readonly #recoveryService?: RecoveryService;
   readonly #outcomeHandlers?: Record<string, DowntimeOutcomeHandler>;
 
   constructor(options: DowntimeServiceOptions) {
@@ -92,7 +95,11 @@ export class DowntimeService {
     this.#economyService = options.economyService;
     this.#facilitiesService = options.facilitiesService;
     this.#transactionStore = options.transactionStore;
+    this.#recoveryService = options.recoveryService;
     this.#outcomeHandlers = options.outcomeHandlers;
+    if (this.#recoveryService) {
+      this.registerRecoveryCompensators(this.#recoveryService);
+    }
   }
 
   #cleanId(idOrUuid: string): string {
@@ -308,5 +315,52 @@ export class DowntimeService {
     if (!saveRes.ok) return saveRes;
 
     return ok({ activity: updatedActivity });
+  }
+
+  registerRecoveryCompensators(recoveryService?: RecoveryService): void {
+    const recovery = recoveryService ?? this.#recoveryService;
+    if (!recovery) return;
+
+    recovery.registerCompensator("downtime:start", async (record) => {
+      const data = record.recoveryData as Record<string, any> | undefined;
+      if (!data || data.type !== "downtime:start") {
+        return ok(undefined);
+      }
+      const recoveryLockOwner = `recovery_${record.transactionId}`;
+      if (this.#economyService && data.debitedCosts && Array.isArray(data.debitedCosts)) {
+        for (const cost of data.debitedCosts) {
+          const refRes = await this.#economyService.commitAdjust({
+            domainUuid: data.domainUuid,
+            resourceId: cost.resourceId,
+            deltaMinor: cost.amount,
+            reason: `Recovery: refund upfront cost for downtime activity ${data.definitionId}`,
+            lockOwner: recoveryLockOwner
+          });
+          if (!refRes.ok) return refRes;
+        }
+      }
+      return ok(undefined);
+    });
+
+    recovery.registerCompensator("downtime:resolution", async (record) => {
+      const data = record.recoveryData as Record<string, any> | undefined;
+      if (!data || data.type !== "downtime:resolution") {
+        return ok(undefined);
+      }
+      const recoveryLockOwner = `recovery_${record.transactionId}`;
+      if (this.#economyService && data.creditedResources && Array.isArray(data.creditedResources)) {
+        for (const cred of data.creditedResources) {
+          const refRes = await this.#economyService.commitAdjust({
+            domainUuid: data.domainUuid,
+            resourceId: cred.resourceId,
+            deltaMinor: -cred.amount,
+            reason: `Recovery: reverse outcome credit for downtime activity ${data.activityId}`,
+            lockOwner: recoveryLockOwner
+          });
+          if (!refRes.ok) return refRes;
+        }
+      }
+      return ok(undefined);
+    });
   }
 }

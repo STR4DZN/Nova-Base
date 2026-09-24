@@ -33,10 +33,10 @@
 | Verificação | Resultado |
 |---|---|
 | TypeScript strict (`tsc --noEmit`) | PASS (0 erros) |
-| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 581/581 (0 falhas) |
+| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 586/586 (0 falhas) |
 | Relatório de Aceitação G5 | Gerado (`docs/GATE_G5_ACCEPTANCE_REPORT.md`) |
 | Regressões G0/G1/G2/G3/G4 | 0 (todos os 444 testes anteriores preservados e passando) |
-| Testes novos Gate G5 | 137 testes dedicados (G5.1 a G5.10: 101 testes + 36 testes adversários de revalidação em g5-revalidation-adversarial.test.ts) |
+| Testes novos Gate G5 | 142 testes dedicados (G5.1 a G5.10: 101 testes + 41 testes adversários de revalidação em g5-revalidation-adversarial.test.ts) |
 | Remediação de Auditoria G5-AUD-001 a G5-AUD-010 | PASS — 100% remediado, endurecido e verificado |
 | Remediação de Revalidação G5-REVAL-001 a G5-REVAL-012 | PASS — 100% remediado, endurecido e verificado |
 | Remediação de Revalidação 2 G5-REVAL2-001 a G5-REVAL2-010 | PASS — 100% remediado, endurecido e verificado |
@@ -86,11 +86,12 @@
 10. **G5-REVAL4-010 (MÉDIO — Transações Duráveis com Recuperação em Manutenção e Reparo de Facilities)**:
     - `FacilitiesService.maintainFacility` e `FacilitiesService.repairFacility` foram equipados com orquestração transacional durável (`type: "facilities:maintenance"` e `"facilities:repair"`), com barreira `await flush()`, ciclo canônico (`prepared -> committing -> committed`), compensação com roteamento para `needs-recovery`, e registro de compensadores no `RecoveryService`.
 
-11. **G5-REVAL4-011 (BAIXO — Normalização de Limites e Atualização de Documentação)**:
-    - Contagens e evidências de testes alinhadas em 581 testes passando com zero falhas e zero regressões. Documentação atualizada mantendo estritamente o estado `GATE_G5_COMPLETED_PENDING_USER_ACCEPTANCE`.
+11. **G5-REVAL4-011 (BAIXO — Normalização de Limites Arquiteturais e Atualização de Documentação)**:
+    - Formalizado que `DomainOperationPlans` (`executeProjectStartDomainOperationPlan`, `executeProjectAdvanceDomainOperationPlan`, `executeProjectCancelDomainOperationPlan`, `executeProjectCompletionDomainOperationPlan`, `executeDowntimeStartPlan`, `executeDowntimeResolutionPlan`) atuam como coordenadores/orquestradores de transação entre subsistemas independentes (`EconomyService`, `PeopleService`, `FacilitiesService`), enquanto os modelos e resolvers de domínio (`StandardProgressResolver`, entidades puras) permanecem estritamente puros e sem efeitos colaterais em subsistemas externos.
+    - Contagens e evidências alinhadas em 586 testes passando com zero falhas e zero regressões. Documentação mantida estritamente no estado `GATE_G5_COMPLETED_PENDING_USER_ACCEPTANCE`.
 
-12. **G5-REVAL4-012 (CRÍTICO — Suíte de Testes Adversários de 36 Casos)**:
-    - Expandida a suíte `tests/runtime/g5-revalidation-adversarial.test.ts` de 26 para 36 testes, cobrindo integralmente as 10 novas matrizes de falha e transição auditadas na 4ª revalidação. 100% de aprovação (36/36).
+12. **G5-REVAL4-012 (CRÍTICO — Suíte de Testes Adversários de 41 Casos)**:
+    - Expandida a suíte `tests/runtime/g5-revalidation-adversarial.test.ts` de 26 para 41 testes (+15 novos testes adversários), cobrindo integralmente as matrizes de falha e transição auditadas na 4ª revalidação, incluindo cancelamento com falha no estágio People, avanço de downtime com auto-complete econômico via CommandBus e recuperação pós-crash de reparo de facility, start de projeto e start de downtime via `recoverAll(1)`. 100% de aprovação (41/41).
 
 ## Remediação da 3ª Revalidação Gate G5 — G5-REVAL3-001 a G5-REVAL3-007
 

@@ -237,6 +237,7 @@ export async function executeProjectAdvanceDomainOperationPlan(
             const tx = context.transactionStore.get(txId);
             if (tx) {
               context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
+              await context.transactionStore.flush();
             }
           }
         }

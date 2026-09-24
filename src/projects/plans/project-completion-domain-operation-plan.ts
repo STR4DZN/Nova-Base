@@ -277,6 +277,7 @@ export async function executeProjectCompletionDomainOperationPlan(
           const tx = context.transactionStore.get(txId);
           if (tx) {
             context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
+            await context.transactionStore.flush();
           }
         }
       }
@@ -310,6 +311,7 @@ export async function executeProjectCompletionDomainOperationPlan(
       const tx = context.transactionStore.get(txId);
       if (tx) {
         context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
+        await context.transactionStore.flush();
       }
     }
   }

@@ -21413,13 +21413,24 @@ async function executeProjectStartDomainOperationPlan(context, params) {
       );
     }
   }
+  const peopleService = context.peopleService ?? new PeopleService(context.domains);
   const debitedCosts = [];
   const createdReservationIds = [];
   let allocatedWorkforceReservationId;
   let compensationFailed = false;
+  const buildRecoveryData = (status) => ({
+    type: "projects:start",
+    projectId: draftProject.id,
+    planId: plan.planId,
+    domainUuid: cleanDomainUuid,
+    debitedCosts: Object.freeze([...debitedCosts]),
+    createdReservationIds: Object.freeze([...createdReservationIds]),
+    allocatedWorkforceReservationId,
+    status
+  });
   const compensate = async (reason) => {
-    if (allocatedWorkforceReservationId && context.peopleService) {
-      const relWfRes = await context.peopleService.releaseWorkforceReservation({
+    if (allocatedWorkforceReservationId) {
+      const relWfRes = await peopleService.releaseWorkforceReservation({
         domainUuid: cleanDomainUuid,
         projectId: draftProject.id,
         reservationId: allocatedWorkforceReservationId,
@@ -21456,6 +21467,10 @@ async function executeProjectStartDomainOperationPlan(context, params) {
     }
     if (context.transactionStore) {
       const targetState = compensationFailed ? "needs-recovery" : "failed";
+      const tx = context.transactionStore.get(txId);
+      if (tx) {
+        context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData(targetState) });
+      }
       context.transactionStore.transition(txId, targetState, epoch, reason);
     }
   };
@@ -21481,6 +21496,13 @@ async function executeProjectStartDomainOperationPlan(context, params) {
           );
         }
         debitedCosts.push({ resourceId: cost.resourceId, amountMinor: cost.amountMinor });
+        if (context.transactionStore) {
+          const tx = context.transactionStore.get(txId);
+          if (tx) {
+            context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
+            await context.transactionStore.flush();
+          }
+        }
       } else if (cost.timing === "reserved") {
         const reserveRes = await context.economyService.reserve({
           domainUuid: cleanDomainUuid,
@@ -21501,12 +21523,18 @@ async function executeProjectStartDomainOperationPlan(context, params) {
           );
         }
         createdReservationIds.push(reserveRes.value.id);
+        if (context.transactionStore) {
+          const tx = context.transactionStore.get(txId);
+          if (tx) {
+            context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
+            await context.transactionStore.flush();
+          }
+        }
       }
     }
   }
   const wfRequired = params.workforceRequired ?? (params.workforceAllocations?.reduce((sum, a) => sum + a.count, 0) ?? 0);
   if (wfRequired > 0) {
-    const peopleService = context.peopleService ?? new PeopleService(context.domains);
     const wfRes = await peopleService.allocateWorkforceReservation({
       domainUuid: cleanDomainUuid,
       projectId: draftProject.id,
@@ -21526,6 +21554,13 @@ async function executeProjectStartDomainOperationPlan(context, params) {
       );
     }
     allocatedWorkforceReservationId = wfRes.value.reservationId;
+    if (context.transactionStore) {
+      const tx = context.transactionStore.get(txId);
+      if (tx) {
+        context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
+        await context.transactionStore.flush();
+      }
+    }
   }
   const projectToCommit = createdReservationIds.length > 0 ? {
     ...draftProject,
@@ -21560,7 +21595,7 @@ async function executeProjectStartDomainOperationPlan(context, params) {
       return committingRes;
     }
   }
-  const updateRes = await context.domains.update({
+  const updateRes = await context.domains.save({
     ...freshDocRes.value,
     record: updatedRecord
   });
@@ -22086,6 +22121,7 @@ async function executeProjectCompletionDomainOperationPlan(context, params) {
           const tx = context.transactionStore.get(txId);
           if (tx) {
             context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
+            await context.transactionStore.flush();
           }
         }
       }
@@ -22116,6 +22152,7 @@ async function executeProjectCompletionDomainOperationPlan(context, params) {
       const tx = context.transactionStore.get(txId);
       if (tx) {
         context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
+        await context.transactionStore.flush();
       }
     }
   }
@@ -22559,6 +22596,7 @@ async function executeProjectAdvanceDomainOperationPlan(context, params) {
             const tx = context.transactionStore.get(txId);
             if (tx) {
               context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
+              await context.transactionStore.flush();
             }
           }
         }
@@ -23064,9 +23102,10 @@ var ProjectsService = class {
           if (!restRes.ok) return restRes;
         }
       }
-      if (this.#peopleService && data.releasedWorkforceSnapshots && data.releasedWorkforceSnapshots.length > 0) {
+      const peopleService = this.#peopleService ?? new PeopleService(this.#domains);
+      if (data.releasedWorkforceSnapshots && data.releasedWorkforceSnapshots.length > 0) {
         for (const wf of data.releasedWorkforceSnapshots) {
-          const restWf = await this.#peopleService.restoreWorkforceReservation({
+          const restWf = await peopleService.restoreWorkforceReservation({
             domainUuid: data.domainUuid,
             projectId: data.projectId,
             reservationId: wf.reservationId
@@ -23151,14 +23190,55 @@ var ProjectsService = class {
           if (!restRes.ok) return restRes;
         }
       }
-      if (this.#peopleService && data.releasedWorkforceSnapshots && Array.isArray(data.releasedWorkforceSnapshots)) {
+      const peopleService = this.#peopleService ?? new PeopleService(this.#domains);
+      if (data.releasedWorkforceSnapshots && Array.isArray(data.releasedWorkforceSnapshots)) {
         for (const wf of data.releasedWorkforceSnapshots) {
-          const restWf = await this.#peopleService.restoreWorkforceReservation({
+          const restWf = await peopleService.restoreWorkforceReservation({
             domainUuid: data.domainUuid,
             projectId: data.projectId,
             reservationId: wf.reservationId
           });
           if (!restWf.ok) return restWf;
+        }
+      }
+      return ok(void 0);
+    });
+    recovery.registerCompensator("projects:start", async (record) => {
+      const data = record.recoveryData;
+      if (!data || data.type !== "projects:start") {
+        return ok(void 0);
+      }
+      const recoveryLockOwner = `recovery_${record.transactionId}`;
+      const peopleService = this.#peopleService ?? new PeopleService(this.#domains);
+      if (data.allocatedWorkforceReservationId) {
+        const relWf = await peopleService.releaseWorkforceReservation({
+          domainUuid: data.domainUuid,
+          projectId: data.projectId,
+          reservationId: data.allocatedWorkforceReservationId
+        });
+        if (!relWf.ok) return relWf;
+      }
+      if (this.#economyService && data.createdReservationIds && Array.isArray(data.createdReservationIds)) {
+        for (const resId of data.createdReservationIds) {
+          const relRes = await this.#economyService.releaseReservation({
+            domainUuid: data.domainUuid,
+            reservationId: resId,
+            reason: `Recovery: release reservation for project start ${data.projectId}`,
+            lockOwner: recoveryLockOwner
+          });
+          if (!relRes.ok) return relRes;
+        }
+      }
+      if (this.#economyService && data.debitedCosts && Array.isArray(data.debitedCosts)) {
+        for (const cost of data.debitedCosts) {
+          const refRes = await this.#economyService.commitAdjust({
+            domainUuid: data.domainUuid,
+            resourceId: cost.resourceId,
+            deltaMinor: cost.amountMinor,
+            reason: `Recovery: refund upfront cost for project start ${data.projectId}`,
+            lockOwner: recoveryLockOwner
+          });
+          if (!refRes.ok) return refRes;
         }
       }
       return ok(void 0);
@@ -24668,6 +24748,7 @@ var FacilitiesService = class {
           const tx = this.#transactionStore.get(txId);
           if (tx) {
             this.#transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
+            await this.#transactionStore.flush();
           }
         }
       }
@@ -24866,6 +24947,7 @@ var FacilitiesService = class {
           const tx = this.#transactionStore.get(txId);
           if (tx) {
             this.#transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
+            await this.#transactionStore.flush();
           }
         }
       }
@@ -26136,6 +26218,20 @@ async function executeDowntimeStartPlan(context, params) {
         return debitRes;
       }
       debitedCosts.push({ resourceId: cost.resourceId, amount: cost.amount });
+      if (context.transactionStore) {
+        const tx = context.transactionStore.get(txId);
+        if (tx) {
+          context.transactionStore.save({
+            ...tx,
+            recoveryData: {
+              ...tx.recoveryData,
+              debitedCosts: Object.freeze([...debitedCosts]),
+              status: "executing"
+            }
+          });
+          await context.transactionStore.flush();
+        }
+      }
     }
   }
   const activityId = `dt-${createOpaqueId("prj").slice(4)}`;
@@ -26305,6 +26401,20 @@ async function executeDowntimeResolutionPlan(context, params) {
         });
         if (creditRes.ok) {
           creditedResources.push({ resourceId, amount });
+          if (context.transactionStore) {
+            const tx = context.transactionStore.get(txId);
+            if (tx) {
+              context.transactionStore.save({
+                ...tx,
+                recoveryData: {
+                  ...tx.recoveryData,
+                  creditedResources: Object.freeze([...creditedResources]),
+                  status: "executing"
+                }
+              });
+              await context.transactionStore.flush();
+            }
+          }
           outcomesApplied.push({
             childReceiptId: createOpaqueId("rep"),
             subsystem: "economy",
@@ -26509,6 +26619,7 @@ var DowntimeService = class {
   #economyService;
   #facilitiesService;
   #transactionStore;
+  #recoveryService;
   #outcomeHandlers;
   constructor(options) {
     this.#domains = options.domains;
@@ -26516,7 +26627,11 @@ var DowntimeService = class {
     this.#economyService = options.economyService;
     this.#facilitiesService = options.facilitiesService;
     this.#transactionStore = options.transactionStore;
+    this.#recoveryService = options.recoveryService;
     this.#outcomeHandlers = options.outcomeHandlers;
+    if (this.#recoveryService) {
+      this.registerRecoveryCompensators(this.#recoveryService);
+    }
   }
   #cleanId(idOrUuid) {
     return normalizeJournalEntryId(idOrUuid);
@@ -26679,6 +26794,50 @@ var DowntimeService = class {
     });
     if (!saveRes.ok) return saveRes;
     return ok({ activity: updatedActivity });
+  }
+  registerRecoveryCompensators(recoveryService) {
+    const recovery = recoveryService ?? this.#recoveryService;
+    if (!recovery) return;
+    recovery.registerCompensator("downtime:start", async (record) => {
+      const data = record.recoveryData;
+      if (!data || data.type !== "downtime:start") {
+        return ok(void 0);
+      }
+      const recoveryLockOwner = `recovery_${record.transactionId}`;
+      if (this.#economyService && data.debitedCosts && Array.isArray(data.debitedCosts)) {
+        for (const cost of data.debitedCosts) {
+          const refRes = await this.#economyService.commitAdjust({
+            domainUuid: data.domainUuid,
+            resourceId: cost.resourceId,
+            deltaMinor: cost.amount,
+            reason: `Recovery: refund upfront cost for downtime activity ${data.definitionId}`,
+            lockOwner: recoveryLockOwner
+          });
+          if (!refRes.ok) return refRes;
+        }
+      }
+      return ok(void 0);
+    });
+    recovery.registerCompensator("downtime:resolution", async (record) => {
+      const data = record.recoveryData;
+      if (!data || data.type !== "downtime:resolution") {
+        return ok(void 0);
+      }
+      const recoveryLockOwner = `recovery_${record.transactionId}`;
+      if (this.#economyService && data.creditedResources && Array.isArray(data.creditedResources)) {
+        for (const cred of data.creditedResources) {
+          const refRes = await this.#economyService.commitAdjust({
+            domainUuid: data.domainUuid,
+            resourceId: cred.resourceId,
+            deltaMinor: -cred.amount,
+            reason: `Recovery: reverse outcome credit for downtime activity ${data.activityId}`,
+            lockOwner: recoveryLockOwner
+          });
+          if (!refRes.ok) return refRes;
+        }
+      }
+      return ok(void 0);
+    });
   }
 };
 
@@ -31151,7 +31310,8 @@ function composeDomainManagerRuntime(options = {}) {
     downtimeRegistry,
     economyService,
     facilitiesService,
-    transactionStore
+    transactionStore,
+    recoveryService: recovery
   });
   const registry = new CommandRegistry();
   registerDomainCommandHandlers(registry, coordinator, mutableDomainRepo);

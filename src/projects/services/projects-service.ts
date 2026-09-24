@@ -406,9 +406,10 @@ export class ProjectsService {
       }
 
       // 4. Restore released workforce reservations (G5-REVAL4-006)
-      if (this.#peopleService && data.releasedWorkforceSnapshots && data.releasedWorkforceSnapshots.length > 0) {
+      const peopleService = this.#peopleService ?? new PeopleService(this.#domains);
+      if (data.releasedWorkforceSnapshots && data.releasedWorkforceSnapshots.length > 0) {
         for (const wf of data.releasedWorkforceSnapshots) {
-          const restWf = await this.#peopleService.restoreWorkforceReservation({
+          const restWf = await peopleService.restoreWorkforceReservation({
             domainUuid: data.domainUuid,
             projectId: data.projectId,
             reservationId: wf.reservationId
@@ -502,9 +503,10 @@ export class ProjectsService {
           if (!restRes.ok) return restRes;
         }
       }
-      if (this.#peopleService && data.releasedWorkforceSnapshots && Array.isArray(data.releasedWorkforceSnapshots)) {
+      const peopleService = this.#peopleService ?? new PeopleService(this.#domains);
+      if (data.releasedWorkforceSnapshots && Array.isArray(data.releasedWorkforceSnapshots)) {
         for (const wf of data.releasedWorkforceSnapshots) {
-          const restWf = await this.#peopleService.restoreWorkforceReservation({
+          const restWf = await peopleService.restoreWorkforceReservation({
             domainUuid: data.domainUuid,
             projectId: data.projectId,
             reservationId: wf.reservationId
@@ -512,6 +514,52 @@ export class ProjectsService {
           if (!restWf.ok) return restWf;
         }
       }
+      return ok(undefined);
+    });
+
+    // Compensator for projects:start
+    recovery.registerCompensator("projects:start", async (record) => {
+      const data = record.recoveryData as Record<string, any> | undefined;
+      if (!data || data.type !== "projects:start") {
+        return ok(undefined);
+      }
+      const recoveryLockOwner = `recovery_${record.transactionId}`;
+      const peopleService = this.#peopleService ?? new PeopleService(this.#domains);
+
+      if (data.allocatedWorkforceReservationId) {
+        const relWf = await peopleService.releaseWorkforceReservation({
+          domainUuid: data.domainUuid,
+          projectId: data.projectId,
+          reservationId: data.allocatedWorkforceReservationId
+        });
+        if (!relWf.ok) return relWf;
+      }
+
+      if (this.#economyService && data.createdReservationIds && Array.isArray(data.createdReservationIds)) {
+        for (const resId of data.createdReservationIds) {
+          const relRes = await this.#economyService.releaseReservation({
+            domainUuid: data.domainUuid,
+            reservationId: resId,
+            reason: `Recovery: release reservation for project start ${data.projectId}`,
+            lockOwner: recoveryLockOwner
+          });
+          if (!relRes.ok) return relRes;
+        }
+      }
+
+      if (this.#economyService && data.debitedCosts && Array.isArray(data.debitedCosts)) {
+        for (const cost of data.debitedCosts) {
+          const refRes = await this.#economyService.commitAdjust({
+            domainUuid: data.domainUuid,
+            resourceId: cost.resourceId,
+            deltaMinor: cost.amountMinor,
+            reason: `Recovery: refund upfront cost for project start ${data.projectId}`,
+            lockOwner: recoveryLockOwner
+          });
+          if (!refRes.ok) return refRes;
+        }
+      }
+
       return ok(undefined);
     });
   }

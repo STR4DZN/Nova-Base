@@ -348,6 +348,20 @@ export async function executeDowntimeStartPlan(
         return debitRes;
       }
       debitedCosts.push({ resourceId: cost.resourceId, amount: cost.amount });
+      if (context.transactionStore) {
+        const tx = context.transactionStore.get(txId);
+        if (tx) {
+          context.transactionStore.save({
+            ...tx,
+            recoveryData: {
+              ...(tx.recoveryData as any),
+              debitedCosts: Object.freeze([...debitedCosts]),
+              status: "executing"
+            }
+          });
+          await context.transactionStore.flush();
+        }
+      }
     }
   }
 

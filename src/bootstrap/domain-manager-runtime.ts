@@ -299,7 +299,8 @@ export function composeDomainManagerRuntime(
     downtimeRegistry,
     economyService,
     facilitiesService,
-    transactionStore
+    transactionStore,
+    recoveryService: recovery
   });
 
   const registry = new CommandRegistry();

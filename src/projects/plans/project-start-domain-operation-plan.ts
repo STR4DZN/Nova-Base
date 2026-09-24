@@ -202,17 +202,30 @@ export async function executeProjectStartDomainOperationPlan(
     }
   }
 
+  const peopleService = context.peopleService ?? new PeopleService(context.domains);
+
   // Tracking for rollback / compensation on failure
   const debitedCosts: Array<{ resourceId: string; amountMinor: number }> = [];
   const createdReservationIds: string[] = [];
   let allocatedWorkforceReservationId: string | undefined;
   let compensationFailed = false;
 
+  const buildRecoveryData = (status: "prepared" | "executing" | "completed" | "needs-recovery" | "failed") => ({
+    type: "projects:start",
+    projectId: draftProject.id,
+    planId: plan.planId,
+    domainUuid: cleanDomainUuid,
+    debitedCosts: Object.freeze([...debitedCosts]),
+    createdReservationIds: Object.freeze([...createdReservationIds]),
+    allocatedWorkforceReservationId,
+    status
+  });
+
   // Compensation helper to cleanly roll back all prior child effects
   const compensate = async (reason: string) => {
     // 1. Release workforce reservation
-    if (allocatedWorkforceReservationId && context.peopleService) {
-      const relWfRes = await context.peopleService.releaseWorkforceReservation({
+    if (allocatedWorkforceReservationId) {
+      const relWfRes = await peopleService.releaseWorkforceReservation({
         domainUuid: cleanDomainUuid,
         projectId: draftProject.id,
         reservationId: allocatedWorkforceReservationId,
@@ -254,6 +267,10 @@ export async function executeProjectStartDomainOperationPlan(
 
     if (context.transactionStore) {
       const targetState = compensationFailed ? "needs-recovery" : "failed";
+      const tx = context.transactionStore.get(txId);
+      if (tx) {
+        context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData(targetState) });
+      }
       context.transactionStore.transition(txId, targetState, epoch, reason);
     }
   };
@@ -281,6 +298,13 @@ export async function executeProjectStartDomainOperationPlan(
           );
         }
         debitedCosts.push({ resourceId: cost.resourceId, amountMinor: cost.amountMinor });
+        if (context.transactionStore) {
+          const tx = context.transactionStore.get(txId);
+          if (tx) {
+            context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
+            await context.transactionStore.flush();
+          }
+        }
       } else if (cost.timing === "reserved") {
         const reserveRes = await context.economyService.reserve({
           domainUuid: cleanDomainUuid,
@@ -301,6 +325,13 @@ export async function executeProjectStartDomainOperationPlan(
           );
         }
         createdReservationIds.push(reserveRes.value.id);
+        if (context.transactionStore) {
+          const tx = context.transactionStore.get(txId);
+          if (tx) {
+            context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
+            await context.transactionStore.flush();
+          }
+        }
       }
     }
   }
@@ -310,7 +341,6 @@ export async function executeProjectStartDomainOperationPlan(
     params.workforceRequired ??
     (params.workforceAllocations?.reduce((sum, a) => sum + a.count, 0) ?? 0);
   if (wfRequired > 0) {
-    const peopleService = context.peopleService ?? new PeopleService(context.domains);
     const wfRes = await peopleService.allocateWorkforceReservation({
       domainUuid: cleanDomainUuid,
       projectId: draftProject.id,
@@ -330,6 +360,13 @@ export async function executeProjectStartDomainOperationPlan(
       );
     }
     allocatedWorkforceReservationId = wfRes.value.reservationId;
+    if (context.transactionStore) {
+      const tx = context.transactionStore.get(txId);
+      if (tx) {
+        context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
+        await context.transactionStore.flush();
+      }
+    }
   }
 
   // Step 4: Commit project start plan
@@ -376,7 +413,7 @@ export async function executeProjectStartDomainOperationPlan(
     }
   }
 
-  const updateRes = await context.domains.update({
+  const updateRes = await context.domains.save({
     ...freshDocRes.value,
     record: updatedRecord
   });
