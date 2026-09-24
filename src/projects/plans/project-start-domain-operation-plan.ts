@@ -24,6 +24,7 @@ export interface ProjectStartDomainOperationParams {
   readonly userId?: string | null;
   readonly expectedRevision?: number;
   readonly workforceRequired?: number;
+  readonly workforceAllocations?: readonly { readonly workforceTypeId?: string; readonly count: number }[];
   readonly contributors?: readonly (string | ProjectContributorRef)[];
   readonly commandId?: string;
   readonly correlationId?: string;

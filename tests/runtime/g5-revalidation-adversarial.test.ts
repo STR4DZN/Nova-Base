@@ -2591,11 +2591,9 @@ test("G5-REVAL4-004 (Fault 5): Recovery execution with recovery_<txId> lockOwner
   env.transactionStore.transition(txId, "prepared", 1);
   env.transactionStore.transition(txId, "needs-recovery", 1, "Simulated crash");
 
-  const scanRecords = await env.recoveryService.scanOnStartup(1);
-  assert.equal(scanRecords.length, 1, "Must find 1 unresolved transaction");
-
-  const recRes = await env.recoveryService.recoverTransaction(txId, 1);
-  checkOk(recRes, "Recovery should succeed under recovery_<txId> lock");
+  const recResList = await env.recoveryService.recoverAll(1);
+  assert.equal(recResList.length, 1, "Must find and recover 1 unresolved transaction via recoverAll");
+  checkOk(recResList[0], "Recovery should succeed under recovery_<txId> lock via recoverAll");
 
   const recoveredTx = env.transactionStore.get(txId);
   assert.equal(recoveredTx?.state, "compensated", "Transaction must be marked compensated");
@@ -2696,8 +2694,9 @@ test("G5-REVAL4-006 (Fault 7): Project completion recovery restores consumed eco
   env.transactionStore.transition(recTxId, "prepared", 1);
   env.transactionStore.transition(recTxId, "needs-recovery", 1, "Simulated crash after completion");
 
-  const recRes = await env.recoveryService.recoverTransaction(recTxId);
-  checkOk(recRes, "Recovery should succeed");
+  const recResList = await env.recoveryService.recoverAll(1);
+  assert.equal(recResList.length, 1, "Must find and recover 1 needs-recovery transaction via recoverAll");
+  checkOk(recResList[0], "Recovery should succeed");
 
   const resSnapshot = recoveryData.consumedReservationSnapshots[0].reservation;
   const restoredRes = env.economyService.getReservation(resSnapshot.id);
