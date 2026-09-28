@@ -33,10 +33,10 @@
 | Verificação | Resultado |
 |---|---|
 | TypeScript strict (`tsc --noEmit`) | PASS (0 erros) |
-| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 611/611 (0 falhas) |
+| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 645/645 (0 falhas, 0 regressões) |
 | Relatório de Aceitação G5 | Gerado (`docs/GATE_G5_ACCEPTANCE_REPORT.md`) |
 | Regressões G0/G1/G2/G3/G4 | 0 (todos os 444 testes anteriores preservados e passando) |
-| Testes novos Gate G5 | 167 testes dedicados (G5.1 a G5.10: 101 testes + 66 testes adversários de revalidação em g5-revalidation-adversarial.test.ts) |
+| Testes novos Gate G5 | 201 testes dedicados (G5.1 a G5.10: 101 testes + 66 testes adversários em g5-revalidation-adversarial.test.ts + 10 testes de lock-set em g5-lockset-contract.test.ts + 5 testes de fence em g5-recovery-fence.test.ts + 19 testes de kernel em g5-transaction-kernel.test.ts) |
 | Remediação de Auditoria G5-AUD-001 a G5-AUD-010 | PASS — 100% remediado, endurecido e verificado |
 | Remediação de Revalidação G5-REVAL-001 a G5-REVAL-012 | PASS — 100% remediado, endurecido e verificado |
 | Remediação de Revalidação 2 G5-REVAL2-001 a G5-REVAL2-010 | PASS — 100% remediado, endurecido e verificado |
@@ -44,10 +44,42 @@
 | Remediação de Revalidação 4 G5-REVAL4-001 a G5-REVAL4-012 | PASS — 100% remediado, endurecido e verificado |
 | Remediação de Revalidação 5 G5-REVAL5-001 a G5-REVAL5-009 | PASS — 100% remediado, endurecido e verificado |
 | Remediação de Revalidação 6 G5-REVAL6-001 a G5-REVAL6-005 | PASS — 100% remediado, endurecido e verificado |
+| Remediação Master G5 (DOMAIN_MANAGER_G5_MASTER_REMEDIACAO_FINAL) | PASS — Camada canônica CompositeMutationSession, lockKey factory, RecoveryFenceRegistry, atomic store methods e matriz de testes completa (Grupos A a I) |
 | Build do pacote (`node build.mjs`) | PASS (`dist/main.js` gerado) |
 | Empacotamento (`node scripts/package.mjs`) | PASS (`dist/domain-manager-v0.0.5.zip` gerado) |
 | Validação de pacote (`node scripts/validate-package.mjs`) | PASS |
 | Validação de artefato (`node scripts/validate-artifact.mjs`) | PASS |
+
+## Remediação Master Gate G5 (DOMAIN_MANAGER_G5_MASTER_REMEDIACAO_FINAL)
+
+1. **Camada de Execução Canônica (`CompositeMutationSession`)**:
+   - Centralizou todo o protocolo transacional de Projetos, Downtime e Facilities em uma única máquina de estados determinística (`planned -> claimed -> prepared -> committing -> committed / needs-recovery`).
+   - Implementou invariantes INV-01 a INV-11: validação estrita de locks e ausência de namespace proibido (INV-01), persistência durável antes de efeitos filhos (INV-02), checkpoints de intenção/recibo por step (INV-03, INV-04, INV-05), captura e wrapping fail-closed de exceções (INV-06, INV-11), barreira lógica de recovery fence imediata (INV-07), reconciliação segura e commit durável (INV-09, INV-10).
+
+2. **Fábrica Canônica de Locks e Zero-Divergence (`lockKey`)**:
+   - Chaves geradas exclusivamente via `lockKey.domain()`, `lockKey.project()`, `lockKey.downtime()`, `lockKey.facility()`.
+   - Rejeição fail-closed com `DM_TX_LOCKSET_DIVERGENCE` caso o conjunto de locks do comando divirja do MutationPlan ou do TransactionRecord (Finding 2: Project Start com `[domain]` estrito; Finding 3: Downtime Resolution com `[domain, downtime:<id>]` e banimento total do prefixo `activity:`).
+
+3. **Barreira Lógica de Recuperação (`RecoveryFenceRegistry`)**:
+   - Bloqueia novas mutações concorrentes ou sobrepostas no mesmo escopo com `DM_RECOVERY_SCOPE_BLOCKED` imediatamente quando uma transação entra em `needs-recovery`, independentemente de retenção ou contenção de lock físico.
+   - Scan de inicialização (`scanOnStartup`) instala fences para todas as transações não resolvidas antes de aceitar comandos no runtime.
+
+4. **Idempotência no Ledger e Ajustes Econômicos (§17)**:
+   - `EconomyService.commitAdjust` agora registra e valida `appliedIdempotencyKeys` diretamente no domínio e no `LedgerStore`, revertendo o saldo em memória caso o flush do ledger falhe e garantindo deduplicação estrita em repetições pós-falha.
+
+5. **Compensadores Compartilhados e Resolvidos Duravelmente (§19)**:
+   - Todos os compensadores de Projetos, Downtime e Facilities agora aceitam `TransactionRecord | string`, reidratam o registro mais atualizado a partir do `TransactionStore`, e evitam dados defasados.
+
+6. **Matriz de Testes Abrangente (Grupos A a I, 645/645 PASS)**:
+   - Grupo A (Lock-set identity: A1 a A8): 10 testes em `g5-lockset-contract.test.ts`.
+   - Grupo B (Immediate compensation exceptions): testado em `g5-transaction-kernel.test.ts`.
+   - Grupo C (Restart idempotency & Section 17): testado em `g5-transaction-kernel.test.ts`.
+   - Grupo D (Runtime fence isolation): testado em `g5-recovery-fence.test.ts`.
+   - Grupo E (Startup fence isolation & pending locks): 5 testes em `g5-recovery-fence.test.ts` (E1, E2, E3).
+   - Grupo F (Parent reconciliation crash points): 8 testes em `g5-transaction-kernel.test.ts` (F1 a F8).
+   - Grupo G (Child intent crash points G1, G2, G3): testado em `g5-transaction-kernel.test.ts`.
+   - Grupo H (Multi-step compensation com skip idempotente): testado em `g5-transaction-kernel.test.ts`.
+   - Grupo I (Coordinator isolation failure handling): testado em `g5-recovery-fence.test.ts`.
 
 ## Remediação da 6ª Revalidação Gate G5 — G5-REVAL6-001 a G5-REVAL6-005
 

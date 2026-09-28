@@ -32,10 +32,22 @@ export interface ProjectCompensationOptions {
  * Shared by immediate plan rollback and RecoveryService.
  */
 export async function compensateProjectStart(
-  record: TransactionRecord,
+  recordOrId: TransactionRecord | string,
   context: ProjectCompensatorContext,
   options?: ProjectCompensationOptions
 ): Promise<Result<void, PublicError>> {
+  const record = typeof recordOrId === "string"
+    ? context.transactionStore?.get(recordOrId)
+    : (context.transactionStore?.get(recordOrId.transactionId) ?? recordOrId);
+  if (!record) {
+    return err(
+      createPublicError({
+        code: "DM_TRANSACTION_NOT_FOUND",
+        category: "not-found",
+        message: `Transaction record '${typeof recordOrId === "string" ? recordOrId : recordOrId.transactionId}' not found`
+      })
+    );
+  }
   const data = record.recoveryData as Record<string, any> | undefined;
   if (!data || data.type !== "projects:start") {
     return ok(undefined);
@@ -70,50 +82,133 @@ export async function compensateProjectStart(
     }
   }
 
-  // 2. Refund debited upfront costs (with stable idempotencyKey to prevent double refund)
-  if (context.economyService && data.debitedCosts && Array.isArray(data.debitedCosts)) {
-    for (let i = 0; i < data.debitedCosts.length; i++) {
-      const cost = data.debitedCosts[i];
-      const stepId = `refund_start_cost_${i}_${cost.resourceId}_${cost.amountMinor}`;
-      const idempotencyKey = `${record.transactionId}:${stepId}`;
-      if (!isCompensationStepCompleted(record, stepId, context.transactionStore)) {
-        const refRes = await context.economyService.commitAdjust({
-          domainUuid: data.domainUuid,
-          resourceId: cost.resourceId,
-          deltaMinor: cost.amountMinor,
-          reason: `Compensation: refund upfront cost for project ${data.projectId}`,
-          lockOwner: effectiveLockOwner,
-          idempotencyKey
-        });
-        if (!refRes.ok) return refRes;
-        await markCompensationStepCompleted(context.transactionStore, record, stepId);
+  // 2. Refund debited upfront costs (Master Remediation §15, §19, INV-06)
+  if (context.economyService) {
+    if (Array.isArray(data.steps) && data.steps.length > 0) {
+      for (const step of data.steps) {
+        if (
+          step.subsystem === "economy" &&
+          step.operation === "adjust" &&
+          (step.state === "applied" || step.state === "unknown" || step.state === "compensating")
+        ) {
+          const stepId = step.stepId;
+          if (!isCompensationStepCompleted(record, stepId, context.transactionStore)) {
+            const intent = step.intent as { resourceId: string; deltaMinor: number };
+            if (intent && intent.deltaMinor < 0) {
+              const idempotencyKey = `${record.transactionId}:compensation:${stepId}`;
+              const refRes = await context.economyService.commitAdjust({
+                domainUuid: data.domainUuid,
+                resourceId: intent.resourceId,
+                deltaMinor: Math.abs(intent.deltaMinor),
+                reason: `Compensation: refund upfront cost for project ${data.projectId}`,
+                lockOwner: effectiveLockOwner,
+                idempotencyKey
+              });
+              if (!refRes.ok) return refRes;
+              await markCompensationStepCompleted(context.transactionStore, record, stepId);
+            }
+          }
+        }
+      }
+    } else if (data.debitedCosts && Array.isArray(data.debitedCosts)) {
+      for (let i = 0; i < data.debitedCosts.length; i++) {
+        const cost = data.debitedCosts[i];
+        const stepId = `refund_start_cost_${i}_${cost.resourceId}_${cost.amountMinor}`;
+        const idempotencyKey = `${record.transactionId}:${stepId}`;
+        if (!isCompensationStepCompleted(record, stepId, context.transactionStore)) {
+          const refRes = await context.economyService.commitAdjust({
+            domainUuid: data.domainUuid,
+            resourceId: cost.resourceId,
+            deltaMinor: cost.amountMinor,
+            reason: `Compensation: refund upfront cost for project ${data.projectId}`,
+            lockOwner: effectiveLockOwner,
+            idempotencyKey
+          });
+          if (!refRes.ok) return refRes;
+          await markCompensationStepCompleted(context.transactionStore, record, stepId);
+        }
       }
     }
   }
 
   // 3. Release economic reservations
-  if (context.economyService && data.createdReservationIds && Array.isArray(data.createdReservationIds)) {
-    for (const resId of data.createdReservationIds) {
-      const stepId = `release_res_${resId}`;
-      if (!isCompensationStepCompleted(record, stepId, context.transactionStore)) {
-        // Pre-reconciliation: check if reservation is already released
-        const resObj = context.economyService.getReservation(resId);
-        if (resObj && (resObj.status === "active" || resObj.status === "partially-consumed")) {
-          const relRes = await context.economyService.releaseReservation({
-            domainUuid: data.domainUuid,
-            reservationId: resId,
-            reason: `Compensation: release reservation for project start ${data.projectId}`,
-            lockOwner: effectiveLockOwner
-          });
-          if (!relRes.ok) return relRes;
+  if (context.economyService) {
+    if (Array.isArray(data.steps) && data.steps.length > 0) {
+      for (const step of data.steps) {
+        if (
+          step.subsystem === "economy" &&
+          step.operation === "reserve" &&
+          (step.state === "applied" || step.state === "unknown" || step.state === "compensating")
+        ) {
+          const stepId = step.stepId;
+          if (!isCompensationStepCompleted(record, stepId, context.transactionStore)) {
+            const receipt = step.receipt as any;
+            const resId = receipt?.id ?? receipt?.reservationId ?? (typeof receipt === "string" ? receipt : undefined);
+            if (resId) {
+              const resObj = context.economyService.getReservation(resId);
+              if (resObj && (resObj.status === "active" || resObj.status === "partially-consumed")) {
+                const relRes = await context.economyService.releaseReservation({
+                  domainUuid: data.domainUuid,
+                  reservationId: resId,
+                  reason: `Compensation: release reservation for project start ${data.projectId}`,
+                  lockOwner: effectiveLockOwner
+                });
+                if (!relRes.ok) return relRes;
+              }
+            }
+            await markCompensationStepCompleted(context.transactionStore, record, stepId);
+          }
         }
-        await markCompensationStepCompleted(context.transactionStore, record, stepId);
+      }
+    } else if (data.createdReservationIds && Array.isArray(data.createdReservationIds)) {
+      for (const resId of data.createdReservationIds) {
+        const stepId = `release_res_${resId}`;
+        if (!isCompensationStepCompleted(record, stepId, context.transactionStore)) {
+          const resObj = context.economyService.getReservation(resId);
+          if (resObj && (resObj.status === "active" || resObj.status === "partially-consumed")) {
+            const relRes = await context.economyService.releaseReservation({
+              domainUuid: data.domainUuid,
+              reservationId: resId,
+              reason: `Compensation: release reservation for project start ${data.projectId}`,
+              lockOwner: effectiveLockOwner
+            });
+            if (!relRes.ok) return relRes;
+          }
+          await markCompensationStepCompleted(context.transactionStore, record, stepId);
+        }
       }
     }
   }
 
   // 4. Release allocated workforce reservation
-  if (data.allocatedWorkforceReservationId) {
+  if (Array.isArray(data.steps) && data.steps.length > 0) {
+    for (const step of data.steps) {
+      if (
+        step.subsystem === "people" &&
+        (step.operation === "allocateWorkforceReservation" || step.operation === "reserve-workforce") &&
+        (step.state === "applied" || step.state === "unknown" || step.state === "compensating")
+      ) {
+        const stepId = step.stepId;
+        if (!isCompensationStepCompleted(record, stepId, context.transactionStore)) {
+          const receipt = step.receipt as any;
+          const resId =
+            receipt?.reservationId ??
+            receipt?.id ??
+            (typeof receipt === "string" ? receipt : undefined) ??
+            data.allocatedWorkforceReservationId;
+          if (resId) {
+            const relWf = await peopleService.releaseWorkforceReservation({
+              domainUuid: data.domainUuid,
+              projectId: data.projectId,
+              reservationId: resId
+            });
+            if (!relWf.ok) return relWf;
+          }
+          await markCompensationStepCompleted(context.transactionStore, record, stepId);
+        }
+      }
+    }
+  } else if (data.allocatedWorkforceReservationId) {
     const stepId = `release_wf_${data.allocatedWorkforceReservationId}`;
     if (!isCompensationStepCompleted(record, stepId, context.transactionStore)) {
       const relWf = await peopleService.releaseWorkforceReservation({
@@ -133,10 +228,22 @@ export async function compensateProjectStart(
  * Unified, idempotent compensator for projects:advance (G5-REVAL6-001, G5-REVAL6-002).
  */
 export async function compensateProjectAdvance(
-  record: TransactionRecord,
+  recordOrId: TransactionRecord | string,
   context: ProjectCompensatorContext,
   options?: ProjectCompensationOptions
 ): Promise<Result<void, PublicError>> {
+  const record = typeof recordOrId === "string"
+    ? context.transactionStore?.get(recordOrId)
+    : (context.transactionStore?.get(recordOrId.transactionId) ?? recordOrId);
+  if (!record) {
+    return err(
+      createPublicError({
+        code: "DM_TRANSACTION_NOT_FOUND",
+        category: "not-found",
+        message: `Transaction record '${typeof recordOrId === "string" ? recordOrId : recordOrId.transactionId}' not found`
+      })
+    );
+  }
   const data = record.recoveryData as Record<string, any> | undefined;
   if (!data || data.type !== "projects:advance") {
     return ok(undefined);
@@ -174,23 +281,53 @@ export async function compensateProjectAdvance(
     }
   }
 
-  // 2. Refund debited progressive costs (with stable idempotencyKey)
-  if (context.economyService && data.debitedCosts && Array.isArray(data.debitedCosts)) {
-    for (let i = 0; i < data.debitedCosts.length; i++) {
-      const cost = data.debitedCosts[i];
-      const stepId = `refund_advance_cost_${i}_${cost.resourceId}_${cost.amountMinor}`;
-      const idempotencyKey = `${record.transactionId}:${stepId}`;
-      if (!isCompensationStepCompleted(record, stepId, context.transactionStore)) {
-        const refRes = await context.economyService.commitAdjust({
-          domainUuid: data.domainUuid,
-          resourceId: cost.resourceId,
-          deltaMinor: cost.amountMinor,
-          reason: `Compensation: refund progressive cost for project ${data.projectId}`,
-          lockOwner: effectiveLockOwner,
-          idempotencyKey
-        });
-        if (!refRes.ok) return refRes;
-        await markCompensationStepCompleted(context.transactionStore, record, stepId);
+  // 2. Journaled steps compensation (Master Remediation §15, §19, INV-06)
+  if (Array.isArray(data.steps) && data.steps.length > 0) {
+    const steps = [...data.steps].reverse();
+    for (const step of steps) {
+      if (step.state !== "applied" && step.state !== "unknown" && step.state !== "compensating") {
+        continue;
+      }
+      const stepId = step.stepId;
+      if (isCompensationStepCompleted(record, stepId, context.transactionStore)) {
+        continue;
+      }
+      if (step.subsystem === "economy" && step.operation === "adjust" && context.economyService) {
+        const intent = step.intent as { resourceId: string; deltaMinor: number };
+        if (intent && intent.deltaMinor < 0) {
+          const idempotencyKey = `${record.transactionId}:compensation:${stepId}`;
+          const refRes = await context.economyService.commitAdjust({
+            domainUuid: data.domainUuid,
+            resourceId: intent.resourceId,
+            deltaMinor: Math.abs(intent.deltaMinor),
+            reason: `Compensation: refund progressive cost for project ${data.projectId}`,
+            lockOwner: effectiveLockOwner,
+            idempotencyKey
+          });
+          if (!refRes.ok) return refRes;
+        }
+      }
+      await markCompensationStepCompleted(context.transactionStore, record, stepId);
+    }
+  } else {
+    // 2. Refund debited progressive costs (with stable idempotencyKey)
+    if (context.economyService && data.debitedCosts && Array.isArray(data.debitedCosts)) {
+      for (let i = 0; i < data.debitedCosts.length; i++) {
+        const cost = data.debitedCosts[i];
+        const stepId = `refund_advance_cost_${i}_${cost.resourceId}_${cost.amountMinor}`;
+        const idempotencyKey = `${record.transactionId}:${stepId}`;
+        if (!isCompensationStepCompleted(record, stepId, context.transactionStore)) {
+          const refRes = await context.economyService.commitAdjust({
+            domainUuid: data.domainUuid,
+            resourceId: cost.resourceId,
+            deltaMinor: cost.amountMinor,
+            reason: `Compensation: refund progressive cost for project ${data.projectId}`,
+            lockOwner: effectiveLockOwner,
+            idempotencyKey
+          });
+          if (!refRes.ok) return refRes;
+          await markCompensationStepCompleted(context.transactionStore, record, stepId);
+        }
       }
     }
   }
@@ -202,10 +339,22 @@ export async function compensateProjectAdvance(
  * Unified, idempotent compensator for projects:cancel (G5-REVAL6-001, G5-REVAL6-002).
  */
 export async function compensateProjectCancel(
-  record: TransactionRecord,
+  recordOrId: TransactionRecord | string,
   context: ProjectCompensatorContext,
   options?: ProjectCompensationOptions
 ): Promise<Result<void, PublicError>> {
+  const record = typeof recordOrId === "string"
+    ? context.transactionStore?.get(recordOrId)
+    : (context.transactionStore?.get(recordOrId.transactionId) ?? recordOrId);
+  if (!record) {
+    return err(
+      createPublicError({
+        code: "DM_TRANSACTION_NOT_FOUND",
+        category: "not-found",
+        message: `Transaction record '${typeof recordOrId === "string" ? recordOrId : recordOrId.transactionId}' not found`
+      })
+    );
+  }
   const data = record.recoveryData as Record<string, any> | undefined;
   if (!data || data.type !== "projects:cancel") {
     return ok(undefined);
@@ -284,10 +433,22 @@ export async function compensateProjectCancel(
  * Unified, idempotent compensator for projects:completion (G5-REVAL6-001, G5-REVAL6-002).
  */
 export async function compensateProjectCompletion(
-  record: TransactionRecord,
+  recordOrId: TransactionRecord | string,
   context: ProjectCompensatorContext,
   options?: ProjectCompensationOptions
 ): Promise<Result<void, PublicError>> {
+  const record = typeof recordOrId === "string"
+    ? context.transactionStore?.get(recordOrId)
+    : (context.transactionStore?.get(recordOrId.transactionId) ?? recordOrId);
+  if (!record) {
+    return err(
+      createPublicError({
+        code: "DM_TRANSACTION_NOT_FOUND",
+        category: "not-found",
+        message: `Transaction record '${typeof recordOrId === "string" ? recordOrId : recordOrId.transactionId}' not found`
+      })
+    );
+  }
   const data = record.recoveryData as Record<string, any> | undefined;
   if (!data || data.type !== "projects:completion") {
     return ok(undefined);
@@ -321,44 +482,76 @@ export async function compensateProjectCompletion(
     }
   }
 
-  // 2. Revert credited rewards (with stable idempotencyKey)
-  if (context.economyService && data.creditedResourceRefs && data.creditedResourceRefs.length > 0) {
-    for (let i = 0; i < data.creditedResourceRefs.length; i++) {
-      const cred = data.creditedResourceRefs[i];
-      const stepId = `revert_credit_${i}_${cred.resourceId}_${cred.amountMinor}`;
-      const idempotencyKey = `${record.transactionId}:${stepId}`;
-      if (!isCompensationStepCompleted(record, stepId, context.transactionStore)) {
-        const adjRes = await context.economyService.commitAdjust({
-          domainUuid: data.domainUuid,
-          resourceId: cred.resourceId,
-          deltaMinor: -cred.amountMinor,
-          reason: `Compensation: reverse completion reward for project ${data.projectId}`,
-          lockOwner: effectiveLockOwner,
-          idempotencyKey
-        });
-        if (!adjRes.ok) return adjRes;
-        await markCompensationStepCompleted(context.transactionStore, record, stepId);
+  // 2. Journaled steps compensation (Master Remediation §15, §19, INV-06)
+  if (Array.isArray(data.steps) && data.steps.length > 0) {
+    const steps = [...data.steps].reverse();
+    for (const step of steps) {
+      if (step.state !== "applied" && step.state !== "unknown" && step.state !== "compensating") {
+        continue;
+      }
+      const stepId = step.stepId;
+      if (isCompensationStepCompleted(record, stepId, context.transactionStore)) {
+        continue;
+      }
+      if (step.subsystem === "economy" && context.economyService) {
+        if (step.operation === "adjust") {
+          const intent = step.intent as { resourceId: string; deltaMinor: number };
+          if (intent) {
+            const idempotencyKey = `${record.transactionId}:compensation:${stepId}`;
+            const refRes = await context.economyService.commitAdjust({
+              domainUuid: data.domainUuid,
+              resourceId: intent.resourceId,
+              deltaMinor: -intent.deltaMinor,
+              reason: `Compensation: reverse completion adjustment for project ${data.projectId}`,
+              lockOwner: effectiveLockOwner,
+              idempotencyKey
+            });
+            if (!refRes.ok) return refRes;
+          }
+        }
+      }
+      await markCompensationStepCompleted(context.transactionStore, record, stepId);
+    }
+  } else {
+    // 2. Revert credited rewards (with stable idempotencyKey)
+    if (context.economyService && data.creditedResourceRefs && data.creditedResourceRefs.length > 0) {
+      for (let i = 0; i < data.creditedResourceRefs.length; i++) {
+        const cred = data.creditedResourceRefs[i];
+        const stepId = `revert_credit_${i}_${cred.resourceId}_${cred.amountMinor}`;
+        const idempotencyKey = `${record.transactionId}:${stepId}`;
+        if (!isCompensationStepCompleted(record, stepId, context.transactionStore)) {
+          const adjRes = await context.economyService.commitAdjust({
+            domainUuid: data.domainUuid,
+            resourceId: cred.resourceId,
+            deltaMinor: -cred.amountMinor,
+            reason: `Compensation: reverse completion reward for project ${data.projectId}`,
+            lockOwner: effectiveLockOwner,
+            idempotencyKey
+          });
+          if (!adjRes.ok) return adjRes;
+          await markCompensationStepCompleted(context.transactionStore, record, stepId);
+        }
       }
     }
-  }
 
-  // 3. Refund debited costs (with stable idempotencyKey)
-  if (context.economyService && data.debitedCostRefs && data.debitedCostRefs.length > 0) {
-    for (let i = 0; i < data.debitedCostRefs.length; i++) {
-      const deb = data.debitedCostRefs[i];
-      const stepId = `refund_debit_${i}_${deb.resourceId}_${deb.amountMinor}`;
-      const idempotencyKey = `${record.transactionId}:${stepId}`;
-      if (!isCompensationStepCompleted(record, stepId, context.transactionStore)) {
-        const refRes = await context.economyService.commitAdjust({
-          domainUuid: data.domainUuid,
-          resourceId: deb.resourceId,
-          deltaMinor: deb.amountMinor,
-          reason: `Compensation: refund completion cost for project ${data.projectId}`,
-          lockOwner: effectiveLockOwner,
-          idempotencyKey
-        });
-        if (!refRes.ok) return refRes;
-        await markCompensationStepCompleted(context.transactionStore, record, stepId);
+    // 3. Refund debited costs (with stable idempotencyKey)
+    if (context.economyService && data.debitedCostRefs && data.debitedCostRefs.length > 0) {
+      for (let i = 0; i < data.debitedCostRefs.length; i++) {
+        const deb = data.debitedCostRefs[i];
+        const stepId = `refund_debit_${i}_${deb.resourceId}_${deb.amountMinor}`;
+        const idempotencyKey = `${record.transactionId}:${stepId}`;
+        if (!isCompensationStepCompleted(record, stepId, context.transactionStore)) {
+          const refRes = await context.economyService.commitAdjust({
+            domainUuid: data.domainUuid,
+            resourceId: deb.resourceId,
+            deltaMinor: deb.amountMinor,
+            reason: `Compensation: refund completion cost for project ${data.projectId}`,
+            lockOwner: effectiveLockOwner,
+            idempotencyKey
+          });
+          if (!refRes.ok) return refRes;
+          await markCompensationStepCompleted(context.transactionStore, record, stepId);
+        }
       }
     }
   }

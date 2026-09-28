@@ -1,46 +1,86 @@
 import { createPublicError, type PublicError } from "../core/contracts/public-error.js";
 import { err, ok, type Result } from "../core/contracts/result.js";
 import { canonicalizeLockKeys, type LockManager, type LockHandle } from "./lock-manager.js";
+import { areLockSetsEqual } from "./lock-keys.js";
+import {
+  RecoveryFenceRegistry,
+  type RecoveryFence
+} from "./recovery-fence-registry.js";
 import {
   isFinalTransactionState,
-  type TransactionRecord
+  type TransactionRecord,
+  type TransactionState
 } from "./transaction-record.js";
 import type { TransactionStore } from "./transaction-store.js";
 
 export interface RecoveryServiceOptions {
   readonly transactionStore: TransactionStore;
   readonly lockManager: LockManager;
+  readonly fenceRegistry?: RecoveryFenceRegistry;
 }
 
 export type TransactionCompensator = (
   record: TransactionRecord
 ) => Promise<Result<void, PublicError>>;
 
+export interface RecoveryServiceDiagnostics {
+  readonly unresolvedTransactions: readonly {
+    readonly transactionId: string;
+    readonly state: TransactionState;
+    readonly safeAutoRecovery: boolean;
+    readonly lockKeys: readonly string[];
+    readonly fenceActive: boolean;
+    readonly physicalLockHeld: boolean;
+    readonly recoveryType?: string;
+    readonly lastError?: string;
+  }[];
+  readonly recoveryFences: readonly RecoveryFence[];
+  readonly pendingRecoveryLockAcquisition: readonly string[];
+  readonly lockSetDivergences: readonly unknown[];
+  readonly lastRecoveryError?: PublicError;
+}
+
 /**
  * RecoveryService — Coordinates durable transaction recovery on startup and failover
- * (Master Spec §11.10, §35, DEC-681–696, DEC-724–731, DEC-827–834).
+ * (Master Spec §11.10, §35, Master Remediation §8, §10, §11, §13, §23, §24, §25).
  *
  * Enforces:
  * 1. Startup scan identifies unresolved transactions from prior crashes or failovers.
- * 2. Unresolved transactions left in "committing" are transitioned to "needs-recovery".
- * 3. Affected lock keys are blocked during recovery while independent domains remain operational.
- * 4. Recovery is strictly idempotent: executing recovery multiple times on the same transaction is safe.
- * 5. Manual / auto-recovery transition flow: needs-recovery -> compensating -> compensated (or remains needs-recovery if compensation fails).
+ * 2. Unresolved transactions left in "committing" or "compensating" transition to "needs-recovery".
+ * 3. Recovery fences are installed for all unresolved transactions, preventing concurrent work.
+ * 4. Lock transfer requires EXACT lock set equality: rejects partial/divergent handles (INV-01, INV-08).
+ * 5. Recovery execution requires the complete lock set atomically before executing compensation (INV-08).
+ * 6. Safe auto-recovery vs manual recovery enforcement.
+ * 7. Recovery is strictly idempotent.
  */
 export class RecoveryService {
   readonly #transactionStore: TransactionStore;
   readonly #lockManager: LockManager;
+  readonly #fenceRegistry: RecoveryFenceRegistry;
   readonly #heldRecoveryLocks = new Map<string, LockHandle>();
   readonly #compensators = new Map<string, TransactionCompensator>();
+  readonly #pendingLockAcquisitions = new Set<string>();
+  readonly #lockSetDivergences: unknown[] = [];
+  #lastRecoveryError?: PublicError;
 
-  constructor(options: RecoveryServiceOptions | TransactionStore, lockManager?: LockManager) {
+  constructor(
+    options: RecoveryServiceOptions | TransactionStore,
+    lockManager?: LockManager,
+    fenceRegistry?: RecoveryFenceRegistry
+  ) {
     if ("transactionStore" in options) {
       this.#transactionStore = options.transactionStore;
       this.#lockManager = options.lockManager;
+      this.#fenceRegistry = options.fenceRegistry ?? new RecoveryFenceRegistry();
     } else {
       this.#transactionStore = options;
       this.#lockManager = lockManager!;
+      this.#fenceRegistry = fenceRegistry ?? new RecoveryFenceRegistry();
     }
+  }
+
+  get fenceRegistry(): RecoveryFenceRegistry {
+    return this.#fenceRegistry;
   }
 
   registerCompensator(type: string, compensator: TransactionCompensator): void {
@@ -52,7 +92,8 @@ export class RecoveryService {
   }
 
   /**
-   * Scans for unresolved transactions at startup or after authority failover.
+   * Scans for unresolved transactions at startup or after authority failover (Master Remediation §23).
+   * Installs recovery fences and attempts to acquire physical locks.
    */
   async scanOnStartup(
     currentEpoch: number
@@ -63,9 +104,9 @@ export class RecoveryService {
 
     for (const record of unresolved) {
       // DEC-724–731: "committing após failover vira needs-recovery até reconciliation."
-      // Also, interrupted compensations from a previous crash must transition back to needs-recovery
-      // so a new recovery attempt can transition needs-recovery -> compensating without invalid state jump.
-      if (record.state === "committing" || record.state === "compensating") {
+      // Also, interrupted prepared or compensating transactions from a previous crash must transition to needs-recovery
+      // so a new recovery attempt can reconcile and compensate without invalid state jumps (INV-07, §10, §20, §23).
+      if (record.state === "committing" || record.state === "compensating" || record.state === "prepared") {
         originalRecords.set(record.transactionId, { ...record });
         this.#transactionStore.transition(
           record.transactionId,
@@ -85,22 +126,32 @@ export class RecoveryService {
         transitionedAny = true;
       }
 
-      // Block affected lock keys atomically (G5-REVAL6-003: NEVER partial keys!)
       const currentTx = this.#transactionStore.get(record.transactionId) ?? record;
-      if (
-        !isFinalTransactionState(currentTx.state) &&
-        currentTx.lockKeys.length > 0 &&
-        this.#lockManager &&
-        !this.#heldRecoveryLocks.has(currentTx.transactionId)
-      ) {
-        const requiredKeys = canonicalizeLockKeys(currentTx.lockKeys);
-        const lockRes = await this.#lockManager.acquireLocks({
-          ownerId: `recovery_${currentTx.transactionId}`,
-          keys: requiredKeys,
-          timeoutMs: 50
+
+      // Master Remediation §23: Install logical recovery fence immediately for every unresolved transaction
+      if (!isFinalTransactionState(currentTx.state) && currentTx.lockKeys.length > 0) {
+        this.#fenceRegistry.install({
+          transactionId: currentTx.transactionId,
+          lockKeys: currentTx.lockKeys,
+          createdAt: Date.now(),
+          reason: "Startup unresolved transaction fence"
         });
-        if (lockRes.ok) {
-          this.#heldRecoveryLocks.set(currentTx.transactionId, lockRes.value);
+
+        // Attempt physical lock acquisition
+        if (this.#lockManager && !this.#heldRecoveryLocks.has(currentTx.transactionId)) {
+          const requiredKeys = canonicalizeLockKeys(currentTx.lockKeys);
+          const lockRes = await this.#lockManager.acquireLocks({
+            ownerId: `recovery_${currentTx.transactionId}`,
+            keys: requiredKeys,
+            timeoutMs: 50
+          });
+          if (lockRes.ok) {
+            this.#heldRecoveryLocks.set(currentTx.transactionId, lockRes.value);
+            this.#pendingLockAcquisitions.delete(currentTx.transactionId);
+          } else {
+            // Lock occupied: mark pending physical isolation, fence remains active (Finding 5, §23)
+            this.#pendingLockAcquisitions.add(currentTx.transactionId);
+          }
         }
       }
     }
@@ -135,8 +186,10 @@ export class RecoveryService {
 
   /**
    * Immediately isolates affected lock keys for a transaction that entered needs-recovery in runtime
-   * (G5-REVAL6-003). If an active lockHandle is provided (e.g. from the current command), atomically transfers
-   * ownership to recovery_<txId> so no other mutation can slip in. Otherwise, acquires all lockKeys atomically.
+   * (Master Remediation §8, §12, §13, INV-07).
+   *
+   * Rejects divergent lock sets fail-closed (Finding 4):
+   * Existing handle MUST contain the exact same lock set as TransactionRecord.
    */
   async isolateTransaction(
     recordOrId: TransactionRecord | string,
@@ -147,41 +200,89 @@ export class RecoveryService {
     if (!record) {
       return ok(undefined);
     }
+
+    const requiredKeys = canonicalizeLockKeys(record.lockKeys);
+
+    // Ensure unresolved transaction is marked needs-recovery (INV-07, §4, §10)
+    if (!isFinalTransactionState(record.state) && record.state !== "needs-recovery") {
+      this.#transactionStore.transition(
+        record.transactionId,
+        "needs-recovery",
+        record.authorityEpoch,
+        "Isolate transaction: transition unresolved state to needs-recovery"
+      );
+    }
+
+    // Install recovery fence immediately regardless of physical lock status (INV-07)
+    if (requiredKeys.length > 0) {
+      this.#fenceRegistry.install({
+        transactionId: record.transactionId,
+        lockKeys: requiredKeys,
+        createdAt: Date.now(),
+        reason: "Runtime needs-recovery isolation"
+      });
+    }
+
     if (this.#heldRecoveryLocks.has(record.transactionId)) {
       return ok(undefined);
     }
-    if (record.lockKeys.length === 0) {
+    if (requiredKeys.length === 0) {
       return ok(undefined);
     }
 
     const recoveryOwnerId = `recovery_${record.transactionId}`;
 
-    // If an existing lock handle is provided (e.g. from the currently running command),
-    // atomically transfer it so no other mutation can slip in.
+    // If an existing lock handle is provided (e.g. from the currently running command):
     if (existingHandle && existingHandle.keys.length > 0) {
+      const heldKeys = canonicalizeLockKeys(existingHandle.keys);
+
+      // Master Remediation Finding 4 (§8): Exact lock-set equality required!
+      if (!areLockSetsEqual(requiredKeys, heldKeys)) {
+        const divergence = {
+          transactionId: record.transactionId,
+          requiredLockKeys: requiredKeys,
+          heldLockKeys: heldKeys,
+          detectedAt: Date.now()
+        };
+        this.#lockSetDivergences.push(divergence);
+        return err(
+          createPublicError({
+            code: "DM_RECOVERY_LOCKSET_DIVERGENCE",
+            category: "internal",
+            message: `Cannot transfer lock for transaction '${record.transactionId}': lock set diverged. Required: [${requiredKeys.join(", ")}], Held: [${heldKeys.join(", ")}]`,
+            details: divergence
+          })
+        );
+      }
+
       const transferRes = this.#lockManager.transferLock(existingHandle, recoveryOwnerId);
       if (transferRes.ok) {
         this.#heldRecoveryLocks.set(record.transactionId, transferRes.value);
+        this.#pendingLockAcquisitions.delete(record.transactionId);
         return ok(undefined);
       }
+      return transferRes;
     }
 
     // Otherwise, acquire the complete lock set atomically
-    const requiredKeys = canonicalizeLockKeys(record.lockKeys);
     const lockRes = await this.#lockManager.acquireLocks({
       ownerId: recoveryOwnerId,
       keys: requiredKeys,
       timeoutMs: 1000
     });
+
     if (!lockRes.ok) {
+      this.#pendingLockAcquisitions.add(record.transactionId);
       return lockRes;
     }
+
     this.#heldRecoveryLocks.set(record.transactionId, lockRes.value);
+    this.#pendingLockAcquisitions.delete(record.transactionId);
     return ok(undefined);
   }
 
   /**
-   * Idempotently recovers an unresolved transaction.
+   * Idempotently recovers an unresolved transaction (Master Remediation §8, §19, INV-08, INV-09).
    */
   async recoverTransaction(
     transactionId: string,
@@ -202,10 +303,12 @@ export class RecoveryService {
     // IDEMPOTENCE (DEC-845–858): If already in a final state, repeated recovery is a safe no-op
     if (isFinalTransactionState(record.state)) {
       this.#releaseRecoveryLock(transactionId);
+      this.#fenceRegistry.remove(transactionId);
+      this.#pendingLockAcquisitions.delete(transactionId);
       return ok(record);
     }
 
-    // G5-REVAL6-003: Recovery must possess the complete lock set atomically before proceeding
+    // INV-08: Recovery must possess the complete lock set atomically before proceeding
     const requiredKeys = canonicalizeLockKeys(record.lockKeys);
     let heldHandle = this.#heldRecoveryLocks.get(transactionId);
     const isFullLockHeld =
@@ -223,15 +326,17 @@ export class RecoveryService {
         timeoutMs: 2000
       });
       if (!lockRes.ok) {
-        return err(
-          createPublicError({
-            code: "DM_RECOVERY_LOCK_FAILED",
-            category: "busy",
-            message: `Cannot execute recovery for transaction '${transactionId}': lock set [${requiredKeys.join(", ")}] could not be fully acquired: ${lockRes.error.message}`
-          })
-        );
+        this.#pendingLockAcquisitions.add(transactionId);
+        const lockErr = createPublicError({
+          code: "DM_RECOVERY_LOCK_FAILED",
+          category: "busy",
+          message: `Cannot execute recovery for transaction '${transactionId}': lock set [${requiredKeys.join(", ")}] could not be fully acquired: ${lockRes.error.message}`
+        });
+        this.#lastRecoveryError = lockErr;
+        return err(lockErr);
       }
       this.#heldRecoveryLocks.set(transactionId, lockRes.value);
+      this.#pendingLockAcquisitions.delete(transactionId);
     }
 
     // Transition to compensating
@@ -251,35 +356,34 @@ export class RecoveryService {
       compensator ?? (recoveryType ? this.#compensators.get(recoveryType) : undefined);
 
     if (!effectiveCompensator) {
-      // G2-AUD-011: Without a verified compensation/reconciliation strategy,
-      // transaction must NOT be marked 'compensated'. It remains in 'needs-recovery'.
       this.#transactionStore.transition(
         transactionId,
         "needs-recovery",
         currentEpoch,
         "Recovery halted: No compensator provided for unresolved transaction"
       );
-      return err(
-        createPublicError({
-          code: "DM_RECOVERY_COMPENSATION_UNAVAILABLE",
-          category: "recovery",
-          message: `Cannot compensate transaction '${transactionId}' without a verified compensator`,
-          userActionRequired: true,
-          retryable: false
-        })
-      );
+      const noCompErr = createPublicError({
+        code: "DM_RECOVERY_COMPENSATION_UNAVAILABLE",
+        category: "recovery",
+        message: `Cannot compensate transaction '${transactionId}' without a verified compensator`,
+        userActionRequired: true,
+        retryable: false
+      });
+      this.#lastRecoveryError = noCompErr;
+      return err(noCompErr);
     }
 
     try {
+      // Master Remediation §19: Pass transactionId or latest record to compensator
       const compRes = await effectiveCompensator(compTransition.value);
       if (!compRes.ok) {
-        // Compensation failed: remains in needs-recovery
         this.#transactionStore.transition(
           transactionId,
           "needs-recovery",
           currentEpoch,
           `Compensation failed: ${compRes.error.message}`
         );
+        this.#lastRecoveryError = compRes.error;
         return err(
           createPublicError({
             code: "DM_RECOVERY_COMPENSATION_FAILED",
@@ -295,19 +399,21 @@ export class RecoveryService {
         currentEpoch,
         `Compensation threw exception: ${error instanceof Error ? error.message : "Unknown error"}`
       );
-      return err(
-        createPublicError({
-          code: "DM_RECOVERY_COMPENSATION_FAILED",
-          category: "recovery",
-          message: `Compensation threw exception: ${error instanceof Error ? error.message : "Unknown error"}`
-        })
-      );
+      const thrownErr = createPublicError({
+        code: "DM_RECOVERY_COMPENSATION_FAILED",
+        category: "recovery",
+        message: `Compensation threw exception: ${error instanceof Error ? error.message : "Unknown error"}`
+      });
+      this.#lastRecoveryError = thrownErr;
+      return err(thrownErr);
     }
 
     // Check if compensator already moved the transaction to a final state (e.g. committed during reconciliation)
     const currentTx = this.#transactionStore.get(transactionId);
     if (currentTx && isFinalTransactionState(currentTx.state)) {
       this.#releaseRecoveryLock(transactionId);
+      this.#fenceRegistry.remove(transactionId);
+      this.#pendingLockAcquisitions.delete(transactionId);
       return ok(currentTx);
     }
 
@@ -340,6 +446,8 @@ export class RecoveryService {
     }
 
     this.#releaseRecoveryLock(transactionId);
+    this.#fenceRegistry.remove(transactionId);
+    this.#pendingLockAcquisitions.delete(transactionId);
     return finalTransition;
   }
 
@@ -389,11 +497,65 @@ export class RecoveryService {
     return Object.freeze(results);
   }
 
+  /**
+   * Retries physical lock acquisition for pending unresolved transactions (Master Remediation §23).
+   */
+  async retryPendingLockAcquisitions(): Promise<void> {
+    for (const txId of Array.from(this.#pendingLockAcquisitions)) {
+      const tx = this.#transactionStore.get(txId);
+      if (!tx || isFinalTransactionState(tx.state)) {
+        this.#pendingLockAcquisitions.delete(txId);
+        continue;
+      }
+      const requiredKeys = canonicalizeLockKeys(tx.lockKeys);
+      const lockRes = await this.#lockManager.acquireLocks({
+        ownerId: `recovery_${txId}`,
+        keys: requiredKeys,
+        timeoutMs: 50
+      });
+      if (lockRes.ok) {
+        this.#heldRecoveryLocks.set(txId, lockRes.value);
+        this.#pendingLockAcquisitions.delete(txId);
+      }
+    }
+  }
+
+  /**
+   * Exposes structured recovery diagnostics (Master Remediation §25).
+   */
+  getDiagnostics(): RecoveryServiceDiagnostics {
+    const unresolvedTxs = this.#transactionStore.listUnresolved();
+    return Object.freeze({
+      unresolvedTransactions: Object.freeze(
+        unresolvedTxs.map((tx) =>
+          Object.freeze({
+            transactionId: tx.transactionId,
+            state: tx.state,
+            safeAutoRecovery: tx.safeAutoRecovery,
+            lockKeys: tx.lockKeys,
+            fenceActive: this.#fenceRegistry.hasFenceForKeys(tx.lockKeys),
+            physicalLockHeld: this.#heldRecoveryLocks.has(tx.transactionId),
+            recoveryType: (tx.recoveryData as any)?.type,
+            lastError: (tx.recoveryData as any)?.lastError ?? this.#lastRecoveryError?.message
+          })
+        )
+      ),
+      recoveryFences: this.#fenceRegistry.getFences(),
+      pendingRecoveryLockAcquisition: Object.freeze(Array.from(this.#pendingLockAcquisitions)),
+      lockSetDivergences: Object.freeze([...this.#lockSetDivergences]),
+      lastRecoveryError: this.#lastRecoveryError
+    });
+  }
+
   clear(): void {
     for (const handle of this.#heldRecoveryLocks.values()) {
       handle.release();
     }
     this.#heldRecoveryLocks.clear();
+    this.#fenceRegistry.clear();
+    this.#pendingLockAcquisitions.clear();
+    this.#lockSetDivergences.length = 0;
+    this.#lastRecoveryError = undefined;
   }
 }
 
@@ -429,11 +591,18 @@ export async function markCompensationStepCompleted(
   if (!currentSteps.includes(stepId)) {
     currentSteps.push(stepId);
   }
+  let updatedSteps = currentData.steps;
+  if (Array.isArray(currentData.steps)) {
+    updatedSteps = currentData.steps.map((s: any) =>
+      s && s.stepId === stepId ? { ...s, state: "compensated" } : s
+    );
+  }
   const updatedRecord: TransactionRecord = {
     ...currentRecord,
     recoveryData: {
       ...currentData,
-      completedCompensationSteps: Object.freeze(currentSteps)
+      completedCompensationSteps: Object.freeze(currentSteps),
+      steps: updatedSteps ? Object.freeze(updatedSteps) : currentData.steps
     },
     updatedAt: Date.now()
   };

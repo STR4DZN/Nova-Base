@@ -1,6 +1,5 @@
 import { createPublicError, type PublicError } from "../../core/contracts/public-error.js";
 import { err, ok, type Result } from "../../core/contracts/result.js";
-import { createOpaqueId } from "../../core/identity/ids.js";
 import { createCommandId, type CommandId } from "../../commands/command-envelope.js";
 import { normalizeJournalEntryId } from "../../core/identity/refs.js";
 import type { DomainRepositoryContract } from "../../storage/repositories/domain-repository.js";
@@ -15,6 +14,11 @@ import type { EconomyService } from "../../economy/services/economy-service.js";
 import type { TransactionStore } from "../../mutations/transaction-store.js";
 import { createTransactionRecord } from "../../mutations/transaction-record.js";
 import { compensateProjectAdvance } from "../services/project-recovery-compensators.js";
+import { lockKey } from "../../mutations/lock-keys.js";
+import {
+  CompositeMutationSession,
+  type TransactionExecutionContext
+} from "../../mutations/composite-mutation-session.js";
 
 export interface ProjectAdvanceDomainOperationParams {
   readonly domainUuid: string;
@@ -27,6 +31,8 @@ export interface ProjectAdvanceDomainOperationParams {
   readonly authorityEpoch?: number;
   readonly correlationId?: string;
   readonly causationId?: string;
+  readonly lockKeys?: readonly string[];
+  readonly transactionContext?: TransactionExecutionContext;
 }
 
 export interface ProjectAdvanceDomainOperationContext {
@@ -54,11 +60,11 @@ export interface ProjectAdvanceRecoveryData {
 
 /**
  * ProjectAdvanceDomainOperationPlan — Atomic composite operation plan for advancing a Project.
- * (Master Spec §15, §11.2, G5-REVAL4-007)
+ * (Master Remediation §22.2, INV-01 to INV-11)
  *
  * Enforces:
- * 1. TransactionRecord prepared in TransactionStore BEFORE child writes.
- * 2. Durable flush barrier prior to progressive cost debits.
+ * 1. TransactionRecord prepared in TransactionStore BEFORE child writes via CompositeMutationSession.
+ * 2. Canonical lock set: domain + project.
  * 3. Progressive cost debits via EconomyService with reverse refund compensation on any failure.
  * 4. Canonical state transitions: prepared -> committing -> committed.
  * 5. Fail-closed transition to "needs-recovery" if compensation refund fails.
@@ -136,159 +142,125 @@ export async function executeProjectAdvanceDomainOperationPlan(
   const deltaUnits = advanceRes.value.receipt.unitsDelta;
   const updatedProject = advanceRes.value.updatedProject;
 
-  // 1. Transaction preparation BEFORE child writes (G5-REVAL4-002, G5-REVAL4-007)
-  const txId = createOpaqueId("tx");
   const cmdId: CommandId = params.commandId
     ? (params.commandId.startsWith("cmd_") ? (params.commandId as CommandId) : (`cmd_${params.commandId}` as CommandId))
     : createCommandId();
   const epoch = params.authorityEpoch ?? 1;
 
-  const debitedCosts: Array<{ resourceId: string; amountMinor: number }> = [];
+  const canonicalAdvanceLocks = [lockKey.domain(cleanDomainUuid), lockKey.project(project.id)];
+  const sessionLockKeys = params.transactionContext?.lockKeys ?? params.lockKeys ?? canonicalAdvanceLocks;
 
-  const buildRecoveryData = (status: ProjectAdvanceRecoveryData["status"]): ProjectAdvanceRecoveryData => ({
-    type: "projects:advance",
-    projectId: project.id,
-    domainUuid: cleanDomainUuid,
-    debitedCosts: Object.freeze([...debitedCosts]),
-    deltaUnits,
-    expectedWorkCompleted: updatedProject.workCompleted,
-    expectedRevision: updatedProject.revision,
-    previousWorkCompleted: project.workCompleted,
-    previousRevision: project.revision,
+  const sessionRes = await CompositeMutationSession.prepare({
+    transactionContext: params.transactionContext,
+    transactionStore: context.transactionStore,
+    commandId: cmdId,
     authorityEpoch: epoch,
-    correlationId: params.correlationId,
-    causationId: params.causationId,
-    status
+    lockKeys: sessionLockKeys,
+    planLockKeys: params.transactionContext?.lockKeys ?? params.lockKeys ?? canonicalAdvanceLocks,
+    recoveryType: "projects:advance",
+    parentRef: `project:${project.id}`,
+    initialRecoveryData: {
+      projectId: project.id,
+      domainUuid: cleanDomainUuid,
+      deltaUnits,
+      expectedWorkCompleted: updatedProject.workCompleted,
+      expectedRevision: updatedProject.revision,
+      previousWorkCompleted: project.workCompleted,
+      previousRevision: project.revision,
+      authorityEpoch: epoch,
+      correlationId: params.correlationId,
+      causationId: params.causationId,
+      status: "prepared"
+    }
   });
 
-  if (context.transactionStore) {
-    const tx = createTransactionRecord({
-      transactionId: txId,
-      commandId: cmdId,
-      authorityEpoch: epoch,
-      lockKeys: [`domain:${cleanDomainUuid}`, `project:${project.id}`],
-      safeAutoRecovery: false,
-      recoveryData: buildRecoveryData("prepared")
-    });
-    context.transactionStore.save(tx);
-    const claimRes = context.transactionStore.transition(txId, "claimed", epoch);
-    if (!claimRes.ok) return claimRes;
-    const prepRes = context.transactionStore.transition(txId, "prepared", epoch);
-    if (!prepRes.ok) return prepRes;
-
-    // G5-REVAL4-002: Durable flush barrier BEFORE child mutations
-    try {
-      await context.transactionStore.flush();
-    } catch (flushErr) {
-      context.transactionStore.transition(txId, "failed", epoch, "Persistence flush failed");
-      return err(
-        createPublicError({
-          code: "DM_DOMAIN_STORAGE_ERROR",
-          category: "internal",
-          message: `Failed to flush transaction preparation to storage: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
-          details: flushErr
-        })
-      );
-    }
+  if (!sessionRes.ok) {
+    return sessionRes;
   }
 
-  let compensationFailed = false;
-  const compensateDebits = async (reason: string) => {
-    if (context.transactionStore) {
-      const tx = context.transactionStore.get(txId);
-      if (tx) {
-        context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("needs-recovery") });
-        const compRes = await compensateProjectAdvance(
-          tx,
-          {
-            domains: context.domains,
-            economyService: context.economyService,
-            transactionStore: context.transactionStore
-          },
-          { lockOwner: params.commandId, skipReconciliation: true }
-        );
-        if (!compRes.ok) {
-          compensationFailed = true;
-        }
-      }
-    } else if (context.economyService && debitedCosts.length > 0) {
-      const dummyTx = createTransactionRecord({
-        transactionId: txId,
-        commandId: cmdId,
+  const session = sessionRes.value;
+  const debitedCosts: Array<{ resourceId: string; amountMinor: number }> = [];
+
+  const runCompensator = async (s: CompositeMutationSession, _error: PublicError) => {
+    const tx = context.transactionStore?.get(s.transactionId) ?? createTransactionRecord({
+      transactionId: s.transactionId,
+      commandId: cmdId,
+      authorityEpoch: epoch,
+      lockKeys: sessionLockKeys,
+      safeAutoRecovery: false,
+      recoveryData: {
+        type: "projects:advance",
+        projectId: project.id,
+        domainUuid: cleanDomainUuid,
+        debitedCosts: Object.freeze([...debitedCosts]),
+        deltaUnits,
+        expectedWorkCompleted: updatedProject.workCompleted,
+        expectedRevision: updatedProject.revision,
+        previousWorkCompleted: project.workCompleted,
+        previousRevision: project.revision,
         authorityEpoch: epoch,
-        lockKeys: [`domain:${cleanDomainUuid}`, `project:${project.id}`],
-        safeAutoRecovery: false,
-        recoveryData: buildRecoveryData("needs-recovery")
-      });
-      const compRes = await compensateProjectAdvance(
-        dummyTx,
-        {
-          domains: context.domains,
-          economyService: context.economyService
-        },
-        { lockOwner: params.commandId, skipReconciliation: true }
-      );
-      if (!compRes.ok) {
-        compensationFailed = true;
+        status: "needs-recovery"
       }
-    }
+    });
+    return compensateProjectAdvance(
+      tx,
+      {
+        domains: context.domains,
+        economyService: context.economyService,
+        transactionStore: context.transactionStore
+      },
+      { lockOwner: params.commandId, skipReconciliation: true }
+    );
   };
 
   // 2. Progressive costs consumption with deterministic cumulative delta (G5-REVAL2-003, G5-REVAL4-007)
   if (context.economyService && deltaUnits > 0) {
     const unitsBefore = project.workCompleted;
     const unitsAfter = Math.min(project.workRequired, unitsBefore + deltaUnits);
+    let costIdx = 0;
     for (const cost of definition.costs) {
       if (cost.timing === "progressive") {
         const dueBefore = Math.floor((unitsBefore / project.workRequired) * cost.amountMinor);
         const dueAfter = Math.floor((unitsAfter / project.workRequired) * cost.amountMinor);
         const toDebit = dueAfter - dueBefore;
         if (toDebit > 0) {
-          const debitRes = await context.economyService.commitAdjust({
-            domainUuid: cleanDomainUuid,
-            resourceId: cost.resourceId,
-            deltaMinor: -toDebit,
-            reason: `Progressive cost for project ${project.name}`,
-            lockOwner: params.commandId
-          });
-          if (!debitRes.ok) {
-            await compensateDebits(`debit failed for progressive cost '${cost.resourceId}'`);
-            if (context.transactionStore) {
-              const targetState = compensationFailed ? "needs-recovery" : "failed";
-              context.transactionStore.transition(txId, targetState, epoch, debitRes.error.message);
+          const stepId = `project-advance:cost:${cost.resourceId}:${costIdx++}`;
+          const stepRes = await session.runChildStep({
+            stepId,
+            subsystem: "economy",
+            operation: "adjust",
+            targetRef: cleanDomainUuid,
+            idempotencyKey: `${session.transactionId}:${stepId}`,
+            intent: { resourceId: cost.resourceId, deltaMinor: -toDebit },
+            execute: async () => {
+              return context.economyService!.commitAdjust({
+                domainUuid: cleanDomainUuid,
+                resourceId: cost.resourceId,
+                deltaMinor: -toDebit,
+                reason: `Progressive cost for project ${project.name}`,
+                lockOwner: params.commandId,
+                idempotencyKey: `${session.transactionId}:${stepId}`
+              });
             }
-            return err(
-              createPublicError({
-                code: "DM_PROJECT_ADVANCE_BLOCKED",
-                category: "conflict",
-                message: `Insufficient funds for progressive cost '${cost.resourceId}': ${debitRes.error.message}`,
-                details: debitRes.error
-              })
-            );
+          });
+          if (!stepRes.ok) {
+            const errToPropagate = stepRes.error.code === "DM_DOMAIN_STORAGE_ERROR"
+              ? stepRes.error
+              : createPublicError({
+                  code: "DM_PROJECT_ADVANCE_BLOCKED",
+                  category: "conflict",
+                  message: `Insufficient funds for progressive cost '${cost.resourceId}': ${stepRes.error.message}`,
+                  details: stepRes.error
+                });
+            return session.failAndCompensate(errToPropagate, runCompensator);
           }
           debitedCosts.push({ resourceId: cost.resourceId, amountMinor: toDebit });
-          if (context.transactionStore) {
-            const tx = context.transactionStore.get(txId);
-            if (tx) {
-              context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
-              try {
-                await context.transactionStore.flush();
-              } catch (flushErr) {
-                await compensateDebits(`flush failed after progressive debit: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
-                if (context.transactionStore) {
-                  const targetState = compensationFailed ? "needs-recovery" : "failed";
-                  context.transactionStore.transition(txId, targetState, epoch, String(flushErr));
-                }
-                return err(
-                  createPublicError({
-                    code: "DM_DOMAIN_STORAGE_ERROR",
-                    category: "internal",
-                    message: `Failed to flush transaction update after progressive debit: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
-                    details: flushErr
-                  })
-                );
-              }
-            }
+          const checkRes = await session.checkpointRecoveryData({
+            debitedCosts: Object.freeze([...debitedCosts]),
+            status: "executing"
+          });
+          if (!checkRes.ok) {
+            return session.failAndCompensate(checkRes.error, runCompensator);
           }
         }
       }
@@ -298,12 +270,7 @@ export async function executeProjectAdvanceDomainOperationPlan(
   // 3. Re-read fresh domain document after progressive cost debits to avoid revision conflict
   const freshDocRes = await context.domains.read(cleanDomainUuid);
   if (!freshDocRes.ok) {
-    await compensateDebits(`domain read failed after progressive debits: ${freshDocRes.error.message}`);
-    if (context.transactionStore) {
-      const targetState = compensationFailed ? "needs-recovery" : "failed";
-      context.transactionStore.transition(txId, targetState, epoch, freshDocRes.error.message);
-    }
-    return freshDocRes;
+    return session.failAndCompensate(freshDocRes.error, runCompensator);
   }
 
   const freshProjectsData = getDomainProjectsData(freshDocRes.value.record);
@@ -317,69 +284,32 @@ export async function executeProjectAdvanceDomainOperationPlan(
   });
 
   // 4. Transition to committing before save
-  if (context.transactionStore) {
-    const committingRes = context.transactionStore.transition(txId, "committing", epoch);
-    if (!committingRes.ok) {
-      await compensateDebits(`transition to committing failed: ${committingRes.error.message}`);
-      const targetState = compensationFailed ? "needs-recovery" : "failed";
-      context.transactionStore.transition(txId, targetState, epoch, committingRes.error.message);
-      return committingRes;
-    }
-    try {
-      await context.transactionStore.flush();
-    } catch (flushErr) {
-      await compensateDebits(`flush committing state failed: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
-      const targetState = compensationFailed ? "needs-recovery" : "failed";
-      context.transactionStore.transition(txId, targetState, epoch, String(flushErr));
-      return err(
-        createPublicError({
-          code: "DM_DOMAIN_STORAGE_ERROR",
-          category: "internal",
-          message: `Failed to flush transaction committing state to storage: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
-          details: flushErr
-        })
-      );
-    }
+  const committingRes = await session.enterCommitting({
+    expectedWorkCompleted: updatedProject.workCompleted,
+    expectedRevision: (freshDocRes.value.record.revision ?? 0) + 1
+  });
+  if (!committingRes.ok) {
+    return session.failAndCompensate(committingRes.error, runCompensator);
   }
 
-  const saveRes = await context.domains.save({
-    ...freshDocRes.value,
-    record: updatedRecord
+  const saveRes = await session.commitParent(async () => {
+    return context.domains.save({
+      ...freshDocRes.value,
+      record: updatedRecord
+    });
   });
 
   if (!saveRes.ok) {
-    await compensateDebits(`domain save failed for project advance: ${saveRes.error.message}`);
-    if (context.transactionStore) {
-      const targetState = compensationFailed ? "needs-recovery" : "failed";
-      context.transactionStore.transition(txId, targetState, epoch, saveRes.error.message);
-    }
-    return saveRes;
+    return session.failAndCompensate(saveRes.error, runCompensator);
   }
 
   // 5. Final transition to committed
-  if (context.transactionStore) {
-    const committedRes = context.transactionStore.transition(txId, "committed", epoch);
-    if (!committedRes.ok) return committedRes;
-    try {
-      await context.transactionStore.flush();
-    } catch (flushErr) {
-      context.transactionStore.transition(
-        txId,
-        "needs-recovery",
-        epoch,
-        "Final commit flush failed to persist to durable storage"
-      );
-      return err(
-        createPublicError({
-          code: "DM_TRANSACTION_COMMIT_UNCONFIRMED",
-          category: "recovery",
-          message: `Project advance succeeded on domain but durable transaction commit marker failed to flush: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}. Requires reconciliation.`,
-          details: flushErr,
-          userActionRequired: true,
-          retryable: false
-        })
-      );
-    }
+  const commitRes = await session.commitDurably({
+    project: updatedProject,
+    deltaApplied: deltaUnits
+  });
+  if (!commitRes.ok) {
+    return commitRes;
   }
 
   return ok({

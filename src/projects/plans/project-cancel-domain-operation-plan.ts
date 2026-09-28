@@ -1,6 +1,5 @@
 import { createPublicError, type PublicError } from "../../core/contracts/public-error.js";
 import { err, ok, type Result } from "../../core/contracts/result.js";
-import { createOpaqueId } from "../../core/identity/ids.js";
 import { createCommandId, type CommandId } from "../../commands/command-envelope.js";
 import { normalizeJournalEntryId } from "../../core/identity/refs.js";
 import type { DomainRepositoryContract } from "../../storage/repositories/domain-repository.js";
@@ -13,6 +12,11 @@ import type { PublicPeopleApi } from "../../people/services/people-service.js";
 import type { TransactionStore } from "../../mutations/transaction-store.js";
 import { createTransactionRecord } from "../../mutations/transaction-record.js";
 import { compensateProjectCancel } from "../services/project-recovery-compensators.js";
+import { lockKey } from "../../mutations/lock-keys.js";
+import {
+  CompositeMutationSession,
+  type TransactionExecutionContext
+} from "../../mutations/composite-mutation-session.js";
 
 export interface ProjectCancelDomainOperationParams {
   readonly domainUuid: string;
@@ -24,6 +28,8 @@ export interface ProjectCancelDomainOperationParams {
   readonly authorityEpoch?: number;
   readonly correlationId?: string;
   readonly causationId?: string;
+  readonly lockKeys?: readonly string[];
+  readonly transactionContext?: TransactionExecutionContext;
 }
 
 export interface ProjectCancelDomainOperationContext {
@@ -47,12 +53,12 @@ export interface ProjectCancelRecoveryData {
 
 /**
  * ProjectCancelDomainOperationPlan — Atomic composite operation plan for cancelling a Project.
- * (Master Spec §15, §11.2, G5-REVAL2-002, G5-REVAL3-003, G5-REVAL4-008)
+ * (Master Remediation §22.3, INV-01 to INV-11)
  *
  * Enforces:
- * 1. TransactionRecord prepared in TransactionStore BEFORE child writes.
- * 2. Durable flush barrier prior to releasing reservations.
- * 3. Snapshotting of active economic and workforce reservations.
+ * 1. TransactionRecord prepared in TransactionStore BEFORE child writes via CompositeMutationSession.
+ * 2. Canonical lock set: domain + project.
+ * 3. Snapshotting of active economic and workforce reservations before release.
  * 4. Fail-closed restoration of reservations on save failure.
  * 5. Canonical state transitions: prepared -> committing -> committed.
  * 6. Routing to "needs-recovery" if reservation restoration fails.
@@ -94,60 +100,12 @@ export async function executeProjectCancelDomainOperationPlan(
   if (!cancelRes.ok) return cancelRes;
   const cancelledProject = cancelRes.value.updatedProject;
 
-  // 1. Transaction preparation BEFORE child writes (G5-REVAL4-002, G5-REVAL4-008)
-  const txId = createOpaqueId("tx");
   const cmdId: CommandId = params.commandId
     ? (params.commandId.startsWith("cmd_") ? (params.commandId as CommandId) : (`cmd_${params.commandId}` as CommandId))
     : createCommandId();
   const epoch = params.authorityEpoch ?? 1;
 
-  const releasedReservationSnapshots: Reservation[] = [];
-  const releasedWorkforceSnapshots: Array<{ reservationId: string; amount: number; workforceTypeId: string }> = [];
-
-  const buildRecoveryData = (status: ProjectCancelRecoveryData["status"]): ProjectCancelRecoveryData => ({
-    type: "projects:cancel",
-    projectId: project.id,
-    domainUuid: cleanDomainUuid,
-    releasedReservationSnapshots: Object.freeze([...releasedReservationSnapshots]),
-    releasedWorkforceSnapshots: Object.freeze([...releasedWorkforceSnapshots]),
-    authorityEpoch: epoch,
-    correlationId: params.correlationId,
-    causationId: params.causationId,
-    status
-  });
-
-  if (context.transactionStore) {
-    const tx = createTransactionRecord({
-      transactionId: txId,
-      commandId: cmdId,
-      authorityEpoch: epoch,
-      lockKeys: [`domain:${cleanDomainUuid}`, `project:${project.id}`],
-      safeAutoRecovery: false,
-      recoveryData: buildRecoveryData("prepared")
-    });
-    context.transactionStore.save(tx);
-    const claimRes = context.transactionStore.transition(txId, "claimed", epoch);
-    if (!claimRes.ok) return claimRes;
-    const prepRes = context.transactionStore.transition(txId, "prepared", epoch);
-    if (!prepRes.ok) return prepRes;
-
-    // G5-REVAL4-002: Durable flush barrier BEFORE child mutations
-    try {
-      await context.transactionStore.flush();
-    } catch (flushErr) {
-      context.transactionStore.transition(txId, "failed", epoch, "Persistence flush failed");
-      return err(
-        createPublicError({
-          code: "DM_DOMAIN_STORAGE_ERROR",
-          category: "internal",
-          message: `Failed to flush transaction preparation to storage: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
-          details: flushErr
-        })
-      );
-    }
-  }
-
-  // 2. Snapshot and release active economy reservations
+  // 1. Snapshot active economy and workforce reservations before any release
   const activeReservationIds: string[] = [];
   if (project.metadata?.reservationIds && Array.isArray(project.metadata.reservationIds)) {
     activeReservationIds.push(...(project.metadata.reservationIds as string[]));
@@ -165,6 +123,7 @@ export async function executeProjectCancelDomainOperationPlan(
     }
   }
 
+  const releasedReservationSnapshots: Reservation[] = [];
   if (context.economyService) {
     for (const resId of activeReservationIds) {
       const resObj = context.economyService.getReservation(resId);
@@ -174,7 +133,7 @@ export async function executeProjectCancelDomainOperationPlan(
     }
   }
 
-  // 3. Snapshot workforce reservations
+  const releasedWorkforceSnapshots: Array<{ reservationId: string; amount: number; workforceTypeId: string }> = [];
   if (context.peopleService && "getReservations" in context.peopleService) {
     const pRes = await context.peopleService.getReservations(cleanDomainUuid);
     if (pRes.ok) {
@@ -190,120 +149,118 @@ export async function executeProjectCancelDomainOperationPlan(
     }
   }
 
-  // G5-REVAL5-003: Persist and flush recovery snapshots BEFORE releasing reservations or workforce
-  if (context.transactionStore) {
-    const tx = context.transactionStore.get(txId);
-    if (tx) {
-      context.transactionStore.save({
-        ...tx,
-        recoveryData: buildRecoveryData("executing")
-      });
-      try {
-        await context.transactionStore.flush();
-      } catch (flushErr) {
-        context.transactionStore.transition(txId, "failed", epoch, "Persistence flush of cancellation snapshots failed");
-        return err(
-          createPublicError({
-            code: "DM_DOMAIN_STORAGE_ERROR",
-            category: "internal",
-            message: `Failed to flush cancellation snapshots to storage: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
-            details: flushErr
-          })
-        );
-      }
+  const canonicalCancelLocks = [lockKey.domain(cleanDomainUuid), lockKey.project(project.id)];
+  const sessionLockKeys = params.transactionContext?.lockKeys ?? params.lockKeys ?? canonicalCancelLocks;
+
+  const sessionRes = await CompositeMutationSession.prepare({
+    transactionContext: params.transactionContext,
+    transactionStore: context.transactionStore,
+    commandId: cmdId,
+    authorityEpoch: epoch,
+    lockKeys: sessionLockKeys,
+    planLockKeys: params.transactionContext?.lockKeys ?? params.lockKeys ?? canonicalCancelLocks,
+    recoveryType: "projects:cancel",
+    parentRef: `project:${project.id}`,
+    initialRecoveryData: {
+      projectId: project.id,
+      domainUuid: cleanDomainUuid,
+      releasedReservationSnapshots: Object.freeze([...releasedReservationSnapshots]),
+      releasedWorkforceSnapshots: Object.freeze([...releasedWorkforceSnapshots]),
+      authorityEpoch: epoch,
+      correlationId: params.correlationId,
+      causationId: params.causationId,
+      status: "prepared"
     }
+  });
+
+  if (!sessionRes.ok) {
+    return sessionRes;
   }
 
-  let restoreFailed = false;
-  const restoreReleased = async (reason: string) => {
-    if (context.transactionStore) {
-      const tx = context.transactionStore.get(txId);
-      if (tx) {
-        context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("needs-recovery") });
-        const compRes = await compensateProjectCancel(
-          tx,
-          {
-            domains: context.domains,
-            economyService: context.economyService,
-            peopleService: context.peopleService,
-            transactionStore: context.transactionStore
-          },
-          { lockOwner: params.commandId, skipReconciliation: true }
-        );
-        if (!compRes.ok) {
-          restoreFailed = true;
-        }
-      }
-    } else {
-      const dummyTx = createTransactionRecord({
-        transactionId: txId,
-        commandId: cmdId,
+  const session = sessionRes.value;
+
+  const runCompensator = async (s: CompositeMutationSession, _error: PublicError) => {
+    const tx = context.transactionStore?.get(s.transactionId) ?? createTransactionRecord({
+      transactionId: s.transactionId,
+      commandId: cmdId,
+      authorityEpoch: epoch,
+      lockKeys: sessionLockKeys,
+      safeAutoRecovery: false,
+      recoveryData: {
+        type: "projects:cancel",
+        projectId: project.id,
+        domainUuid: cleanDomainUuid,
+        releasedReservationSnapshots: Object.freeze([...releasedReservationSnapshots]),
+        releasedWorkforceSnapshots: Object.freeze([...releasedWorkforceSnapshots]),
         authorityEpoch: epoch,
-        lockKeys: [`domain:${cleanDomainUuid}`, `project:${project.id}`],
-        safeAutoRecovery: false,
-        recoveryData: buildRecoveryData("needs-recovery")
-      });
-      const compRes = await compensateProjectCancel(
-        dummyTx,
-        {
-          domains: context.domains,
-          economyService: context.economyService,
-          peopleService: context.peopleService
-        },
-        { lockOwner: params.commandId, skipReconciliation: true }
-      );
-      if (!compRes.ok) {
-        restoreFailed = true;
+        status: "needs-recovery"
       }
-    }
+    });
+    return compensateProjectCancel(
+      tx,
+      {
+        domains: context.domains,
+        economyService: context.economyService,
+        peopleService: context.peopleService,
+        transactionStore: context.transactionStore
+      },
+      { lockOwner: params.commandId, skipReconciliation: true }
+    );
   };
 
-  // 4. Release economy reservations with fail-closed validation
+  // 2. Release economy reservations with fail-closed validation
   if (context.economyService) {
     for (const resId of activeReservationIds) {
-      const releaseRes = await context.economyService.releaseReservation({
-        domainUuid: cleanDomainUuid,
-        reservationId: resId,
-        reason: params.reason ?? "Project cancelled",
-        lockOwner: params.commandId
-      });
-      if (!releaseRes.ok) {
-        await restoreReleased(`rollback after failed release of reservation '${resId}'`);
-        if (context.transactionStore) {
-          const targetState = restoreFailed ? "needs-recovery" : "failed";
-          context.transactionStore.transition(txId, targetState, epoch, releaseRes.error.message);
+      const stepId = `project-cancel:release-reservation:${resId}`;
+      const stepRes = await session.runChildStep({
+        stepId,
+        subsystem: "economy",
+        operation: "release",
+        targetRef: resId,
+        idempotencyKey: `${session.transactionId}:${stepId}`,
+        intent: { reservationId: resId },
+        execute: async () => {
+          return context.economyService!.releaseReservation({
+            domainUuid: cleanDomainUuid,
+            reservationId: resId,
+            reason: params.reason ?? "Project cancelled",
+            lockOwner: params.commandId
+          });
         }
-        return releaseRes;
+      });
+      if (!stepRes.ok) {
+        return session.failAndCompensate(stepRes.error, runCompensator);
       }
     }
   }
 
-  // 5. Release workforce reservation via public People API
+  // 3. Release workforce reservation via public People API
   if (context.peopleService) {
-    const releaseWfRes = await context.peopleService.releaseWorkforceReservation({
-      domainUuid: cleanDomainUuid,
-      projectId: params.projectId,
-      userId: params.userId
-    });
-    if (!releaseWfRes.ok) {
-      await restoreReleased(`rollback after failed release of workforce: ${releaseWfRes.error.message}`);
-      if (context.transactionStore) {
-        const targetState = restoreFailed ? "needs-recovery" : "failed";
-        context.transactionStore.transition(txId, targetState, epoch, releaseWfRes.error.message);
+    const stepId = `project-cancel:release-workforce:${project.id}`;
+    const wfStepRes = await session.runChildStep({
+      stepId,
+      subsystem: "people",
+      operation: "release",
+      targetRef: `project:${project.id}`,
+      idempotencyKey: `${session.transactionId}:${stepId}`,
+      intent: { projectId: params.projectId },
+      execute: async () => {
+        return context.peopleService!.releaseWorkforceReservation({
+          domainUuid: cleanDomainUuid,
+          projectId: params.projectId,
+          userId: params.userId
+        });
       }
-      return releaseWfRes;
+    });
+    if (!wfStepRes.ok) {
+      return session.failAndCompensate(wfStepRes.error, runCompensator);
     }
   }
 
-  // 6. Re-read fresh domain document and save cancellation
+  // 4. Re-read fresh domain document and save cancellation
   const freshDocRes = await context.domains.read(cleanDomainUuid);
   if (!freshDocRes.ok) {
-    await restoreReleased(`domain read failed after reservation release: ${freshDocRes.error.message}`);
-    if (context.transactionStore) {
-      const targetState = restoreFailed ? "needs-recovery" : "failed";
-      context.transactionStore.transition(txId, targetState, epoch, freshDocRes.error.message);
-    }
-    return freshDocRes;
+    return session.failAndCompensate(freshDocRes.error, runCompensator);
   }
 
   const freshProjectsData = getDomainProjectsData(freshDocRes.value.record);
@@ -316,70 +273,30 @@ export async function executeProjectCancelDomainOperationPlan(
     projects: Object.freeze(updatedProjects)
   });
 
-  // 7. Transition to committing before save
-  if (context.transactionStore) {
-    const committingRes = context.transactionStore.transition(txId, "committing", epoch);
-    if (!committingRes.ok) {
-      await restoreReleased(`transition to committing failed: ${committingRes.error.message}`);
-      const targetState = restoreFailed ? "needs-recovery" : "failed";
-      context.transactionStore.transition(txId, targetState, epoch, committingRes.error.message);
-      return committingRes;
-    }
-    try {
-      await context.transactionStore.flush();
-    } catch (flushErr) {
-      await restoreReleased(`flush committing state failed: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
-      const targetState = restoreFailed ? "needs-recovery" : "failed";
-      context.transactionStore.transition(txId, targetState, epoch, String(flushErr));
-      return err(
-        createPublicError({
-          code: "DM_DOMAIN_STORAGE_ERROR",
-          category: "internal",
-          message: `Failed to flush transaction committing state to storage: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
-          details: flushErr
-        })
-      );
-    }
+  // 5. Transition to committing before save
+  const committingRes = await session.enterCommitting({
+    expectedLifecycle: "cancelled",
+    expectedRevision: (freshDocRes.value.record.revision ?? 0) + 1
+  });
+  if (!committingRes.ok) {
+    return session.failAndCompensate(committingRes.error, runCompensator);
   }
 
-  const saveRes = await context.domains.save({
-    ...freshDocRes.value,
-    record: updatedRecord
+  const saveRes = await session.commitParent(async () => {
+    return context.domains.save({
+      ...freshDocRes.value,
+      record: updatedRecord
+    });
   });
 
   if (!saveRes.ok) {
-    await restoreReleased(`domain save failed during project cancellation: ${saveRes.error.message}`);
-    if (context.transactionStore) {
-      const targetState = restoreFailed ? "needs-recovery" : "failed";
-      context.transactionStore.transition(txId, targetState, epoch, saveRes.error.message);
-    }
-    return saveRes;
+    return session.failAndCompensate(saveRes.error, runCompensator);
   }
 
-  // 8. Final transition to committed
-  if (context.transactionStore) {
-    const committedRes = context.transactionStore.transition(txId, "committed", epoch);
-    if (!committedRes.ok) return committedRes;
-    try {
-      await context.transactionStore.flush();
-    } catch (flushErr) {
-      context.transactionStore.transition(
-        txId,
-        "needs-recovery",
-        epoch,
-        "Final commit flush failed to persist to durable storage"
-      );
-      return err(
-        createPublicError({
-          code: "DM_TRANSACTION_COMMIT_UNCONFIRMED",
-          category: "recovery",
-          message: `Project cancel succeeded on domain but durable transaction commit marker failed to flush: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}. Requires reconciliation.`,
-          details: flushErr,
-          userActionRequired: true,
-          retryable: false
-        })
-      );
-    }
+  // 6. Final transition to committed
+  const commitRes = await session.commitDurably({ project: cancelledProject });
+  if (!commitRes.ok) {
+    return commitRes;
   }
 
   return ok({ project: cancelledProject });

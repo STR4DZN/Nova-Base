@@ -17,6 +17,7 @@ import type {
 } from "../../mutations/mutation-coordinator.js";
 import { createMutationPlan } from "../../mutations/plans/plan-contract.js";
 import { normalizeJournalEntryId } from "../../core/identity/refs.js";
+import { lockKey } from "../../mutations/lock-keys.js";
 
 export interface RegisterFacilityCommandsOptions {
   readonly registry: CommandRegistry;
@@ -91,16 +92,28 @@ export function registerFacilityCommands(options: RegisterFacilityCommandsOption
       commit: async (plan, freshState) => {
         const payload = plan.writeSet[0]?.payload as TPayload;
         const customData = (plan.customData ?? {}) as Record<string, unknown>;
+        const authorityEpoch = (customData.authorityEpoch as number) ?? (payload as any).authorityEpoch ?? 1;
+        const correlationId = (customData.correlationId as string) ?? (payload as any).correlationId;
+        const causationId = (customData.causationId as string) ?? (payload as any).causationId ?? plan.commandId;
+        const transactionContext = {
+          commandId: plan.commandId,
+          authorityEpoch,
+          correlationId,
+          causationId,
+          lockKeys: plan.lockKeys
+        };
         const mergedPayload = {
           ...payload,
-          authorityEpoch: customData.authorityEpoch ?? (payload as any).authorityEpoch,
-          correlationId: customData.correlationId ?? (payload as any).correlationId,
-          causationId: customData.causationId ?? (payload as any).causationId
+          authorityEpoch,
+          correlationId,
+          causationId,
+          transactionContext,
+          lockKeys: plan.lockKeys
         };
         const execRes = await execute(mergedPayload, {
           command: { commandId: plan.commandId, payload: mergedPayload },
           senderUserId: (customData.senderUserId as string) ?? (payload as any).userId,
-          authorityEpoch: (customData.authorityEpoch as number) ?? 1
+          authorityEpoch
         } as any);
         if (!execRes.ok) return execRes;
         const readRes = await domains.read(freshState.state.uuid);
@@ -118,7 +131,7 @@ export function registerFacilityCommands(options: RegisterFacilityCommandsOption
 
   // 1. facilities:create-facility
   const createMutation = makeMutationDef(
-    (p: any) => [`domain:${normalizeJournalEntryId(p.domainUuid)}`],
+    (p: any) => [lockKey.domain(p.domainUuid)],
     (p: any) => `Create facility '${p.name ?? p.definitionId}' in domain '${p.domainUuid}'`,
     (p, ctx) => facilitiesService.createFacility({
       domainUuid: p.domainUuid,
@@ -193,7 +206,7 @@ export function registerFacilityCommands(options: RegisterFacilityCommandsOption
 
   // 2. facilities:maintain-facility
   const maintainMutation = makeMutationDef(
-    (p: any) => [`domain:${normalizeJournalEntryId(p.domainUuid)}`, `facility:${p.facilityId}`],
+    (p: any) => [lockKey.domain(p.domainUuid), lockKey.facility(p.facilityId)],
     (p: any) => `Maintain facility '${p.facilityId}' in domain '${p.domainUuid}'`,
     (p, ctx) => facilitiesService.maintainFacility({
       domainUuid: p.domainUuid,
@@ -204,7 +217,9 @@ export function registerFacilityCommands(options: RegisterFacilityCommandsOption
       commandId: ctx.command.commandId,
       authorityEpoch: ctx.authorityEpoch,
       correlationId: (p as any).correlationId ?? (ctx.command as any).correlationId,
-      causationId: (p as any).causationId ?? (ctx.command as any).causationId ?? ctx.command.commandId
+      causationId: (p as any).causationId ?? (ctx.command as any).causationId ?? ctx.command.commandId,
+      lockKeys: (p as any).lockKeys,
+      transactionContext: (p as any).transactionContext
     })
   );
 
@@ -266,7 +281,7 @@ export function registerFacilityCommands(options: RegisterFacilityCommandsOption
 
   // 3. facilities:repair-facility
   const repairMutation = makeMutationDef(
-    (p: any) => [`domain:${normalizeJournalEntryId(p.domainUuid)}`, `facility:${p.facilityId}`],
+    (p: any) => [lockKey.domain(p.domainUuid), lockKey.facility(p.facilityId)],
     (p: any) => `Repair facility '${p.facilityId}' in domain '${p.domainUuid}'`,
     (p, ctx) => facilitiesService.repairFacility({
       domainUuid: p.domainUuid,
@@ -278,7 +293,9 @@ export function registerFacilityCommands(options: RegisterFacilityCommandsOption
       commandId: ctx.command.commandId,
       authorityEpoch: ctx.authorityEpoch,
       correlationId: (p as any).correlationId ?? (ctx.command as any).correlationId,
-      causationId: (p as any).causationId ?? (ctx.command as any).causationId ?? ctx.command.commandId
+      causationId: (p as any).causationId ?? (ctx.command as any).causationId ?? ctx.command.commandId,
+      lockKeys: (p as any).lockKeys,
+      transactionContext: (p as any).transactionContext
     })
   );
 
@@ -341,7 +358,7 @@ export function registerFacilityCommands(options: RegisterFacilityCommandsOption
 
   // 4. facilities:apply-damage
   const damageMutation = makeMutationDef(
-    (p: any) => [`domain:${normalizeJournalEntryId(p.domainUuid)}`, `facility:${p.facilityId}`],
+    (p: any) => [lockKey.domain(p.domainUuid), lockKey.facility(p.facilityId)],
     (p: any) => `Apply damage to facility '${p.facilityId}' in domain '${p.domainUuid}'`,
     (p, ctx) => facilitiesService.applyDamage({
       domainUuid: p.domainUuid,

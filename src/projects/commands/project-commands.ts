@@ -16,6 +16,7 @@ import type {
 } from "../../mutations/mutation-coordinator.js";
 import { createMutationPlan } from "../../mutations/plans/plan-contract.js";
 import { normalizeJournalEntryId } from "../../core/identity/refs.js";
+import { lockKey } from "../../mutations/lock-keys.js";
 
 export interface RegisterProjectCommandsOptions {
   readonly registry: CommandRegistry;
@@ -90,16 +91,28 @@ export function registerProjectCommands(options: RegisterProjectCommandsOptions)
       commit: async (plan, freshState) => {
         const payload = plan.writeSet[0]?.payload as TPayload;
         const customData = (plan.customData ?? {}) as Record<string, unknown>;
+        const authorityEpoch = (customData.authorityEpoch as number) ?? (payload as any).authorityEpoch ?? 1;
+        const correlationId = (customData.correlationId as string) ?? (payload as any).correlationId;
+        const causationId = (customData.causationId as string) ?? (payload as any).causationId ?? plan.commandId;
+        const transactionContext = {
+          commandId: plan.commandId,
+          authorityEpoch,
+          correlationId,
+          causationId,
+          lockKeys: plan.lockKeys
+        };
         const mergedPayload = {
           ...payload,
-          authorityEpoch: customData.authorityEpoch ?? (payload as any).authorityEpoch,
-          correlationId: customData.correlationId ?? (payload as any).correlationId,
-          causationId: customData.causationId ?? (payload as any).causationId
+          authorityEpoch,
+          correlationId,
+          causationId,
+          transactionContext,
+          lockKeys: plan.lockKeys
         };
         const execRes = await execute(mergedPayload, {
           command: { commandId: plan.commandId, payload: mergedPayload },
           senderUserId: (customData.senderUserId as string) ?? (payload as any).userId,
-          authorityEpoch: (customData.authorityEpoch as number) ?? 1
+          authorityEpoch
         } as any);
         if (!execRes.ok) return execRes;
         const readRes = await domains.read(freshState.state.uuid);
@@ -117,7 +130,7 @@ export function registerProjectCommands(options: RegisterProjectCommandsOptions)
 
   // 1. projects:start-project
   const startMutation = makeMutationDef(
-    (p: any) => [`domain:${normalizeJournalEntryId(p.domainUuid)}`],
+    (p: any) => [lockKey.domain(p.domainUuid)],
     (p: any) => `Start project '${p.name ?? p.definitionId}' in domain '${p.domainUuid}'`,
     (p, ctx) => projectsService.startProject({
       domainUuid: p.domainUuid,
@@ -192,7 +205,7 @@ export function registerProjectCommands(options: RegisterProjectCommandsOptions)
 
   // 2. projects:advance-project
   const advanceMutation = makeMutationDef(
-    (p: any) => [`domain:${normalizeJournalEntryId(p.domainUuid)}`, `project:${p.projectId}`],
+    (p: any) => [lockKey.domain(p.domainUuid), lockKey.project(p.projectId)],
     (p: any) => `Advance project '${p.projectId}' by ${p.delta ?? p.units ?? 0} in domain '${p.domainUuid}'`,
     (p, ctx) => projectsService.advanceProject({
       domainUuid: p.domainUuid,
@@ -277,7 +290,7 @@ export function registerProjectCommands(options: RegisterProjectCommandsOptions)
 
   // 3. projects:pause-project
   const pauseMutation = makeMutationDef(
-    (p: any) => [`domain:${normalizeJournalEntryId(p.domainUuid)}`, `project:${p.projectId}`],
+    (p: any) => [lockKey.domain(p.domainUuid), lockKey.project(p.projectId)],
     (p: any) => `Pause project '${p.projectId}' in domain '${p.domainUuid}'`,
     (p, ctx) => projectsService.pauseProject({
       domainUuid: p.domainUuid,
@@ -319,7 +332,7 @@ export function registerProjectCommands(options: RegisterProjectCommandsOptions)
 
   // 4. projects:resume-project
   const resumeMutation = makeMutationDef(
-    (p: any) => [`domain:${normalizeJournalEntryId(p.domainUuid)}`, `project:${p.projectId}`],
+    (p: any) => [lockKey.domain(p.domainUuid), lockKey.project(p.projectId)],
     (p: any) => `Resume project '${p.projectId}' in domain '${p.domainUuid}'`,
     (p, ctx) => projectsService.resumeProject({
       domainUuid: p.domainUuid,
@@ -361,7 +374,7 @@ export function registerProjectCommands(options: RegisterProjectCommandsOptions)
 
   // 5. projects:cancel-project
   const cancelMutation = makeMutationDef(
-    (p: any) => [`domain:${normalizeJournalEntryId(p.domainUuid)}`, `project:${p.projectId}`],
+    (p: any) => [lockKey.domain(p.domainUuid), lockKey.project(p.projectId)],
     (p: any) => `Cancel project '${p.projectId}' in domain '${p.domainUuid}'`,
     (p, ctx) => projectsService.cancelProject({
       domainUuid: p.domainUuid,
@@ -403,7 +416,7 @@ export function registerProjectCommands(options: RegisterProjectCommandsOptions)
 
   // 6. projects:block-project
   const blockMutation = makeMutationDef(
-    (p: any) => [`domain:${normalizeJournalEntryId(p.domainUuid)}`, `project:${p.projectId}`],
+    (p: any) => [lockKey.domain(p.domainUuid), lockKey.project(p.projectId)],
     (p: any) => `Block project '${p.projectId}' in domain '${p.domainUuid}'`,
     (p, ctx) => projectsService.blockProject({
       domainUuid: p.domainUuid,
@@ -445,7 +458,7 @@ export function registerProjectCommands(options: RegisterProjectCommandsOptions)
 
   // 7. projects:unblock-project
   const unblockMutation = makeMutationDef(
-    (p: any) => [`domain:${normalizeJournalEntryId(p.domainUuid)}`, `project:${p.projectId}`],
+    (p: any) => [lockKey.domain(p.domainUuid), lockKey.project(p.projectId)],
     (p: any) => `Unblock project '${p.projectId}' in domain '${p.domainUuid}'`,
     (p, ctx) => projectsService.unblockProject({
       domainUuid: p.domainUuid,
@@ -487,7 +500,7 @@ export function registerProjectCommands(options: RegisterProjectCommandsOptions)
 
   // 8. projects:complete-project
   const completeMutation = makeMutationDef(
-    (p: any) => [`domain:${normalizeJournalEntryId(p.domainUuid)}`, `project:${p.projectId}`],
+    (p: any) => [lockKey.domain(p.domainUuid), lockKey.project(p.projectId)],
     (p: any) => `Complete project '${p.projectId}' in domain '${p.domainUuid}'`,
     (p, ctx) => projectsService.completeProject({
       domainUuid: p.domainUuid,

@@ -13,12 +13,14 @@ export const ECONOMY_SCHEMA_VERSION = 1 as const;
 export interface DomainEconomyData {
   readonly schemaVersion: typeof ECONOMY_SCHEMA_VERSION;
   readonly accounts: readonly ResourceAccount[];
+  readonly appliedIdempotencyKeys?: readonly string[];
 }
 
 export function createDefaultDomainEconomyData(): DomainEconomyData {
   return {
     schemaVersion: ECONOMY_SCHEMA_VERSION,
-    accounts: Object.freeze([])
+    accounts: Object.freeze([]),
+    appliedIdempotencyKeys: Object.freeze([])
   };
 }
 
@@ -81,9 +83,14 @@ export function validateDomainEconomyData(raw: unknown): Result<DomainEconomyDat
     validatedAccounts.push(acc);
   }
 
+  const appliedKeys = Array.isArray(candidate.appliedIdempotencyKeys)
+    ? Object.freeze([...(candidate.appliedIdempotencyKeys as string[])])
+    : Object.freeze([]);
+
   return ok({
     schemaVersion: ECONOMY_SCHEMA_VERSION,
-    accounts: Object.freeze(validatedAccounts)
+    accounts: Object.freeze(validatedAccounts),
+    appliedIdempotencyKeys: appliedKeys
   });
 }
 

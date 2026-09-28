@@ -5,7 +5,7 @@
 **Normative Authorities:** `Documentos/99_DOMAIN_MANAGER_MASTER_SPECIFICATION_V1.md` (§15, §16, §17, DEC-083 to DEC-097, Anexo 07 DEC-2306 to DEC-3200), `Documentos/GATES/15_G5_PROJECTS_FACILITIES_DOWNTIME.md`  
 **Status:** **GATE_G5_COMPLETED_PENDING_USER_ACCEPTANCE (Aguardando Aceitação Soberana do Usuário — Nunca aceito sem confirmação explícita)**  
 **Date:** 2026-09-28  
-**Test Suite:** 611/611 passing (0 failures, 0 regressions against G4 baseline of 444; +167 dedicated G5 tests, including 66 adversarial revalidation tests)  
+**Test Suite:** 645/645 passing (0 failures, 0 regressions against G4 baseline of 444; +201 dedicated G5 tests, including 66 adversarial revalidation tests + 34 master remediation tests)  
 **TypeScript Conformance:** Strict, 0 errors via `npx tsc --noEmit`  
 **Package & Artifact Validation:** PASS (`dist/domain-manager-v0.0.5.zip`, validation scripts verified)
 
@@ -80,7 +80,7 @@ The G5 test suite validates the system against high-scale multi-domain operation
 
 ## 5. Test Suite & Validation Summary
 
-- **Total Test Count**: 604 tests passing (0 failures, 0 regressions across G0–G4 baseline of 444; +160 dedicated G5 tests).
+- **Total Test Count**: 645 tests passing (0 failures, 0 regressions across G0–G4 baseline of 444; +201 dedicated G5 tests).
 - **TypeScript Compilation**: Strict conformance, 0 errors via `node node_modules/typescript/bin/tsc --noEmit`.
 - **Production Build**: `node build.mjs` built cleanly with zero warnings (`dist/main.js`).
 - **Distribution Package**: `node scripts/package.mjs` created `dist/domain-manager-v0.0.5.zip`.
@@ -201,10 +201,27 @@ The G5 test suite validates the system against high-scale multi-domain operation
 
 ---
 
-## 13. Canonical Next Gate Designation
+## 13. Master Remediation Matrix (DOMAIN_MANAGER_G5_MASTER_REMEDIACAO_FINAL)
 
-Per the Master Specification roadmap, Gate G5 is now complete, fully remediated against initial audit (G5-AUD-001 to G5-AUD-010), first revalidation (G5-REVAL-001 to G5-REVAL-012), second revalidation (G5-REVAL2-001 to G5-REVAL2-010), third revalidation (G5-REVAL3-001 to G5-REVAL3-007), fourth revalidation (G5-REVAL4-001 to G5-REVAL4-012), fifth revalidation (G5-REVAL5-001 to G5-REVAL5-009), and sixth revalidation (G5-REVAL6-001 to G5-REVAL6-005), and strictly pending user acceptance:
+| Architectural Finding / Directive | Severity | Description & Root Cause | Architectural Remediation | Verification Evidence |
+|---|---|---|---|---|
+| **G5-MASTER-001** (Finding 1) | CRITICAL | Immediate compensation exception gap in DomainOperationPlans. Exceptions during compensator step execution bypassed `needs-recovery` marking and released locks prematurely. | Created `CompositeMutationSession.failAndCompensate(primaryError, compensatorFn)` centralizing exception trapping, step journal update, fail-closed `needs-recovery` marking, logical fence installation, and lock isolation without unhandled throws. | `tests/runtime/g5-transaction-kernel.test.ts` (G5-KERNEL-INV-11, G5-GROUP-B passing). |
+| **G5-MASTER-002** (Finding 2) | CRITICAL | Lock-set divergence in Project Start: Command held `[domain]`, while TransactionRecord requested `[domain, project:<generatedId>]`, causing partial lock isolation gaps. | Unified Project Start to canonical domain-only lock set `[domain]` across Command, MutationPlan, and TransactionRecord (INV-01). Generated project is guarded by domain serial lock. | `tests/runtime/g5-lockset-contract.test.ts` (G5-LOCKSET-A1 passing). |
+| **G5-MASTER-003** (Finding 3) | CRITICAL | Lock namespace divergence in Downtime Resolution: Command used `downtime:<id>` while TransactionRecord used `activity:<id>`, preventing zero-gap lock transfer. | Created `src/mutations/lock-keys.ts` with canonical `lockKey` factory. Replaced all occurrences of `activity:` with `downtime:`, strictly banning `activity:` as a lock key namespace. | `tests/runtime/g5-lockset-contract.test.ts` (G5-LOCKSET-A6, G5-LOCKSET-ASSERTION passing). |
+| **G5-MASTER-004** (Finding 4 & 6) | CRITICAL | `isolateTransaction()` accepted partial handles without proving complete lock-set coverage, and `MutationCoordinator` ignored isolation Result. | Enforced exact canonical lock-set equality (`required == held`). Divergent sets reject fail-closed with `DM_RECOVERY_LOCKSET_DIVERGENCE`. `MutationCoordinator` verifies Result and reports `DM_RECOVERY_ISOLATION_FAILED` while retaining fence. | `tests/runtime/g5-recovery-fence.test.ts` (G5-FENCE-I1 passing). |
+| **G5-MASTER-005** (Finding 5, §11, §23) | CRITICAL | Unsafe unresolved transactions could remain unblocked if physical lock acquisition failed during startup or runtime. | Created `RecoveryFenceRegistry` providing immediate logical barriers blocking overlapping mutations with `DM_RECOVERY_SCOPE_BLOCKED` even when physical locks are pending or delayed. | `tests/runtime/g5-recovery-fence.test.ts` (G5-FENCE-D1, E1, E2, E3 passing). |
+| **G5-MASTER-006** (§14, §15, §18) | ARCHITECTURAL | Duplicated transactional state machine across plans. Plans called low-level store transitions manually. | Implemented canonical `CompositeMutationSession` and atomic durable store methods (`saveDurable`, `patchDurable`, `transitionDurable`). Replaced parallel arrays with structured `RecoveryStep[]` journal. Migrated all 8 G5 flows. | `src/mutations/composite-mutation-session.ts`, `tests/runtime/g5-transaction-kernel.test.ts`. |
+| **G5-MASTER-007** (§17) | CRITICAL | Economy adjust idempotency marker survived only in memory; ledger flush failure risked duplicate adjustments on retry after restart. | Persisted `appliedIdempotencyKeys` in domain document alongside balance mutation in `EconomyService.commitAdjust`. Rehydrated service skips duplicate adjust on retry, guaranteeing balance changes exactly once across restarts. | `tests/runtime/g5-transaction-kernel.test.ts` (G5-SECTION-17-RESTART passing). |
+| **G5-MASTER-008** (§20, INV-09) | CRITICAL | Parent reconciliation crash points: crash after parent write must reconcile to `committed` rather than rolling back completed work. | Added `"committed"` to `VALID_TRANSITIONS["needs-recovery"]`. Implemented parent reconciliation verification across all 8 G5 flows (Project Start, Advance, Cancel, Completion; Downtime Start, Resolution; Facility Maintenance, Repair). | `tests/runtime/g5-transaction-kernel.test.ts` (G5-GROUP-F-1 to F-8 passing). |
+| **G5-MASTER-009** (§26) | TEST MATRIX | Full master remediation fault test matrix (Grupos A to I) executed and passing. | Verified lock-set identity (A1–A8), immediate compensation exceptions (B), restart idempotency (C), runtime fence (D), startup isolation & auto-recovery (E1–E3), parent reconciliation (F1–F8), child intent crash points (G1–G3), multi-step skip (H), and coordinator isolation error (I). | `tests/runtime/g5-lockset-contract.test.ts`, `tests/runtime/g5-recovery-fence.test.ts`, `tests/runtime/g5-transaction-kernel.test.ts`. |
+
+---
+
+## 14. Canonical Next Gate Designation
+
+Per the Master Specification roadmap, Gate G5 is now complete, fully remediated against initial audit (G5-AUD-001 to G5-AUD-010), first revalidation (G5-REVAL-001 to G5-REVAL-012), second revalidation (G5-REVAL2-001 to G5-REVAL2-010), third revalidation (G5-REVAL3-001 to G5-REVAL3-007), fourth revalidation (G5-REVAL4-001 to G5-REVAL4-012), fifth revalidation (G5-REVAL5-001 to G5-REVAL5-009), sixth revalidation (G5-REVAL6-001 to G5-REVAL6-005), and the Master Remediation (DOMAIN_MANAGER_G5_MASTER_REMEDIACAO_FINAL), and strictly pending user acceptance:
 - **Current Gate Status**: `GATE_G5_COMPLETED_PENDING_USER_ACCEPTANCE`
 - **Canonical Next Gate**: **Gate G6 — Relations / Reputation / Agreements / Territory** (`Documentos/GATES/16_G6_RELATIONS_REPUTATION_AGREEMENTS_TERRITORY.md`).
+
 
 

@@ -20,6 +20,11 @@ import type { ChildReceipt } from "../../projects/plans/project-plan-types.js";
 import type { TransactionStore } from "../../mutations/transaction-store.js";
 import { createTransactionRecord } from "../../mutations/transaction-record.js";
 import { compensateDowntimeResolution } from "../services/downtime-recovery-compensators.js";
+import { lockKey } from "../../mutations/lock-keys.js";
+import {
+  CompositeMutationSession,
+  type TransactionExecutionContext
+} from "../../mutations/composite-mutation-session.js";
 
 export type DowntimeOutcomeHandler = (outcome: any) => Promise<ChildReceipt> | ChildReceipt;
 
@@ -43,18 +48,21 @@ export interface DowntimeResolutionPlanParams {
   readonly correlationId?: string;
   readonly causationId?: string;
   readonly authorityEpoch?: number;
+  readonly lockKeys?: readonly string[];
+  readonly transactionContext?: TransactionExecutionContext;
 }
 
 /**
  * DowntimeResolutionPlan — Coordinated domain operation plan for completing/resolving a Downtime Activity.
- * (Master Spec §17, DEC-2751, G5-REVAL3-001, G5-REVAL3-002, G5-REVAL3-005)
+ * (Master Remediation §22.6, Finding 3, INV-01 to INV-11)
  *
  * Enforces:
  * 1. Progress and precondition check (elapsed ticks, valid inProgress state).
- * 2. TransactionRecord prepared in TransactionStore before external modifications.
- * 3. Classifies outcomes as MANDATORY vs OPTIONAL (outcome.optional === true).
- * 4. Fails closed and blocks completion if any mandatory outcome fails (never silently marks completed).
- * 5. Explicitly compensates/rolls back executed outcome credits if mandatory outcome or persistence fails.
+ * 2. TransactionRecord prepared in TransactionStore via CompositeMutationSession BEFORE child writes.
+ * 3. Canonical lock set: domain + downtime:<activityId> (NEVER activity:<activityId>!).
+ * 4. Classifies outcomes as MANDATORY vs OPTIONAL (outcome.optional === true).
+ * 5. Fails closed and blocks completion if any mandatory outcome fails (never silently marks completed).
+ * 6. Explicitly compensates/rolls back executed outcome credits if mandatory outcome or persistence fails.
  */
 export async function executeDowntimeResolutionPlan(
   context: DowntimeResolutionPlanContext,
@@ -98,16 +106,9 @@ export async function executeDowntimeResolutionPlan(
   }
 
   const definition = context.downtimeRegistry.get(activity.definitionId);
-  const candidateOutcomes: DowntimeOutcomeDefinition[] = definition?.outcomeDefinitions
-    ? [...definition.outcomeDefinitions]
-    : [];
+  const outcomesToExecute: readonly DowntimeOutcomeDefinition[] =
+    definition?.outcomeDefinitions ?? [];
 
-  const outcomesToExecute = params.outcomeKey
-    ? candidateOutcomes.filter((o) => o.id === params.outcomeKey)
-    : candidateOutcomes;
-
-  // 1. Transaction preparation BEFORE child effects (G5-REVAL3-002, G5-REVAL4-001, G5-REVAL4-002)
-  const txId = createOpaqueId("tx");
   const cmdId: CommandId = params.commandId
     ? params.commandId.startsWith("cmd_")
       ? (params.commandId as CommandId)
@@ -115,105 +116,90 @@ export async function executeDowntimeResolutionPlan(
     : createCommandId();
   const epoch = params.authorityEpoch ?? 1;
 
-  if (context.transactionStore) {
-    const tx = createTransactionRecord({
-      transactionId: txId,
-      commandId: cmdId,
-      authorityEpoch: epoch,
-      lockKeys: [`domain:${cleanDomainUuid}`, `activity:${activity.id}`],
-      safeAutoRecovery: false,
-      recoveryData: {
-        type: "downtime:resolution",
-        domainUuid: cleanDomainUuid,
-        activityId: activity.id,
-        definitionId: activity.definitionId,
-        correlationId: params.correlationId,
-        causationId: params.causationId,
-        status: "prepared"
-      }
-    });
-    context.transactionStore.save(tx);
-    const claimRes = context.transactionStore.transition(txId, "claimed", epoch);
-    if (!claimRes.ok) return claimRes;
-    const prepRes = context.transactionStore.transition(txId, "prepared", epoch);
-    if (!prepRes.ok) return prepRes;
+  // Master Remediation Finding 3 & §22.6: Canonical lock set is domain + downtime:<activityId>
+  const canonicalLocks = [lockKey.domain(cleanDomainUuid), lockKey.downtime(activity.id)];
+  const sessionLockKeys = params.transactionContext?.lockKeys ?? params.lockKeys ?? canonicalLocks;
 
-    // G5-REVAL4-002: Flush transaction to durable storage BEFORE executing child writes
-    try {
-      await context.transactionStore.flush();
-    } catch (flushErr) {
-      context.transactionStore.transition(txId, "failed", epoch, "Persistence flush failed");
-      return err(
-        createPublicError({
-          code: "DM_DOMAIN_STORAGE_ERROR",
-          category: "internal",
-          message: `Failed to flush transaction preparation to storage: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
-          details: flushErr
-        })
-      );
+  const sessionRes = await CompositeMutationSession.prepare({
+    transactionContext: params.transactionContext,
+    transactionStore: context.transactionStore,
+    commandId: cmdId,
+    authorityEpoch: epoch,
+    lockKeys: sessionLockKeys,
+    planLockKeys: params.transactionContext?.lockKeys ?? params.lockKeys ?? canonicalLocks,
+    recoveryType: "downtime:resolution",
+    parentRef: `downtime:${activity.id}`,
+    initialRecoveryData: {
+      type: "downtime:resolution",
+      domainUuid: cleanDomainUuid,
+      activityId: activity.id,
+      definitionId: activity.definitionId,
+      correlationId: params.correlationId,
+      causationId: params.causationId,
+      status: "prepared"
     }
+  });
+
+  if (!sessionRes.ok) {
+    return sessionRes;
   }
 
-  // Track executed credits for rollback on mandatory failure or persistence error
+  const session = sessionRes.value;
+
   const creditedResources: { resourceId: string; amount: number }[] = [];
   const outcomesApplied: ChildReceipt[] = [];
-  const failedMandatoryOutcomes: { outcome: DowntimeOutcomeDefinition; error: string }[] = [];
-  let compensationFailed = false;
 
-  const compensateCredits = async (reason: string) => {
-    if (context.transactionStore) {
-      const tx = context.transactionStore.get(txId);
-      if (tx) {
-        context.transactionStore.save({
-          ...tx,
-          recoveryData: {
-            ...(tx.recoveryData as any),
-            creditedResources: Object.freeze([...creditedResources]),
-            status: "needs-recovery"
+  const runCompensator = async (s: CompositeMutationSession, _error: PublicError) => {
+    const effectiveCredited = [...creditedResources];
+    for (const step of s.steps) {
+      if (step.subsystem === "economy" && (step.state === "applied" || step.state === "unknown")) {
+        const intent = step.intent as { resourceId: string; deltaMinor: number };
+        if (intent && intent.deltaMinor > 0) {
+          if (!effectiveCredited.some((c) => c.resourceId === intent.resourceId && c.amount === intent.deltaMinor)) {
+            effectiveCredited.push({ resourceId: intent.resourceId, amount: intent.deltaMinor });
           }
-        });
-        const compRes = await compensateDowntimeResolution(
-          tx,
-          {
-            domains: context.domains,
-            economyService: context.economyService,
-            transactionStore: context.transactionStore
-          },
-          { lockOwner: params.commandId, skipReconciliation: true }
-        );
-        if (!compRes.ok) {
-          compensationFailed = true;
         }
-      }
-    } else if (context.economyService && creditedResources.length > 0) {
-      const dummyTx = createTransactionRecord({
-        transactionId: txId,
-        commandId: cmdId,
-        authorityEpoch: epoch,
-        lockKeys: [`domain:${cleanDomainUuid}`],
-        safeAutoRecovery: false,
-        recoveryData: {
-          type: "downtime:resolution",
-          activityId: params.activityId,
-          domainUuid: cleanDomainUuid,
-          creditedResources: Object.freeze([...creditedResources])
-        }
-      });
-      const compRes = await compensateDowntimeResolution(
-        dummyTx,
-        {
-          domains: context.domains,
-          economyService: context.economyService
-        },
-        { lockOwner: params.commandId, skipReconciliation: true }
-      );
-      if (!compRes.ok) {
-        compensationFailed = true;
       }
     }
+
+    const currentTx = context.transactionStore?.get(s.transactionId);
+    const existingRecData = (currentTx?.recoveryData as Record<string, unknown>) ?? {};
+    const updatedRecData = {
+      ...existingRecData,
+      type: "downtime:resolution",
+      activityId: params.activityId,
+      domainUuid: cleanDomainUuid,
+      creditedResources: Object.freeze([...effectiveCredited]),
+      status: "needs-recovery"
+    };
+
+    const tx = currentTx
+      ? { ...currentTx, recoveryData: updatedRecData }
+      : createTransactionRecord({
+          transactionId: s.transactionId,
+          commandId: cmdId,
+          authorityEpoch: epoch,
+          lockKeys: sessionLockKeys,
+          safeAutoRecovery: false,
+          recoveryData: updatedRecData
+        });
+
+    if (context.transactionStore) {
+      context.transactionStore.save(tx);
+    }
+
+    return compensateDowntimeResolution(
+      tx,
+      {
+        domains: context.domains,
+        economyService: context.economyService,
+        transactionStore: context.transactionStore
+      },
+      { lockOwner: params.commandId, skipReconciliation: true }
+    );
   };
 
-  // 2. Execute outcomes with mandatory vs optional classification (G5-REVAL3-005)
+  // Execute outcomes with mandatory vs optional classification (G5-REVAL3-005)
   for (const outcome of outcomesToExecute) {
     const isOptional = outcome.optional === true;
 
@@ -222,136 +208,111 @@ export async function executeDowntimeResolutionPlan(
       const amount = Number((outcome.parameters as any)?.amount ?? 0);
 
       if (context.economyService && amount > 0) {
-        const creditRes = await context.economyService.commitAdjust({
-          domainUuid: cleanDomainUuid,
-          resourceId,
-          deltaMinor: amount,
-          reason: `Outcome of downtime activity '${activity.name}': ${outcome.label}`,
-          lockOwner: params.commandId
+        const stepId = `downtime-resolution:reward:${outcome.id}`;
+        const stepRes = await session.runChildStep({
+          stepId,
+          subsystem: "economy",
+          operation: "adjust",
+          targetRef: cleanDomainUuid,
+          idempotencyKey: `${session.transactionId}:${stepId}`,
+          intent: { resourceId, deltaMinor: amount },
+          execute: async () => {
+            return context.economyService!.commitAdjust({
+              domainUuid: cleanDomainUuid,
+              resourceId,
+              deltaMinor: amount,
+              reason: `Outcome of downtime activity '${activity.name}': ${outcome.label}`,
+              lockOwner: params.commandId,
+              idempotencyKey: `${session.transactionId}:${stepId}`
+            });
+          }
         });
 
-        if (creditRes.ok) {
+        if (stepRes.ok) {
           creditedResources.push({ resourceId, amount });
-          if (context.transactionStore) {
-            const tx = context.transactionStore.get(txId);
-            if (tx) {
-              context.transactionStore.save({
-                ...tx,
-                recoveryData: {
-                  ...(tx.recoveryData as any),
-                  creditedResources: Object.freeze([...creditedResources]),
-                  status: "executing"
-                }
-              });
-              try {
-                await context.transactionStore.flush();
-              } catch (flushErr) {
-                await compensateCredits(`flush failure after credit: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
-                const targetState = compensationFailed ? "needs-recovery" : "failed";
-                context.transactionStore.transition(txId, targetState, epoch, "Flush failure after credit");
-                return err(
-                  createPublicError({
-                    code: "DM_DOMAIN_STORAGE_ERROR",
-                    category: "internal",
-                    message: `Failed to persist transaction update after credit: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
-                    details: flushErr
-                  })
-                );
-              }
-            }
+          const checkRes = await session.checkpointRecoveryData({
+            creditedResources: Object.freeze([...creditedResources]),
+            status: "executing"
+          });
+          if (!checkRes.ok) {
+            return session.failAndCompensate(checkRes.error, runCompensator);
           }
           outcomesApplied.push({
             childReceiptId: createOpaqueId("rep"),
             subsystem: "economy",
             action: "grant_resource",
-            targetRef: resourceId,
+            targetRef: cleanDomainUuid,
             payload: { resourceId, amount },
             success: true,
             appliedAt: Date.now()
           });
         } else {
+          if (!isOptional) {
+            const errToPropagate = stepRes.error.code === "DM_DOMAIN_STORAGE_ERROR"
+              ? stepRes.error
+              : createPublicError({
+                  code: "DM_DOWNTIME_MANDATORY_OUTCOME_FAILED",
+                  category: "conflict",
+                  message: `Mandatory outcome '${outcome.label}' failed: ${stepRes.error.message}`,
+                  details: stepRes.error
+                });
+            return session.failAndCompensate(errToPropagate, runCompensator);
+          }
           outcomesApplied.push({
             childReceiptId: createOpaqueId("rep"),
             subsystem: "economy",
             action: "grant_resource",
-            targetRef: resourceId,
+            targetRef: cleanDomainUuid,
             payload: { resourceId, amount },
             success: false,
-            error: creditRes.error.message,
+            error: stepRes.error.message,
             appliedAt: Date.now()
           });
-
-          if (!isOptional) {
-            failedMandatoryOutcomes.push({
-              outcome,
-              error: `Economy credit failed: ${creditRes.error.message}`
-            });
-          }
         }
-      } else if (!context.economyService && amount > 0) {
-        outcomesApplied.push({
-          childReceiptId: createOpaqueId("rep"),
-          subsystem: "economy",
-          action: "grant_resource",
-          targetRef: resourceId,
-          payload: { resourceId, amount },
-          success: false,
-          error: "EconomyService not available",
-          appliedAt: Date.now()
-        });
-
-        if (!isOptional) {
-          failedMandatoryOutcomes.push({
-            outcome,
-            error: "EconomyService not available for mandatory grant-resource outcome"
-          });
-        }
-      } else {
-        outcomesApplied.push({
-          childReceiptId: createOpaqueId("rep"),
-          subsystem: "economy",
-          action: "grant_resource",
-          targetRef: resourceId,
-          payload: { resourceId, amount },
-          success: true,
-          appliedAt: Date.now()
-        });
       }
     } else {
-      // Non-economy outcomes: route through outcome handlers
-      const handler =
-        params.outcomeHandlers?.[outcome.type] ??
-        context.defaultOutcomeHandlers?.[outcome.type];
-
+      const handlers = {
+        ...(context.defaultOutcomeHandlers ?? {}),
+        ...(params.outcomeHandlers ?? {})
+      };
+      const handler = handlers[outcome.type];
       if (handler) {
         try {
           const res = await handler(outcome);
           outcomesApplied.push(res);
           if (!res.success && !isOptional) {
-            failedMandatoryOutcomes.push({
-              outcome,
-              error: res.error ?? "Outcome handler reported failure"
-            });
+            return session.failAndCompensate(
+              createPublicError({
+                code: "DM_DOWNTIME_MANDATORY_OUTCOME_FAILED",
+                category: "conflict",
+                message: `Mandatory outcome '${outcome.label}' failed: ${res.error ?? "handler failed"}`,
+                details: res
+              }),
+              runCompensator
+            );
           }
-        } catch (err: any) {
-          const errMsg = err?.message ?? String(err);
+        } catch (handlerErr) {
+          if (!isOptional) {
+            return session.failAndCompensate(
+              createPublicError({
+                code: "DM_DOWNTIME_MANDATORY_OUTCOME_FAILED",
+                category: "internal",
+                message: `Mandatory outcome handler for '${outcome.label}' threw: ${handlerErr instanceof Error ? handlerErr.message : String(handlerErr)}`,
+                details: handlerErr
+              }),
+              runCompensator
+            );
+          }
           outcomesApplied.push({
             childReceiptId: createOpaqueId("rep"),
             subsystem: "custom",
             action: outcome.type,
-            targetRef: outcome.id,
+            targetRef: cleanDomainUuid,
             payload: outcome.parameters,
             success: false,
-            error: errMsg,
+            error: handlerErr instanceof Error ? handlerErr.message : String(handlerErr),
             appliedAt: Date.now()
           });
-
-          if (!isOptional) {
-            failedMandatoryOutcomes.push({
-              outcome,
-              error: `Handler threw error: ${errMsg}`
-            });
-          }
         }
       } else if (outcome.type === "narrative:event") {
         // Built-in handling for canonical narrative events / logs
@@ -359,156 +320,90 @@ export async function executeDowntimeResolutionPlan(
           childReceiptId: createOpaqueId("rep"),
           subsystem: "custom",
           action: outcome.type,
-          targetRef: outcome.id,
+          targetRef: outcome.id ?? cleanDomainUuid,
           payload: outcome.parameters,
           success: true,
           appliedAt: Date.now()
         });
       } else {
-        // No handler registered
+        if (!isOptional) {
+          return session.failAndCompensate(
+            createPublicError({
+              code: "DM_DOWNTIME_MANDATORY_OUTCOME_FAILED",
+              category: "conflict",
+              message: `No handler registered for mandatory outcome type '${outcome.type}' (${outcome.label})`
+            }),
+            runCompensator
+          );
+        }
         outcomesApplied.push({
           childReceiptId: createOpaqueId("rep"),
           subsystem: "custom",
           action: outcome.type,
-          targetRef: outcome.id,
+          targetRef: cleanDomainUuid,
           payload: outcome.parameters,
           success: false,
-          error: `No handler registered for outcome type '${outcome.type}'`,
+          error: `No handler registered for optional outcome type '${outcome.type}'`,
           appliedAt: Date.now()
         });
-
-        if (!isOptional) {
-          failedMandatoryOutcomes.push({
-            outcome,
-            error: `No handler registered for mandatory outcome type '${outcome.type}'`
-          });
-        }
       }
     }
   }
 
-  // 3. Fail closed if any mandatory outcome failed (G5-REVAL3-005)
-  if (failedMandatoryOutcomes.length > 0) {
-    await compensateCredits("rollback outcome credits after mandatory outcome failure");
-
-    if (context.transactionStore) {
-      const targetState = compensationFailed ? "needs-recovery" : "failed";
-      context.transactionStore.transition(
-        txId,
-        targetState,
-        epoch,
-        `Mandatory outcome(s) failed: ${failedMandatoryOutcomes.map((f) => f.outcome.label).join(", ")}`
-      );
-    }
-
-    return err(
-      createPublicError({
-        code: "DM_DOWNTIME_MANDATORY_OUTCOME_FAILED",
-        category: "conflict",
-        message: `Downtime completion blocked: mandatory outcome(s) failed: ${failedMandatoryOutcomes.map((f) => `${f.outcome.label} (${f.error})`).join("; ")}`,
-        details: { failedOutcomes: failedMandatoryOutcomes }
-      })
-    );
+  // 3. Mark completed and update domain document
+  const freshDocRes = await context.domains.read(cleanDomainUuid);
+  if (!freshDocRes.ok) {
+    return session.failAndCompensate(freshDocRes.error, runCompensator);
   }
 
-  // 4. All mandatory outcomes succeeded: complete activity
-  const now = Date.now();
   const updatedActivity: DowntimeInstance = {
     ...activity,
     lifecycle: "completed",
-    completedAt: now,
-    revision: activity.revision + 1,
-    updatedAt: now
+    updatedAt: Date.now(),
+    revision: activity.revision + 1
   };
-
-  // 5. Re-read fresh domain document after outcome execution
-  const freshDocRes = await context.domains.read(cleanDomainUuid);
-  if (!freshDocRes.ok) {
-    await compensateCredits("domain read failed after outcome execution");
-    if (context.transactionStore) {
-      const targetState = compensationFailed ? "needs-recovery" : "failed";
-      context.transactionStore.transition(txId, targetState, epoch, freshDocRes.error.message);
-    }
-    return freshDocRes;
-  }
 
   const freshDowntimeData = getDomainDowntimeData(freshDocRes.value.record);
   const updatedActivities = freshDowntimeData.activities.map((a) =>
-    a.id === params.activityId ? updatedActivity : a
+    a.id === activity.id ? updatedActivity : a
   );
-
   const updatedRecord = withDomainDowntimeData(freshDocRes.value.record, {
     ...freshDowntimeData,
     activities: Object.freeze(updatedActivities)
   });
 
-  if (context.transactionStore) {
-    const committingRes = context.transactionStore.transition(txId, "committing", epoch);
-    if (!committingRes.ok) {
-      await compensateCredits(`transition to committing failed: ${committingRes.error.message}`);
-      const targetState = compensationFailed ? "needs-recovery" : "failed";
-      context.transactionStore.transition(txId, targetState, epoch, committingRes.error.message);
-      return committingRes;
-    }
-    try {
-      await context.transactionStore.flush();
-    } catch (flushErr) {
-      await compensateCredits(`flush before domain save failed: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
-      const targetState = compensationFailed ? "needs-recovery" : "failed";
-      context.transactionStore.transition(txId, targetState, epoch, String(flushErr));
-      return err(
-        createPublicError({
-          code: "DM_DOMAIN_STORAGE_ERROR",
-          category: "internal",
-          message: `Failed to persist committing state before domain update: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
-          details: flushErr
-        })
-      );
-    }
+  const committingRes = await session.enterCommitting({
+    activityId: activity.id,
+    expectedLifecycle: "completed",
+    expectedRevision: (freshDocRes.value.record.revision ?? 0) + 1
+  });
+  if (!committingRes.ok) {
+    return session.failAndCompensate(committingRes.error, runCompensator);
   }
 
-  const saveRes = await context.domains.save({
-    ...freshDocRes.value,
-    record: updatedRecord
+  const saveRes = await session.commitParent(async () => {
+    return context.domains.save({
+      ...freshDocRes.value,
+      record: updatedRecord
+    });
   });
 
   if (!saveRes.ok) {
-    await compensateCredits(`domain save failed for activity completion: ${saveRes.error.message}`);
-    if (context.transactionStore) {
-      const targetState = compensationFailed ? "needs-recovery" : "failed";
-      context.transactionStore.transition(txId, targetState, epoch, saveRes.error.message);
-    }
-    return saveRes;
+    return session.failAndCompensate(saveRes.error, runCompensator);
   }
 
-  if (context.transactionStore) {
-    const committedRes = context.transactionStore.transition(txId, "committed", epoch);
-    if (!committedRes.ok) return committedRes;
-    try {
-      await context.transactionStore.flush();
-    } catch (flushErr) {
-      context.transactionStore.transition(
-        txId,
-        "needs-recovery",
-        epoch,
-        "Final commit flush failed to persist to durable storage"
-      );
-      return err(
-        createPublicError({
-          code: "DM_TRANSACTION_COMMIT_UNCONFIRMED",
-          category: "recovery",
-          message: `Downtime resolution succeeded on domain but durable transaction commit marker failed to flush: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}. Requires reconciliation.`,
-          details: flushErr,
-          userActionRequired: true,
-          retryable: false
-        })
-      );
-    }
+  const commitDurableRes = await session.commitDurably({
+    activity: updatedActivity,
+    outcomes: outcomesToExecute,
+    outcomesApplied
+  });
+  if (!commitDurableRes.ok) {
+    return commitDurableRes;
   }
 
   return ok({
     activity: updatedActivity,
-    outcomes: Object.freeze(outcomesToExecute),
-    outcomesApplied: Object.freeze(outcomesApplied)
+    outcomes: outcomesToExecute,
+    outcomesApplied
   });
 }

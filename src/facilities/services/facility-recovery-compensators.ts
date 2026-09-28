@@ -28,10 +28,22 @@ export interface FacilityCompensationOptions {
  * Unified, idempotent compensator for facilities:maintenance and facilities:repair (G5-REVAL6-001, G5-REVAL6-002).
  */
 export async function compensateFacilityOperation(
-  record: TransactionRecord,
+  recordOrId: TransactionRecord | string,
   context: FacilityCompensatorContext,
   options?: FacilityCompensationOptions
 ): Promise<Result<void, PublicError>> {
+  const record = typeof recordOrId === "string"
+    ? context.transactionStore?.get(recordOrId)
+    : (context.transactionStore?.get(recordOrId.transactionId) ?? recordOrId);
+  if (!record) {
+    return err(
+      createPublicError({
+        code: "DM_TRANSACTION_NOT_FOUND",
+        category: "not-found",
+        message: `Transaction record '${typeof recordOrId === "string" ? recordOrId : recordOrId.transactionId}' not found`
+      })
+    );
+  }
   const data = record.recoveryData as (FacilityOperationRecoveryData & Record<string, any>) | undefined;
   if (!data || (data.type !== "facilities:maintenance" && data.type !== "facilities:repair")) {
     return ok(undefined);
@@ -100,8 +112,35 @@ export async function compensateFacilityOperation(
     }
   }
 
-  // 3. Refund debited costs with stable idempotencyKey
-  if (context.economyService && data.debitedCosts && Array.isArray(data.debitedCosts)) {
+  // 3. Refund debited costs with stable idempotencyKey (Master Remediation §15, §19, INV-06)
+  if (Array.isArray(data.steps) && data.steps.length > 0) {
+    const steps = [...data.steps].reverse();
+    for (const step of steps) {
+      if (step.state !== "applied" && step.state !== "unknown" && step.state !== "compensating") {
+        continue;
+      }
+      const stepId = step.stepId;
+      if (isCompensationStepCompleted(record, stepId, context.transactionStore)) {
+        continue;
+      }
+      if (step.subsystem === "economy" && step.operation === "adjust" && context.economyService) {
+        const intent = step.intent as { resourceId: string; deltaMinor: number };
+        if (intent && intent.deltaMinor < 0) {
+          const idempotencyKey = `${record.transactionId}:compensation:${stepId}`;
+          const refRes = await context.economyService.commitAdjust({
+            domainUuid: data.domainUuid,
+            resourceId: intent.resourceId,
+            deltaMinor: Math.abs(intent.deltaMinor),
+            reason: `Compensation: refund ${data.type} cost for facility ${data.facilityId}`,
+            lockOwner: effectiveLockOwner,
+            idempotencyKey
+          });
+          if (!refRes.ok) return refRes;
+        }
+      }
+      await markCompensationStepCompleted(context.transactionStore, record, stepId);
+    }
+  } else if (context.economyService && data.debitedCosts && Array.isArray(data.debitedCosts)) {
     for (let i = 0; i < data.debitedCosts.length; i++) {
       const cost = data.debitedCosts[i];
       const stepId = `refund_fac_cost_${i}_${cost.resourceId}_${cost.amount}`;

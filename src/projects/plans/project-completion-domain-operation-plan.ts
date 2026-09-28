@@ -10,18 +10,21 @@ import { getDomainProjectsData, withDomainProjectsData } from "../project-data.j
 import {
   evaluateProjectCompletionPlan,
   commitProjectCompletion,
-  type ProjectCompletionCommitOptions,
   type SideEffectHandler
 } from "./project-completion-plan-service.js";
 import type { ChildReceipt } from "./project-plan-types.js";
 import type { Reservation } from "../../economy/reservations/reservation-types.js";
 import type { EconomyService } from "../../economy/services/economy-service.js";
 import type { FacilitiesService } from "../../facilities/services/facilities-service.js";
-import { getDomainFacilitiesData, withDomainFacilitiesData } from "../../facilities/facility-data.js";
 import { PeopleService, type PublicPeopleApi } from "../../people/services/people-service.js";
 import type { TransactionStore } from "../../mutations/transaction-store.js";
 import { createTransactionRecord } from "../../mutations/transaction-record.js";
 import { compensateProjectCompletion } from "../services/project-recovery-compensators.js";
+import { lockKey } from "../../mutations/lock-keys.js";
+import {
+  CompositeMutationSession,
+  type TransactionExecutionContext
+} from "../../mutations/composite-mutation-session.js";
 
 export interface ProjectCompletionDomainOperationParams {
   readonly domainUuid: string;
@@ -33,6 +36,8 @@ export interface ProjectCompletionDomainOperationParams {
   readonly correlationId?: string;
   readonly causationId?: string;
   readonly sideEffectHandlers?: Readonly<Record<string, SideEffectHandler>>;
+  readonly lockKeys?: readonly string[];
+  readonly transactionContext?: TransactionExecutionContext;
 }
 
 export interface ProjectCompletionDomainOperationContext {
@@ -65,13 +70,13 @@ export interface ProjectCompletionRecoveryData {
 
 /**
  * ProjectCompletionDomainOperationPlan — Canonical composite operation plan for completing a Project.
- * (Master Spec §15, §11.2, G5-REVAL3-001, G5-REVAL3-003, G5-REVAL3-004)
+ * (Master Remediation §22.4, INV-01 to INV-11)
  *
  * Enforces:
- * 1. TransactionRecord prepared in TransactionStore BEFORE child writes.
- * 2. Child writes executed with strict Result checking (consumption, debits, facilities, rewards).
- * 3. Durable recoveryData capturing project snapshot, created facility IDs, and ledger refs.
- * 4. Automatic transition to "needs-recovery" on any partial failure or persistence error.
+ * 1. TransactionRecord prepared in TransactionStore BEFORE child writes via CompositeMutationSession.
+ * 2. Canonical lock set: domain + project.
+ * 3. Individual child steps with durable receipts for costs, reservations, workforce, facilities, rewards.
+ * 4. Automatic transition to "needs-recovery" on partial failure or persistence error.
  */
 export async function executeProjectCompletionDomainOperationPlan(
   context: ProjectCompletionDomainOperationContext,
@@ -99,7 +104,7 @@ export async function executeProjectCompletionDomainOperationPlan(
       createPublicError({
         code: "DM_PROJECT_REVISION_MISMATCH",
         category: "conflict",
-        message: `Project revision mismatch: expected ${params.expectedRevision}, found ${project.revision}`
+        message: `Expected revision ${params.expectedRevision}, found ${project.revision}`
       })
     );
   }
@@ -124,9 +129,13 @@ export async function executeProjectCompletionDomainOperationPlan(
 
   if (!plan.isSatisfied) {
     const firstBlocker = plan.blockers[0];
+    const code: `DM_${string}` =
+      firstBlocker?.code && firstBlocker.code.startsWith("DM_")
+        ? (firstBlocker.code as `DM_${string}`)
+        : "DM_PROJECT_COMPLETION_BLOCKED";
     return err(
       createPublicError({
-        code: "DM_PROJECT_COMPLETION_BLOCKED",
+        code,
         category: "conflict",
         message: firstBlocker?.message ?? "Project completion preconditions unsatisfied",
         details: { blockers: plan.blockers }
@@ -134,12 +143,40 @@ export async function executeProjectCompletionDomainOperationPlan(
     );
   }
 
-  // 1. Transaction preparation BEFORE child effects (G5-REVAL2-005, G5-REVAL3-004)
-  const txId = createOpaqueId("tx");
   const cmdId: CommandId = params.commandId
     ? (params.commandId.startsWith("cmd_") ? (params.commandId as CommandId) : (`cmd_${params.commandId}` as CommandId))
     : createCommandId();
   const epoch = params.authorityEpoch ?? 1;
+
+  const canonicalCompletionLocks = [lockKey.domain(cleanDomainUuid), lockKey.project(project.id)];
+  const sessionLockKeys = params.transactionContext?.lockKeys ?? params.lockKeys ?? canonicalCompletionLocks;
+
+  const sessionRes = await CompositeMutationSession.prepare({
+    transactionContext: params.transactionContext,
+    transactionStore: context.transactionStore,
+    commandId: cmdId,
+    authorityEpoch: epoch,
+    lockKeys: sessionLockKeys,
+    planLockKeys: params.transactionContext?.lockKeys ?? params.lockKeys ?? canonicalCompletionLocks,
+    recoveryType: "projects:completion",
+    parentRef: `project:${project.id}`,
+    initialRecoveryData: {
+      projectId: project.id,
+      planId: plan.planId,
+      domainUuid: cleanDomainUuid,
+      projectSnapshot: project,
+      authorityEpoch: epoch,
+      correlationId: params.correlationId,
+      causationId: params.causationId,
+      status: "prepared"
+    }
+  });
+
+  if (!sessionRes.ok) {
+    return sessionRes;
+  }
+
+  const session = sessionRes.value;
 
   const createdFacilityIds: string[] = [];
   const debitedCostRefs: Array<{ resourceId: string; amountMinor: number }> = [];
@@ -148,165 +185,139 @@ export async function executeProjectCompletionDomainOperationPlan(
   const consumedReservationSnapshots: Array<{ reservation: Reservation; consumedAmount: number }> = [];
   const releasedWorkforceSnapshots: Array<{ reservationId: string; amount: number; workforceTypeId: string }> = [];
 
-  const buildRecoveryData = (status: ProjectCompletionRecoveryData["status"]): ProjectCompletionRecoveryData => ({
-    type: "projects:completion",
-    projectId: project.id,
-    planId: plan.planId,
-    domainUuid: cleanDomainUuid,
-    projectSnapshot: project,
-    createdFacilityIds: Object.freeze([...createdFacilityIds]),
-    debitedCostRefs: Object.freeze([...debitedCostRefs]),
-    creditedResourceRefs: Object.freeze([...creditedResourceRefs]),
-    consumedReservationIds: Object.freeze([...consumedReservationIds]),
-    consumedReservationSnapshots: Object.freeze([...consumedReservationSnapshots]),
-    releasedWorkforceSnapshots: Object.freeze([...releasedWorkforceSnapshots]),
-    expectedRevision: project.revision + 1,
-    authorityEpoch: epoch,
-    correlationId: params.correlationId,
-    causationId: params.causationId,
-    status
-  });
-
-  if (context.transactionStore) {
-    const tx = createTransactionRecord({
-      transactionId: txId,
-      commandId: cmdId,
-      authorityEpoch: epoch,
-      lockKeys: [`domain:${cleanDomainUuid}`, `project:${project.id}`],
-      safeAutoRecovery: false,
-      recoveryData: buildRecoveryData("prepared")
-    });
-    context.transactionStore.save(tx);
-    const claimRes = context.transactionStore.transition(txId, "claimed", epoch);
-    if (!claimRes.ok) return claimRes;
-    const prepRes = context.transactionStore.transition(txId, "prepared", epoch);
-    if (!prepRes.ok) return prepRes;
-
-    // G5-REVAL4-002: Flush transaction to durable storage BEFORE executing child writes
-    try {
-      await context.transactionStore.flush();
-    } catch (flushErr) {
-      context.transactionStore.transition(txId, "failed", epoch, "Persistence flush failed");
-      return err(
-        createPublicError({
-          code: "DM_DOMAIN_STORAGE_ERROR",
-          category: "internal",
-          message: `Failed to flush transaction preparation to storage: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
-          details: flushErr
-        })
-      );
-    }
-  }
-
-  let compensationFailed = false;
-  const compensatePriorSteps = async (reason: string) => {
-    if (context.transactionStore) {
-      const tx = context.transactionStore.get(txId);
-      if (tx) {
-        context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("needs-recovery") });
-        const compRes = await compensateProjectCompletion(
-          tx,
-          {
-            domains: context.domains,
-            economyService: context.economyService,
-            facilitiesService: context.facilitiesService,
-            peopleService: context.peopleService,
-            transactionStore: context.transactionStore
-          },
-          { lockOwner: params.commandId, skipReconciliation: true }
-        );
-        if (!compRes.ok) {
-          compensationFailed = true;
+  const runCompensator = async (s: CompositeMutationSession, _error: PublicError) => {
+    const effectiveFacilityIds = [...createdFacilityIds];
+    for (const step of s.steps) {
+      if (step.subsystem === "facility" && (step.state === "applied" || step.state === "unknown")) {
+        const receipt = step.receipt as any;
+        const id = receipt?.facility?.id ?? (typeof receipt === "string" ? receipt : undefined);
+        if (id && !effectiveFacilityIds.includes(id)) {
+          effectiveFacilityIds.push(id);
         }
       }
-    } else {
-      const dummyTx = createTransactionRecord({
-        transactionId: txId,
-        commandId: cmdId,
-        authorityEpoch: epoch,
-        lockKeys: [`domain:${cleanDomainUuid}`, `project:${project.id}`],
-        safeAutoRecovery: false,
-        recoveryData: buildRecoveryData("needs-recovery")
-      });
-      const compRes = await compensateProjectCompletion(
-        dummyTx,
-        {
-          domains: context.domains,
-          economyService: context.economyService,
-          facilitiesService: context.facilitiesService,
-          peopleService: context.peopleService
-        },
-        { lockOwner: params.commandId, skipReconciliation: true }
-      );
-      if (!compRes.ok) {
-        compensationFailed = true;
+    }
+
+    const effectiveDebited = [...debitedCostRefs];
+    for (const step of s.steps) {
+      if (step.subsystem === "economy" && step.operation === "adjust" && (step.state === "applied" || step.state === "unknown")) {
+        const intent = step.intent as { resourceId: string; deltaMinor: number };
+        if (intent && intent.deltaMinor < 0) {
+          const amt = Math.abs(intent.deltaMinor);
+          if (!effectiveDebited.some((d) => d.resourceId === intent.resourceId && d.amountMinor === amt)) {
+            effectiveDebited.push({ resourceId: intent.resourceId, amountMinor: amt });
+          }
+        }
       }
     }
+
+    const effectiveCredited = [...creditedResourceRefs];
+    for (const step of s.steps) {
+      if (step.subsystem === "economy" && (step.state === "applied" || step.state === "unknown")) {
+        const intent = step.intent as { resourceId: string; deltaMinor: number };
+        if (intent && intent.deltaMinor > 0) {
+          if (!effectiveCredited.some((c) => c.resourceId === intent.resourceId && c.amountMinor === intent.deltaMinor)) {
+            effectiveCredited.push({ resourceId: intent.resourceId, amountMinor: intent.deltaMinor });
+          }
+        }
+      }
+    }
+
+    const currentTx = context.transactionStore?.get(s.transactionId);
+    const existingRecData = (currentTx?.recoveryData as Record<string, unknown>) ?? {};
+    const updatedRecData = {
+      ...existingRecData,
+      type: "projects:completion",
+      projectId: project.id,
+      planId: plan.planId,
+      domainUuid: cleanDomainUuid,
+      projectSnapshot: project,
+      createdFacilityIds: Object.freeze([...effectiveFacilityIds]),
+      debitedCostRefs: Object.freeze([...effectiveDebited]),
+      creditedResourceRefs: Object.freeze([...effectiveCredited]),
+      consumedReservationIds: Object.freeze([...consumedReservationIds]),
+      consumedReservationSnapshots: Object.freeze([...consumedReservationSnapshots]),
+      releasedWorkforceSnapshots: Object.freeze([...releasedWorkforceSnapshots]),
+      expectedRevision: project.revision + 1,
+      authorityEpoch: epoch,
+      status: "needs-recovery"
+    };
+
+    const tx = currentTx
+      ? { ...currentTx, recoveryData: updatedRecData }
+      : createTransactionRecord({
+          transactionId: s.transactionId,
+          commandId: cmdId,
+          authorityEpoch: epoch,
+          lockKeys: sessionLockKeys,
+          safeAutoRecovery: false,
+          recoveryData: updatedRecData
+        });
+
+    if (context.transactionStore) {
+      context.transactionStore.save(tx);
+    }
+
+    return compensateProjectCompletion(
+      tx,
+      {
+        domains: context.domains,
+        economyService: context.economyService,
+        facilitiesService: context.facilitiesService,
+        peopleService: context.peopleService,
+        transactionStore: context.transactionStore
+      },
+      { lockOwner: params.commandId, skipReconciliation: true }
+    );
   };
 
-  // 2. Execute onCompletion costs with fail-closed validation (G5-REVAL2-003, G5-REVAL3-002, G5-REVAL5-006)
+  // 1. Execute onCompletion costs with fail-closed validation
   if (context.economyService) {
+    let costIdx = 0;
     for (const cost of definition.costs) {
       if (cost.timing === "onCompletion") {
-        const debitRes = await context.economyService.commitAdjust({
-          domainUuid: cleanDomainUuid,
-          resourceId: cost.resourceId,
-          deltaMinor: -cost.amountMinor,
-          reason: `OnCompletion cost for project ${project.name}`,
-          lockOwner: params.commandId
-        });
-        if (!debitRes.ok) {
-          await compensatePriorSteps(`Failed to debit onCompletion cost for '${cost.resourceId}': ${debitRes.error.message}`);
-          if (context.transactionStore) {
-            const targetState = compensationFailed ? "needs-recovery" : "failed";
-            const tx = context.transactionStore.get(txId);
-            if (tx) {
-              context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData(targetState) });
-            }
-            context.transactionStore.transition(txId, targetState, epoch, debitRes.error.message);
+        const stepId = `project-complete:cost:${cost.resourceId}:${costIdx++}`;
+        const stepRes = await session.runChildStep({
+          stepId,
+          subsystem: "economy",
+          operation: "adjust",
+          targetRef: cleanDomainUuid,
+          idempotencyKey: `${session.transactionId}:${stepId}`,
+          intent: { resourceId: cost.resourceId, deltaMinor: -cost.amountMinor },
+          execute: async () => {
+            return context.economyService!.commitAdjust({
+              domainUuid: cleanDomainUuid,
+              resourceId: cost.resourceId,
+              deltaMinor: -cost.amountMinor,
+              reason: `OnCompletion cost for project ${project.name}`,
+              lockOwner: params.commandId,
+              idempotencyKey: `${session.transactionId}:${stepId}`
+            });
           }
-          return err(
-            createPublicError({
-              code: "DM_PROJECT_COMPLETION_BLOCKED",
-              category: "conflict",
-              message: `Failed to debit onCompletion cost for '${cost.resourceId}': ${debitRes.error.message}`,
-              details: debitRes.error
-            })
-          );
+        });
+        if (!stepRes.ok) {
+          const errToPropagate = stepRes.error.code === "DM_DOMAIN_STORAGE_ERROR"
+            ? stepRes.error
+            : createPublicError({
+                code: "DM_PROJECT_COMPLETION_BLOCKED",
+                category: "conflict",
+                message: `Failed to debit onCompletion cost for '${cost.resourceId}': ${stepRes.error.message}`,
+                details: stepRes.error
+              });
+          return session.failAndCompensate(errToPropagate, runCompensator);
         }
         debitedCostRefs.push({ resourceId: cost.resourceId, amountMinor: cost.amountMinor });
-        if (context.transactionStore) {
-          const tx = context.transactionStore.get(txId);
-          if (tx) {
-            context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
-            try {
-              await context.transactionStore.flush();
-            } catch (flushErr) {
-              await compensatePriorSteps(`Persistence flush failed after onCompletion debit: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
-              if (context.transactionStore) {
-                const targetState = compensationFailed ? "needs-recovery" : "failed";
-                const curTx = context.transactionStore.get(txId);
-                if (curTx) {
-                  context.transactionStore.save({ ...curTx, recoveryData: buildRecoveryData(targetState) });
-                }
-                context.transactionStore.transition(txId, targetState, epoch, String(flushErr));
-              }
-              return err(
-                createPublicError({
-                  code: "DM_DOMAIN_STORAGE_ERROR",
-                  category: "internal",
-                  message: `Failed to flush transaction update after onCompletion debit: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
-                  details: flushErr
-                })
-              );
-            }
-          }
+        const checkRes = await session.checkpointRecoveryData({
+          debitedCostRefs: Object.freeze([...debitedCostRefs]),
+          status: "executing"
+        });
+        if (!checkRes.ok) {
+          return session.failAndCompensate(checkRes.error, runCompensator);
         }
       }
     }
   }
 
-  // 3. Consume active reservations with fail-closed checking (G5-REVAL3-003)
+  // 2. Consume active reservations with fail-closed checking
   if (context.economyService) {
     const activeReservations: string[] = [];
     if (project?.metadata?.reservationIds && Array.isArray(project.metadata.reservationIds)) {
@@ -329,83 +340,63 @@ export async function executeProjectCompletionDomainOperationPlan(
       if (resObj && (resObj.status === "active" || resObj.status === "partially-consumed")) {
         const consumedAmount = resObj.remainingAmountMinor;
         const snapshotCopy: Reservation = { ...resObj };
-        const consumeRes = await context.economyService.consumeReservation({
-          domainUuid: cleanDomainUuid,
-          reservationId: resId,
-          amountMinor: consumedAmount,
-          reason: `Project ${project.name} completed`,
-          lockOwner: params.commandId
-        });
-        if (!consumeRes.ok) {
-          // G5-REVAL3-003: Consume failure MUST NOT be silently ignored!
-          await compensatePriorSteps(`Failed to consume reservation '${resId}': ${consumeRes.error.message}`);
-          if (context.transactionStore) {
-            const tx = context.transactionStore.get(txId);
-            if (tx) {
-              context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("needs-recovery") });
-            }
-            context.transactionStore.transition(txId, "needs-recovery", epoch, consumeRes.error.message);
+        const stepId = `project-complete:consume-reservation:${resId}`;
+        const stepRes = await session.runChildStep({
+          stepId,
+          subsystem: "economy",
+          operation: "consumeReservation",
+          targetRef: resId,
+          idempotencyKey: `${session.transactionId}:${stepId}`,
+          intent: { reservationId: resId, amountMinor: consumedAmount },
+          execute: async () => {
+            return context.economyService!.consumeReservation({
+              domainUuid: cleanDomainUuid,
+              reservationId: resId,
+              amountMinor: consumedAmount,
+              reason: `Project ${project.name} completed`,
+              lockOwner: params.commandId
+            });
           }
-          return err(
-            createPublicError({
-              code: "DM_PROJECT_COMPLETION_BLOCKED",
-              category: "conflict",
-              message: `Failed to consume reservation '${resId}': ${consumeRes.error.message}`,
-              details: consumeRes.error
-            })
-          );
+        });
+        if (!stepRes.ok) {
+          const errToPropagate = stepRes.error.code === "DM_DOMAIN_STORAGE_ERROR"
+            ? stepRes.error
+            : createPublicError({
+                code: "DM_PROJECT_COMPLETION_BLOCKED",
+                category: "conflict",
+                message: `Failed to consume reservation '${resId}': ${stepRes.error.message}`,
+                details: stepRes.error
+              });
+          return session.failAndCompensate(errToPropagate, runCompensator);
         }
         consumedReservationIds.push(resId);
         consumedReservationSnapshots.push({ reservation: snapshotCopy, consumedAmount });
-        if (context.transactionStore) {
-          const tx = context.transactionStore.get(txId);
-          if (tx) {
-            context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
-            try {
-              await context.transactionStore.flush();
-            } catch (flushErr) {
-              await compensatePriorSteps(`Persistence flush failed after reservation consume: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
-              if (context.transactionStore) {
-                const targetState = compensationFailed ? "needs-recovery" : "failed";
-                context.transactionStore.transition(txId, targetState, epoch, String(flushErr));
-              }
-              return err(
-                createPublicError({
-                  code: "DM_DOMAIN_STORAGE_ERROR",
-                  category: "internal",
-                  message: `Failed to flush transaction update after reservation consume: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
-                  details: flushErr
-                })
-              );
-            }
-          }
+        const checkRes = await session.checkpointRecoveryData({
+          consumedReservationIds: Object.freeze([...consumedReservationIds]),
+          consumedReservationSnapshots: Object.freeze([...consumedReservationSnapshots]),
+          status: "executing"
+        });
+        if (!checkRes.ok) {
+          return session.failAndCompensate(checkRes.error, runCompensator);
         }
       }
     }
   }
 
-  // 4. Release workforce reservations via People API (G5-REVAL3-001, G5-REVAL3-003, G5-REVAL4-006, G5-REVAL5-007)
+  // 3. Release workforce reservations via People API
   if (context.peopleService) {
     let hasActiveReservations = false;
     if ("getReservations" in context.peopleService) {
       const pRes = await context.peopleService.getReservations(cleanDomainUuid);
       if (!pRes.ok) {
-        await compensatePriorSteps(`Failed to inspect workforce reservations: ${pRes.error.message}`);
-        if (context.transactionStore) {
-          const targetState = compensationFailed ? "needs-recovery" : "failed";
-          const tx = context.transactionStore.get(txId);
-          if (tx) {
-            context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData(targetState) });
-          }
-          context.transactionStore.transition(txId, targetState, epoch, pRes.error.message);
-        }
-        return err(
+        return session.failAndCompensate(
           createPublicError({
             code: "DM_PROJECT_COMPLETION_BLOCKED",
             category: "conflict",
             message: `Failed to inspect workforce reservations for project '${project.id}': ${pRes.error.message}`,
             details: pRes.error
-          })
+          }),
+          runCompensator
         );
       }
       for (const r of pRes.value) {
@@ -422,63 +413,45 @@ export async function executeProjectCompletionDomainOperationPlan(
       hasActiveReservations = true;
     }
 
-    // G5-REVAL5-007: Only release if there were active workforce reservations. Real errors fail-closed.
     if (hasActiveReservations) {
-      const wfRelRes = await context.peopleService.releaseWorkforceReservation({
-        domainUuid: cleanDomainUuid,
-        projectId: project.id,
-        userId: params.userId
+      const stepId = `project-complete:release-workforce:${project.id}`;
+      const wfStepRes = await session.runChildStep({
+        stepId,
+        subsystem: "people",
+        operation: "releaseWorkforceReservation",
+        targetRef: cleanDomainUuid,
+        idempotencyKey: `${session.transactionId}:${stepId}`,
+        intent: { projectId: project.id },
+        execute: async () => {
+          return context.peopleService!.releaseWorkforceReservation({
+            domainUuid: cleanDomainUuid,
+            projectId: project.id,
+            userId: params.userId
+          });
+        }
       });
-      if (!wfRelRes.ok) {
-        await compensatePriorSteps(`Failed to release workforce reservation: ${wfRelRes.error.message}`);
-        if (context.transactionStore) {
-          const targetState = compensationFailed ? "needs-recovery" : "failed";
-          const tx = context.transactionStore.get(txId);
-          if (tx) {
-            context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData(targetState) });
-          }
-          context.transactionStore.transition(txId, targetState, epoch, wfRelRes.error.message);
-        }
-        return err(
-          createPublicError({
-            code: "DM_PROJECT_COMPLETION_BLOCKED",
-            category: "conflict",
-            message: `Failed to release workforce reservation for project '${project.id}': ${wfRelRes.error.message}`,
-            details: wfRelRes.error
-          })
-        );
+      if (!wfStepRes.ok) {
+        const errToPropagate = wfStepRes.error.code === "DM_DOMAIN_STORAGE_ERROR"
+          ? wfStepRes.error
+          : createPublicError({
+              code: "DM_PROJECT_COMPLETION_BLOCKED",
+              category: "conflict",
+              message: `Failed to release workforce reservation for project '${project.id}': ${wfStepRes.error.message}`,
+              details: wfStepRes.error
+            });
+        return session.failAndCompensate(errToPropagate, runCompensator);
       }
-      if (context.transactionStore) {
-        const tx = context.transactionStore.get(txId);
-        if (tx) {
-          context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
-          try {
-            await context.transactionStore.flush();
-          } catch (flushErr) {
-            await compensatePriorSteps(`Persistence flush failed after workforce release: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
-            if (context.transactionStore) {
-              const targetState = compensationFailed ? "needs-recovery" : "failed";
-              const curTx = context.transactionStore.get(txId);
-              if (curTx) {
-                context.transactionStore.save({ ...curTx, recoveryData: buildRecoveryData(targetState) });
-              }
-              context.transactionStore.transition(txId, targetState, epoch, String(flushErr));
-            }
-            return err(
-              createPublicError({
-                code: "DM_DOMAIN_STORAGE_ERROR",
-                category: "internal",
-                message: `Failed to flush transaction update after workforce release: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
-                details: flushErr
-              })
-            );
-          }
-        }
+      const checkRes = await session.checkpointRecoveryData({
+        releasedWorkforceSnapshots: Object.freeze([...releasedWorkforceSnapshots]),
+        status: "executing"
+      });
+      if (!checkRes.ok) {
+        return session.failAndCompensate(checkRes.error, runCompensator);
       }
     }
   }
 
-  // 5. Execute coordinated side effects
+  // 4. Execute coordinated side effects
   let partialFailure = false;
   const executedReceipts: Record<string, ChildReceipt> = {};
 
@@ -498,48 +471,46 @@ export async function executeProjectCompletionDomainOperationPlan(
       };
       continue;
     }
-    const facRes = await context.facilitiesService.createFacility({
-      domainUuid: cleanDomainUuid,
-      definitionId: effect.targetRef,
-      name: effect.description
+
+    const stepId = `project-complete:facility:${effect.id}`;
+    const facStepRes = await session.runChildStep({
+      stepId,
+      subsystem: "facility",
+      operation: "createFacility",
+      targetRef: effect.targetRef,
+      idempotencyKey: `${session.transactionId}:${stepId}`,
+      intent: { definitionId: effect.targetRef, name: effect.description },
+      execute: async () => {
+        return context.facilitiesService!.createFacility({
+          domainUuid: cleanDomainUuid,
+          definitionId: effect.targetRef!,
+          name: effect.description
+        });
+      }
     });
-    if (facRes.ok) {
-      createdFacilityIds.push(facRes.value.facility.id);
-      if (context.transactionStore) {
-        const tx = context.transactionStore.get(txId);
-        if (tx) {
-          context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
-          try {
-            await context.transactionStore.flush();
-          } catch (flushErr) {
-            await compensatePriorSteps(`Persistence flush failed after facility creation: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
-            const targetState = compensationFailed ? "needs-recovery" : "failed";
-            const curTx = context.transactionStore.get(txId);
-            if (curTx) {
-              context.transactionStore.save({ ...curTx, recoveryData: buildRecoveryData(targetState) });
-            }
-            context.transactionStore.transition(txId, targetState, epoch, String(flushErr));
-            return err(
-              createPublicError({
-                code: "DM_DOMAIN_STORAGE_ERROR",
-                category: "internal",
-                message: `Failed to flush transaction update after facility creation: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
-                details: flushErr
-              })
-            );
-          }
-        }
+
+    if (facStepRes.ok) {
+      createdFacilityIds.push(facStepRes.value.facility.id);
+      const checkRes = await session.checkpointRecoveryData({
+        createdFacilityIds: Object.freeze([...createdFacilityIds]),
+        status: "executing"
+      });
+      if (!checkRes.ok) {
+        return session.failAndCompensate(checkRes.error, runCompensator);
       }
       executedReceipts[effect.id] = {
         childReceiptId: createOpaqueId("rep"),
         subsystem: "facility",
         action: "create_facility",
-        targetRef: facRes.value.facility.id,
-        payload: { definitionId: effect.targetRef, facilityId: facRes.value.facility.id },
+        targetRef: facStepRes.value.facility.id,
+        payload: { definitionId: effect.targetRef, facilityId: facStepRes.value.facility.id },
         success: true,
         appliedAt: Date.now()
       };
     } else {
+      if (facStepRes.error.code === "DM_DOMAIN_STORAGE_ERROR") {
+        return session.failAndCompensate(facStepRes.error, runCompensator);
+      }
       partialFailure = true;
       executedReceipts[effect.id] = {
         childReceiptId: createOpaqueId("rep"),
@@ -548,7 +519,7 @@ export async function executeProjectCompletionDomainOperationPlan(
         targetRef: effect.targetRef,
         payload: effect.value,
         success: false,
-        error: facRes.error.message,
+        error: facStepRes.error.message,
         appliedAt: Date.now()
       };
     }
@@ -570,40 +541,36 @@ export async function executeProjectCompletionDomainOperationPlan(
       };
       continue;
     }
+
     const deltaMinor = Number(effect.value);
-    const econRes = await context.economyService.commitAdjust({
-      domainUuid: cleanDomainUuid,
-      resourceId: effect.targetRef,
-      deltaMinor,
-      reason: `Project completion reward: ${effect.description ?? project.name}`,
-      lockOwner: params.commandId
+    const stepId = `project-complete:reward:${effect.id}`;
+    const econStepRes = await session.runChildStep({
+      stepId,
+      subsystem: "economy",
+      operation: "adjust",
+      targetRef: effect.targetRef,
+      idempotencyKey: `${session.transactionId}:${stepId}`,
+      intent: { resourceId: effect.targetRef, deltaMinor },
+      execute: async () => {
+        return context.economyService!.commitAdjust({
+          domainUuid: cleanDomainUuid,
+          resourceId: effect.targetRef!,
+          deltaMinor,
+          reason: `Project completion reward: ${effect.description ?? project.name}`,
+          lockOwner: params.commandId,
+          idempotencyKey: `${session.transactionId}:${stepId}`
+        });
+      }
     });
-    if (econRes.ok) {
+
+    if (econStepRes.ok) {
       creditedResourceRefs.push({ resourceId: effect.targetRef, amountMinor: deltaMinor });
-      if (context.transactionStore) {
-        const tx = context.transactionStore.get(txId);
-        if (tx) {
-          context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
-          try {
-            await context.transactionStore.flush();
-          } catch (flushErr) {
-            await compensatePriorSteps(`Persistence flush failed after resource credit: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
-            const targetState = compensationFailed ? "needs-recovery" : "failed";
-            const curTx = context.transactionStore.get(txId);
-            if (curTx) {
-              context.transactionStore.save({ ...curTx, recoveryData: buildRecoveryData(targetState) });
-            }
-            context.transactionStore.transition(txId, targetState, epoch, String(flushErr));
-            return err(
-              createPublicError({
-                code: "DM_DOMAIN_STORAGE_ERROR",
-                category: "internal",
-                message: `Failed to flush transaction update after resource credit: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
-                details: flushErr
-              })
-            );
-          }
-        }
+      const checkRes = await session.checkpointRecoveryData({
+        creditedResourceRefs: Object.freeze([...creditedResourceRefs]),
+        status: "executing"
+      });
+      if (!checkRes.ok) {
+        return session.failAndCompensate(checkRes.error, runCompensator);
       }
       executedReceipts[effect.id] = {
         childReceiptId: createOpaqueId("rep"),
@@ -615,6 +582,9 @@ export async function executeProjectCompletionDomainOperationPlan(
         appliedAt: Date.now()
       };
     } else {
+      if (econStepRes.error.code === "DM_DOMAIN_STORAGE_ERROR") {
+        return session.failAndCompensate(econStepRes.error, runCompensator);
+      }
       partialFailure = true;
       executedReceipts[effect.id] = {
         childReceiptId: createOpaqueId("rep"),
@@ -623,7 +593,7 @@ export async function executeProjectCompletionDomainOperationPlan(
         targetRef: effect.targetRef,
         payload: { amountMinor: effect.value },
         success: false,
-        error: econRes.error.message,
+        error: econStepRes.error.message,
         appliedAt: Date.now()
       };
     }
@@ -688,36 +658,6 @@ export async function executeProjectCompletionDomainOperationPlan(
     }
   }
 
-  // Update recoveryData with all accumulated side effect state (G5-REVAL5-003)
-  if (context.transactionStore) {
-    const tx = context.transactionStore.get(txId);
-    if (tx) {
-      context.transactionStore.save({
-        ...tx,
-        recoveryData: buildRecoveryData(partialFailure ? "needs-recovery" : "executing")
-      });
-      try {
-        await context.transactionStore.flush();
-      } catch (flushErr) {
-        await compensatePriorSteps(`Persistence flush failed at side effects checkpoint: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
-        const targetState = compensationFailed ? "needs-recovery" : "failed";
-        const curTx = context.transactionStore.get(txId);
-        if (curTx) {
-          context.transactionStore.save({ ...curTx, recoveryData: buildRecoveryData(targetState) });
-        }
-        context.transactionStore.transition(txId, targetState, epoch, String(flushErr));
-        return err(
-          createPublicError({
-            code: "DM_DOMAIN_STORAGE_ERROR",
-            category: "internal",
-            message: `Failed to flush transaction update at side effects checkpoint: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
-            details: flushErr
-          })
-        );
-      }
-    }
-  }
-
   // Build side effect handlers delivering executed real receipts
   const sideEffectHandlers: Record<string, SideEffectHandler> = {
     ...(params.sideEffectHandlers ?? {})
@@ -768,10 +708,7 @@ export async function executeProjectCompletionDomainOperationPlan(
     sideEffectHandlers
   });
   if (!commitRes.ok) {
-    if (context.transactionStore) {
-      context.transactionStore.transition(txId, "needs-recovery", epoch, commitRes.error.message);
-    }
-    return commitRes;
+    return session.failAndCompensate(commitRes.error, runCompensator);
   }
 
   if (commitRes.value.partialFailure) {
@@ -783,17 +720,9 @@ export async function executeProjectCompletionDomainOperationPlan(
   // Re-read fresh document AFTER child effects and workforce release to avoid revision collision
   const freshDocRes = await context.domains.read(cleanDomainUuid);
   if (!freshDocRes.ok) {
-    if (context.transactionStore) {
-      const tx = context.transactionStore.get(txId);
-      if (tx) {
-        context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("needs-recovery") });
-      }
-      context.transactionStore.transition(txId, "needs-recovery", epoch, freshDocRes.error.message);
-    }
-    return freshDocRes;
+    return session.failAndCompensate(freshDocRes.error, runCompensator);
   }
 
-  // Read latest projects data and update project in array
   const freshProjectsData = getDomainProjectsData(freshDocRes.value.record);
   const updatedProjects = freshProjectsData.projects.map((p) =>
     p.id === project.id ? completedProject : p
@@ -804,89 +733,62 @@ export async function executeProjectCompletionDomainOperationPlan(
     projects: Object.freeze(updatedProjects)
   });
 
-  if (context.transactionStore) {
-    const committingRes = context.transactionStore.transition(txId, "committing", epoch);
-    if (!committingRes.ok) {
-      const tx = context.transactionStore.get(txId);
-      if (tx) {
-        context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("needs-recovery") });
-      }
-      context.transactionStore.transition(txId, "needs-recovery", epoch, committingRes.error.message);
-      return committingRes;
-    }
-    try {
-      await context.transactionStore.flush();
-    } catch (flushErr) {
-      await compensatePriorSteps(`Persistence flush failed while entering committing state: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
-      const targetState = compensationFailed ? "needs-recovery" : "failed";
-      const tx = context.transactionStore.get(txId);
-      if (tx) {
-        context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData(targetState) });
-      }
-      context.transactionStore.transition(txId, targetState, epoch, String(flushErr));
-      return err(
-        createPublicError({
-          code: "DM_DOMAIN_STORAGE_ERROR",
-          category: "internal",
-          message: `Failed to persist committing state before domain update: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
-          details: flushErr
-        })
-      );
-    }
+  const committingRes = await session.enterCommitting({
+    expectedLifecycle: "completed",
+    expectedRevision: (freshDocRes.value.record.revision ?? 0) + 1
+  });
+  if (!committingRes.ok) {
+    return session.failAndCompensate(committingRes.error, runCompensator);
   }
 
-  const updateRes = await context.domains.save({
-    ...freshDocRes.value,
-    record: updatedRecord
+  const saveRes = await session.commitParent(async () => {
+    return context.domains.save({
+      ...freshDocRes.value,
+      record: updatedRecord
+    });
   });
 
-  if (!updateRes.ok) {
+  if (!saveRes.ok) {
     if (context.transactionStore) {
-      const tx = context.transactionStore.get(txId);
-      if (tx) {
-        context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("needs-recovery") });
+      const currentTx = context.transactionStore.get(session.transactionId);
+      if (currentTx) {
+        context.transactionStore.save({
+          ...currentTx,
+          recoveryData: {
+            ...((currentTx.recoveryData as Record<string, unknown>) ?? {}),
+            type: "projects:completion",
+            projectId: project.id,
+            planId: plan.planId,
+            domainUuid: cleanDomainUuid,
+            projectSnapshot: project,
+            createdFacilityIds: Object.freeze([...createdFacilityIds]),
+            debitedCostRefs: Object.freeze([...debitedCostRefs]),
+            creditedResourceRefs: Object.freeze([...creditedResourceRefs]),
+            consumedReservationIds: Object.freeze([...consumedReservationIds]),
+            consumedReservationSnapshots: Object.freeze([...consumedReservationSnapshots]),
+            releasedWorkforceSnapshots: Object.freeze([...releasedWorkforceSnapshots]),
+            expectedRevision: project.revision + 1,
+            authorityEpoch: epoch,
+            status: "needs-recovery"
+          }
+        });
       }
-      context.transactionStore.transition(txId, "needs-recovery", epoch, updateRes.error.message);
     }
-    return updateRes;
+    await session.markNeedsRecovery(saveRes.error.message);
+    return saveRes;
   }
 
-  // Final transaction state: needs-recovery if any partial failure occurred, else committed
-  if (context.transactionStore) {
-    if (partialFailure) {
-      const tx = context.transactionStore.get(txId);
-      if (tx) {
-        context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("needs-recovery") });
-      }
-      context.transactionStore.transition(
-        txId,
-        "needs-recovery",
-        epoch,
-        "Project completed with one or more child side effect failures"
-      );
-    } else {
-      const committedRes = context.transactionStore.transition(txId, "committed", epoch);
-      if (!committedRes.ok) return committedRes;
-      try {
-        await context.transactionStore.flush();
-      } catch (flushErr) {
-        context.transactionStore.transition(
-          txId,
-          "needs-recovery",
-          epoch,
-          "Final commit flush failed to persist to durable storage"
-        );
-        return err(
-          createPublicError({
-            code: "DM_TRANSACTION_COMMIT_UNCONFIRMED",
-            category: "recovery",
-            message: `Project completion succeeded on domain but durable transaction commit marker failed to flush: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}. Requires reconciliation.`,
-            details: flushErr,
-            userActionRequired: true,
-            retryable: false
-          })
-        );
-      }
+  if (partialFailure) {
+    await session.markNeedsRecovery(
+      "Project completed with one or more child side effect failures"
+    );
+  } else {
+    const commitDurableRes = await session.commitDurably({
+      project: completedProject,
+      childReceipts: commitRes.value.childReceipts
+    });
+    if (!commitDurableRes.ok) {
+      return commitDurableRes;
     }
   }
 

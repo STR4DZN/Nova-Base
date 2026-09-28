@@ -16,6 +16,7 @@ import type {
 } from "../../mutations/mutation-coordinator.js";
 import { createMutationPlan } from "../../mutations/plans/plan-contract.js";
 import { normalizeJournalEntryId } from "../../core/identity/refs.js";
+import { lockKey } from "../../mutations/lock-keys.js";
 
 export interface RegisterDowntimeCommandsOptions {
   readonly registry: CommandRegistry;
@@ -90,16 +91,28 @@ export function registerDowntimeCommands(options: RegisterDowntimeCommandsOption
       commit: async (plan, freshState) => {
         const payload = plan.writeSet[0]?.payload as TPayload;
         const customData = (plan.customData ?? {}) as Record<string, unknown>;
+        const authorityEpoch = (customData.authorityEpoch as number) ?? (payload as any).authorityEpoch ?? 1;
+        const correlationId = (customData.correlationId as string) ?? (payload as any).correlationId;
+        const causationId = (customData.causationId as string) ?? (payload as any).causationId ?? plan.commandId;
+        const transactionContext = {
+          commandId: plan.commandId,
+          authorityEpoch,
+          correlationId,
+          causationId,
+          lockKeys: plan.lockKeys
+        };
         const mergedPayload = {
           ...payload,
-          authorityEpoch: customData.authorityEpoch ?? (payload as any).authorityEpoch,
-          correlationId: customData.correlationId ?? (payload as any).correlationId,
-          causationId: customData.causationId ?? (payload as any).causationId
+          authorityEpoch,
+          correlationId,
+          causationId,
+          transactionContext,
+          lockKeys: plan.lockKeys
         };
         const execRes = await execute(mergedPayload, {
           command: { commandId: plan.commandId, payload: mergedPayload },
           senderUserId: (customData.senderUserId as string) ?? (payload as any).userId,
-          authorityEpoch: (customData.authorityEpoch as number) ?? 1
+          authorityEpoch
         } as any);
         if (!execRes.ok) return execRes;
         const readRes = await domains.read(freshState.state.uuid);
@@ -117,7 +130,7 @@ export function registerDowntimeCommands(options: RegisterDowntimeCommandsOption
 
   // 1. downtime:start-activity
   const startMutation = makeMutationDef(
-    (p: any) => [`domain:${normalizeJournalEntryId(p.domainUuid)}`],
+    (p: any) => [lockKey.domain(p.domainUuid)],
     (p: any) => `Start downtime activity '${p.label ?? p.definitionId}' in domain '${p.domainUuid}'`,
     (p, ctx) =>
       downtimeService.startActivity({
@@ -132,7 +145,9 @@ export function registerDowntimeCommands(options: RegisterDowntimeCommandsOption
         commandId: ctx.command.commandId,
         authorityEpoch: ctx.authorityEpoch,
         correlationId: (p as any).correlationId ?? (ctx.command as any).correlationId,
-        causationId: (p as any).causationId ?? (ctx.command as any).causationId ?? ctx.command.commandId
+        causationId: (p as any).causationId ?? (ctx.command as any).causationId ?? ctx.command.commandId,
+        lockKeys: (p as any).lockKeys,
+        transactionContext: (p as any).transactionContext
       })
   );
 
@@ -197,7 +212,7 @@ export function registerDowntimeCommands(options: RegisterDowntimeCommandsOption
 
   // 2. downtime:advance-activity
   const advanceMutation = makeMutationDef(
-    (p: any) => [`domain:${normalizeJournalEntryId(p.domainUuid)}`, `downtime:${p.activityId}`],
+    (p: any) => [lockKey.domain(p.domainUuid), lockKey.downtime(p.activityId)],
     (p: any) => `Advance downtime activity '${p.activityId}' by ${p.ticks} ticks in domain '${p.domainUuid}'`,
     (p, ctx) =>
       downtimeService.advanceActivity({
@@ -280,7 +295,7 @@ export function registerDowntimeCommands(options: RegisterDowntimeCommandsOption
 
   // 3. downtime:complete-activity
   const completeMutation = makeMutationDef(
-    (p: any) => [`domain:${normalizeJournalEntryId(p.domainUuid)}`, `downtime:${p.activityId}`],
+    (p: any) => [lockKey.domain(p.domainUuid), lockKey.downtime(p.activityId)],
     (p: any) => `Complete downtime activity '${p.activityId}' in domain '${p.domainUuid}'`,
     (p, ctx) =>
       downtimeService.completeActivity({
@@ -292,7 +307,9 @@ export function registerDowntimeCommands(options: RegisterDowntimeCommandsOption
         commandId: ctx.command.commandId,
         authorityEpoch: ctx.authorityEpoch,
         correlationId: (p as any).correlationId ?? (ctx.command as any).correlationId,
-        causationId: (p as any).causationId ?? (ctx.command as any).causationId ?? ctx.command.commandId
+        causationId: (p as any).causationId ?? (ctx.command as any).causationId ?? ctx.command.commandId,
+        lockKeys: (p as any).lockKeys,
+        transactionContext: (p as any).transactionContext
       })
   );
 
@@ -323,7 +340,7 @@ export function registerDowntimeCommands(options: RegisterDowntimeCommandsOption
 
   // 4. downtime:pause-activity
   const pauseMutation = makeMutationDef(
-    (p: any) => [`domain:${normalizeJournalEntryId(p.domainUuid)}`, `downtime:${p.activityId}`],
+    (p: any) => [lockKey.domain(p.domainUuid), lockKey.downtime(p.activityId)],
     (p: any) => `Pause downtime activity '${p.activityId}' in domain '${p.domainUuid}'`,
     (p, ctx) =>
       downtimeService.pauseActivity({
@@ -364,7 +381,7 @@ export function registerDowntimeCommands(options: RegisterDowntimeCommandsOption
 
   // 5. downtime:resume-activity
   const resumeMutation = makeMutationDef(
-    (p: any) => [`domain:${normalizeJournalEntryId(p.domainUuid)}`, `downtime:${p.activityId}`],
+    (p: any) => [lockKey.domain(p.domainUuid), lockKey.downtime(p.activityId)],
     (p: any) => `Resume downtime activity '${p.activityId}' in domain '${p.domainUuid}'`,
     (p, ctx) =>
       downtimeService.resumeActivity({

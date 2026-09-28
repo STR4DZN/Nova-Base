@@ -10,6 +10,8 @@ import {
 
 import type { RecoveryService } from "./recovery-service.js";
 import type { TransactionStore } from "./transaction-store.js";
+import { isFinalTransactionState } from "./transaction-record.js";
+import type { RecoveryFenceRegistry } from "./recovery-fence-registry.js";
 
 export interface FreshStateWithRevision {
   readonly revision?: number;
@@ -61,6 +63,7 @@ export interface MutationCoordinatorOptions {
   readonly defaultLockTimeoutMs?: number;
   readonly recoveryService?: RecoveryService;
   readonly transactionStore?: TransactionStore;
+  readonly fenceRegistry?: RecoveryFenceRegistry;
 }
 
 /**
@@ -79,12 +82,14 @@ export class MutationCoordinator {
   readonly #defaultLockTimeoutMs: number;
   readonly #recoveryService?: RecoveryService;
   readonly #transactionStore?: TransactionStore;
+  readonly #fenceRegistry?: RecoveryFenceRegistry;
 
   constructor(options: MutationCoordinatorOptions) {
     this.#lockManager = options.lockManager;
     this.#defaultLockTimeoutMs = options.defaultLockTimeoutMs ?? 10000;
     this.#recoveryService = options.recoveryService;
     this.#transactionStore = options.transactionStore;
+    this.#fenceRegistry = options.fenceRegistry;
   }
 
   async execute<
@@ -101,6 +106,23 @@ export class MutationCoordinator {
 
     // 1. Lock Planning
     const lockKeys = definition.getLockKeys(context);
+
+    // Master Remediation §11: Check active recovery fences before acquiring locks
+    const effectiveFenceRegistry = this.#fenceRegistry ?? this.#recoveryService?.fenceRegistry;
+    if (effectiveFenceRegistry) {
+      const fenceCheck = effectiveFenceRegistry.assertKeysAvailable(lockKeys);
+      if (!fenceCheck.ok) {
+        return ok(
+          createMutationReceipt<TResult>({
+            commandId: command.commandId,
+            status: "rejected",
+            changed: false,
+            error: fenceCheck.error,
+            executedAt: now
+          })
+        );
+      }
+    }
 
     // 2. Ordered Lock Acquisition
     const lockResult = await this.#lockManager.acquireLocks({
@@ -271,11 +293,45 @@ export class MutationCoordinator {
       }
 
       if (!commitResult.ok) {
-        // G5-REVAL6-003: If transaction for this command entered needs-recovery, immediately isolate locks
+        // Master Remediation §4, §13, INV-07: Fail-safe isolation for any unresolved state
         if (this.#transactionStore && this.#recoveryService) {
           const tx = this.#transactionStore.getByCommandId(command.commandId);
-          if (tx && tx.state === "needs-recovery") {
-            await this.#recoveryService.isolateTransaction(tx, lockHandle);
+          if (tx && !isFinalTransactionState(tx.state)) {
+            if (tx.state !== "needs-recovery") {
+              this.#transactionStore.transition(
+                tx.transactionId,
+                "needs-recovery",
+                context.authorityEpoch ?? 1,
+                `Commit failed abnormally: ${commitResult.error.message}`
+              );
+              try {
+                await this.#transactionStore.flush();
+              } catch {
+                // Ignore flush failure: fence already protects scope
+              }
+            }
+            const updatedTx = this.#transactionStore.get(tx.transactionId) ?? tx;
+            const isoRes = await this.#recoveryService.isolateTransaction(updatedTx, lockHandle);
+            if (!isoRes.ok) {
+              return ok(
+                createMutationReceipt<TResult>({
+                  commandId: command.commandId,
+                  status: "rejected",
+                  changed: false,
+                  error: createPublicError({
+                    code: "DM_RECOVERY_ISOLATION_FAILED",
+                    category: "recovery",
+                    message: `Transaction isolation failed: ${isoRes.error.message}`,
+                    details: {
+                      isolationError: isoRes.error,
+                      originalError: commitResult.error
+                    },
+                    userActionRequired: true
+                  }),
+                  executedAt: now
+                })
+              );
+            }
           }
         }
 

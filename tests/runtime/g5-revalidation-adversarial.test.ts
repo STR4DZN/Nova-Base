@@ -4853,8 +4853,12 @@ test("G5-REVAL6-005 Scenario 21: Transaction enters needs-recovery in runtime ->
   });
 
   assert.equal(blockedRes.ok, true);
-  assert.equal(blockedRes.value.status, "rejected", "Second mutation must be blocked by the active recovery lock");
-  assert.equal(blockedRes.value.error?.code, "DM_LOCK_TIMEOUT");
+  assert.equal(blockedRes.value.status, "rejected", "Second mutation must be blocked by the active recovery lock or fence");
+  assert.ok(
+    blockedRes.value.error?.code === "DM_RECOVERY_SCOPE_BLOCKED" ||
+    blockedRes.value.error?.code === "DM_LOCK_TIMEOUT",
+    `Expected DM_RECOVERY_SCOPE_BLOCKED or DM_LOCK_TIMEOUT, got ${blockedRes.value.error?.code}`
+  );
 });
 
 // ---------------------------------------------------------------------------

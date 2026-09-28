@@ -711,8 +711,19 @@ export class EconomyService {
 
       const existingAccount = econData.accounts[accIndex];
 
-      // G5-REVAL6-002: Check idempotency key against ledger store before executing adjustment
+      // G5-REVAL6-002 & Master Remediation §17: Check idempotency key against domain economy data and ledger store
       if (params.idempotencyKey) {
+        if (econData.appliedIdempotencyKeys?.includes(params.idempotencyKey)) {
+          const existingEntries = this.#ledgerStore.query({
+            domainUuid: params.domainUuid,
+            sourceRef: params.idempotencyKey
+          });
+          return ok({
+            account: existingAccount,
+            entry: existingEntries[0],
+            isNoop: true
+          });
+        }
         const existingEntries = this.#ledgerStore.query({
           domainUuid: params.domainUuid,
           sourceRef: params.idempotencyKey
@@ -1036,9 +1047,14 @@ export class EconomyService {
       const updatedAccounts = [...econData.accounts];
       updatedAccounts[accIndex] = updatedAccount;
 
+      const appliedKeys = params.idempotencyKey
+        ? [...(econData.appliedIdempotencyKeys ?? []), params.idempotencyKey]
+        : econData.appliedIdempotencyKeys;
+
       const updatedRecord = withDomainEconomyData(doc.record, {
         ...econData,
-        accounts: Object.freeze(updatedAccounts)
+        accounts: Object.freeze(updatedAccounts),
+        appliedIdempotencyKeys: appliedKeys ? Object.freeze(appliedKeys) : undefined
       });
 
       const updateDocRes = await this.#domains.update({ ...doc, record: updatedRecord });

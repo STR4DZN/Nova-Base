@@ -26,10 +26,22 @@ export interface DowntimeCompensationOptions {
  * Unified, idempotent compensator for downtime:start (G5-REVAL6-001, G5-REVAL6-002).
  */
 export async function compensateDowntimeStart(
-  record: TransactionRecord,
+  recordOrId: TransactionRecord | string,
   context: DowntimeCompensatorContext,
   options?: DowntimeCompensationOptions
 ): Promise<Result<void, PublicError>> {
+  const record = typeof recordOrId === "string"
+    ? context.transactionStore?.get(recordOrId)
+    : (context.transactionStore?.get(recordOrId.transactionId) ?? recordOrId);
+  if (!record) {
+    return err(
+      createPublicError({
+        code: "DM_TRANSACTION_NOT_FOUND",
+        category: "not-found",
+        message: `Transaction record '${typeof recordOrId === "string" ? recordOrId : recordOrId.transactionId}' not found`
+      })
+    );
+  }
   const data = record.recoveryData as Record<string, any> | undefined;
   if (!data || data.type !== "downtime:start") {
     return ok(undefined);
@@ -65,23 +77,53 @@ export async function compensateDowntimeStart(
     }
   }
 
-  // 2. Refund upfront debited costs (with stable idempotencyKey)
-  if (context.economyService && data.debitedCosts && Array.isArray(data.debitedCosts)) {
-    for (let i = 0; i < data.debitedCosts.length; i++) {
-      const cost = data.debitedCosts[i];
-      const stepId = `refund_dt_start_${i}_${cost.resourceId}_${cost.amount}`;
-      const idempotencyKey = `${record.transactionId}:${stepId}`;
-      if (!isCompensationStepCompleted(record, stepId, context.transactionStore)) {
-        const refRes = await context.economyService.commitAdjust({
-          domainUuid: data.domainUuid,
-          resourceId: cost.resourceId,
-          deltaMinor: cost.amount,
-          reason: `Compensation: refund upfront cost for downtime activity ${data.definitionId}`,
-          lockOwner: effectiveLockOwner,
-          idempotencyKey
-        });
-        if (!refRes.ok) return refRes;
-        await markCompensationStepCompleted(context.transactionStore, record, stepId);
+  // 2. Journaled steps compensation (Master Remediation §15, §19, INV-06)
+  if (Array.isArray(data.steps) && data.steps.length > 0) {
+    const steps = [...data.steps].reverse();
+    for (const step of steps) {
+      if (step.state !== "applied" && step.state !== "unknown" && step.state !== "compensating") {
+        continue;
+      }
+      const stepId = step.stepId;
+      if (isCompensationStepCompleted(record, stepId, context.transactionStore)) {
+        continue;
+      }
+      if (step.subsystem === "economy" && step.operation === "adjust" && context.economyService) {
+        const intent = step.intent as { resourceId: string; deltaMinor: number };
+        if (intent && intent.deltaMinor < 0) {
+          const idempotencyKey = `${record.transactionId}:compensation:${stepId}`;
+          const refRes = await context.economyService.commitAdjust({
+            domainUuid: data.domainUuid,
+            resourceId: intent.resourceId,
+            deltaMinor: Math.abs(intent.deltaMinor),
+            reason: `Compensation: refund upfront cost for downtime activity ${data.definitionId}`,
+            lockOwner: effectiveLockOwner,
+            idempotencyKey
+          });
+          if (!refRes.ok) return refRes;
+        }
+      }
+      await markCompensationStepCompleted(context.transactionStore, record, stepId);
+    }
+  } else {
+    // 2. Refund upfront debited costs (with stable idempotencyKey)
+    if (context.economyService && data.debitedCosts && Array.isArray(data.debitedCosts)) {
+      for (let i = 0; i < data.debitedCosts.length; i++) {
+        const cost = data.debitedCosts[i];
+        const stepId = `refund_dt_start_${i}_${cost.resourceId}_${cost.amount}`;
+        const idempotencyKey = `${record.transactionId}:${stepId}`;
+        if (!isCompensationStepCompleted(record, stepId, context.transactionStore)) {
+          const refRes = await context.economyService.commitAdjust({
+            domainUuid: data.domainUuid,
+            resourceId: cost.resourceId,
+            deltaMinor: cost.amount,
+            reason: `Compensation: refund upfront cost for downtime activity ${data.definitionId}`,
+            lockOwner: effectiveLockOwner,
+            idempotencyKey
+          });
+          if (!refRes.ok) return refRes;
+          await markCompensationStepCompleted(context.transactionStore, record, stepId);
+        }
       }
     }
   }
@@ -93,10 +135,22 @@ export async function compensateDowntimeStart(
  * Unified, idempotent compensator for downtime:resolution (G5-REVAL6-001, G5-REVAL6-002).
  */
 export async function compensateDowntimeResolution(
-  record: TransactionRecord,
+  recordOrId: TransactionRecord | string,
   context: DowntimeCompensatorContext,
   options?: DowntimeCompensationOptions
 ): Promise<Result<void, PublicError>> {
+  const record = typeof recordOrId === "string"
+    ? context.transactionStore?.get(recordOrId)
+    : (context.transactionStore?.get(recordOrId.transactionId) ?? recordOrId);
+  if (!record) {
+    return err(
+      createPublicError({
+        code: "DM_TRANSACTION_NOT_FOUND",
+        category: "not-found",
+        message: `Transaction record '${typeof recordOrId === "string" ? recordOrId : recordOrId.transactionId}' not found`
+      })
+    );
+  }
   const data = record.recoveryData as Record<string, any> | undefined;
   if (!data || data.type !== "downtime:resolution") {
     return ok(undefined);
@@ -130,23 +184,53 @@ export async function compensateDowntimeResolution(
     }
   }
 
-  // 2. Revert credited rewards (with stable idempotencyKey)
-  if (context.economyService && data.creditedRewards && Array.isArray(data.creditedRewards)) {
-    for (let i = 0; i < data.creditedRewards.length; i++) {
-      const reward = data.creditedRewards[i];
-      const stepId = `revert_dt_reward_${i}_${reward.resourceId}_${reward.amount}`;
-      const idempotencyKey = `${record.transactionId}:${stepId}`;
-      if (!isCompensationStepCompleted(record, stepId, context.transactionStore)) {
-        const revRes = await context.economyService.commitAdjust({
-          domainUuid: data.domainUuid,
-          resourceId: reward.resourceId,
-          deltaMinor: -reward.amount,
-          reason: `Compensation: reverse reward for downtime activity ${data.activityId}`,
-          lockOwner: effectiveLockOwner,
-          idempotencyKey
-        });
-        if (!revRes.ok) return revRes;
-        await markCompensationStepCompleted(context.transactionStore, record, stepId);
+  // 2. Journaled steps compensation (Master Remediation §15, §19, INV-06)
+  if (Array.isArray(data.steps) && data.steps.length > 0) {
+    const steps = [...data.steps].reverse();
+    for (const step of steps) {
+      if (step.state !== "applied" && step.state !== "unknown" && step.state !== "compensating") {
+        continue;
+      }
+      const stepId = step.stepId;
+      if (isCompensationStepCompleted(record, stepId, context.transactionStore)) {
+        continue;
+      }
+      if (step.subsystem === "economy" && step.operation === "adjust" && context.economyService) {
+        const intent = step.intent as { resourceId: string; deltaMinor: number };
+        if (intent && intent.deltaMinor > 0) {
+          const idempotencyKey = `${record.transactionId}:compensation:${stepId}`;
+          const revRes = await context.economyService.commitAdjust({
+            domainUuid: data.domainUuid,
+            resourceId: intent.resourceId,
+            deltaMinor: -intent.deltaMinor,
+            reason: `Compensation: reverse reward for downtime activity ${data.activityId}`,
+            lockOwner: effectiveLockOwner,
+            idempotencyKey
+          });
+          if (!revRes.ok) return revRes;
+        }
+      }
+      await markCompensationStepCompleted(context.transactionStore, record, stepId);
+    }
+  } else {
+    // 2. Revert credited rewards (with stable idempotencyKey)
+    if (context.economyService && data.creditedRewards && Array.isArray(data.creditedRewards)) {
+      for (let i = 0; i < data.creditedRewards.length; i++) {
+        const reward = data.creditedRewards[i];
+        const stepId = `revert_dt_reward_${i}_${reward.resourceId}_${reward.amount}`;
+        const idempotencyKey = `${record.transactionId}:${stepId}`;
+        if (!isCompensationStepCompleted(record, stepId, context.transactionStore)) {
+          const revRes = await context.economyService.commitAdjust({
+            domainUuid: data.domainUuid,
+            resourceId: reward.resourceId,
+            deltaMinor: -reward.amount,
+            reason: `Compensation: reverse reward for downtime activity ${data.activityId}`,
+            lockOwner: effectiveLockOwner,
+            idempotencyKey
+          });
+          if (!revRes.ok) return revRes;
+          await markCompensationStepCompleted(context.transactionStore, record, stepId);
+        }
       }
     }
   }

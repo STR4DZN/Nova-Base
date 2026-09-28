@@ -1,5 +1,5 @@
 import { createPublicError, type PublicError } from "../core/contracts/public-error.js";
-import { err, type Result } from "../core/contracts/result.js";
+import { err, ok, type Result } from "../core/contracts/result.js";
 import type { CommandId } from "../commands/command-envelope.js";
 import {
   isFinalTransactionState,
@@ -28,8 +28,12 @@ export class TransactionStore {
   #persistQueue: Promise<void> = Promise.resolve();
   #lastPersistError: Error | null = null;
 
-  constructor(options: TransactionStoreOptions = {}) {
-    this.#storageAdapter = options.storageAdapter;
+  constructor(options: TransactionStoreOptions | TransactionStorageAdapter = {}) {
+    if ("storageAdapter" in options) {
+      this.#storageAdapter = options.storageAdapter;
+    } else if ("saveSnapshot" in options) {
+      this.#storageAdapter = options as TransactionStorageAdapter;
+    }
   }
 
   async rehydrate(): Promise<void> {
@@ -110,6 +114,105 @@ export class TransactionStore {
 
     this.save(transitionRes.value);
     return transitionRes;
+  }
+
+  /**
+   * Persists a transaction record and confirms flush to durable storage (Master Remediation §18).
+   */
+  async saveDurable(record: TransactionRecord): Promise<Result<TransactionRecord, PublicError>> {
+    this.save(record);
+    try {
+      await this.flush();
+      return ok(this.get(record.transactionId) ?? record);
+    } catch (flushErr) {
+      return err(
+        createPublicError({
+          code: "DM_DOMAIN_STORAGE_ERROR",
+          category: "internal",
+          message: `Failed to persist transaction '${record.transactionId}': ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+          details: flushErr
+        })
+      );
+    }
+  }
+
+  /**
+   * Applies an in-place patch to an existing transaction record with atomic durable persistence (Master Remediation §18).
+   * Reverts in-memory change on flush failure.
+   */
+  async patchDurable(
+    transactionId: string,
+    patcher: (current: TransactionRecord) => TransactionRecord
+  ): Promise<Result<TransactionRecord, PublicError>> {
+    const current = this.get(transactionId);
+    if (!current) {
+      return err(
+        createPublicError({
+          code: "DM_TRANSACTION_NOT_FOUND",
+          category: "not-found",
+          message: `Transaction '${transactionId}' not found in TransactionStore`
+        })
+      );
+    }
+    const patched = patcher(current);
+    this.save(patched);
+    try {
+      await this.flush();
+      return ok(this.get(transactionId) ?? patched);
+    } catch (flushErr) {
+      this.save(current);
+      return err(
+        createPublicError({
+          code: "DM_DOMAIN_STORAGE_ERROR",
+          category: "internal",
+          message: `Failed to flush patched transaction '${transactionId}': ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+          details: flushErr
+        })
+      );
+    }
+  }
+
+  /**
+   * Executes a state transition and confirms durable persistence (Master Remediation §18).
+   * Reverts in-memory state on flush failure.
+   */
+  async transitionDurable(
+    transactionId: string,
+    toState: TransactionState,
+    authorityEpoch: number,
+    reason?: string,
+    now: number = Date.now()
+  ): Promise<Result<TransactionRecord, PublicError>> {
+    const current = this.get(transactionId);
+    if (!current) {
+      return err(
+        createPublicError({
+          code: "DM_TRANSACTION_NOT_FOUND",
+          category: "not-found",
+          message: `Transaction '${transactionId}' not found in TransactionStore`
+        })
+      );
+    }
+
+    const transitionRes = this.transition(transactionId, toState, authorityEpoch, reason, now);
+    if (!transitionRes.ok) {
+      return transitionRes;
+    }
+
+    try {
+      await this.flush();
+      return ok(this.get(transactionId) ?? transitionRes.value);
+    } catch (flushErr) {
+      this.save(current);
+      return err(
+        createPublicError({
+          code: "DM_DOMAIN_STORAGE_ERROR",
+          category: "internal",
+          message: `Failed to flush transaction transition from '${current.state}' to '${toState}' for '${transactionId}': ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+          details: flushErr
+        })
+      );
+    }
   }
 
   async flush(): Promise<void> {

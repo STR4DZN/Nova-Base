@@ -14,6 +14,11 @@ import { PeopleService, type PublicPeopleApi } from "../../people/services/peopl
 import type { TransactionStore } from "../../mutations/transaction-store.js";
 import { createTransactionRecord, type TransactionRecord } from "../../mutations/transaction-record.js";
 import { compensateProjectStart } from "../services/project-recovery-compensators.js";
+import { lockKey } from "../../mutations/lock-keys.js";
+import {
+  CompositeMutationSession,
+  type TransactionExecutionContext
+} from "../../mutations/composite-mutation-session.js";
 
 export interface ProjectStartDomainOperationParams {
   readonly domainUuid: string;
@@ -31,6 +36,8 @@ export interface ProjectStartDomainOperationParams {
   readonly correlationId?: string;
   readonly causationId?: string;
   readonly authorityEpoch?: number;
+  readonly lockKeys?: readonly string[];
+  readonly transactionContext?: TransactionExecutionContext;
 }
 
 export interface ProjectStartDomainOperationContext {
@@ -159,193 +166,189 @@ export async function executeProjectStartDomainOperationPlan(
     }
   }
 
-  // 1. Transaction preparation BEFORE child writes (G5-REVAL3-002, G5-REVAL4-001, G5-REVAL4-002)
-  const txId = createOpaqueId("tx");
+  // 1. Transaction preparation BEFORE child writes (Master Remediation §14, INV-02)
   const cmdId: CommandId = params.commandId
     ? (params.commandId.startsWith("cmd_") ? (params.commandId as CommandId) : (`cmd_${params.commandId}` as CommandId))
     : createCommandId();
   const epoch = params.authorityEpoch ?? 1;
 
-  if (context.transactionStore) {
-    const tx = createTransactionRecord({
-      transactionId: txId,
-      commandId: cmdId,
-      authorityEpoch: epoch,
-      lockKeys: [`domain:${cleanDomainUuid}`, `project:${draftProject.id}`],
-      safeAutoRecovery: false,
-      recoveryData: {
-        type: "projects:start",
-        projectId: draftProject.id,
-        planId: plan.planId,
-        domainUuid: cleanDomainUuid,
-        status: "prepared"
-      }
-    });
-    context.transactionStore.save(tx);
-    const claimRes = context.transactionStore.transition(txId, "claimed", epoch);
-    if (!claimRes.ok) return claimRes;
-    const prepRes = context.transactionStore.transition(txId, "prepared", epoch);
-    if (!prepRes.ok) return prepRes;
-
-    // G5-REVAL4-002: Flush transaction to durable storage BEFORE executing child writes
-    try {
-      await context.transactionStore.flush();
-    } catch (flushErr) {
-      context.transactionStore.transition(txId, "failed", epoch, "Persistence flush failed");
-      return err(
-        createPublicError({
-          code: "DM_DOMAIN_STORAGE_ERROR",
-          category: "internal",
-          message: `Failed to flush transaction preparation to storage: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
-          details: flushErr
-        })
-      );
-    }
-  }
-
   const peopleService = context.peopleService ?? new PeopleService(context.domains);
 
-  // Tracking for rollback / compensation on failure
+  // Finding 2: Lock set for Project Start is domain-only!
+  const canonicalStartLock = lockKey.domain(cleanDomainUuid);
+  const sessionLockKeys = params.transactionContext?.lockKeys ?? params.lockKeys ?? [canonicalStartLock];
+
+  const sessionRes = await CompositeMutationSession.prepare({
+    transactionContext: params.transactionContext,
+    transactionStore: context.transactionStore,
+    commandId: cmdId,
+    authorityEpoch: epoch,
+    lockKeys: sessionLockKeys,
+    planLockKeys: params.transactionContext?.lockKeys ?? params.lockKeys ?? [canonicalStartLock],
+    recoveryType: "projects:start",
+    parentRef: `domain:${cleanDomainUuid}`,
+    initialRecoveryData: {
+      projectId: draftProject.id,
+      planId: plan.planId,
+      domainUuid: cleanDomainUuid,
+      status: "prepared"
+    }
+  });
+
+  if (!sessionRes.ok) {
+    return sessionRes;
+  }
+
+  const session = sessionRes.value;
   const debitedCosts: Array<{ resourceId: string; amountMinor: number }> = [];
   const createdReservationIds: string[] = [];
   let allocatedWorkforceReservationId: string | undefined;
-  let compensationFailed = false;
 
-  const buildRecoveryData = (status: "prepared" | "executing" | "completed" | "needs-recovery" | "failed") => ({
-    type: "projects:start",
-    projectId: draftProject.id,
-    planId: plan.planId,
-    domainUuid: cleanDomainUuid,
-    debitedCosts: Object.freeze([...debitedCosts]),
-    createdReservationIds: Object.freeze([...createdReservationIds]),
-    allocatedWorkforceReservationId,
-    status
-  });
-
-  // Compensation helper to cleanly roll back all prior child effects
-  const compensate = async (reason: string) => {
-    if (context.transactionStore) {
-      const tx = context.transactionStore.get(txId);
-      if (tx) {
-        const updatedTx: TransactionRecord = {
-          ...tx,
-          recoveryData: buildRecoveryData("needs-recovery")
-        };
-        context.transactionStore.save(updatedTx);
-        const compRes = await compensateProjectStart(
-          updatedTx,
-          {
-            domains: context.domains,
-            economyService: context.economyService,
-            peopleService,
-            transactionStore: context.transactionStore
-          },
-          { lockOwner: params.commandId, skipReconciliation: true }
-        );
-        const targetState = compRes.ok ? "failed" : "needs-recovery";
-        context.transactionStore.transition(txId, targetState, epoch, reason);
+  const runCompensator = (s: CompositeMutationSession, primaryError: PublicError) => {
+    const effectiveDebited = [...debitedCosts];
+    for (const step of s.steps) {
+      if (step.subsystem === "economy" && step.operation === "adjust" && (step.state === "applied" || step.state === "unknown")) {
+        const intent = step.intent as { resourceId: string; deltaMinor: number };
+        if (intent && intent.deltaMinor < 0) {
+          const amount = Math.abs(intent.deltaMinor);
+          if (!effectiveDebited.some((d) => d.resourceId === intent.resourceId && d.amountMinor === amount)) {
+            effectiveDebited.push({ resourceId: intent.resourceId, amountMinor: amount });
+          }
+        }
       }
-    } else {
-      const dummyTx = createTransactionRecord({
-        transactionId: txId,
-        commandId: cmdId,
-        authorityEpoch: epoch,
-        lockKeys: [`domain:${cleanDomainUuid}`, `project:${draftProject.id}`],
-        safeAutoRecovery: false,
-        recoveryData: buildRecoveryData("needs-recovery")
-      });
-      await compensateProjectStart(
-        dummyTx,
-        {
-          domains: context.domains,
-          economyService: context.economyService,
-          peopleService
-        },
-        { lockOwner: params.commandId, skipReconciliation: true }
-      );
     }
+    const effectiveReservations = [...createdReservationIds];
+    for (const step of s.steps) {
+      if (step.subsystem === "economy" && step.operation === "reserve" && (step.state === "applied" || step.state === "unknown")) {
+        const receipt = step.receipt as any;
+        const resId = receipt?.id ?? (typeof receipt === "string" ? receipt : undefined);
+        if (resId && !effectiveReservations.includes(resId)) {
+          effectiveReservations.push(resId);
+        }
+      }
+    }
+
+    const currentTx = context.transactionStore?.get(s.transactionId);
+    const existingRecData = (currentTx?.recoveryData as Record<string, unknown>) ?? {};
+    const updatedRecData = {
+      ...existingRecData,
+      type: "projects:start",
+      projectId: draftProject.id,
+      planId: plan.planId,
+      domainUuid: cleanDomainUuid,
+      debitedCosts: Object.freeze([...effectiveDebited]),
+      createdReservationIds: Object.freeze([...effectiveReservations]),
+      allocatedWorkforceReservationId,
+      status: "needs-recovery"
+    };
+
+    const txToCompensate = currentTx
+      ? { ...currentTx, recoveryData: updatedRecData }
+      : createTransactionRecord({
+          transactionId: s.transactionId,
+          commandId: cmdId,
+          authorityEpoch: epoch,
+          lockKeys: sessionLockKeys,
+          safeAutoRecovery: false,
+          recoveryData: updatedRecData
+        });
+
+    if (context.transactionStore) {
+      context.transactionStore.save(txToCompensate);
+    }
+
+    return compensateProjectStart(
+      txToCompensate,
+      {
+        domains: context.domains,
+        economyService: context.economyService,
+        peopleService,
+        transactionStore: context.transactionStore
+      },
+      { lockOwner: params.commandId, skipReconciliation: true }
+    );
   };
 
   // Step 1 & 2: Execute upfront debits and reservations
   if (context.economyService) {
+    let costIdx = 0;
     for (const cost of definition.costs) {
       if (cost.timing === "upfront") {
-        const debitRes = await context.economyService.commitAdjust({
-          domainUuid: cleanDomainUuid,
-          resourceId: cost.resourceId,
-          deltaMinor: -cost.amountMinor,
-          reason: `Upfront cost for project ${draftProject.name}`,
-          lockOwner: params.commandId
+        const stepId = `project-start:upfront:${cost.resourceId}:${costIdx++}`;
+        const stepRes = await session.runChildStep({
+          stepId,
+          subsystem: "economy",
+          operation: "adjust",
+          targetRef: cleanDomainUuid,
+          idempotencyKey: `${session.transactionId}:${stepId}`,
+          intent: { resourceId: cost.resourceId, deltaMinor: -cost.amountMinor },
+          execute: async () => {
+            return context.economyService!.commitAdjust({
+              domainUuid: cleanDomainUuid,
+              resourceId: cost.resourceId,
+              deltaMinor: -cost.amountMinor,
+              reason: `Upfront cost for project ${draftProject.name}`,
+              lockOwner: params.commandId,
+              idempotencyKey: `${session.transactionId}:${stepId}`
+            });
+          }
         });
-        if (!debitRes.ok) {
-          await compensate(`Failed to debit upfront cost for '${cost.resourceId}': ${debitRes.error.message}`);
-          return err(
-            createPublicError({
-              code: "DM_PROJECT_START_BLOCKED",
-              category: "conflict",
-              message: `Failed to debit upfront cost for '${cost.resourceId}': ${debitRes.error.message}`,
-              details: debitRes.error
-            })
-          );
+        if (!stepRes.ok) {
+          const errToPropagate = stepRes.error.code === "DM_DOMAIN_STORAGE_ERROR"
+            ? stepRes.error
+            : createPublicError({
+                code: "DM_PROJECT_START_BLOCKED",
+                category: "conflict",
+                message: `Failed to debit upfront cost for '${cost.resourceId}': ${stepRes.error.message}`,
+                details: stepRes.error
+              });
+          return session.failAndCompensate(errToPropagate, runCompensator);
         }
         debitedCosts.push({ resourceId: cost.resourceId, amountMinor: cost.amountMinor });
-        if (context.transactionStore) {
-          const tx = context.transactionStore.get(txId);
-          if (tx) {
-            context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
-            try {
-              await context.transactionStore.flush();
-            } catch (flushErr) {
-              await compensate(`Persistence flush failed after upfront debit: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
-              return err(
-                createPublicError({
-                  code: "DM_DOMAIN_STORAGE_ERROR",
-                  category: "internal",
-                  message: `Failed to flush transaction update after upfront debit: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
-                  details: flushErr
-                })
-              );
-            }
-          }
+        const checkRes = await session.checkpointRecoveryData({
+          debitedCosts: Object.freeze([...debitedCosts]),
+          status: "executing"
+        });
+        if (!checkRes.ok) {
+          return session.failAndCompensate(checkRes.error, runCompensator);
         }
       } else if (cost.timing === "reserved") {
-        const reserveRes = await context.economyService.reserve({
-          domainUuid: cleanDomainUuid,
-          resourceId: cost.resourceId,
-          amountMinor: cost.amountMinor,
-          source: { type: "project", ref: projectId },
-          lockOwner: params.commandId
-        });
-        if (!reserveRes.ok) {
-          await compensate(`Failed to create reservation for '${cost.resourceId}': ${reserveRes.error.message}`);
-          return err(
-            createPublicError({
-              code: "DM_PROJECT_START_BLOCKED",
-              category: "conflict",
-              message: `Failed to create reservation for '${cost.resourceId}': ${reserveRes.error.message}`,
-              details: reserveRes.error
-            })
-          );
-        }
-        createdReservationIds.push(reserveRes.value.id);
-        if (context.transactionStore) {
-          const tx = context.transactionStore.get(txId);
-          if (tx) {
-            context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
-            try {
-              await context.transactionStore.flush();
-            } catch (flushErr) {
-              await compensate(`Persistence flush failed after reservation: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
-              return err(
-                createPublicError({
-                  code: "DM_DOMAIN_STORAGE_ERROR",
-                  category: "internal",
-                  message: `Failed to flush transaction update after reservation: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
-                  details: flushErr
-                })
-              );
-            }
+        const stepId = `project-start:reservation:${cost.resourceId}:${costIdx++}`;
+        const stepRes = await session.runChildStep({
+          stepId,
+          subsystem: "economy",
+          operation: "reserve",
+          targetRef: cleanDomainUuid,
+          idempotencyKey: `${session.transactionId}:${stepId}`,
+          intent: { resourceId: cost.resourceId, amountMinor: cost.amountMinor },
+          execute: async () => {
+            return context.economyService!.reserve({
+              domainUuid: cleanDomainUuid,
+              resourceId: cost.resourceId,
+              amountMinor: cost.amountMinor,
+              source: { type: "project", ref: projectId },
+              lockOwner: params.commandId
+            });
           }
+        });
+        if (!stepRes.ok) {
+          const errToPropagate = stepRes.error.code === "DM_DOMAIN_STORAGE_ERROR"
+            ? stepRes.error
+            : createPublicError({
+                code: "DM_PROJECT_START_BLOCKED",
+                category: "conflict",
+                message: `Failed to create reservation for '${cost.resourceId}': ${stepRes.error.message}`,
+                details: stepRes.error
+              });
+          return session.failAndCompensate(errToPropagate, runCompensator);
+        }
+        createdReservationIds.push(stepRes.value.id);
+        const checkRes = await session.checkpointRecoveryData({
+          createdReservationIds: Object.freeze([...createdReservationIds]),
+          status: "executing"
+        });
+        if (!checkRes.ok) {
+          return session.failAndCompensate(checkRes.error, runCompensator);
         }
       }
     }
@@ -356,43 +359,41 @@ export async function executeProjectStartDomainOperationPlan(
     params.workforceRequired ??
     (params.workforceAllocations?.reduce((sum, a) => sum + a.count, 0) ?? 0);
   if (wfRequired > 0) {
-    const wfRes = await peopleService.allocateWorkforceReservation({
-      domainUuid: cleanDomainUuid,
-      projectId: draftProject.id,
-      amount: wfRequired,
-      workforceTypeId: params.workforceAllocations?.[0]?.workforceTypeId ?? "general",
-      userId: params.userId
-    });
-    if (!wfRes.ok) {
-      await compensate(`Failed to allocate workforce reservation: ${wfRes.error.message}`);
-      return err(
-        createPublicError({
-          code: "DM_PROJECT_START_BLOCKED",
-          category: "conflict",
-          message: `Failed to allocate workforce reservation: ${wfRes.error.message}`,
-          details: wfRes.error
+    const stepId = `project-start:workforce:${params.workforceAllocations?.[0]?.workforceTypeId ?? "general"}`;
+    const wfStepRes = await session.runChildStep({
+      stepId,
+      subsystem: "people",
+      operation: "allocateWorkforceReservation",
+      targetRef: cleanDomainUuid,
+      idempotencyKey: `${session.transactionId}:${stepId}`,
+      intent: { amount: wfRequired, projectId: draftProject.id },
+      execute: async () =>
+        peopleService.allocateWorkforceReservation({
+          domainUuid: cleanDomainUuid,
+          projectId: draftProject.id,
+          amount: wfRequired,
+          workforceTypeId: params.workforceAllocations?.[0]?.workforceTypeId ?? "general",
+          userId: params.userId
         })
-      );
+    });
+    if (!wfStepRes.ok) {
+      const errToPropagate = wfStepRes.error.code === "DM_DOMAIN_STORAGE_ERROR"
+        ? wfStepRes.error
+        : createPublicError({
+            code: "DM_PROJECT_START_BLOCKED",
+            category: "conflict",
+            message: `Failed to allocate workforce reservation: ${wfStepRes.error.message}`,
+            details: wfStepRes.error
+          });
+      return session.failAndCompensate(errToPropagate, runCompensator);
     }
-    allocatedWorkforceReservationId = wfRes.value.reservationId;
-    if (context.transactionStore) {
-      const tx = context.transactionStore.get(txId);
-      if (tx) {
-        context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
-        try {
-          await context.transactionStore.flush();
-        } catch (flushErr) {
-          await compensate(`Persistence flush failed after workforce allocation: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
-          return err(
-            createPublicError({
-              code: "DM_DOMAIN_STORAGE_ERROR",
-              category: "internal",
-              message: `Failed to flush transaction update after workforce allocation: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
-              details: flushErr
-            })
-          );
-        }
-      }
+    allocatedWorkforceReservationId = wfStepRes.value.reservationId;
+    const checkRes = await session.checkpointRecoveryData({
+      allocatedWorkforceReservationId,
+      status: "executing"
+    });
+    if (!checkRes.ok) {
+      return session.failAndCompensate(checkRes.error, runCompensator);
     }
   }
 
@@ -412,8 +413,7 @@ export async function executeProjectStartDomainOperationPlan(
     userId: params.userId
   });
   if (!commitRes.ok) {
-    await compensate(`commitProjectStartPlan failed: ${commitRes.error.message}`);
-    return commitRes;
+    return session.failAndCompensate(commitRes.error, runCompensator);
   }
 
   const startedProject = commitRes.value.project;
@@ -421,8 +421,7 @@ export async function executeProjectStartDomainOperationPlan(
   // Re-read fresh document to avoid revision collision
   const freshDocRes = await context.domains.read(cleanDomainUuid);
   if (!freshDocRes.ok) {
-    await compensate(`Failed to re-read domain doc: ${freshDocRes.error.message}`);
-    return freshDocRes;
+    return session.failAndCompensate(freshDocRes.error, runCompensator);
   }
 
   const freshRecord = freshDocRes.value.record;
@@ -432,61 +431,21 @@ export async function executeProjectStartDomainOperationPlan(
     projects: Object.freeze([...freshProjectsData.projects, startedProject])
   });
 
-  if (context.transactionStore) {
-    const committingRes = context.transactionStore.transition(txId, "committing", epoch);
-    if (!committingRes.ok) {
-      await compensate(`transition to committing failed: ${committingRes.error.message}`);
-      return committingRes;
-    }
-    try {
-      await context.transactionStore.flush();
-    } catch (flushErr) {
-      await compensate(`Persistence flush failed for committing state: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
-      return err(
-        createPublicError({
-          code: "DM_DOMAIN_STORAGE_ERROR",
-          category: "internal",
-          message: `Failed to flush transaction committing state to storage: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
-          details: flushErr
-        })
-      );
-    }
+  const committingPrep = await session.enterCommitting();
+  if (!committingPrep.ok) {
+    return session.failAndCompensate(committingPrep.error, runCompensator);
   }
 
-  const updateRes = await context.domains.save({
-    ...freshDocRes.value,
-    record: updatedRecord
-  });
+  const updateRes = await session.commitParent(async () =>
+    context.domains.save({
+      ...freshDocRes.value,
+      record: updatedRecord
+    })
+  );
 
   if (!updateRes.ok) {
-    await compensate(`Domain update failed during project start: ${updateRes.error.message}`);
-    return updateRes;
+    return session.failAndCompensate(updateRes.error, runCompensator);
   }
 
-  if (context.transactionStore) {
-    const committedRes = context.transactionStore.transition(txId, "committed", epoch);
-    if (!committedRes.ok) return committedRes;
-    try {
-      await context.transactionStore.flush();
-    } catch (flushErr) {
-      context.transactionStore.transition(
-        txId,
-        "needs-recovery",
-        epoch,
-        "Final commit flush failed to persist to durable storage"
-      );
-      return err(
-        createPublicError({
-          code: "DM_TRANSACTION_COMMIT_UNCONFIRMED",
-          category: "recovery",
-          message: `Project start succeeded on domain but durable transaction commit marker failed to flush: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}. Requires reconciliation.`,
-          details: flushErr,
-          userActionRequired: true,
-          retryable: false
-        })
-      );
-    }
-  }
-
-  return ok({ project: startedProject });
+  return session.commitDurably({ project: startedProject });
 }

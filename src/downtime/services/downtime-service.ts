@@ -35,6 +35,7 @@ import {
   compensateDowntimeStart,
   compensateDowntimeResolution
 } from "./downtime-recovery-compensators.js";
+import type { TransactionExecutionContext } from "../../mutations/composite-mutation-session.js";
 
 export type DowntimeOutcomeHandler = (outcome: any) => Promise<ChildReceipt> | ChildReceipt;
 
@@ -61,6 +62,8 @@ export interface StartActivityParams {
   readonly correlationId?: string;
   readonly causationId?: string;
   readonly authorityEpoch?: number;
+  readonly lockKeys?: readonly string[];
+  readonly transactionContext?: TransactionExecutionContext;
 }
 
 export interface AdvanceActivityParams {
@@ -86,6 +89,8 @@ export interface CompleteActivityParams {
   readonly correlationId?: string;
   readonly causationId?: string;
   readonly authorityEpoch?: number;
+  readonly lockKeys?: readonly string[];
+  readonly transactionContext?: TransactionExecutionContext;
 }
 
 export class DowntimeService {
