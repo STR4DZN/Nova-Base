@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { mkdirSync, readdirSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as esbuild from "esbuild";
 
@@ -20,7 +20,7 @@ function findBuiltTests(directory) {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
     const path = join(directory, entry.name);
     if (entry.isDirectory()) return findBuiltTests(path);
-    return entry.name.endsWith(".test.js") ? [path] : [];
+    return entry.name.endsWith(".test.js") ? [relative(projectRoot, path)] : [];
   });
 }
 
