@@ -33,10 +33,10 @@
 | Verificação | Resultado |
 |---|---|
 | TypeScript strict (`tsc --noEmit`) | PASS (0 erros) |
-| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 601/601 (0 falhas) |
+| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 604/604 (0 falhas) |
 | Relatório de Aceitação G5 | Gerado (`docs/GATE_G5_ACCEPTANCE_REPORT.md`) |
 | Regressões G0/G1/G2/G3/G4 | 0 (todos os 444 testes anteriores preservados e passando) |
-| Testes novos Gate G5 | 157 testes dedicados (G5.1 a G5.10: 101 testes + 56 testes adversários de revalidação em g5-revalidation-adversarial.test.ts) |
+| Testes novos Gate G5 | 160 testes dedicados (G5.1 a G5.10: 101 testes + 59 testes adversários de revalidação em g5-revalidation-adversarial.test.ts) |
 | Remediação de Auditoria G5-AUD-001 a G5-AUD-010 | PASS — 100% remediado, endurecido e verificado |
 | Remediação de Revalidação G5-REVAL-001 a G5-REVAL-012 | PASS — 100% remediado, endurecido e verificado |
 | Remediação de Revalidação 2 G5-REVAL2-001 a G5-REVAL2-010 | PASS — 100% remediado, endurecido e verificado |
@@ -82,8 +82,8 @@
    - `FacilitiesService.maintainFacility` e `repairFacility` gravam o snapshot e revisão anterior da instalação no `recoveryData`.
    - O compensador de recuperação reconcilia o estado do domínio e, caso a operação precise ser revertida, restaura fielmente o snapshot e revisão anterior da `FacilityInstance`.
 
-9. **G5-REVAL5-009 (TEST GAP — Cobertura Completa de 56 Cenários Adversários)**:
-   - Adicionados novos cenários adversários em `tests/runtime/g5-revalidation-adversarial.test.ts` cobrindo: falha de flush pós-débito child, crash após save do domínio com reconciliação para committed, falha no flush final de committed, cancelamento com snapshots write-ahead, idempotência de compensação em retry pós-falha parcial, múltiplos custos de conclusão com falha intermediária, erro de workforce release fail-closed, isolamento de `safeAutoRecovery: false`, e falhas de leitura no compensador. Total: 56/56 testes aprovados.
+9. **G5-REVAL5-009 (TEST GAP — Cobertura Completa de 59 Cenários Adversários)**:
+   - Adicionados novos cenários adversários em `tests/runtime/g5-revalidation-adversarial.test.ts` cobrindo: falha de flush pós-débito child, crash após save do domínio com reconciliação para committed, falha no flush final de committed, cancelamento com snapshots write-ahead, idempotência de compensação em retry pós-falha parcial, múltiplos custos de conclusão com falha intermediária, erro de workforce release fail-closed, isolamento de `safeAutoRecovery: false`, falhas de leitura no compensador, retomada de compensação interrompida e isolamento de locks sem deadlocks de startup. Total: 59/59 testes aprovados.
 
 ## Remediação da 4ª Revalidação Gate G5 — G5-REVAL4-001 a G5-REVAL4-012
 

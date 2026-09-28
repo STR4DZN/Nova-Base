@@ -62,25 +62,44 @@ export class RecoveryService {
 
     for (const record of unresolved) {
       // DEC-724–731: "committing após failover vira needs-recovery até reconciliation."
-      if (record.state === "committing") {
+      // Also, interrupted compensations from a previous crash must transition back to needs-recovery
+      // so a new recovery attempt can transition needs-recovery -> compensating without invalid state jump.
+      if (record.state === "committing" || record.state === "compensating") {
         this.#transactionStore.transition(
           record.transactionId,
           "needs-recovery",
           currentEpoch,
-          "Startup recovery scan: transition uncommitted transaction to needs-recovery"
+          `Startup recovery scan: transition ${record.state} transaction to needs-recovery`
+        );
+        transitionedAny = true;
+      } else if (record.state === "claimed" || record.state === "planned") {
+        this.#transactionStore.transition(
+          record.transactionId,
+          "failed",
+          currentEpoch,
+          `Startup recovery scan: transaction abandoned in ${record.state} state during failover`
         );
         transitionedAny = true;
       }
 
       // Block affected lock keys so damaged domains are protected while independent domains continue
-      if (record.lockKeys.length > 0 && !this.#heldRecoveryLocks.has(record.transactionId)) {
-        const lockRes = await this.#lockManager.acquireLocks({
-          ownerId: `recovery_${record.transactionId}`,
-          keys: record.lockKeys,
-          timeoutMs: 0 // acquire if free or queue
-        });
-        if (lockRes.ok) {
-          this.#heldRecoveryLocks.set(record.transactionId, lockRes.value);
+      const currentTx = this.#transactionStore.get(record.transactionId) ?? record;
+      if (
+        !isFinalTransactionState(currentTx.state) &&
+        currentTx.lockKeys.length > 0 &&
+        this.#lockManager &&
+        !this.#heldRecoveryLocks.has(currentTx.transactionId)
+      ) {
+        const freeKeys = currentTx.lockKeys.filter((k) => !this.#lockManager!.isLocked(k));
+        if (freeKeys.length > 0) {
+          const lockRes = await this.#lockManager.acquireLocks({
+            ownerId: `recovery_${currentTx.transactionId}`,
+            keys: freeKeys,
+            timeoutMs: 50
+          });
+          if (lockRes.ok) {
+            this.#heldRecoveryLocks.set(currentTx.transactionId, lockRes.value);
+          }
         }
       }
     }

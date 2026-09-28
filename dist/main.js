@@ -8315,24 +8315,35 @@ var RecoveryService = class {
     const unresolved = this.#transactionStore.listUnresolved();
     let transitionedAny = false;
     for (const record of unresolved) {
-      if (record.state === "committing") {
+      if (record.state === "committing" || record.state === "compensating") {
         this.#transactionStore.transition(
           record.transactionId,
           "needs-recovery",
           currentEpoch,
-          "Startup recovery scan: transition uncommitted transaction to needs-recovery"
+          `Startup recovery scan: transition ${record.state} transaction to needs-recovery`
+        );
+        transitionedAny = true;
+      } else if (record.state === "claimed" || record.state === "planned") {
+        this.#transactionStore.transition(
+          record.transactionId,
+          "failed",
+          currentEpoch,
+          `Startup recovery scan: transaction abandoned in ${record.state} state during failover`
         );
         transitionedAny = true;
       }
-      if (record.lockKeys.length > 0 && !this.#heldRecoveryLocks.has(record.transactionId)) {
-        const lockRes = await this.#lockManager.acquireLocks({
-          ownerId: `recovery_${record.transactionId}`,
-          keys: record.lockKeys,
-          timeoutMs: 0
-          // acquire if free or queue
-        });
-        if (lockRes.ok) {
-          this.#heldRecoveryLocks.set(record.transactionId, lockRes.value);
+      const currentTx = this.#transactionStore.get(record.transactionId) ?? record;
+      if (!isFinalTransactionState(currentTx.state) && currentTx.lockKeys.length > 0 && this.#lockManager && !this.#heldRecoveryLocks.has(currentTx.transactionId)) {
+        const freeKeys = currentTx.lockKeys.filter((k) => !this.#lockManager.isLocked(k));
+        if (freeKeys.length > 0) {
+          const lockRes = await this.#lockManager.acquireLocks({
+            ownerId: `recovery_${currentTx.transactionId}`,
+            keys: freeKeys,
+            timeoutMs: 50
+          });
+          if (lockRes.ok) {
+            this.#heldRecoveryLocks.set(currentTx.transactionId, lockRes.value);
+          }
         }
       }
     }
@@ -27769,9 +27780,7 @@ var DowntimeService = class {
         const docRes = await this.#domains.read(cleanDomainUuid);
         if (!docRes.ok) return docRes;
         const dtData = getDomainDowntimeData(docRes.value.record);
-        const existingActivity = dtData.activities.find(
-          (a) => data.activityId && a.id === data.activityId || !data.activityId && a.definitionId === data.definitionId
-        );
+        const existingActivity = data.activityId ? dtData.activities.find((a) => a.id === data.activityId) : void 0;
         if (existingActivity) {
           if (this.#transactionStore) {
             this.#transactionStore.transition(

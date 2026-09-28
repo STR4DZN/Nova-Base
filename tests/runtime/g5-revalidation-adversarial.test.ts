@@ -4371,6 +4371,175 @@ test("G5-REVAL5-AUDIT Scenario 15: Facility snapshot restoration fails closed on
   assert.equal(completedSteps.includes("restore_facility_snapshot_fac-test-1"), false, "Failed restoration must NOT mark step as completed");
 });
 
+// ---------------------------------------------------------------------------
+// TEST 57: G5-REVAL5-AUDIT Scenario 16 — Interrupted compensation from crash transitions on startup to needs-recovery and recovers idempotently
+// ---------------------------------------------------------------------------
+test("G5-REVAL5-AUDIT Scenario 16: Interrupted compensation from crash transitions on startup to needs-recovery and recovers idempotently", async () => {
+  let record = createInitialRecord();
+  record = withDomainEconomyData(record, {
+    schemaVersion: 1,
+    accounts: [
+      {
+        mode: "native",
+        domainUuid: "JournalEntry.dom-adv-1",
+        resourceId: "domain-manager:materials",
+        balanceMinor: 200,
+        baseCapacityMinor: null
+      }
+    ]
+  });
+  const env = setupTestEnvironment(record);
+  const txId = "tx_interrupted_comp";
+  const tx = createTransactionRecord({
+    transactionId: txId,
+    commandId: "cmd_interrupted_comp" as any,
+    authorityEpoch: 1,
+    lockKeys: [`domain:${env.rawDoc.id}`],
+    safeAutoRecovery: true,
+    recoveryData: {
+      type: "projects:start",
+      domainUuid: env.rawDoc.id,
+      projectId: "prj_interrupted",
+      debitedCosts: [{ resourceId: "domain-manager:materials", amountMinor: 50 }],
+      completedCompensationSteps: []
+    }
+  });
+  env.transactionStore.save(tx);
+  env.transactionStore.transition(txId, "claimed", 1);
+  env.transactionStore.transition(txId, "prepared", 1);
+  env.transactionStore.transition(txId, "needs-recovery", 1);
+  // Transaction was interrupted mid-compensation when node crashed
+  env.transactionStore.transition(txId, "compensating", 1);
+
+  env.projectsService.registerRecoveryCompensators(env.recoveryService);
+
+  // Authority restarts in epoch 2 and runs scanOnStartup
+  const unresolved = await env.recoveryService.scanOnStartup(2);
+  const scannedTx = env.transactionStore.get(txId);
+  assert.equal(scannedTx?.state, "needs-recovery", "Interrupted compensation must transition to needs-recovery on failover");
+
+  // Recovery must now succeed without DM_TRANSACTION_INVALID_TRANSITION
+  const recRes = await env.recoveryService.recoverTransaction(txId, 2);
+  assert.equal(recRes.ok, true, "Recovery must succeed when resumed after failover");
+  assert.equal(recRes.value.state, "compensated");
+
+  const doc = (await env.domains.read(env.rawDoc.id)).value;
+  const econ = tryGetDomainEconomyData(doc.record).value;
+  const mat = econ.accounts.find((a) => a.resourceId === "domain-manager:materials")!.balanceMinor;
+  assert.equal(mat, 250, "Refunded 50 materials during recovery compensation");
+});
+
+// ---------------------------------------------------------------------------
+// TEST 58: G5-REVAL5-AUDIT Scenario 17 — Abandoned claimed/planned transactions transition to failed on startup scan
+// ---------------------------------------------------------------------------
+test("G5-REVAL5-AUDIT Scenario 17: Abandoned claimed/planned transactions transition to failed on startup scan", async () => {
+  const env = setupTestEnvironment();
+  const txClaimedId = "tx_abandoned_claimed";
+  const txClaimed = createTransactionRecord({
+    transactionId: txClaimedId,
+    commandId: "cmd_abandoned_claimed" as any,
+    authorityEpoch: 1,
+    lockKeys: [`domain:${env.rawDoc.id}`],
+    safeAutoRecovery: false
+  });
+  env.transactionStore.save(txClaimed);
+  env.transactionStore.transition(txClaimedId, "claimed", 1);
+
+  const txPlannedId = "tx_abandoned_planned";
+  const txPlanned = createTransactionRecord({
+    transactionId: txPlannedId,
+    commandId: "cmd_abandoned_planned" as any,
+    authorityEpoch: 1,
+    lockKeys: [`domain:${env.rawDoc.id}`],
+    safeAutoRecovery: false
+  });
+  env.transactionStore.save(txPlanned);
+
+  await env.recoveryService.scanOnStartup(2);
+
+  const storedClaimed = env.transactionStore.get(txClaimedId);
+  assert.equal(storedClaimed?.state, "failed", "Claimed transaction abandoned before prepare must fail on failover");
+
+  const storedPlanned = env.transactionStore.get(txPlannedId);
+  assert.equal(storedPlanned?.state, "failed", "Planned transaction abandoned before claim must fail on failover");
+});
+
+// ---------------------------------------------------------------------------
+// TEST 59: G5-REVAL5-AUDIT Scenario 18 — Downtime start parent state reconciliation rejects false match on definitionId when activityId differs
+// ---------------------------------------------------------------------------
+test("G5-REVAL5-AUDIT Scenario 18: Downtime start parent state reconciliation rejects false match on definitionId when activityId differs", async () => {
+  let record = createInitialRecord();
+  record = withDomainEconomyData(record, {
+    schemaVersion: 1,
+    accounts: [
+      {
+        mode: "native",
+        domainUuid: "JournalEntry.dom-adv-1",
+        resourceId: "domain-manager:materials",
+        balanceMinor: 200,
+        baseCapacityMinor: null
+      }
+    ]
+  });
+  const env = setupTestEnvironment(record);
+
+  // Directly save an existing activity on domain with definitionId: "domain-manager:crafting" and id: "dt-existing-1"
+  const docRes = await env.domains.read(env.rawDoc.id);
+  const dtData = getDomainDowntimeData(docRes.value.record);
+  const existingActivity = {
+    id: "dt-existing-1",
+    definitionId: "domain-manager:crafting",
+    lifecycle: "active",
+    participants: [],
+    progress: 0,
+    workRequired: 10,
+    startedAtReal: Date.now(),
+    updatedAtReal: Date.now()
+  } as any;
+  await env.domains.save({
+    ...docRes.value,
+    record: withDomainDowntimeData(docRes.value.record, {
+      ...dtData,
+      activities: Object.freeze([existingActivity])
+    })
+  });
+
+  // Now create an uncommitted transaction with a DIFFERENT activityId that crashed during committing
+  const txId = "tx_dt_diff_activity";
+  const tx = createTransactionRecord({
+    transactionId: txId,
+    commandId: "cmd_dt_diff" as any,
+    authorityEpoch: 1,
+    lockKeys: [`domain:${env.rawDoc.id}`],
+    safeAutoRecovery: true,
+    recoveryData: {
+      type: "downtime:start",
+      domainUuid: env.rawDoc.id,
+      activityId: "dt-completely-different-id",
+      definitionId: "domain-manager:crafting",
+      debitedCosts: [{ resourceId: "domain-manager:materials", amount: 10 }]
+    }
+  });
+  env.transactionStore.save(tx);
+  env.transactionStore.transition(txId, "claimed", 1);
+  env.transactionStore.transition(txId, "prepared", 1);
+  env.transactionStore.transition(txId, "committing", 1);
+  env.transactionStore.transition(txId, "needs-recovery", 1);
+
+  env.downtimeService.registerRecoveryCompensators(env.recoveryService);
+
+  // Recovery must NOT reconcile to committed based on definitionId; it must compensate (refund debited cost)
+  const recRes = await env.recoveryService.recoverTransaction(txId, 1);
+  assert.equal(recRes.ok, true);
+  assert.equal(recRes.value.state, "compensated", "Transaction must be compensated, not falsely committed");
+
+  const finalDoc = (await env.domains.read(env.rawDoc.id)).value;
+  const econ = tryGetDomainEconomyData(finalDoc.record).value;
+  const mat = econ.accounts.find((a) => a.resourceId === "domain-manager:materials")!.balanceMinor;
+  assert.equal(mat, 210, "Refunded 10 materials during downtime recovery compensation");
+});
+
+
 
 
 

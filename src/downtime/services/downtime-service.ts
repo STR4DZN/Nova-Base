@@ -341,11 +341,9 @@ export class DowntimeService {
         const docRes = await this.#domains.read(cleanDomainUuid);
         if (!docRes.ok) return docRes;
         const dtData = getDomainDowntimeData(docRes.value.record);
-        const existingActivity = dtData.activities.find(
-          (a) =>
-            (data.activityId && a.id === data.activityId) ||
-            (!data.activityId && a.definitionId === data.definitionId)
-        );
+        const existingActivity = data.activityId
+          ? dtData.activities.find((a) => a.id === data.activityId)
+          : undefined;
         if (existingActivity) {
           if (this.#transactionStore) {
             this.#transactionStore.transition(

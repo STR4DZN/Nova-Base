@@ -5,7 +5,7 @@
 **Normative Authorities:** `Documentos/99_DOMAIN_MANAGER_MASTER_SPECIFICATION_V1.md` (§15, §16, §17, DEC-083 to DEC-097, Anexo 07 DEC-2306 to DEC-3200), `Documentos/GATES/15_G5_PROJECTS_FACILITIES_DOWNTIME.md`  
 **Status:** **GATE_G5_COMPLETED_PENDING_USER_ACCEPTANCE (Aguardando Aceitação Soberana do Usuário — Nunca aceito sem confirmação explícita)**  
 **Date:** 2026-09-28  
-**Test Suite:** 601/601 passing (0 failures, 0 regressions against G4 baseline of 444; +157 dedicated G5 tests, including 56 adversarial revalidation tests)  
+**Test Suite:** 604/604 passing (0 failures, 0 regressions against G4 baseline of 444; +160 dedicated G5 tests, including 59 adversarial revalidation tests)  
 **TypeScript Conformance:** Strict, 0 errors via `npx tsc --noEmit`  
 **Package & Artifact Validation:** PASS (`dist/domain-manager-v0.0.5.zip`, validation scripts verified)
 
@@ -80,7 +80,7 @@ The G5 test suite validates the system against high-scale multi-domain operation
 
 ## 5. Test Suite & Validation Summary
 
-- **Total Test Count**: 601 tests passing (0 failures, 0 regressions across G0–G4 baseline of 444; +157 dedicated G5 tests).
+- **Total Test Count**: 604 tests passing (0 failures, 0 regressions across G0–G4 baseline of 444; +160 dedicated G5 tests).
 - **TypeScript Compilation**: Strict conformance, 0 errors via `node node_modules/typescript/bin/tsc --noEmit`.
 - **Production Build**: `node build.mjs` built cleanly with zero warnings (`dist/main.js`).
 - **Distribution Package**: `node scripts/package.mjs` created `dist/domain-manager-v0.0.5.zip`.
@@ -185,7 +185,7 @@ The G5 test suite validates the system against high-scale multi-domain operation
 | **G5-REVAL5-006** | CRITICAL | Project completion partial debit failure: if a secondary `onCompletion` debit failed, previous debits were not compensated and transaction marked `failed`. | In `project-completion-domain-operation-plan.ts`, any `onCompletion` debit failure triggers immediate reverse compensation (`compensatePriorSteps`) of all prior debits before failing closed. | `tests/runtime/g5-revalidation-adversarial.test.ts` (Scenario 6 verifies multi-debit completion failure refunds prior debits). |
 | **G5-REVAL5-007** | HIGH | Project completion workforce release ignored real repository errors as "non-fatal", risking orphaned active reservations. | Differentiated legitimate absence of workforce reservations from real storage/read errors. Storage errors fail closed (`DM_PROJECT_COMPLETION_BLOCKED`), trigger rollback, and prevent completion. | `tests/runtime/g5-revalidation-adversarial.test.ts` (Scenario 7 verifies workforce release storage error blocks completion). |
 | **G5-REVAL5-008** | HIGH | Facility recovery does not restore Facility: compensators refunded costs but left facility modified if parent write had occurred. | Persisted previous facility snapshots and revisions into `recoveryData`. On rollback, compensator restores the exact prior snapshot and revision to the domain record. | `tests/runtime/g5-revalidation-adversarial.test.ts` (Scenario 9 & Scenario 15 verify facility snapshot restoration and fail-closed error handling). |
-| **G5-REVAL5-009** | TEST GAP | Missing adversarial test coverage for all 9 crash-safety, reconciliation, flush failure, and retry scenarios. | Expanded `tests/runtime/g5-revalidation-adversarial.test.ts` to 56 tests (adding Scenarios 1 to 9 and Scenarios 10 to 15) verifying all crash points, flush errors, idempotency checkpoints, and reconciliation paths. 56/56 passing. | `tests/runtime/g5-revalidation-adversarial.test.ts` (56/56 passing, full suite 601/601 passing). |
+| **G5-REVAL5-009** | TEST GAP | Missing adversarial test coverage for all 9 crash-safety, reconciliation, flush failure, and retry scenarios. | Expanded `tests/runtime/g5-revalidation-adversarial.test.ts` to 59 tests (adding Scenarios 1 to 9, Scenarios 10 to 15, and Scenarios 16 to 18) verifying all crash points, flush errors, idempotency checkpoints, interrupted compensation resumption, and reconciliation paths. 59/59 passing. | `tests/runtime/g5-revalidation-adversarial.test.ts` (59/59 passing, full suite 604/604 passing). |
 
 ---
 
