@@ -97,6 +97,7 @@ export interface AdjustParams {
   readonly commandId?: CommandId;
   readonly authorityEpoch?: number;
   readonly lockOwner?: string;
+  readonly idempotencyKey?: string;
 }
 
 export interface TransferParams {
@@ -710,6 +711,21 @@ export class EconomyService {
 
       const existingAccount = econData.accounts[accIndex];
 
+      // G5-REVAL6-002: Check idempotency key against ledger store before executing adjustment
+      if (params.idempotencyKey) {
+        const existingEntries = this.#ledgerStore.query({
+          domainUuid: params.domainUuid,
+          sourceRef: params.idempotencyKey
+        });
+        if (existingEntries.length > 0) {
+          return ok({
+            account: existingAccount,
+            entry: existingEntries[0],
+            isNoop: true
+          });
+        }
+      }
+
       if (existingAccount.mode === "derived") {
         return err(
           createPublicError({
@@ -911,7 +927,7 @@ export class EconomyService {
           transactionId,
           source: {
             type: "adjustment",
-            ref: providerAccount.providerRef,
+            ref: params.idempotencyKey ?? providerAccount.providerRef,
             reason: params.reason,
             userId: params.userId
           }
@@ -1033,7 +1049,10 @@ export class EconomyService {
         resourceId: params.resourceId,
         deltaMinor: intent.deltaMinor,
         kind: intent.kind,
-        source: intent.source
+        source: {
+          ...intent.source,
+          ref: params.idempotencyKey ?? intent.source.ref
+        }
       });
 
       if (!entryRes.ok) {

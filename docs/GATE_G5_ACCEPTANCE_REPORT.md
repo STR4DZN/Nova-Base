@@ -5,7 +5,7 @@
 **Normative Authorities:** `Documentos/99_DOMAIN_MANAGER_MASTER_SPECIFICATION_V1.md` (§15, §16, §17, DEC-083 to DEC-097, Anexo 07 DEC-2306 to DEC-3200), `Documentos/GATES/15_G5_PROJECTS_FACILITIES_DOWNTIME.md`  
 **Status:** **GATE_G5_COMPLETED_PENDING_USER_ACCEPTANCE (Aguardando Aceitação Soberana do Usuário — Nunca aceito sem confirmação explícita)**  
 **Date:** 2026-09-28  
-**Test Suite:** 604/604 passing (0 failures, 0 regressions against G4 baseline of 444; +160 dedicated G5 tests, including 59 adversarial revalidation tests)  
+**Test Suite:** 611/611 passing (0 failures, 0 regressions against G4 baseline of 444; +167 dedicated G5 tests, including 66 adversarial revalidation tests)  
 **TypeScript Conformance:** Strict, 0 errors via `npx tsc --noEmit`  
 **Package & Artifact Validation:** PASS (`dist/domain-manager-v0.0.5.zip`, validation scripts verified)
 
@@ -189,9 +189,21 @@ The G5 test suite validates the system against high-scale multi-domain operation
 
 ---
 
-## 12. Canonical Next Gate Designation
+## 12. Sixth Revalidation Audit Remediation Matrix (G5-REVAL6-001 to G5-REVAL6-005)
 
-Per the Master Specification roadmap, Gate G5 is now complete, fully remediated against initial audit (G5-AUD-001 to G5-AUD-010), first revalidation (G5-REVAL-001 to G5-REVAL-012), second revalidation (G5-REVAL2-001 to G5-REVAL2-010), third revalidation (G5-REVAL3-001 to G5-REVAL3-007), fourth revalidation (G5-REVAL4-001 to G5-REVAL4-012), and fifth revalidation (G5-REVAL5-001 to G5-REVAL5-009), and strictly pending user acceptance:
+| Revalidation Finding | Severity | Description & Root Cause | Architectural Remediation | Verification Evidence |
+|---|---|---|---|---|
+| **G5-REVAL6-001** | CRITICAL | Shared compensation checkpoints & fail-closed rollback: flush errors during `markCompensationStepCompleted` left unpersisted checkpoints in memory, and immediate compensation reordering needed durable checkpointing before subsequent steps. | Wrapped `transactionStore.flush()` in try/catch within `markCompensationStepCompleted` and restored in-memory record to prior state (`transactionStore.save(currentRecord)`) on throw. Reordered immediate compensations to ensure debited cost refunds occur and checkpoint cleanly before allocation releases. | `tests/runtime/g5-revalidation-adversarial.test.ts` (Scenario 19 & Scenario 20 verify fail-closed step checkpointing and recovery retry skipping). |
+| **G5-REVAL6-002** | CRITICAL | Compensator retry idempotency on partial success: retrying compensations after step failure risked duplicate adjustments and balance drift. | Bound each compensation step to deterministic idempotency key `${txId}:${stepId}` in `EconomyService` and verified ledger entries prior to applying adjustments. Retried compensations detect existing ledger entries and act idempotently without duplicate adjustments. | `tests/runtime/g5-revalidation-adversarial.test.ts` (Scenario 20 verifies idempotency on compensation retry via ledger query and idempotency key). |
+| **G5-REVAL6-003** | CRITICAL | Lock contention on runtime `needs-recovery`: transactions entering `needs-recovery` during runtime must immediately hold recovery locks without gap, preventing concurrent mutations on the same keys. | Implemented zero-gap lock transfer retaining domain locks into the recovery scope when a transaction enters `needs-recovery`, rejecting subsequent concurrent mutations with `DM_LOCK_TIMEOUT`. | `tests/runtime/g5-revalidation-adversarial.test.ts` (Scenario 21 & Scenario 25 verify zero-gap lock transfer and blocking of concurrent mutations). |
+| **G5-REVAL6-004** | CRITICAL | All-or-nothing lock acquisition on startup scan & rejection of partial lock sets: `scanOnStartup` and `recoverTransaction` could retain partial locks or attempt recovery with incomplete lock coverage. | Enforced all-or-nothing lock acquisition in `scanOnStartup` (releases all acquired keys if any key cannot be locked) and fail-closed validation in `recoverTransaction` (rejects with `DM_RECOVERY_LOCK_FAILED` if any lock in the set is missing). | `tests/runtime/g5-revalidation-adversarial.test.ts` (Scenario 22 & Scenario 23 verify all-or-nothing scan locking and rejection of partial lock sets). |
+| **G5-REVAL6-005** | CRITICAL & TEST GAP | Missing adversarial test coverage for all 5 sixth-revalidation crash-safety, zero-gap locking, and lock-set integrity scenarios. | Expanded `tests/runtime/g5-revalidation-adversarial.test.ts` to 66 tests (adding Scenarios 19 to 25) verifying immediate step rollback, retry idempotency with flush failure, lock blocking on needs-recovery, all-or-nothing startup scan locks, partial lock rejection, scan flush failure reversion, and zero-gap lock transfer. 66/66 passing. | `tests/runtime/g5-revalidation-adversarial.test.ts` (66/66 passing, full suite 611/611 passing). |
+
+---
+
+## 13. Canonical Next Gate Designation
+
+Per the Master Specification roadmap, Gate G5 is now complete, fully remediated against initial audit (G5-AUD-001 to G5-AUD-010), first revalidation (G5-REVAL-001 to G5-REVAL-012), second revalidation (G5-REVAL2-001 to G5-REVAL2-010), third revalidation (G5-REVAL3-001 to G5-REVAL3-007), fourth revalidation (G5-REVAL4-001 to G5-REVAL4-012), fifth revalidation (G5-REVAL5-001 to G5-REVAL5-009), and sixth revalidation (G5-REVAL6-001 to G5-REVAL6-005), and strictly pending user acceptance:
 - **Current Gate Status**: `GATE_G5_COMPLETED_PENDING_USER_ACCEPTANCE`
 - **Canonical Next Gate**: **Gate G6 — Relations / Reputation / Agreements / Territory** (`Documentos/GATES/16_G6_RELATIONS_REPUTATION_AGREEMENTS_TERRITORY.md`).
 

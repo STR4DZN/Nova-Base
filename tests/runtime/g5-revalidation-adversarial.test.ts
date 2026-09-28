@@ -202,9 +202,9 @@ function setupTestEnvironment(record: DomainRecord = createInitialRecord()) {
   const domains = new DomainRepository(store);
 
   const lockManager = new LockManager();
-  const coordinator = new MutationCoordinator({ lockManager });
   const transactionStore = new TransactionStore({ storageAdapter: new InMemoryTransactionStorageAdapter() });
   const recoveryService = new RecoveryService({ transactionStore, lockManager });
+  const coordinator = new MutationCoordinator({ lockManager, recoveryService, transactionStore, defaultLockTimeoutMs: 100 });
 
   const resourceRegistry = createDefaultResourceRegistry();
   const ledgerStore = new LedgerStore({ storageAdapter: new InMemoryLedgerStorageAdapter() });
@@ -4537,6 +4537,565 @@ test("G5-REVAL5-AUDIT Scenario 18: Downtime start parent state reconciliation re
   const econ = tryGetDomainEconomyData(finalDoc.record).value;
   const mat = econ.accounts.find((a) => a.resourceId === "domain-manager:materials")!.balanceMinor;
   assert.equal(mat, 210, "Refunded 10 materials during downtime recovery compensation");
+});
+
+// ---------------------------------------------------------------------------
+// TEST 60: G5-REVAL6-005 Scenario 19 — Immediate compensation step A reverts, step B fails -> RecoveryService retry skips step A
+// ---------------------------------------------------------------------------
+test("G5-REVAL6-005 Scenario 19: Immediate compensation step A reverts, step B fails -> RecoveryService retry skips step A", async () => {
+  let record = createInitialRecord();
+  record = withDomainEconomyData(record, {
+    schemaVersion: 1,
+    accounts: [
+      {
+        mode: "native",
+        domainUuid: "JournalEntry.dom-adv-1",
+        resourceId: "domain-manager:materials",
+        balanceMinor: 200,
+        baseCapacityMinor: null
+      }
+    ]
+  });
+  const env = setupTestEnvironment(record);
+
+  env.projectRegistry.register({
+    id: "domain-manager:two-cost-project",
+    version: 1,
+    label: "Two Cost Project",
+    tags: ["construction"],
+    progressResolverId: "domain-manager:standard",
+    defaultWorkRequired: 100,
+    requirements: [],
+    costs: [
+      { resourceId: "domain-manager:materials", amountMinor: 50, timing: "upfront" },
+      { resourceId: "domain-manager:materials", amountMinor: 30, timing: "reserved" }
+    ],
+    rewards: []
+  });
+
+  // Inject failure into peopleService.releaseWorkforceReservation during immediate rollback
+  const origRelWf = env.peopleService.releaseWorkforceReservation.bind(env.peopleService);
+  let wfFailedOnce = true;
+  env.peopleService.releaseWorkforceReservation = async (params: any) => {
+    if (wfFailedOnce) {
+      wfFailedOnce = false;
+      return err(
+        createPublicError({
+          code: "DM_PEOPLE_INJECTED_FAULT",
+          category: "internal",
+          message: "Injected workforce release error during immediate rollback"
+        })
+      );
+    }
+    return origRelWf(params);
+  };
+
+  // Inject failure into domain save after upfront debits & reservation
+  const origSave = env.domains.save.bind(env.domains);
+  env.domains.save = async (doc: any) => {
+    const prjData = getDomainProjectsData(doc.record);
+    if (prjData.projects.some((p: any) => p.name === "Partial Comp Project")) {
+      return err(
+        createPublicError({
+          code: "DM_STORAGE_INJECTED_FAULT",
+          category: "internal",
+          message: "Injected disk write failure during project start save"
+        })
+      );
+    }
+    return origSave(doc);
+  };
+
+  const startCmdId = "cmd_start_partial_comp" as CommandId;
+  const startRes = await env.projectsService.startProject({
+    domainUuid: env.rawDoc.id,
+    definitionId: "domain-manager:two-cost-project",
+    name: "Partial Comp Project",
+    workRequired: 100,
+    workforceRequired: 1,
+    commandId: startCmdId,
+    authorityEpoch: 1,
+    userId: "gm-user"
+  });
+
+  assert.equal(startRes.ok, false, "Project start must fail due to domain save error");
+
+  // Restore domains.save
+  env.domains.save = origSave;
+
+  const tx = env.transactionStore.getByCommandId(startCmdId);
+  assert.ok(tx, "Transaction must exist");
+  assert.equal(tx.state, "needs-recovery", "Transaction must be in needs-recovery due to failed workforce compensation");
+
+  // Register recovery compensators
+  env.projectsService.registerRecoveryCompensators(env.recoveryService);
+
+  // Initial balance was 200. Upfront debit was 50 (balance -> 150).
+  // During immediate rollback:
+  // Step 1: workforce release failed (wfFailedOnce).
+  // Step 2: reservation release succeeded.
+  // Step 3: refund debited cost succeeded (+50 -> balance back to 200), and markCompensationStepCompleted recorded the refund!
+  const midDoc = (await env.domains.read(env.rawDoc.id)).value;
+  const midEcon = tryGetDomainEconomyData(midDoc.record).value;
+  const midMat = midEcon.accounts.find((a) => a.resourceId === "domain-manager:materials")!.balanceMinor;
+  assert.equal(midMat, 200, "Materials must be refunded during immediate compensation step");
+
+  // Now, RecoveryService retries recovery on the same transaction!
+  const recRes = await env.recoveryService.recoverTransaction(tx.transactionId, 1);
+  assert.equal(recRes.ok, true, "Recovery must succeed on retry");
+  assert.equal(recRes.value.state, "compensated");
+
+  // Verify materials account did NOT get double-refunded (must still be 200, not 250!)
+  const finalDoc = (await env.domains.read(env.rawDoc.id)).value;
+  const finalEcon = tryGetDomainEconomyData(finalDoc.record).value;
+  const finalMat = finalEcon.accounts.find((a) => a.resourceId === "domain-manager:materials")!.balanceMinor;
+  assert.equal(finalMat, 200, "Step A was skipped on retry: materials must NOT be double-refunded");
+});
+
+// ---------------------------------------------------------------------------
+// TEST 61: G5-REVAL6-005 Scenario 20 — Compensation side effect succeeds, but markCompensationStepCompleted().flush() fails -> retry is idempotent via idempotencyKey and ledger query
+// ---------------------------------------------------------------------------
+test("G5-REVAL6-005 Scenario 20: Compensation side effect succeeds, but markCompensationStepCompleted().flush() fails -> retry is idempotent via idempotencyKey and ledger query", async () => {
+  let record = createInitialRecord();
+  record = withDomainEconomyData(record, {
+    schemaVersion: 1,
+    accounts: [
+      {
+        mode: "native",
+        domainUuid: "JournalEntry.dom-adv-1",
+        resourceId: "domain-manager:materials",
+        balanceMinor: 200,
+        baseCapacityMinor: null
+      }
+    ]
+  });
+  const env = setupTestEnvironment(record);
+
+  const txId = "tx_side_effect_ledger_idemp";
+  const stepId = "refund_dt_start_0_domain-manager:materials_20";
+
+  const tx = createTransactionRecord({
+    transactionId: txId,
+    commandId: "cmd_dt_idemp" as any,
+    authorityEpoch: 1,
+    lockKeys: [`domain:${env.rawDoc.id}`],
+    safeAutoRecovery: true,
+    recoveryData: {
+      type: "downtime:start",
+      domainUuid: env.rawDoc.id,
+      definitionId: "domain-manager:crafting",
+      debitedCosts: [{ resourceId: "domain-manager:materials", amount: 20 }],
+      completedCompensationSteps: []
+    }
+  });
+  env.transactionStore.save(tx);
+  env.transactionStore.transition(txId, "claimed", 1);
+  env.transactionStore.transition(txId, "prepared", 1);
+  env.transactionStore.transition(txId, "needs-recovery", 1);
+
+  env.downtimeService.registerRecoveryCompensators(env.recoveryService);
+
+  // Inject failure on transactionStore.flush during markCompensationStepCompleted
+  let flushCallCount = 0;
+  const origTxFlush = env.transactionStore.flush.bind(env.transactionStore);
+  env.transactionStore.flush = async () => {
+    flushCallCount++;
+    if (flushCallCount === 1) {
+      throw new Error("Injected disk failure during checkpoint flush");
+    }
+    return origTxFlush();
+  };
+
+  // Attempt recovery: commitAdjust succeeds and writes ledger entry with source.ref = idempotencyKey
+  // but checkpoint flush fails!
+  const firstRec = await env.recoveryService.recoverTransaction(txId, 1);
+  assert.equal(firstRec.ok, false, "Recovery must fail when checkpoint flush fails");
+
+  // Restore flush
+  env.transactionStore.flush = origTxFlush;
+
+  // The materials account was credited +20 (balance 220)
+  const docAfterFirst = (await env.domains.read(env.rawDoc.id)).value;
+  const econAfterFirst = tryGetDomainEconomyData(docAfterFirst.record).value;
+  const matAfterFirst = econAfterFirst.accounts.find((a) => a.resourceId === "domain-manager:materials")!.balanceMinor;
+  assert.equal(matAfterFirst, 220, "Materials refunded in ledger on first attempt");
+
+  // Notice that tx.recoveryData.completedCompensationSteps does NOT contain stepId because flush failed!
+  const uncheckpointedTx = env.transactionStore.get(txId);
+  assert.equal(
+    ((uncheckpointedTx?.recoveryData as any).completedCompensationSteps || []).includes(stepId),
+    false,
+    "Step checkpoint was unconfirmed"
+  );
+
+  // Now retry recovery!
+  // Compensator runs step again, but commitAdjust checks ledgerStore for idempotencyKey and returns isNoop: true!
+  const secondRec = await env.recoveryService.recoverTransaction(txId, 1);
+  assert.equal(secondRec.ok, true, "Second recovery attempt must succeed");
+  assert.equal(secondRec.value.state, "compensated");
+
+  const docAfterSecond = (await env.domains.read(env.rawDoc.id)).value;
+  const econAfterSecond = tryGetDomainEconomyData(docAfterSecond.record).value;
+  const matAfterSecond = econAfterSecond.accounts.find((a) => a.resourceId === "domain-manager:materials")!.balanceMinor;
+  assert.equal(matAfterSecond, 220, "Materials must NOT be double-refunded due to ledger idempotencyKey query!");
+});
+
+// ---------------------------------------------------------------------------
+// TEST 62: G5-REVAL6-005 Scenario 21 — Transaction enters needs-recovery in runtime -> another mutation on the same keys is blocked immediately before restart
+// ---------------------------------------------------------------------------
+test("G5-REVAL6-005 Scenario 21: Transaction enters needs-recovery in runtime -> another mutation on same keys is blocked immediately before restart", async () => {
+  let record = createInitialRecord();
+  record = withDomainEconomyData(record, {
+    schemaVersion: 1,
+    accounts: [
+      {
+        mode: "native",
+        domainUuid: "JournalEntry.dom-adv-1",
+        resourceId: "domain-manager:materials",
+        balanceMinor: 200,
+        baseCapacityMinor: null
+      }
+    ]
+  });
+  const env = setupTestEnvironment(record);
+
+  env.projectRegistry.register({
+    id: "domain-manager:fail-needs-rec-project",
+    version: 1,
+    label: "Fail Needs Rec Project",
+    tags: ["infrastructure"],
+    progressResolverId: "domain-manager:standard",
+    defaultWorkRequired: 10,
+    requirements: [],
+    costs: [{ resourceId: "domain-manager:materials", amountMinor: 20, timing: "upfront" }],
+    rewards: []
+  });
+
+  // Inject failure into peopleService.releaseWorkforceReservation so immediate rollback fails and transaction enters needs-recovery
+  env.peopleService.releaseWorkforceReservation = async () => {
+    return err(
+      createPublicError({
+        code: "DM_PEOPLE_FAILURE",
+        category: "internal",
+        message: "Workforce release failed"
+      })
+    );
+  };
+
+  // Inject domain save failure
+  const origSave = env.domains.save.bind(env.domains);
+  env.domains.save = async (doc: any) => {
+    const prjData = getDomainProjectsData(doc.record);
+    if (prjData.projects.some((p: any) => p.name === "Needs Recovery Test")) {
+      return err(
+        createPublicError({
+          code: "DM_STORAGE_FAIL",
+          category: "internal",
+          message: "Storage save failed"
+        })
+      );
+    }
+    return origSave(doc);
+  };
+
+  const failingCmdId = createCommandId();
+  const res = await env.commandBus.execute({
+    contractVersion: 1,
+    commandId: failingCmdId,
+    type: "projects:start-project",
+    issuedAtReal: Date.now(),
+    authorityEpoch: 1,
+    payload: {
+      domainUuid: env.rawDoc.id,
+      definitionId: "domain-manager:fail-needs-rec-project",
+      name: "Needs Recovery Test",
+      workRequired: 10,
+      workforceRequired: 1
+    }
+  });
+
+  assert.equal(res.ok, true);
+  assert.equal(res.value.status, "rejected");
+
+  const tx = env.transactionStore.getByCommandId(failingCmdId);
+  assert.ok(tx);
+  assert.equal(tx.state, "needs-recovery");
+
+  // Verify that the domain lock is STILL held by the recovery owner (recovery_<txId>)
+  const domainLockKey = `domain:${normalizeJournalEntryId(env.rawDoc.id)}`;
+  assert.equal(
+    env.lockManager.isLocked(domainLockKey),
+    true,
+    "Domain lock must remain locked after needs-recovery transfer"
+  );
+  assert.equal(
+    env.recoveryService.hasHeldRecoveryLock(tx.transactionId),
+    true,
+    "RecoveryService must track the held recovery lock"
+  );
+
+  // Restore domain save
+  env.domains.save = origSave;
+
+  // Now attempt another mutation on the SAME domain in the same runtime BEFORE restart
+  const nextCmdId = createCommandId();
+  const blockedRes = await env.commandBus.execute({
+    contractVersion: 1,
+    commandId: nextCmdId,
+    type: "facilities:apply-damage",
+    issuedAtReal: Date.now(),
+    authorityEpoch: 1,
+    payload: {
+      domainUuid: env.rawDoc.id,
+      facilityId: "fac-dummy",
+      damage: 10
+    }
+  });
+
+  assert.equal(blockedRes.ok, true);
+  assert.equal(blockedRes.value.status, "rejected", "Second mutation must be blocked by the active recovery lock");
+  assert.equal(blockedRes.value.error?.code, "DM_LOCK_TIMEOUT");
+});
+
+// ---------------------------------------------------------------------------
+// TEST 63: G5-REVAL6-005 Scenario 22 — scanOnStartup encounters lock set [domain, entity] with one key occupied -> defers without acquiring partial locks
+// ---------------------------------------------------------------------------
+test("G5-REVAL6-005 Scenario 22: scanOnStartup encounters lock set [domain, entity] with one key occupied -> defers without acquiring partial locks", async () => {
+  const env = setupTestEnvironment();
+
+  const domainKey = `domain:${env.rawDoc.id}`;
+  const entityKey = `facility:fac-busy-1`;
+
+  // Occupy entityKey under an external owner
+  const externalLock = await env.lockManager.acquireLocks({
+    keys: [entityKey],
+    ownerId: "external-worker",
+    timeoutMs: 60000
+  });
+  assert.equal(externalLock.ok, true);
+
+  // Create an unresolved transaction with BOTH domainKey and entityKey
+  const txId = "tx_partial_lock_test";
+  const tx = createTransactionRecord({
+    transactionId: txId,
+    commandId: "cmd_partial_lock" as any,
+    authorityEpoch: 1,
+    lockKeys: [domainKey, entityKey],
+    safeAutoRecovery: true,
+    recoveryData: {
+      type: "facilities:maintenance",
+      domainUuid: env.rawDoc.id,
+      facilityId: "fac-busy-1",
+      debitedCosts: []
+    }
+  });
+  env.transactionStore.save(tx);
+  env.transactionStore.transition(txId, "claimed", 1);
+  env.transactionStore.transition(txId, "prepared", 1);
+  env.transactionStore.transition(txId, "needs-recovery", 1);
+
+  // Run scanOnStartup in new epoch
+  await env.recoveryService.scanOnStartup(2);
+
+  // scanOnStartup must NOT acquire domainKey partially!
+  assert.equal(
+    env.lockManager.isLocked(domainKey),
+    false,
+    "scanOnStartup must not acquire partial lock on domainKey when entityKey is busy"
+  );
+  assert.equal(
+    env.recoveryService.hasHeldRecoveryLock(txId),
+    false,
+    "Transaction must not be registered with partial recovery locks"
+  );
+
+  // Release external lock
+  externalLock.value.release();
+
+  // Subsequent scan can now acquire both keys atomically
+  await env.recoveryService.scanOnStartup(2);
+  assert.equal(
+    env.lockManager.isLocked(domainKey),
+    true,
+    "Both keys acquired atomically once entityKey was freed"
+  );
+  assert.equal(
+    env.lockManager.isLocked(entityKey),
+    true,
+    "Both keys acquired atomically once entityKey was freed"
+  );
+});
+
+// ---------------------------------------------------------------------------
+// TEST 64: G5-REVAL6-005 Scenario 23 — recoverTransaction cannot execute with a partial lock set -> rejects with DM_RECOVERY_LOCK_FAILED
+// ---------------------------------------------------------------------------
+test("G5-REVAL6-005 Scenario 23: recoverTransaction cannot execute with a partial lock set -> rejects with DM_RECOVERY_LOCK_FAILED", async () => {
+  const env = setupTestEnvironment();
+
+  const domainKey = `domain:${env.rawDoc.id}`;
+  const projectKey = `project:prj-contested`;
+
+  // Occupy projectKey under an external holder
+  const extLock = await env.lockManager.acquireLocks({
+    keys: [projectKey],
+    ownerId: "competing-owner",
+    timeoutMs: 60000
+  });
+  assert.equal(extLock.ok, true);
+
+  const txId = "tx_contested_recovery";
+  const tx = createTransactionRecord({
+    transactionId: txId,
+    commandId: "cmd_contested" as any,
+    authorityEpoch: 1,
+    lockKeys: [domainKey, projectKey],
+    safeAutoRecovery: false,
+    recoveryData: {
+      type: "projects:start",
+      domainUuid: env.rawDoc.id,
+      projectId: "prj-contested"
+    }
+  });
+  env.transactionStore.save(tx);
+  env.transactionStore.transition(txId, "claimed", 1);
+  env.transactionStore.transition(txId, "prepared", 1);
+  env.transactionStore.transition(txId, "needs-recovery", 1);
+
+  // Directly invoke recoverTransaction without full lock set available
+  const recRes = await env.recoveryService.recoverTransaction(txId, 2);
+  assert.equal(recRes.ok, false);
+  assert.equal(recRes.error.code, "DM_RECOVERY_LOCK_FAILED");
+
+  // Confirm domainKey was not leaked
+  assert.equal(
+    env.lockManager.isLocked(domainKey),
+    false,
+    "domainKey must not remain locked after failed lock acquisition"
+  );
+
+  extLock.value.release();
+});
+
+// ---------------------------------------------------------------------------
+// TEST 65: G5-REVAL6-005 Scenario 24 — scanOnStartup transition flush fails -> compensation does not initiate, returns storage error, leaves locks held
+// ---------------------------------------------------------------------------
+test("G5-REVAL6-005 Scenario 24: scanOnStartup transition flush fails -> compensation does not initiate, returns storage error, leaves locks held", async () => {
+  const env = setupTestEnvironment();
+
+  const txId = "tx_scan_flush_fail";
+  const tx = createTransactionRecord({
+    transactionId: txId,
+    commandId: "cmd_scan_flush_fail" as any,
+    authorityEpoch: 1,
+    lockKeys: [`domain:${env.rawDoc.id}`],
+    safeAutoRecovery: true,
+    recoveryData: {
+      type: "projects:advance",
+      domainUuid: env.rawDoc.id,
+      projectId: "prj_test",
+      debitedCosts: [{ resourceId: "domain-manager:materials", amountMinor: 20 }]
+    }
+  });
+  env.transactionStore.save(tx);
+  env.transactionStore.transition(txId, "claimed", 1);
+  env.transactionStore.transition(txId, "prepared", 1);
+  // Transaction left in committing state before node crash
+  env.transactionStore.transition(txId, "committing", 1);
+
+  // Inject failure when scanOnStartup attempts to flush committing -> needs-recovery transition
+  const origFlush = env.transactionStore.flush.bind(env.transactionStore);
+  env.transactionStore.flush = async () => {
+    throw new Error("Injected disk failure during startup transition flush");
+  };
+
+  // scanOnStartup must fail closed and throw DM_DOMAIN_STORAGE_ERROR
+  let threw = false;
+  try {
+    await env.recoveryService.scanOnStartup(2);
+  } catch (err: any) {
+    threw = true;
+    assert.equal(err.code, "DM_DOMAIN_STORAGE_ERROR");
+  }
+  assert.equal(threw, true, "scanOnStartup must rethrow DM_DOMAIN_STORAGE_ERROR on flush failure");
+
+  // recoverAll must also catch and return the storage error rather than executing compensations
+  const allRes = await env.recoveryService.recoverAll(2);
+  assert.equal(allRes.length, 1);
+  assert.equal(allRes[0].ok, false);
+  assert.equal(allRes[0].error.code, "DM_DOMAIN_STORAGE_ERROR");
+
+  // Locks must remain held in isolation to protect against unsynchronized operations
+  assert.equal(
+    env.lockManager.isLocked(`domain:${env.rawDoc.id}`),
+    true,
+    "Lock must remain held to protect the unpersisted transition state"
+  );
+
+  env.transactionStore.flush = origFlush;
+});
+
+// ---------------------------------------------------------------------------
+// TEST 66: G5-REVAL6-005 Scenario 25 — Concurrency between needs-recovery and recovery lock acquisition is prevented by zero-gap lock transfer
+// ---------------------------------------------------------------------------
+test("G5-REVAL6-005 Scenario 25: Concurrency between needs-recovery and recovery lock acquisition is prevented by zero-gap lock transfer", async () => {
+  let record = createInitialRecord();
+  record = withDomainEconomyData(record, {
+    schemaVersion: 1,
+    accounts: [
+      {
+        mode: "native",
+        domainUuid: "JournalEntry.dom-adv-1",
+        resourceId: "domain-manager:materials",
+        balanceMinor: 200,
+        baseCapacityMinor: null
+      }
+    ]
+  });
+  const env = setupTestEnvironment(record);
+
+  const lockKey = `domain:${env.rawDoc.id}`;
+
+  // Acquire command lock under cmd_initial
+  const cmdLockRes = await env.lockManager.acquireLocks({
+    keys: [lockKey],
+    ownerId: "cmd_initial",
+    timeoutMs: 5000
+  });
+  assert.equal(cmdLockRes.ok, true);
+  const cmdHandle = cmdLockRes.value;
+
+  const txId = "tx_zero_gap_transfer";
+  const tx = createTransactionRecord({
+    transactionId: txId,
+    commandId: "cmd_initial" as any,
+    authorityEpoch: 1,
+    lockKeys: [lockKey],
+    safeAutoRecovery: false
+  });
+  env.transactionStore.save(tx);
+  env.transactionStore.transition(txId, "claimed", 1);
+  env.transactionStore.transition(txId, "prepared", 1);
+  env.transactionStore.transition(txId, "needs-recovery", 1);
+
+  // Isolate transaction via zero-gap lock transfer
+  const isoRes = await env.recoveryService.isolateTransaction(tx, cmdHandle);
+  assert.equal(isoRes.ok, true, "Zero-gap lock transfer must succeed");
+
+  // Simulate command finally block executing release() on the original command handle
+  cmdHandle.release();
+
+  // Verify that the lock is STILL held by recovery owner and was NOT released!
+  assert.equal(env.lockManager.isLocked(lockKey), true, "Lock must remain held despite command handle release");
+  assert.equal(env.recoveryService.hasHeldRecoveryLock(txId), true, "RecoveryService still holds recovery lock");
+
+  // Any concurrent command trying to sneak in between command completion and recovery is rejected
+  const concurrentTry = await env.lockManager.acquireLocks({
+    keys: [lockKey],
+    ownerId: "cmd_concurrent_sneaker",
+    timeoutMs: 100
+  });
+  assert.equal(concurrentTry.ok, false, "Concurrent command cannot acquire lock during zero-gap isolation");
+  assert.equal(concurrentTry.error.code, "DM_LOCK_TIMEOUT");
 });
 
 

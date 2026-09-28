@@ -23,6 +23,7 @@ import { getDomainFacilitiesData } from "../../facilities/facility-data.js";
 import { tryGetDomainPeopleData } from "../../people/people-data.js";
 import type { TransactionStore } from "../../mutations/transaction-store.js";
 import { createTransactionRecord } from "../../mutations/transaction-record.js";
+import { compensateDowntimeStart } from "../services/downtime-recovery-compensators.js";
 
 export interface DowntimeStartPlanParams {
   readonly domainUuid: string;
@@ -318,16 +319,53 @@ export async function executeDowntimeStartPlan(
   let compensationFailed = false;
 
   const compensateDebits = async (reason: string) => {
-    if (!context.economyService || debitedCosts.length === 0) return;
-    for (const cost of debitedCosts) {
-      const refundRes = await context.economyService.commitAdjust({
-        domainUuid: cleanDomainUuid,
-        resourceId: cost.resourceId,
-        deltaMinor: cost.amount,
-        reason: `Compensation: ${reason}`,
-        lockOwner: params.commandId
+    if (context.transactionStore) {
+      const tx = context.transactionStore.get(txId);
+      if (tx) {
+        context.transactionStore.save({
+          ...tx,
+          recoveryData: {
+            ...(tx.recoveryData as any),
+            debitedCosts: Object.freeze([...debitedCosts]),
+            status: "needs-recovery"
+          }
+        });
+        const compRes = await compensateDowntimeStart(
+          tx,
+          {
+            domains: context.domains,
+            economyService: context.economyService,
+            transactionStore: context.transactionStore
+          },
+          { lockOwner: params.commandId, skipReconciliation: true }
+        );
+        if (!compRes.ok) {
+          compensationFailed = true;
+        }
+      }
+    } else if (context.economyService && debitedCosts.length > 0) {
+      const dummyTx = createTransactionRecord({
+        transactionId: txId,
+        commandId: cmdId,
+        authorityEpoch: epoch,
+        lockKeys: [`domain:${cleanDomainUuid}`],
+        safeAutoRecovery: false,
+        recoveryData: {
+          type: "downtime:start",
+          definitionId: params.definitionId,
+          domainUuid: cleanDomainUuid,
+          debitedCosts: Object.freeze([...debitedCosts])
+        }
       });
-      if (!refundRes.ok) {
+      const compRes = await compensateDowntimeStart(
+        dummyTx,
+        {
+          domains: context.domains,
+          economyService: context.economyService
+        },
+        { lockOwner: params.commandId, skipReconciliation: true }
+      );
+      if (!compRes.ok) {
         compensationFailed = true;
       }
     }

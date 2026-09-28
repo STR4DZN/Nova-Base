@@ -16,7 +16,7 @@
 - **Gate G2**: Concluído, auditado, homologado e aceito em ambiente real Foundry VTT v13.351 + Socketlib.
 - **Gate G3**: Concluído, auditado, homologado e aceito soberanamente pelo usuário (`GATE_G3_HOMOLOGATED_AND_ACCEPTED`).
 - **Gate G4**: Concluído, auditado, homologado e aceito pelo usuário. Implementação completa de todos os 10 microbuilds (G4.1 a G4.10) de acordo com o Master Specification (§14, §11–12, §42, DEC-1416–2305) e `Documentos/GATES/14_G4_ECONOMY_RESOURCES.md`.
-- **Gate G5**: Concluído (G5.1 a G5.10, G5-AUD-001 a G5-AUD-010, G5-REVAL-001 a G5-REVAL-012, G5-REVAL2-001 a G5-REVAL2-010, G5-REVAL3-001 a G5-REVAL3-007, G5-REVAL4-001 a G5-REVAL4-012 e G5-REVAL5-001 a G5-REVAL5-009) e aguardando aceitação soberana do usuário (`GATE_G5_COMPLETED_PENDING_USER_ACCEPTANCE`).
+- **Gate G5**: Concluído (G5.1 a G5.10, G5-AUD-001 a G5-AUD-010, G5-REVAL-001 a G5-REVAL-012, G5-REVAL2-001 a G5-REVAL2-010, G5-REVAL3-001 a G5-REVAL3-007, G5-REVAL4-001 a G5-REVAL4-012, G5-REVAL5-001 a G5-REVAL5-009 e G5-REVAL6-001 a G5-REVAL6-005) e aguardando aceitação soberana do usuário (`GATE_G5_COMPLETED_PENDING_USER_ACCEPTANCE`).
   - **G5.1 (Project model / lifecycle — definition / instance / revision)**: Concluído. Separação formal de `ProjectDefinition` (reutilizável, versionada, catalogada em `ProjectDefinitionRegistry`) e `ProjectInstance` (execução concreta por domínio com `revision`, `workRequired`, `workCompleted`, `lifecycle`, `clampProgress`), cálculo puro de progresso inteiro derivado (`calculateProjectProgress` com clamp de goal por DEC-086, DEC-087, DEC-090), máquina de estados de ciclo de vida (`validateProjectLifecycleTransition` cobrindo os 11 estados canônicos de Master §15.4 e reabertura auditada via `allowReopen`), definições canônicas iniciais (`CANONICAL_PROJECT_DEFINITIONS`), e modelo de capacidade em domínio `domain-manager:projects` (`DomainProjectsData`, `tryGetDomainProjectsData`, `withDomainProjectsData`, `getDomainProjectsData`) validado e registrado no `CapabilityRegistry`.
   - **G5.2 (Progress / resolver / history)**: Concluído. Implementação do modelo de histórico append-oriented (`ProjectEntry`), validação estrita de fontes e metadados (`PROJECT_ENTRY_SOURCE_KINDS`), transição de estado pura (`applyProjectEntry`) com suporte a setbacks negativos (DEC-088) e clamp no objetivo por padrão (DEC-090), regras de compensação/reversão auditada (bloqueio de reversão dupla com `DM_PROJECT_REVERSAL_ALREADY_EXISTS` e proibição de reversão de reversão), contrato extensível de resolução pura de progresso (`ProgressResolver`), implementação padrão (`StandardProgressResolver` / `domain-manager:standard`) sem mutação da instância, e catálogo `ProgressResolverRegistry` com factory e suporte a congelamento (`freeze`).
   - **G5.3 (Start plan)**: Concluído. Implementação do modelo de plano pré-execução (`ProjectStartPlan`), avaliação desacoplada de pré-condições (`evaluateProjectStartPlan`) sem mutação direta de Domain/People/Economy, mapeamento de intenção de reservas econômicas (`ProjectEconomicReservationIntent`) para custos upfront e reserved, avaliação de workforce (`ProjectWorkforceIntent`) e requisitos estruturados (`ProjectRequirementEvaluation` com status satisfied/unsatisfied/unavailable/error), detecção e diagnóstico de blockers (`ProjectBlocker`: capacidade ausente, fundos insuficientes, requisitos insatisfeitos, ciclo de vida inválido e `DM_PROJECT_REVISION_MISMATCH`), e commit atômico (`commitProjectStartPlan`) com suporte aos estados `active` e `initializing`, incremento de revisão e geração de `ProjectEntry` inicial.
@@ -33,20 +33,41 @@
 | Verificação | Resultado |
 |---|---|
 | TypeScript strict (`tsc --noEmit`) | PASS (0 erros) |
-| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 604/604 (0 falhas) |
+| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 611/611 (0 falhas) |
 | Relatório de Aceitação G5 | Gerado (`docs/GATE_G5_ACCEPTANCE_REPORT.md`) |
 | Regressões G0/G1/G2/G3/G4 | 0 (todos os 444 testes anteriores preservados e passando) |
-| Testes novos Gate G5 | 160 testes dedicados (G5.1 a G5.10: 101 testes + 59 testes adversários de revalidação em g5-revalidation-adversarial.test.ts) |
+| Testes novos Gate G5 | 167 testes dedicados (G5.1 a G5.10: 101 testes + 66 testes adversários de revalidação em g5-revalidation-adversarial.test.ts) |
 | Remediação de Auditoria G5-AUD-001 a G5-AUD-010 | PASS — 100% remediado, endurecido e verificado |
 | Remediação de Revalidação G5-REVAL-001 a G5-REVAL-012 | PASS — 100% remediado, endurecido e verificado |
 | Remediação de Revalidação 2 G5-REVAL2-001 a G5-REVAL2-010 | PASS — 100% remediado, endurecido e verificado |
 | Remediação de Revalidação 3 G5-REVAL3-001 a G5-REVAL3-007 | PASS — 100% remediado, endurecido e verificado |
 | Remediação de Revalidação 4 G5-REVAL4-001 a G5-REVAL4-012 | PASS — 100% remediado, endurecido e verificado |
 | Remediação de Revalidação 5 G5-REVAL5-001 a G5-REVAL5-009 | PASS — 100% remediado, endurecido e verificado |
+| Remediação de Revalidação 6 G5-REVAL6-001 a G5-REVAL6-005 | PASS — 100% remediado, endurecido e verificado |
 | Build do pacote (`node build.mjs`) | PASS (`dist/main.js` gerado) |
 | Empacotamento (`node scripts/package.mjs`) | PASS (`dist/domain-manager-v0.0.5.zip` gerado) |
 | Validação de pacote (`node scripts/validate-package.mjs`) | PASS |
 | Validação de artefato (`node scripts/validate-artifact.mjs`) | PASS |
+
+## Remediação da 6ª Revalidação Gate G5 — G5-REVAL6-001 a G5-REVAL6-005
+
+1. **G5-REVAL6-001 (CRÍTICO — Checkpoints de Compensação Compartilhados e Reversão Fail-Closed em Falha de Persistência)**:
+   - Em `RecoveryService.markCompensationStepCompleted`, se a chamada a `transactionStore.flush()` falhar, o estado em memória é revertido imediatamente para o registro anterior (`transactionStore.save(currentRecord)`), impedindo que checkpoints de compensação não persistidos permaneçam em memória como falsos positivos.
+   - Em operações imediatas de compensação (`project-start-domain-operation-plan`, etc.), o estorno de custos é executado e persistido antes da liberação de alocações, e qualquer falha transiciona de forma determinística para `needs-recovery`.
+
+2. **G5-REVAL6-002 (CRÍTICO — Idempotência Estrita no Ledger de Compensação via IdempotencyKey e Verificação Prévia)**:
+   - Em compensações que envolvem ajustes econômicos (`EconomyService`), os passos de compensação utilizam chave idempotente determinística estável baseada em `${transactionId}:${compensationStepId}` e consultam o histórico/ledger para garantir que nenhum ajuste de estorno seja aplicado em duplicidade durante retentativas após falhas parciais.
+
+3. **G5-REVAL6-003 (CRÍTICO — Transferência Atômica de Locks sem Lacuna / Zero-Gap Lock Transfer para needs-recovery)**:
+   - Ao transicionar uma transação para `needs-recovery` em runtime, os locks associados são retidos e transferidos atomicamente para o escopo de recovery antes da liberação do contexto do coordenador de mutações, impedindo qualquer corrida ou execução concorrente de novas mutações sobre as chaves em disputa antes da devida recuperação.
+
+4. **G5-REVAL6-004 (CRÍTICO — Aquisição All-or-Nothing de Locks no Startup e Rejeição de Locks Parciais)**:
+   - Em `RecoveryService.scanOnStartup`, caso qualquer chave do conjunto de locks de uma transação não possa ser adquirida imediatamente (conflito ou contenção), todas as chaves já adquiridas são liberadas e a transação é postergada de forma limpa sem retenção de locks parciais.
+   - Em `RecoveryService.recoverTransaction`, a execução é sumariamente rejeitada com `DM_RECOVERY_LOCK_FAILED` caso qualquer lock do conjunto necessário não esteja sob posse do autor de recuperação.
+
+5. **G5-REVAL6-005 (CRÍTICO & TEST GAP — Reversão de Memória em Erro de Flush no Scan e Expansão para 66 Cenários Adversários)**:
+   - `scanOnStartup` captura snapshots originais em memória antes de aplicar transições em lote; caso o flush em lote falhe, todos os registros em memória são revertidos para seus estados originais para evitar corrupção de estado transitório.
+   - A matriz de testes adversários em `tests/runtime/g5-revalidation-adversarial.test.ts` foi expandida com 7 novos cenários complexos (Cenários 19 a 25), totalizando 66 testes adversários com 100% de aprovação (66/66) e elevando o total do repositório para 611/611 testes passando sem regressões.
 
 ## Remediação da 5ª Revalidação Gate G5 — G5-REVAL5-001 a G5-REVAL5-009
 

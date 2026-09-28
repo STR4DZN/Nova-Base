@@ -199,6 +199,45 @@ export class LockManager {
     return this.#locks.get(key)?.currentOwnerId ?? null;
   }
 
+  /**
+   * Atomically transfers lock ownership for all keys held by a handle to a new owner
+   * without releasing the keys back to waiting queues (G5-REVAL6-003).
+   * Calls to release() on the old handle become a safe no-op.
+   */
+  transferLock(
+    handle: LockHandle,
+    newOwnerId: string
+  ): Result<LockHandle, PublicError> {
+    if (!newOwnerId || newOwnerId.trim().length === 0) {
+      return err(
+        createPublicError({
+          code: "DM_LOCK_INVALID_OWNER",
+          category: "validation",
+          message: "newOwnerId must be a non-empty identifier"
+        })
+      );
+    }
+    const oldOwnerId = handle.ownerId;
+    for (const key of handle.keys) {
+      const state = this.#locks.get(key);
+      if (!state || state.currentOwnerId !== oldOwnerId) {
+        return err(
+          createPublicError({
+            code: "DM_LOCK_TRANSFER_FAILED",
+            category: "internal",
+            message: `Cannot transfer lock on key '${key}': not held by '${oldOwnerId}'`
+          })
+        );
+      }
+    }
+    for (const key of handle.keys) {
+      const state = this.#locks.get(key)!;
+      state.currentOwnerId = newOwnerId;
+    }
+    const newHandleId = `lock_h_${this.#nextHandleSeq++}_${Date.now()}`;
+    return ok(this.#createHandle(newHandleId, newOwnerId, handle.keys));
+  }
+
   getDiagnostics(): readonly LockDiagnosticsInfo[] {
     const info: LockDiagnosticsInfo[] = [];
     for (const [key, state] of this.#locks) {

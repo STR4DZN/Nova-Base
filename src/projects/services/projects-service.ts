@@ -54,6 +54,12 @@ import {
   isCompensationStepCompleted,
   markCompensationStepCompleted
 } from "../../mutations/recovery-service.js";
+import {
+  compensateProjectCompletion,
+  compensateProjectAdvance,
+  compensateProjectCancel,
+  compensateProjectStart
+} from "./project-recovery-compensators.js";
 
 export interface ProjectsServiceOptions {
   readonly domains: DomainRepositoryContract;
@@ -360,365 +366,57 @@ export class ProjectsService {
     if (!recovery) return;
 
     recovery.registerCompensator("projects:completion", async (record) => {
-      const data = record.recoveryData as unknown as ProjectCompletionRecoveryData | undefined;
-      if (!data || data.type !== "projects:completion") {
-        return ok(undefined);
-      }
-
-      const recoveryLockOwner = `recovery_${record.transactionId}`;
-      const cleanDomainUuid = normalizeJournalEntryId(data.domainUuid);
-
-      // Parent State Reconciliation (G5-REVAL5-002)
-      // Check if parent domain save was already persisted before failure/crash
-      const reachedCommitting = record.history.some(
-        (h) => h.toState === "committing" || h.toState === "committed"
+      return compensateProjectCompletion(
+        record,
+        {
+          domains: this.#domains,
+          economyService: this.#economyService,
+          facilitiesService: this.#facilitiesService,
+          peopleService: this.#peopleService,
+          transactionStore: this.#transactionStore
+        }
       );
-      if (reachedCommitting) {
-        const docRes = await this.#domains.read(cleanDomainUuid);
-        if (!docRes.ok) return docRes;
-        const prjData = getDomainProjectsData(docRes.value.record);
-        const existingProject = prjData.projects.find((p) => p.id === data.projectId);
-        if (existingProject && existingProject.lifecycle === "completed") {
-          // Parent operation succeeded on domain — finalize as committed
-          if (this.#transactionStore) {
-            this.#transactionStore.transition(
-              record.transactionId,
-              "committed",
-              record.authorityEpoch,
-              "Parent state reconciliation: project already completed on domain"
-            );
-            await this.#transactionStore.flush();
-          }
-          return ok(undefined);
-        }
-      }
-
-      // 1. Revert credited resources (debit them back)
-      if (this.#economyService && data.creditedResourceRefs && data.creditedResourceRefs.length > 0) {
-        for (let i = 0; i < data.creditedResourceRefs.length; i++) {
-          const cred = data.creditedResourceRefs[i];
-          const stepId = `revert_credit_${i}_${cred.resourceId}_${cred.amountMinor}`;
-          if (!isCompensationStepCompleted(record, stepId, this.#transactionStore)) {
-            const adjRes = await this.#economyService.commitAdjust({
-              domainUuid: data.domainUuid,
-              resourceId: cred.resourceId,
-              deltaMinor: -cred.amountMinor,
-              reason: `Recovery: reverse completion reward for project ${data.projectId}`,
-              lockOwner: recoveryLockOwner
-            });
-            if (!adjRes.ok) return adjRes;
-            await markCompensationStepCompleted(this.#transactionStore, record, stepId);
-          }
-        }
-      }
-
-      // 2. Refund debited costs (credit them back)
-      if (this.#economyService && data.debitedCostRefs && data.debitedCostRefs.length > 0) {
-        for (let i = 0; i < data.debitedCostRefs.length; i++) {
-          const deb = data.debitedCostRefs[i];
-          const stepId = `refund_debit_${i}_${deb.resourceId}_${deb.amountMinor}`;
-          if (!isCompensationStepCompleted(record, stepId, this.#transactionStore)) {
-            const refRes = await this.#economyService.commitAdjust({
-              domainUuid: data.domainUuid,
-              resourceId: deb.resourceId,
-              deltaMinor: deb.amountMinor,
-              reason: `Recovery: refund completion cost for project ${data.projectId}`,
-              lockOwner: recoveryLockOwner
-            });
-            if (!refRes.ok) return refRes;
-            await markCompensationStepCompleted(this.#transactionStore, record, stepId);
-          }
-        }
-      }
-
-      // 3. Restore consumed economic reservations (G5-REVAL4-006)
-      if (this.#economyService && data.consumedReservationSnapshots && data.consumedReservationSnapshots.length > 0) {
-        for (const snap of data.consumedReservationSnapshots) {
-          const stepId = `restore_res_${snap.reservation.id}`;
-          if (!isCompensationStepCompleted(record, stepId, this.#transactionStore)) {
-            const restRes = await this.#economyService.restoreReservation({
-              domainUuid: data.domainUuid,
-              reservationSnapshot: snap.reservation,
-              consumedAmount: snap.consumedAmount,
-              reason: `Recovery: restore consumed reservation ${snap.reservation.id} for project ${data.projectId}`,
-              lockOwner: recoveryLockOwner
-            });
-            if (!restRes.ok) return restRes;
-            await markCompensationStepCompleted(this.#transactionStore, record, stepId);
-          }
-        }
-      }
-
-      // 4. Restore released workforce reservations (G5-REVAL4-006)
-      const peopleService = this.#peopleService ?? new PeopleService(this.#domains);
-      if (data.releasedWorkforceSnapshots && data.releasedWorkforceSnapshots.length > 0) {
-        for (const wf of data.releasedWorkforceSnapshots) {
-          const stepId = `restore_wf_${wf.reservationId}`;
-          if (!isCompensationStepCompleted(record, stepId, this.#transactionStore)) {
-            const restWf = await peopleService.restoreWorkforceReservation({
-              domainUuid: data.domainUuid,
-              projectId: data.projectId,
-              reservationId: wf.reservationId
-            });
-            if (!restWf.ok) return restWf;
-            await markCompensationStepCompleted(this.#transactionStore, record, stepId);
-          }
-        }
-      }
-
-      // 5. Rollback created facilities
-      if (data.createdFacilityIds && data.createdFacilityIds.length > 0) {
-        const stepId = `rollback_facilities_${data.createdFacilityIds.join("_")}`;
-        if (!isCompensationStepCompleted(record, stepId, this.#transactionStore)) {
-          const docRes = await this.#domains.read(cleanDomainUuid);
-          if (!docRes.ok) return docRes;
-          const facData = getDomainFacilitiesData(docRes.value.record);
-          const remainingFacilities = facData.facilities.filter(
-            (f) => !data.createdFacilityIds.includes(f.id)
-          );
-          if (remainingFacilities.length !== facData.facilities.length) {
-            const updatedRecord = withDomainFacilitiesData(docRes.value.record, {
-              ...facData,
-              facilities: Object.freeze(remainingFacilities)
-            });
-            const saveRes = await this.#domains.save({
-              ...docRes.value,
-              record: updatedRecord
-            });
-            if (!saveRes.ok) return saveRes;
-          }
-          await markCompensationStepCompleted(this.#transactionStore, record, stepId);
-        }
-      }
-
-      // 6. Restore project snapshot
-      if (data.projectSnapshot) {
-        const stepId = `restore_project_snapshot_${data.projectId}`;
-        if (!isCompensationStepCompleted(record, stepId, this.#transactionStore)) {
-          const docRes = await this.#domains.read(cleanDomainUuid);
-          if (!docRes.ok) return docRes;
-          const prjData = getDomainProjectsData(docRes.value.record);
-          const restoredProjects = prjData.projects.map((p) =>
-            p.id === data.projectId ? { ...data.projectSnapshot, updatedAt: Date.now() } : p
-          );
-          const updatedRecord = withDomainProjectsData(docRes.value.record, {
-            ...prjData,
-            projects: Object.freeze(restoredProjects)
-          });
-          const saveRes = await this.#domains.save({
-            ...docRes.value,
-            record: updatedRecord
-          });
-          if (!saveRes.ok) return saveRes;
-          await markCompensationStepCompleted(this.#transactionStore, record, stepId);
-        }
-      }
-
-      return ok(undefined);
     });
+
 
     // Compensator for projects:advance (G5-REVAL4-007)
     recovery.registerCompensator("projects:advance", async (record) => {
-      const data = record.recoveryData as Record<string, any> | undefined;
-      if (!data || data.type !== "projects:advance") {
-        return ok(undefined);
-      }
-      const recoveryLockOwner = `recovery_${record.transactionId}`;
-      const cleanDomainUuid = normalizeJournalEntryId(data.domainUuid);
-
-      // Parent State Reconciliation (G5-REVAL5-002)
-      const reachedCommitting = record.history.some(
-        (h) => h.toState === "committing" || h.toState === "committed"
+      return compensateProjectAdvance(
+        record,
+        {
+          domains: this.#domains,
+          economyService: this.#economyService,
+          transactionStore: this.#transactionStore
+        }
       );
-      if (reachedCommitting) {
-        const docRes = await this.#domains.read(cleanDomainUuid);
-        if (!docRes.ok) return docRes;
-        const prjData = getDomainProjectsData(docRes.value.record);
-        const existingProject = prjData.projects.find((p) => p.id === data.projectId);
-        if (
-          existingProject &&
-          data.expectedWorkCompleted !== undefined &&
-          existingProject.workCompleted >= data.expectedWorkCompleted
-        ) {
-          if (this.#transactionStore) {
-            this.#transactionStore.transition(
-              record.transactionId,
-              "committed",
-              record.authorityEpoch,
-              "Parent state reconciliation: project work already advanced on domain"
-            );
-            await this.#transactionStore.flush();
-          }
-          return ok(undefined);
-        }
-      }
-
-      if (this.#economyService && data.debitedCosts && Array.isArray(data.debitedCosts)) {
-        for (let i = 0; i < data.debitedCosts.length; i++) {
-          const cost = data.debitedCosts[i];
-          const stepId = `refund_advance_cost_${i}_${cost.resourceId}_${cost.amountMinor}`;
-          if (!isCompensationStepCompleted(record, stepId, this.#transactionStore)) {
-            const refRes = await this.#economyService.commitAdjust({
-              domainUuid: data.domainUuid,
-              resourceId: cost.resourceId,
-              deltaMinor: cost.amountMinor,
-              reason: `Recovery: refund progressive cost for project ${data.projectId}`,
-              lockOwner: recoveryLockOwner
-            });
-            if (!refRes.ok) return refRes;
-            await markCompensationStepCompleted(this.#transactionStore, record, stepId);
-          }
-        }
-      }
-      return ok(undefined);
     });
+
 
     // Compensator for projects:cancel (G5-REVAL4-008)
     recovery.registerCompensator("projects:cancel", async (record) => {
-      const data = record.recoveryData as Record<string, any> | undefined;
-      if (!data || data.type !== "projects:cancel") {
-        return ok(undefined);
-      }
-      const recoveryLockOwner = `recovery_${record.transactionId}`;
-      const cleanDomainUuid = normalizeJournalEntryId(data.domainUuid);
-
-      // Parent State Reconciliation (G5-REVAL5-002)
-      const reachedCommitting = record.history.some(
-        (h) => h.toState === "committing" || h.toState === "committed"
+      return compensateProjectCancel(
+        record,
+        {
+          domains: this.#domains,
+          economyService: this.#economyService,
+          peopleService: this.#peopleService,
+          transactionStore: this.#transactionStore
+        }
       );
-      if (reachedCommitting) {
-        const docRes = await this.#domains.read(cleanDomainUuid);
-        if (!docRes.ok) return docRes;
-        const prjData = getDomainProjectsData(docRes.value.record);
-        const existingProject = prjData.projects.find((p) => p.id === data.projectId);
-        if (existingProject && existingProject.lifecycle === "cancelled") {
-          if (this.#transactionStore) {
-            this.#transactionStore.transition(
-              record.transactionId,
-              "committed",
-              record.authorityEpoch,
-              "Parent state reconciliation: project already cancelled on domain"
-            );
-            await this.#transactionStore.flush();
-          }
-          return ok(undefined);
-        }
-      }
-
-      if (this.#economyService && data.releasedReservationSnapshots && Array.isArray(data.releasedReservationSnapshots)) {
-        for (const snap of data.releasedReservationSnapshots) {
-          const stepId = `restore_cancel_res_${snap.id}`;
-          if (!isCompensationStepCompleted(record, stepId, this.#transactionStore)) {
-            const restRes = await this.#economyService.restoreReservation({
-              domainUuid: data.domainUuid,
-              reservationSnapshot: snap,
-              reason: `Recovery: restore cancelled reservation for project ${data.projectId}`,
-              lockOwner: recoveryLockOwner
-            });
-            if (!restRes.ok) return restRes;
-            await markCompensationStepCompleted(this.#transactionStore, record, stepId);
-          }
-        }
-      }
-      const peopleService = this.#peopleService ?? new PeopleService(this.#domains);
-      if (data.releasedWorkforceSnapshots && Array.isArray(data.releasedWorkforceSnapshots)) {
-        for (const wf of data.releasedWorkforceSnapshots) {
-          const stepId = `restore_cancel_wf_${wf.reservationId}`;
-          if (!isCompensationStepCompleted(record, stepId, this.#transactionStore)) {
-            const restWf = await peopleService.restoreWorkforceReservation({
-              domainUuid: data.domainUuid,
-              projectId: data.projectId,
-              reservationId: wf.reservationId
-            });
-            if (!restWf.ok) return restWf;
-            await markCompensationStepCompleted(this.#transactionStore, record, stepId);
-          }
-        }
-      }
-      return ok(undefined);
     });
 
     // Compensator for projects:start
     recovery.registerCompensator("projects:start", async (record) => {
-      const data = record.recoveryData as Record<string, any> | undefined;
-      if (!data || data.type !== "projects:start") {
-        return ok(undefined);
-      }
-      const recoveryLockOwner = `recovery_${record.transactionId}`;
-      const cleanDomainUuid = normalizeJournalEntryId(data.domainUuid);
-      const peopleService = this.#peopleService ?? new PeopleService(this.#domains);
-
-      // Parent State Reconciliation (G5-REVAL5-002)
-      const reachedCommitting = record.history.some(
-        (h) => h.toState === "committing" || h.toState === "committed"
+      return compensateProjectStart(
+        record,
+        {
+          domains: this.#domains,
+          economyService: this.#economyService,
+          peopleService: this.#peopleService,
+          transactionStore: this.#transactionStore
+        }
       );
-      if (reachedCommitting) {
-        const docRes = await this.#domains.read(cleanDomainUuid);
-        if (!docRes.ok) return docRes;
-        const prjData = getDomainProjectsData(docRes.value.record);
-        const existingProject = prjData.projects.find((p) => p.id === data.projectId);
-        if (existingProject) {
-          if (this.#transactionStore) {
-            this.#transactionStore.transition(
-              record.transactionId,
-              "committed",
-              record.authorityEpoch,
-              "Parent state reconciliation: project already created on domain"
-            );
-            await this.#transactionStore.flush();
-          }
-          return ok(undefined);
-        }
-      }
-
-      if (data.allocatedWorkforceReservationId) {
-        const stepId = `release_wf_${data.allocatedWorkforceReservationId}`;
-        if (!isCompensationStepCompleted(record, stepId, this.#transactionStore)) {
-          const relWf = await peopleService.releaseWorkforceReservation({
-            domainUuid: data.domainUuid,
-            projectId: data.projectId,
-            reservationId: data.allocatedWorkforceReservationId
-          });
-          if (!relWf.ok) return relWf;
-          await markCompensationStepCompleted(this.#transactionStore, record, stepId);
-        }
-      }
-
-      if (this.#economyService && data.createdReservationIds && Array.isArray(data.createdReservationIds)) {
-        for (const resId of data.createdReservationIds) {
-          const stepId = `release_res_${resId}`;
-          if (!isCompensationStepCompleted(record, stepId, this.#transactionStore)) {
-            const relRes = await this.#economyService.releaseReservation({
-              domainUuid: data.domainUuid,
-              reservationId: resId,
-              reason: `Recovery: release reservation for project start ${data.projectId}`,
-              lockOwner: recoveryLockOwner
-            });
-            if (!relRes.ok) return relRes;
-            await markCompensationStepCompleted(this.#transactionStore, record, stepId);
-          }
-        }
-      }
-
-      if (this.#economyService && data.debitedCosts && Array.isArray(data.debitedCosts)) {
-        for (let i = 0; i < data.debitedCosts.length; i++) {
-          const cost = data.debitedCosts[i];
-          const stepId = `refund_start_cost_${i}_${cost.resourceId}_${cost.amountMinor}`;
-          if (!isCompensationStepCompleted(record, stepId, this.#transactionStore)) {
-            const refRes = await this.#economyService.commitAdjust({
-              domainUuid: data.domainUuid,
-              resourceId: cost.resourceId,
-              deltaMinor: cost.amountMinor,
-              reason: `Recovery: refund upfront cost for project start ${data.projectId}`,
-              lockOwner: recoveryLockOwner
-            });
-            if (!refRes.ok) return refRes;
-            await markCompensationStepCompleted(this.#transactionStore, record, stepId);
-          }
-        }
-      }
-
-      return ok(undefined);
     });
   }
+
 }

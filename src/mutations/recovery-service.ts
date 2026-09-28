@@ -1,6 +1,6 @@
 import { createPublicError, type PublicError } from "../core/contracts/public-error.js";
 import { err, ok, type Result } from "../core/contracts/result.js";
-import type { LockManager, LockHandle } from "./lock-manager.js";
+import { canonicalizeLockKeys, type LockManager, type LockHandle } from "./lock-manager.js";
 import {
   isFinalTransactionState,
   type TransactionRecord
@@ -59,12 +59,14 @@ export class RecoveryService {
   ): Promise<readonly TransactionRecord[]> {
     const unresolved = this.#transactionStore.listUnresolved();
     let transitionedAny = false;
+    const originalRecords = new Map<string, TransactionRecord>();
 
     for (const record of unresolved) {
       // DEC-724–731: "committing após failover vira needs-recovery até reconciliation."
       // Also, interrupted compensations from a previous crash must transition back to needs-recovery
       // so a new recovery attempt can transition needs-recovery -> compensating without invalid state jump.
       if (record.state === "committing" || record.state === "compensating") {
+        originalRecords.set(record.transactionId, { ...record });
         this.#transactionStore.transition(
           record.transactionId,
           "needs-recovery",
@@ -73,6 +75,7 @@ export class RecoveryService {
         );
         transitionedAny = true;
       } else if (record.state === "claimed" || record.state === "planned") {
+        originalRecords.set(record.transactionId, { ...record });
         this.#transactionStore.transition(
           record.transactionId,
           "failed",
@@ -82,7 +85,7 @@ export class RecoveryService {
         transitionedAny = true;
       }
 
-      // Block affected lock keys so damaged domains are protected while independent domains continue
+      // Block affected lock keys atomically (G5-REVAL6-003: NEVER partial keys!)
       const currentTx = this.#transactionStore.get(record.transactionId) ?? record;
       if (
         !isFinalTransactionState(currentTx.state) &&
@@ -90,16 +93,14 @@ export class RecoveryService {
         this.#lockManager &&
         !this.#heldRecoveryLocks.has(currentTx.transactionId)
       ) {
-        const freeKeys = currentTx.lockKeys.filter((k) => !this.#lockManager!.isLocked(k));
-        if (freeKeys.length > 0) {
-          const lockRes = await this.#lockManager.acquireLocks({
-            ownerId: `recovery_${currentTx.transactionId}`,
-            keys: freeKeys,
-            timeoutMs: 50
-          });
-          if (lockRes.ok) {
-            this.#heldRecoveryLocks.set(currentTx.transactionId, lockRes.value);
-          }
+        const requiredKeys = canonicalizeLockKeys(currentTx.lockKeys);
+        const lockRes = await this.#lockManager.acquireLocks({
+          ownerId: `recovery_${currentTx.transactionId}`,
+          keys: requiredKeys,
+          timeoutMs: 50
+        });
+        if (lockRes.ok) {
+          this.#heldRecoveryLocks.set(currentTx.transactionId, lockRes.value);
         }
       }
     }
@@ -107,12 +108,76 @@ export class RecoveryService {
     if (transitionedAny) {
       try {
         await this.#transactionStore.flush();
-      } catch {
-        // Startup scan best-effort flush; unresolved list is re-queried below
+      } catch (flushErr) {
+        // G5-REVAL6-004: Fail-closed if recovery transitions cannot be persisted:
+        // Revert in-memory transitions so unpersisted states do not trigger premature recovery
+        for (const [txId, orig] of originalRecords.entries()) {
+          this.#transactionStore.save(orig);
+        }
+        throw createPublicError({
+          code: "DM_DOMAIN_STORAGE_ERROR",
+          category: "internal",
+          message: `Failed to persist recovery transitions during startup scan: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`
+        });
       }
     }
 
     return this.#transactionStore.listUnresolved();
+  }
+
+  hasHeldRecoveryLock(transactionId: string): boolean {
+    return this.#heldRecoveryLocks.has(transactionId);
+  }
+
+  getHeldRecoveryLock(transactionId: string): LockHandle | undefined {
+    return this.#heldRecoveryLocks.get(transactionId);
+  }
+
+  /**
+   * Immediately isolates affected lock keys for a transaction that entered needs-recovery in runtime
+   * (G5-REVAL6-003). If an active lockHandle is provided (e.g. from the current command), atomically transfers
+   * ownership to recovery_<txId> so no other mutation can slip in. Otherwise, acquires all lockKeys atomically.
+   */
+  async isolateTransaction(
+    recordOrId: TransactionRecord | string,
+    existingHandle?: LockHandle
+  ): Promise<Result<void, PublicError>> {
+    const record =
+      typeof recordOrId === "string" ? this.#transactionStore.get(recordOrId) : recordOrId;
+    if (!record) {
+      return ok(undefined);
+    }
+    if (this.#heldRecoveryLocks.has(record.transactionId)) {
+      return ok(undefined);
+    }
+    if (record.lockKeys.length === 0) {
+      return ok(undefined);
+    }
+
+    const recoveryOwnerId = `recovery_${record.transactionId}`;
+
+    // If an existing lock handle is provided (e.g. from the currently running command),
+    // atomically transfer it so no other mutation can slip in.
+    if (existingHandle && existingHandle.keys.length > 0) {
+      const transferRes = this.#lockManager.transferLock(existingHandle, recoveryOwnerId);
+      if (transferRes.ok) {
+        this.#heldRecoveryLocks.set(record.transactionId, transferRes.value);
+        return ok(undefined);
+      }
+    }
+
+    // Otherwise, acquire the complete lock set atomically
+    const requiredKeys = canonicalizeLockKeys(record.lockKeys);
+    const lockRes = await this.#lockManager.acquireLocks({
+      ownerId: recoveryOwnerId,
+      keys: requiredKeys,
+      timeoutMs: 1000
+    });
+    if (!lockRes.ok) {
+      return lockRes;
+    }
+    this.#heldRecoveryLocks.set(record.transactionId, lockRes.value);
+    return ok(undefined);
   }
 
   /**
@@ -138,6 +203,35 @@ export class RecoveryService {
     if (isFinalTransactionState(record.state)) {
       this.#releaseRecoveryLock(transactionId);
       return ok(record);
+    }
+
+    // G5-REVAL6-003: Recovery must possess the complete lock set atomically before proceeding
+    const requiredKeys = canonicalizeLockKeys(record.lockKeys);
+    let heldHandle = this.#heldRecoveryLocks.get(transactionId);
+    const isFullLockHeld =
+      heldHandle &&
+      requiredKeys.every((k) => heldHandle!.keys.includes(k));
+
+    if (!isFullLockHeld && requiredKeys.length > 0) {
+      if (heldHandle) {
+        heldHandle.release();
+        this.#heldRecoveryLocks.delete(transactionId);
+      }
+      const lockRes = await this.#lockManager.acquireLocks({
+        ownerId: `recovery_${transactionId}`,
+        keys: requiredKeys,
+        timeoutMs: 2000
+      });
+      if (!lockRes.ok) {
+        return err(
+          createPublicError({
+            code: "DM_RECOVERY_LOCK_FAILED",
+            category: "busy",
+            message: `Cannot execute recovery for transaction '${transactionId}': lock set [${requiredKeys.join(", ")}] could not be fully acquired: ${lockRes.error.message}`
+          })
+        );
+      }
+      this.#heldRecoveryLocks.set(transactionId, lockRes.value);
     }
 
     // Transition to compensating
@@ -266,7 +360,22 @@ export class RecoveryService {
     currentEpoch: number,
     options?: { readonly includeUnsafe?: boolean }
   ): Promise<readonly Result<TransactionRecord, PublicError>[]> {
-    const unresolved = await this.scanOnStartup(currentEpoch);
+    let unresolved: readonly TransactionRecord[];
+    try {
+      unresolved = await this.scanOnStartup(currentEpoch);
+    } catch (scanErr) {
+      return Object.freeze([
+        err(
+          scanErr && typeof scanErr === "object" && "code" in scanErr
+            ? (scanErr as unknown as PublicError)
+            : createPublicError({
+                code: "DM_DOMAIN_STORAGE_ERROR",
+                category: "internal",
+                message: `Startup recovery scan failed: ${scanErr instanceof Error ? scanErr.message : String(scanErr)}`
+              })
+        )
+      ]);
+    }
     const results: Result<TransactionRecord, PublicError>[] = [];
     for (const tx of unresolved) {
       if (!isFinalTransactionState(tx.state)) {
@@ -330,7 +439,13 @@ export async function markCompensationStepCompleted(
   };
   if (transactionStore) {
     transactionStore.save(updatedRecord);
-    await transactionStore.flush();
+    try {
+      await transactionStore.flush();
+    } catch (flushErr) {
+      // Revert in-memory save on flush failure so unconfirmed checkpoints are not falsely retained
+      transactionStore.save(currentRecord);
+      throw flushErr;
+    }
   }
   return updatedRecord;
 }

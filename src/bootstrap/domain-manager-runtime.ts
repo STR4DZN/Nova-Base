@@ -223,7 +223,6 @@ export function composeDomainManagerRuntime(
 
   const authority = options.authority ?? new FoundryPrimaryAuthorityAdapter();
   const lockManager = options.lockManager ?? new LockManager();
-  const coordinator = new MutationCoordinator({ lockManager });
   const transactionStore =
     options.transactionStore ??
     new TransactionStore({
@@ -231,6 +230,7 @@ export function composeDomainManagerRuntime(
         options.transactionStorageAdapter ?? new FoundryJournalTransactionStorageAdapter()
     });
   const recovery = new RecoveryService({ transactionStore, lockManager });
+  const coordinator = new MutationCoordinator({ lockManager, recoveryService: recovery, transactionStore });
 
   const resourceRegistry = options.resourceRegistry ?? createDefaultResourceRegistry();
   const ledgerStore =

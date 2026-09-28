@@ -14,6 +14,7 @@ import {
 import type { EconomyService } from "../../economy/services/economy-service.js";
 import type { TransactionStore } from "../../mutations/transaction-store.js";
 import { createTransactionRecord } from "../../mutations/transaction-record.js";
+import { compensateProjectAdvance } from "../services/project-recovery-compensators.js";
 
 export interface ProjectAdvanceDomainOperationParams {
   readonly domainUuid: string;
@@ -193,16 +194,41 @@ export async function executeProjectAdvanceDomainOperationPlan(
 
   let compensationFailed = false;
   const compensateDebits = async (reason: string) => {
-    if (!context.economyService || debitedCosts.length === 0) return;
-    for (const cost of debitedCosts) {
-      const refundRes = await context.economyService.commitAdjust({
-        domainUuid: cleanDomainUuid,
-        resourceId: cost.resourceId,
-        deltaMinor: cost.amountMinor,
-        reason: `Compensation refund: ${reason}`,
-        lockOwner: params.commandId
+    if (context.transactionStore) {
+      const tx = context.transactionStore.get(txId);
+      if (tx) {
+        context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("needs-recovery") });
+        const compRes = await compensateProjectAdvance(
+          tx,
+          {
+            domains: context.domains,
+            economyService: context.economyService,
+            transactionStore: context.transactionStore
+          },
+          { lockOwner: params.commandId, skipReconciliation: true }
+        );
+        if (!compRes.ok) {
+          compensationFailed = true;
+        }
+      }
+    } else if (context.economyService && debitedCosts.length > 0) {
+      const dummyTx = createTransactionRecord({
+        transactionId: txId,
+        commandId: cmdId,
+        authorityEpoch: epoch,
+        lockKeys: [`domain:${cleanDomainUuid}`, `project:${project.id}`],
+        safeAutoRecovery: false,
+        recoveryData: buildRecoveryData("needs-recovery")
       });
-      if (!refundRes.ok) {
+      const compRes = await compensateProjectAdvance(
+        dummyTx,
+        {
+          domains: context.domains,
+          economyService: context.economyService
+        },
+        { lockOwner: params.commandId, skipReconciliation: true }
+      );
+      if (!compRes.ok) {
         compensationFailed = true;
       }
     }

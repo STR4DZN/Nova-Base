@@ -8,6 +8,9 @@ import {
   type MutationReceipt
 } from "./receipt-contract.js";
 
+import type { RecoveryService } from "./recovery-service.js";
+import type { TransactionStore } from "./transaction-store.js";
+
 export interface FreshStateWithRevision {
   readonly revision?: number;
   readonly entityRevisions?: Readonly<Record<string, number>>;
@@ -56,6 +59,8 @@ export interface MutationDefinition<
 export interface MutationCoordinatorOptions {
   readonly lockManager: LockManager;
   readonly defaultLockTimeoutMs?: number;
+  readonly recoveryService?: RecoveryService;
+  readonly transactionStore?: TransactionStore;
 }
 
 /**
@@ -72,10 +77,14 @@ export interface MutationCoordinatorOptions {
 export class MutationCoordinator {
   readonly #lockManager: LockManager;
   readonly #defaultLockTimeoutMs: number;
+  readonly #recoveryService?: RecoveryService;
+  readonly #transactionStore?: TransactionStore;
 
   constructor(options: MutationCoordinatorOptions) {
     this.#lockManager = options.lockManager;
     this.#defaultLockTimeoutMs = options.defaultLockTimeoutMs ?? 10000;
+    this.#recoveryService = options.recoveryService;
+    this.#transactionStore = options.transactionStore;
   }
 
   async execute<
@@ -262,6 +271,14 @@ export class MutationCoordinator {
       }
 
       if (!commitResult.ok) {
+        // G5-REVAL6-003: If transaction for this command entered needs-recovery, immediately isolate locks
+        if (this.#transactionStore && this.#recoveryService) {
+          const tx = this.#transactionStore.getByCommandId(command.commandId);
+          if (tx && tx.state === "needs-recovery") {
+            await this.#recoveryService.isolateTransaction(tx, lockHandle);
+          }
+        }
+
         const errorDetails =
           typeof commitResult.error.details === "object" && commitResult.error.details !== null
             ? (commitResult.error.details as Record<string, unknown>)

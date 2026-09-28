@@ -21,6 +21,7 @@ import { getDomainFacilitiesData, withDomainFacilitiesData } from "../../facilit
 import { PeopleService, type PublicPeopleApi } from "../../people/services/people-service.js";
 import type { TransactionStore } from "../../mutations/transaction-store.js";
 import { createTransactionRecord } from "../../mutations/transaction-record.js";
+import { compensateProjectCompletion } from "../services/project-recovery-compensators.js";
 
 export interface ProjectCompletionDomainOperationParams {
   readonly domainUuid: string;
@@ -199,83 +200,45 @@ export async function executeProjectCompletionDomainOperationPlan(
 
   let compensationFailed = false;
   const compensatePriorSteps = async (reason: string) => {
-    // 1. Revert credited resources
-    if (context.economyService && creditedResourceRefs.length > 0) {
-      for (const cred of creditedResourceRefs) {
-        const revRes = await context.economyService.commitAdjust({
-          domainUuid: cleanDomainUuid,
-          resourceId: cred.resourceId,
-          deltaMinor: -cred.amountMinor,
-          reason: `Compensation: ${reason}`,
-          lockOwner: params.commandId
-        });
-        if (!revRes.ok) {
+    if (context.transactionStore) {
+      const tx = context.transactionStore.get(txId);
+      if (tx) {
+        context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("needs-recovery") });
+        const compRes = await compensateProjectCompletion(
+          tx,
+          {
+            domains: context.domains,
+            economyService: context.economyService,
+            facilitiesService: context.facilitiesService,
+            peopleService: context.peopleService,
+            transactionStore: context.transactionStore
+          },
+          { lockOwner: params.commandId, skipReconciliation: true }
+        );
+        if (!compRes.ok) {
           compensationFailed = true;
         }
       }
-    }
-    // 2. Refund debited costs (G5-REVAL5-006)
-    if (context.economyService && debitedCostRefs.length > 0) {
-      for (const cost of debitedCostRefs) {
-        const refRes = await context.economyService.commitAdjust({
-          domainUuid: cleanDomainUuid,
-          resourceId: cost.resourceId,
-          deltaMinor: cost.amountMinor,
-          reason: `Compensation: ${reason}`,
-          lockOwner: params.commandId
-        });
-        if (!refRes.ok) {
-          compensationFailed = true;
-        }
-      }
-    }
-    // 3. Restore consumed reservations
-    if (context.economyService && consumedReservationSnapshots.length > 0) {
-      for (const snap of consumedReservationSnapshots) {
-        const restRes = await context.economyService.restoreReservation({
-          domainUuid: cleanDomainUuid,
-          reservationSnapshot: snap.reservation,
-          consumedAmount: snap.consumedAmount,
-          reason: `Compensation: ${reason}`,
-          lockOwner: params.commandId
-        });
-        if (!restRes.ok) {
-          compensationFailed = true;
-        }
-      }
-    }
-    // 4. Restore released workforce reservations
-    const peopleService = context.peopleService ?? new PeopleService(context.domains);
-    if (releasedWorkforceSnapshots.length > 0) {
-      for (const wf of releasedWorkforceSnapshots) {
-        const restWf = await peopleService.restoreWorkforceReservation({
-          domainUuid: cleanDomainUuid,
-          projectId: project.id,
-          reservationId: wf.reservationId,
-          userId: params.userId
-        });
-        if (!restWf.ok) {
-          compensationFailed = true;
-        }
-      }
-    }
-    // 5. Rollback created facilities
-    if (context.facilitiesService && createdFacilityIds.length > 0) {
-      const freshDoc = await context.domains.read(cleanDomainUuid);
-      if (freshDoc.ok) {
-        const facData = getDomainFacilitiesData(freshDoc.value.record);
-        const remaining = facData.facilities.filter((f) => !createdFacilityIds.includes(f.id));
-        if (remaining.length !== facData.facilities.length) {
-          const updatedRec = withDomainFacilitiesData(freshDoc.value.record, {
-            ...facData,
-            facilities: Object.freeze(remaining)
-          });
-          const sRes = await context.domains.save({ ...freshDoc.value, record: updatedRec });
-          if (!sRes.ok) {
-            compensationFailed = true;
-          }
-        }
-      } else {
+    } else {
+      const dummyTx = createTransactionRecord({
+        transactionId: txId,
+        commandId: cmdId,
+        authorityEpoch: epoch,
+        lockKeys: [`domain:${cleanDomainUuid}`, `project:${project.id}`],
+        safeAutoRecovery: false,
+        recoveryData: buildRecoveryData("needs-recovery")
+      });
+      const compRes = await compensateProjectCompletion(
+        dummyTx,
+        {
+          domains: context.domains,
+          economyService: context.economyService,
+          facilitiesService: context.facilitiesService,
+          peopleService: context.peopleService
+        },
+        { lockOwner: params.commandId, skipReconciliation: true }
+      );
+      if (!compRes.ok) {
         compensationFailed = true;
       }
     }

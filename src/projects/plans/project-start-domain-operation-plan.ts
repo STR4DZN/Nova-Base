@@ -12,7 +12,8 @@ import { evaluateProjectStartPlan, commitProjectStartPlan } from "./project-star
 import type { EconomyService } from "../../economy/services/economy-service.js";
 import { PeopleService, type PublicPeopleApi } from "../../people/services/people-service.js";
 import type { TransactionStore } from "../../mutations/transaction-store.js";
-import { createTransactionRecord } from "../../mutations/transaction-record.js";
+import { createTransactionRecord, type TransactionRecord } from "../../mutations/transaction-record.js";
+import { compensateProjectStart } from "../services/project-recovery-compensators.js";
 
 export interface ProjectStartDomainOperationParams {
   readonly domainUuid: string;
@@ -223,55 +224,45 @@ export async function executeProjectStartDomainOperationPlan(
 
   // Compensation helper to cleanly roll back all prior child effects
   const compensate = async (reason: string) => {
-    // 1. Release workforce reservation
-    if (allocatedWorkforceReservationId) {
-      const relWfRes = await peopleService.releaseWorkforceReservation({
-        domainUuid: cleanDomainUuid,
-        projectId: draftProject.id,
-        reservationId: allocatedWorkforceReservationId,
-        userId: params.userId
-      });
-      if (!relWfRes.ok) {
-        compensationFailed = true;
-      }
-    }
-
-    // 2. Release economic reservations
-    if (context.economyService) {
-      for (const resId of createdReservationIds) {
-        const relRes = await context.economyService.releaseReservation({
-          domainUuid: cleanDomainUuid,
-          reservationId: resId,
-          reason: `Compensation: ${reason}`,
-          lockOwner: params.commandId
-        });
-        if (!relRes.ok) {
-          compensationFailed = true;
-        }
-      }
-
-      // 3. Refund debited costs
-      for (const cost of debitedCosts) {
-        const refundRes = await context.economyService.commitAdjust({
-          domainUuid: cleanDomainUuid,
-          resourceId: cost.resourceId,
-          deltaMinor: cost.amountMinor,
-          reason: `Compensation refund: ${reason}`,
-          lockOwner: params.commandId
-        });
-        if (!refundRes.ok) {
-          compensationFailed = true;
-        }
-      }
-    }
-
     if (context.transactionStore) {
-      const targetState = compensationFailed ? "needs-recovery" : "failed";
       const tx = context.transactionStore.get(txId);
       if (tx) {
-        context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData(targetState) });
+        const updatedTx: TransactionRecord = {
+          ...tx,
+          recoveryData: buildRecoveryData("needs-recovery")
+        };
+        context.transactionStore.save(updatedTx);
+        const compRes = await compensateProjectStart(
+          updatedTx,
+          {
+            domains: context.domains,
+            economyService: context.economyService,
+            peopleService,
+            transactionStore: context.transactionStore
+          },
+          { lockOwner: params.commandId, skipReconciliation: true }
+        );
+        const targetState = compRes.ok ? "failed" : "needs-recovery";
+        context.transactionStore.transition(txId, targetState, epoch, reason);
       }
-      context.transactionStore.transition(txId, targetState, epoch, reason);
+    } else {
+      const dummyTx = createTransactionRecord({
+        transactionId: txId,
+        commandId: cmdId,
+        authorityEpoch: epoch,
+        lockKeys: [`domain:${cleanDomainUuid}`, `project:${draftProject.id}`],
+        safeAutoRecovery: false,
+        recoveryData: buildRecoveryData("needs-recovery")
+      });
+      await compensateProjectStart(
+        dummyTx,
+        {
+          domains: context.domains,
+          economyService: context.economyService,
+          peopleService
+        },
+        { lockOwner: params.commandId, skipReconciliation: true }
+      );
     }
   };
 

@@ -12,6 +12,7 @@ import type { Reservation } from "../../economy/reservations/reservation-types.j
 import type { PublicPeopleApi } from "../../people/services/people-service.js";
 import type { TransactionStore } from "../../mutations/transaction-store.js";
 import { createTransactionRecord } from "../../mutations/transaction-record.js";
+import { compensateProjectCancel } from "../services/project-recovery-compensators.js";
 
 export interface ProjectCancelDomainOperationParams {
   readonly domainUuid: string;
@@ -215,32 +216,44 @@ export async function executeProjectCancelDomainOperationPlan(
 
   let restoreFailed = false;
   const restoreReleased = async (reason: string) => {
-    // Restore economic reservations
-    if (context.economyService && releasedReservationSnapshots.length > 0) {
-      for (const snap of releasedReservationSnapshots) {
-        const restRes = await context.economyService.restoreReservation({
-          domainUuid: cleanDomainUuid,
-          reservationSnapshot: snap,
-          reason: `Compensation: ${reason}`,
-          lockOwner: params.commandId
-        });
-        if (!restRes.ok) {
+    if (context.transactionStore) {
+      const tx = context.transactionStore.get(txId);
+      if (tx) {
+        context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("needs-recovery") });
+        const compRes = await compensateProjectCancel(
+          tx,
+          {
+            domains: context.domains,
+            economyService: context.economyService,
+            peopleService: context.peopleService,
+            transactionStore: context.transactionStore
+          },
+          { lockOwner: params.commandId, skipReconciliation: true }
+        );
+        if (!compRes.ok) {
           restoreFailed = true;
         }
       }
-    }
-    // Restore workforce reservations
-    if (context.peopleService && releasedWorkforceSnapshots.length > 0) {
-      for (const wf of releasedWorkforceSnapshots) {
-        const restWf = await context.peopleService.restoreWorkforceReservation({
-          domainUuid: cleanDomainUuid,
-          projectId: project.id,
-          reservationId: wf.reservationId,
-          userId: params.userId
-        });
-        if (!restWf.ok) {
-          restoreFailed = true;
-        }
+    } else {
+      const dummyTx = createTransactionRecord({
+        transactionId: txId,
+        commandId: cmdId,
+        authorityEpoch: epoch,
+        lockKeys: [`domain:${cleanDomainUuid}`, `project:${project.id}`],
+        safeAutoRecovery: false,
+        recoveryData: buildRecoveryData("needs-recovery")
+      });
+      const compRes = await compensateProjectCancel(
+        dummyTx,
+        {
+          domains: context.domains,
+          economyService: context.economyService,
+          peopleService: context.peopleService
+        },
+        { lockOwner: params.commandId, skipReconciliation: true }
+      );
+      if (!compRes.ok) {
+        restoreFailed = true;
       }
     }
   };
