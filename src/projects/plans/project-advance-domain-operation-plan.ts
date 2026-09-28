@@ -41,6 +41,10 @@ export interface ProjectAdvanceRecoveryData {
   readonly domainUuid: string;
   readonly debitedCosts: readonly { resourceId: string; amountMinor: number }[];
   readonly deltaUnits: number;
+  readonly expectedWorkCompleted?: number;
+  readonly expectedRevision?: number;
+  readonly previousWorkCompleted?: number;
+  readonly previousRevision?: number;
   readonly authorityEpoch: number;
   readonly correlationId?: string;
   readonly causationId?: string;
@@ -146,6 +150,10 @@ export async function executeProjectAdvanceDomainOperationPlan(
     domainUuid: cleanDomainUuid,
     debitedCosts: Object.freeze([...debitedCosts]),
     deltaUnits,
+    expectedWorkCompleted: updatedProject.workCompleted,
+    expectedRevision: updatedProject.revision,
+    previousWorkCompleted: project.workCompleted,
+    previousRevision: project.revision,
     authorityEpoch: epoch,
     correlationId: params.correlationId,
     causationId: params.causationId,
@@ -237,7 +245,23 @@ export async function executeProjectAdvanceDomainOperationPlan(
             const tx = context.transactionStore.get(txId);
             if (tx) {
               context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
-              await context.transactionStore.flush();
+              try {
+                await context.transactionStore.flush();
+              } catch (flushErr) {
+                await compensateDebits(`flush failed after progressive debit: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
+                if (context.transactionStore) {
+                  const targetState = compensationFailed ? "needs-recovery" : "failed";
+                  context.transactionStore.transition(txId, targetState, epoch, String(flushErr));
+                }
+                return err(
+                  createPublicError({
+                    code: "DM_DOMAIN_STORAGE_ERROR",
+                    category: "internal",
+                    message: `Failed to flush transaction update after progressive debit: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+                    details: flushErr
+                  })
+                );
+              }
             }
           }
         }
@@ -275,6 +299,21 @@ export async function executeProjectAdvanceDomainOperationPlan(
       context.transactionStore.transition(txId, targetState, epoch, committingRes.error.message);
       return committingRes;
     }
+    try {
+      await context.transactionStore.flush();
+    } catch (flushErr) {
+      await compensateDebits(`flush committing state failed: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
+      const targetState = compensationFailed ? "needs-recovery" : "failed";
+      context.transactionStore.transition(txId, targetState, epoch, String(flushErr));
+      return err(
+        createPublicError({
+          code: "DM_DOMAIN_STORAGE_ERROR",
+          category: "internal",
+          message: `Failed to flush transaction committing state to storage: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+          details: flushErr
+        })
+      );
+    }
   }
 
   const saveRes = await context.domains.save({
@@ -297,8 +336,23 @@ export async function executeProjectAdvanceDomainOperationPlan(
     if (!committedRes.ok) return committedRes;
     try {
       await context.transactionStore.flush();
-    } catch {
-      // already committed
+    } catch (flushErr) {
+      context.transactionStore.transition(
+        txId,
+        "needs-recovery",
+        epoch,
+        "Final commit flush failed to persist to durable storage"
+      );
+      return err(
+        createPublicError({
+          code: "DM_TRANSACTION_COMMIT_UNCONFIRMED",
+          category: "recovery",
+          message: `Project advance succeeded on domain but durable transaction commit marker failed to flush: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}. Requires reconciliation.`,
+          details: flushErr,
+          userActionRequired: true,
+          retryable: false
+        })
+      );
     }
   }
 

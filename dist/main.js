@@ -8053,12 +8053,12 @@ var VALID_TRANSITIONS = {
   claimed: /* @__PURE__ */ new Set(["prepared", "failed", "needs-recovery"]),
   prepared: /* @__PURE__ */ new Set(["committing", "compensating", "failed", "needs-recovery"]),
   committing: /* @__PURE__ */ new Set(["committed", "needs-recovery", "compensating", "failed"]),
-  committed: /* @__PURE__ */ new Set([]),
-  // Final
+  committed: /* @__PURE__ */ new Set(["needs-recovery"]),
+  // Final unless durable commit persistence fails
   "needs-recovery": /* @__PURE__ */ new Set(["compensating", "committing", "compensated", "failed"]),
   compensating: /* @__PURE__ */ new Set(["compensated", "committed", "needs-recovery", "failed"]),
-  compensated: /* @__PURE__ */ new Set([]),
-  // Final
+  compensated: /* @__PURE__ */ new Set(["needs-recovery"]),
+  // Final unless durable compensation persistence fails
   failed: /* @__PURE__ */ new Set([])
   // Final
 };
@@ -8313,6 +8313,7 @@ var RecoveryService = class {
    */
   async scanOnStartup(currentEpoch) {
     const unresolved = this.#transactionStore.listUnresolved();
+    let transitionedAny = false;
     for (const record of unresolved) {
       if (record.state === "committing") {
         this.#transactionStore.transition(
@@ -8321,6 +8322,7 @@ var RecoveryService = class {
           currentEpoch,
           "Startup recovery scan: transition uncommitted transaction to needs-recovery"
         );
+        transitionedAny = true;
       }
       if (record.lockKeys.length > 0 && !this.#heldRecoveryLocks.has(record.transactionId)) {
         const lockRes = await this.#lockManager.acquireLocks({
@@ -8332,6 +8334,12 @@ var RecoveryService = class {
         if (lockRes.ok) {
           this.#heldRecoveryLocks.set(record.transactionId, lockRes.value);
         }
+      }
+    }
+    if (transitionedAny) {
+      try {
+        await this.#transactionStore.flush();
+      } catch {
       }
     }
     return this.#transactionStore.listUnresolved();
@@ -8425,6 +8433,25 @@ var RecoveryService = class {
       currentEpoch,
       "Transaction successfully compensated during recovery"
     );
+    if (finalTransition.ok) {
+      try {
+        await this.#transactionStore.flush();
+      } catch (flushErr) {
+        this.#transactionStore.transition(
+          transactionId,
+          "needs-recovery",
+          currentEpoch,
+          `Failed to flush compensated state: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`
+        );
+        return err(
+          createPublicError({
+            code: "DM_DOMAIN_STORAGE_ERROR",
+            category: "internal",
+            message: `Transaction compensated in memory but failed to flush to storage: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`
+          })
+        );
+      }
+    }
     this.#releaseRecoveryLock(transactionId);
     return finalTransition;
   }
@@ -8436,13 +8463,18 @@ var RecoveryService = class {
     }
   }
   /**
-   * Recovers all unresolved transactions using registered compensators.
+   * Recovers unresolved transactions using registered compensators.
+   * Auto-recovers ONLY transactions where safeAutoRecovery === true unless includeUnsafe is explicitly requested
+   * (Master Spec §11.10, G5-REVAL5-001). Transactions left without auto-recovery remain in needs-recovery.
    */
-  async recoverAll(currentEpoch) {
+  async recoverAll(currentEpoch, options) {
     const unresolved = await this.scanOnStartup(currentEpoch);
     const results = [];
     for (const tx of unresolved) {
       if (!isFinalTransactionState(tx.state)) {
+        if (!tx.safeAutoRecovery && !options?.includeUnsafe) {
+          continue;
+        }
         const res = await this.recoverTransaction(tx.transactionId, currentEpoch);
         results.push(res);
       }
@@ -8456,6 +8488,33 @@ var RecoveryService = class {
     this.#heldRecoveryLocks.clear();
   }
 };
+function isCompensationStepCompleted(record, stepId, transactionStore) {
+  const currentRecord = transactionStore?.get(record.transactionId) ?? record;
+  const data = currentRecord.recoveryData;
+  const steps = data?.completedCompensationSteps;
+  return Array.isArray(steps) && steps.includes(stepId);
+}
+async function markCompensationStepCompleted(transactionStore, record, stepId) {
+  const currentRecord = transactionStore?.get(record.transactionId) ?? record;
+  const currentData = currentRecord.recoveryData ?? {};
+  const currentSteps = Array.isArray(currentData.completedCompensationSteps) ? [...currentData.completedCompensationSteps] : [];
+  if (!currentSteps.includes(stepId)) {
+    currentSteps.push(stepId);
+  }
+  const updatedRecord = {
+    ...currentRecord,
+    recoveryData: {
+      ...currentData,
+      completedCompensationSteps: Object.freeze(currentSteps)
+    },
+    updatedAt: Date.now()
+  };
+  if (transactionStore) {
+    transactionStore.save(updatedRecord);
+    await transactionStore.flush();
+  }
+  return updatedRecord;
+}
 
 // src/mutations/plans/plan-contract.ts
 function deepCloneAndFreeze(val) {
@@ -21500,7 +21559,19 @@ async function executeProjectStartDomainOperationPlan(context, params) {
           const tx = context.transactionStore.get(txId);
           if (tx) {
             context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
-            await context.transactionStore.flush();
+            try {
+              await context.transactionStore.flush();
+            } catch (flushErr) {
+              await compensate(`Persistence flush failed after upfront debit: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
+              return err(
+                createPublicError({
+                  code: "DM_DOMAIN_STORAGE_ERROR",
+                  category: "internal",
+                  message: `Failed to flush transaction update after upfront debit: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+                  details: flushErr
+                })
+              );
+            }
           }
         }
       } else if (cost.timing === "reserved") {
@@ -21527,7 +21598,19 @@ async function executeProjectStartDomainOperationPlan(context, params) {
           const tx = context.transactionStore.get(txId);
           if (tx) {
             context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
-            await context.transactionStore.flush();
+            try {
+              await context.transactionStore.flush();
+            } catch (flushErr) {
+              await compensate(`Persistence flush failed after reservation: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
+              return err(
+                createPublicError({
+                  code: "DM_DOMAIN_STORAGE_ERROR",
+                  category: "internal",
+                  message: `Failed to flush transaction update after reservation: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+                  details: flushErr
+                })
+              );
+            }
           }
         }
       }
@@ -21558,7 +21641,19 @@ async function executeProjectStartDomainOperationPlan(context, params) {
       const tx = context.transactionStore.get(txId);
       if (tx) {
         context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
-        await context.transactionStore.flush();
+        try {
+          await context.transactionStore.flush();
+        } catch (flushErr) {
+          await compensate(`Persistence flush failed after workforce allocation: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
+          return err(
+            createPublicError({
+              code: "DM_DOMAIN_STORAGE_ERROR",
+              category: "internal",
+              message: `Failed to flush transaction update after workforce allocation: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+              details: flushErr
+            })
+          );
+        }
       }
     }
   }
@@ -21594,6 +21689,19 @@ async function executeProjectStartDomainOperationPlan(context, params) {
       await compensate(`transition to committing failed: ${committingRes.error.message}`);
       return committingRes;
     }
+    try {
+      await context.transactionStore.flush();
+    } catch (flushErr) {
+      await compensate(`Persistence flush failed for committing state: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
+      return err(
+        createPublicError({
+          code: "DM_DOMAIN_STORAGE_ERROR",
+          category: "internal",
+          message: `Failed to flush transaction committing state to storage: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+          details: flushErr
+        })
+      );
+    }
   }
   const updateRes = await context.domains.save({
     ...freshDocRes.value,
@@ -21608,7 +21716,23 @@ async function executeProjectStartDomainOperationPlan(context, params) {
     if (!committedRes.ok) return committedRes;
     try {
       await context.transactionStore.flush();
-    } catch {
+    } catch (flushErr) {
+      context.transactionStore.transition(
+        txId,
+        "needs-recovery",
+        epoch,
+        "Final commit flush failed to persist to durable storage"
+      );
+      return err(
+        createPublicError({
+          code: "DM_TRANSACTION_COMMIT_UNCONFIRMED",
+          category: "recovery",
+          message: `Project start succeeded on domain but durable transaction commit marker failed to flush: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}. Requires reconciliation.`,
+          details: flushErr,
+          userActionRequired: true,
+          retryable: false
+        })
+      );
     }
   }
   return ok({ project: startedProject });
@@ -22009,6 +22133,7 @@ async function executeProjectCompletionDomainOperationPlan(context, params) {
     consumedReservationIds: Object.freeze([...consumedReservationIds]),
     consumedReservationSnapshots: Object.freeze([...consumedReservationSnapshots]),
     releasedWorkforceSnapshots: Object.freeze([...releasedWorkforceSnapshots]),
+    expectedRevision: project.revision + 1,
     authorityEpoch: epoch,
     correlationId: params.correlationId,
     causationId: params.causationId,
@@ -22042,6 +22167,84 @@ async function executeProjectCompletionDomainOperationPlan(context, params) {
       );
     }
   }
+  let compensationFailed = false;
+  const compensatePriorSteps = async (reason) => {
+    if (context.economyService && creditedResourceRefs.length > 0) {
+      for (const cred of creditedResourceRefs) {
+        const revRes = await context.economyService.commitAdjust({
+          domainUuid: cleanDomainUuid,
+          resourceId: cred.resourceId,
+          deltaMinor: -cred.amountMinor,
+          reason: `Compensation: ${reason}`,
+          lockOwner: params.commandId
+        });
+        if (!revRes.ok) {
+          compensationFailed = true;
+        }
+      }
+    }
+    if (context.economyService && debitedCostRefs.length > 0) {
+      for (const cost of debitedCostRefs) {
+        const refRes = await context.economyService.commitAdjust({
+          domainUuid: cleanDomainUuid,
+          resourceId: cost.resourceId,
+          deltaMinor: cost.amountMinor,
+          reason: `Compensation: ${reason}`,
+          lockOwner: params.commandId
+        });
+        if (!refRes.ok) {
+          compensationFailed = true;
+        }
+      }
+    }
+    if (context.economyService && consumedReservationSnapshots.length > 0) {
+      for (const snap of consumedReservationSnapshots) {
+        const restRes = await context.economyService.restoreReservation({
+          domainUuid: cleanDomainUuid,
+          reservationSnapshot: snap.reservation,
+          consumedAmount: snap.consumedAmount,
+          reason: `Compensation: ${reason}`,
+          lockOwner: params.commandId
+        });
+        if (!restRes.ok) {
+          compensationFailed = true;
+        }
+      }
+    }
+    const peopleService = context.peopleService ?? new PeopleService(context.domains);
+    if (releasedWorkforceSnapshots.length > 0) {
+      for (const wf of releasedWorkforceSnapshots) {
+        const restWf = await peopleService.restoreWorkforceReservation({
+          domainUuid: cleanDomainUuid,
+          projectId: project.id,
+          reservationId: wf.reservationId,
+          userId: params.userId
+        });
+        if (!restWf.ok) {
+          compensationFailed = true;
+        }
+      }
+    }
+    if (context.facilitiesService && createdFacilityIds.length > 0) {
+      const freshDoc = await context.domains.read(cleanDomainUuid);
+      if (freshDoc.ok) {
+        const facData = getDomainFacilitiesData(freshDoc.value.record);
+        const remaining = facData.facilities.filter((f) => !createdFacilityIds.includes(f.id));
+        if (remaining.length !== facData.facilities.length) {
+          const updatedRec = withDomainFacilitiesData(freshDoc.value.record, {
+            ...facData,
+            facilities: Object.freeze(remaining)
+          });
+          const sRes = await context.domains.save({ ...freshDoc.value, record: updatedRec });
+          if (!sRes.ok) {
+            compensationFailed = true;
+          }
+        }
+      } else {
+        compensationFailed = true;
+      }
+    }
+  };
   if (context.economyService) {
     for (const cost of definition.costs) {
       if (cost.timing === "onCompletion") {
@@ -22053,8 +22256,14 @@ async function executeProjectCompletionDomainOperationPlan(context, params) {
           lockOwner: params.commandId
         });
         if (!debitRes.ok) {
+          await compensatePriorSteps(`Failed to debit onCompletion cost for '${cost.resourceId}': ${debitRes.error.message}`);
           if (context.transactionStore) {
-            context.transactionStore.transition(txId, "failed", epoch, debitRes.error.message);
+            const targetState = compensationFailed ? "needs-recovery" : "failed";
+            const tx = context.transactionStore.get(txId);
+            if (tx) {
+              context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData(targetState) });
+            }
+            context.transactionStore.transition(txId, targetState, epoch, debitRes.error.message);
           }
           return err(
             createPublicError({
@@ -22066,6 +22275,33 @@ async function executeProjectCompletionDomainOperationPlan(context, params) {
           );
         }
         debitedCostRefs.push({ resourceId: cost.resourceId, amountMinor: cost.amountMinor });
+        if (context.transactionStore) {
+          const tx = context.transactionStore.get(txId);
+          if (tx) {
+            context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
+            try {
+              await context.transactionStore.flush();
+            } catch (flushErr) {
+              await compensatePriorSteps(`Persistence flush failed after onCompletion debit: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
+              if (context.transactionStore) {
+                const targetState = compensationFailed ? "needs-recovery" : "failed";
+                const curTx = context.transactionStore.get(txId);
+                if (curTx) {
+                  context.transactionStore.save({ ...curTx, recoveryData: buildRecoveryData(targetState) });
+                }
+                context.transactionStore.transition(txId, targetState, epoch, String(flushErr));
+              }
+              return err(
+                createPublicError({
+                  code: "DM_DOMAIN_STORAGE_ERROR",
+                  category: "internal",
+                  message: `Failed to flush transaction update after onCompletion debit: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+                  details: flushErr
+                })
+              );
+            }
+          }
+        }
       }
     }
   }
@@ -22099,6 +22335,7 @@ async function executeProjectCompletionDomainOperationPlan(context, params) {
           lockOwner: params.commandId
         });
         if (!consumeRes.ok) {
+          await compensatePriorSteps(`Failed to consume reservation '${resId}': ${consumeRes.error.message}`);
           if (context.transactionStore) {
             const tx = context.transactionStore.get(txId);
             if (tx) {
@@ -22121,38 +22358,115 @@ async function executeProjectCompletionDomainOperationPlan(context, params) {
           const tx = context.transactionStore.get(txId);
           if (tx) {
             context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
-            await context.transactionStore.flush();
+            try {
+              await context.transactionStore.flush();
+            } catch (flushErr) {
+              await compensatePriorSteps(`Persistence flush failed after reservation consume: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
+              if (context.transactionStore) {
+                const targetState = compensationFailed ? "needs-recovery" : "failed";
+                context.transactionStore.transition(txId, targetState, epoch, String(flushErr));
+              }
+              return err(
+                createPublicError({
+                  code: "DM_DOMAIN_STORAGE_ERROR",
+                  category: "internal",
+                  message: `Failed to flush transaction update after reservation consume: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+                  details: flushErr
+                })
+              );
+            }
           }
         }
       }
     }
   }
   if (context.peopleService) {
+    let hasActiveReservations = false;
     if ("getReservations" in context.peopleService) {
       const pRes = await context.peopleService.getReservations(cleanDomainUuid);
-      if (pRes.ok) {
-        for (const r of pRes.value) {
-          if (r.targetRef === `project:${project.id}` && r.status === "active") {
-            releasedWorkforceSnapshots.push({
-              reservationId: r.id,
-              amount: r.amount,
-              workforceTypeId: r.workforceTypeId
-            });
+      if (!pRes.ok) {
+        await compensatePriorSteps(`Failed to inspect workforce reservations: ${pRes.error.message}`);
+        if (context.transactionStore) {
+          const targetState = compensationFailed ? "needs-recovery" : "failed";
+          const tx = context.transactionStore.get(txId);
+          if (tx) {
+            context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData(targetState) });
           }
+          context.transactionStore.transition(txId, targetState, epoch, pRes.error.message);
+        }
+        return err(
+          createPublicError({
+            code: "DM_PROJECT_COMPLETION_BLOCKED",
+            category: "conflict",
+            message: `Failed to inspect workforce reservations for project '${project.id}': ${pRes.error.message}`,
+            details: pRes.error
+          })
+        );
+      }
+      for (const r of pRes.value) {
+        if (r.targetRef === `project:${project.id}` && r.status === "active") {
+          hasActiveReservations = true;
+          releasedWorkforceSnapshots.push({
+            reservationId: r.id,
+            amount: r.amount,
+            workforceTypeId: r.workforceTypeId
+          });
         }
       }
+    } else {
+      hasActiveReservations = true;
     }
-    const wfRelRes = await context.peopleService.releaseWorkforceReservation({
-      domainUuid: cleanDomainUuid,
-      projectId: project.id,
-      userId: params.userId
-    });
-    if (!wfRelRes.ok) {
-    } else if (releasedWorkforceSnapshots.length > 0 && context.transactionStore) {
-      const tx = context.transactionStore.get(txId);
-      if (tx) {
-        context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
-        await context.transactionStore.flush();
+    if (hasActiveReservations) {
+      const wfRelRes = await context.peopleService.releaseWorkforceReservation({
+        domainUuid: cleanDomainUuid,
+        projectId: project.id,
+        userId: params.userId
+      });
+      if (!wfRelRes.ok) {
+        await compensatePriorSteps(`Failed to release workforce reservation: ${wfRelRes.error.message}`);
+        if (context.transactionStore) {
+          const targetState = compensationFailed ? "needs-recovery" : "failed";
+          const tx = context.transactionStore.get(txId);
+          if (tx) {
+            context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData(targetState) });
+          }
+          context.transactionStore.transition(txId, targetState, epoch, wfRelRes.error.message);
+        }
+        return err(
+          createPublicError({
+            code: "DM_PROJECT_COMPLETION_BLOCKED",
+            category: "conflict",
+            message: `Failed to release workforce reservation for project '${project.id}': ${wfRelRes.error.message}`,
+            details: wfRelRes.error
+          })
+        );
+      }
+      if (context.transactionStore) {
+        const tx = context.transactionStore.get(txId);
+        if (tx) {
+          context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
+          try {
+            await context.transactionStore.flush();
+          } catch (flushErr) {
+            await compensatePriorSteps(`Persistence flush failed after workforce release: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
+            if (context.transactionStore) {
+              const targetState = compensationFailed ? "needs-recovery" : "failed";
+              const curTx = context.transactionStore.get(txId);
+              if (curTx) {
+                context.transactionStore.save({ ...curTx, recoveryData: buildRecoveryData(targetState) });
+              }
+              context.transactionStore.transition(txId, targetState, epoch, String(flushErr));
+            }
+            return err(
+              createPublicError({
+                code: "DM_DOMAIN_STORAGE_ERROR",
+                category: "internal",
+                message: `Failed to flush transaction update after workforce release: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+                details: flushErr
+              })
+            );
+          }
+        }
       }
     }
   }
@@ -22181,6 +22495,31 @@ async function executeProjectCompletionDomainOperationPlan(context, params) {
     });
     if (facRes.ok) {
       createdFacilityIds.push(facRes.value.facility.id);
+      if (context.transactionStore) {
+        const tx = context.transactionStore.get(txId);
+        if (tx) {
+          context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
+          try {
+            await context.transactionStore.flush();
+          } catch (flushErr) {
+            await compensatePriorSteps(`Persistence flush failed after facility creation: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
+            const targetState = compensationFailed ? "needs-recovery" : "failed";
+            const curTx = context.transactionStore.get(txId);
+            if (curTx) {
+              context.transactionStore.save({ ...curTx, recoveryData: buildRecoveryData(targetState) });
+            }
+            context.transactionStore.transition(txId, targetState, epoch, String(flushErr));
+            return err(
+              createPublicError({
+                code: "DM_DOMAIN_STORAGE_ERROR",
+                category: "internal",
+                message: `Failed to flush transaction update after facility creation: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+                details: flushErr
+              })
+            );
+          }
+        }
+      }
       executedReceipts[effect.id] = {
         childReceiptId: createOpaqueId("rep"),
         subsystem: "facility",
@@ -22230,6 +22569,31 @@ async function executeProjectCompletionDomainOperationPlan(context, params) {
     });
     if (econRes.ok) {
       creditedResourceRefs.push({ resourceId: effect.targetRef, amountMinor: deltaMinor });
+      if (context.transactionStore) {
+        const tx = context.transactionStore.get(txId);
+        if (tx) {
+          context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
+          try {
+            await context.transactionStore.flush();
+          } catch (flushErr) {
+            await compensatePriorSteps(`Persistence flush failed after resource credit: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
+            const targetState = compensationFailed ? "needs-recovery" : "failed";
+            const curTx = context.transactionStore.get(txId);
+            if (curTx) {
+              context.transactionStore.save({ ...curTx, recoveryData: buildRecoveryData(targetState) });
+            }
+            context.transactionStore.transition(txId, targetState, epoch, String(flushErr));
+            return err(
+              createPublicError({
+                code: "DM_DOMAIN_STORAGE_ERROR",
+                category: "internal",
+                message: `Failed to flush transaction update after resource credit: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+                details: flushErr
+              })
+            );
+          }
+        }
+      }
       executedReceipts[effect.id] = {
         childReceiptId: createOpaqueId("rep"),
         subsystem: "economy",
@@ -22317,6 +22681,25 @@ async function executeProjectCompletionDomainOperationPlan(context, params) {
         ...tx,
         recoveryData: buildRecoveryData(partialFailure ? "needs-recovery" : "executing")
       });
+      try {
+        await context.transactionStore.flush();
+      } catch (flushErr) {
+        await compensatePriorSteps(`Persistence flush failed at side effects checkpoint: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
+        const targetState = compensationFailed ? "needs-recovery" : "failed";
+        const curTx = context.transactionStore.get(txId);
+        if (curTx) {
+          context.transactionStore.save({ ...curTx, recoveryData: buildRecoveryData(targetState) });
+        }
+        context.transactionStore.transition(txId, targetState, epoch, String(flushErr));
+        return err(
+          createPublicError({
+            code: "DM_DOMAIN_STORAGE_ERROR",
+            category: "internal",
+            message: `Failed to flush transaction update at side effects checkpoint: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+            details: flushErr
+          })
+        );
+      }
     }
   }
   const sideEffectHandlers = {
@@ -22399,6 +22782,25 @@ async function executeProjectCompletionDomainOperationPlan(context, params) {
       context.transactionStore.transition(txId, "needs-recovery", epoch, committingRes.error.message);
       return committingRes;
     }
+    try {
+      await context.transactionStore.flush();
+    } catch (flushErr) {
+      await compensatePriorSteps(`Persistence flush failed while entering committing state: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
+      const targetState = compensationFailed ? "needs-recovery" : "failed";
+      const tx = context.transactionStore.get(txId);
+      if (tx) {
+        context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData(targetState) });
+      }
+      context.transactionStore.transition(txId, targetState, epoch, String(flushErr));
+      return err(
+        createPublicError({
+          code: "DM_DOMAIN_STORAGE_ERROR",
+          category: "internal",
+          message: `Failed to persist committing state before domain update: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+          details: flushErr
+        })
+      );
+    }
   }
   const updateRes = await context.domains.save({
     ...freshDocRes.value,
@@ -22431,7 +22833,23 @@ async function executeProjectCompletionDomainOperationPlan(context, params) {
       if (!committedRes.ok) return committedRes;
       try {
         await context.transactionStore.flush();
-      } catch {
+      } catch (flushErr) {
+        context.transactionStore.transition(
+          txId,
+          "needs-recovery",
+          epoch,
+          "Final commit flush failed to persist to durable storage"
+        );
+        return err(
+          createPublicError({
+            code: "DM_TRANSACTION_COMMIT_UNCONFIRMED",
+            category: "recovery",
+            message: `Project completion succeeded on domain but durable transaction commit marker failed to flush: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}. Requires reconciliation.`,
+            details: flushErr,
+            userActionRequired: true,
+            retryable: false
+          })
+        );
       }
     }
   }
@@ -22511,6 +22929,10 @@ async function executeProjectAdvanceDomainOperationPlan(context, params) {
     domainUuid: cleanDomainUuid,
     debitedCosts: Object.freeze([...debitedCosts]),
     deltaUnits,
+    expectedWorkCompleted: updatedProject.workCompleted,
+    expectedRevision: updatedProject.revision,
+    previousWorkCompleted: project.workCompleted,
+    previousRevision: project.revision,
     authorityEpoch: epoch,
     correlationId: params.correlationId,
     causationId: params.causationId,
@@ -22596,7 +23018,23 @@ async function executeProjectAdvanceDomainOperationPlan(context, params) {
             const tx = context.transactionStore.get(txId);
             if (tx) {
               context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
-              await context.transactionStore.flush();
+              try {
+                await context.transactionStore.flush();
+              } catch (flushErr) {
+                await compensateDebits(`flush failed after progressive debit: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
+                if (context.transactionStore) {
+                  const targetState = compensationFailed ? "needs-recovery" : "failed";
+                  context.transactionStore.transition(txId, targetState, epoch, String(flushErr));
+                }
+                return err(
+                  createPublicError({
+                    code: "DM_DOMAIN_STORAGE_ERROR",
+                    category: "internal",
+                    message: `Failed to flush transaction update after progressive debit: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+                    details: flushErr
+                  })
+                );
+              }
             }
           }
         }
@@ -22628,6 +23066,21 @@ async function executeProjectAdvanceDomainOperationPlan(context, params) {
       context.transactionStore.transition(txId, targetState, epoch, committingRes.error.message);
       return committingRes;
     }
+    try {
+      await context.transactionStore.flush();
+    } catch (flushErr) {
+      await compensateDebits(`flush committing state failed: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
+      const targetState = compensationFailed ? "needs-recovery" : "failed";
+      context.transactionStore.transition(txId, targetState, epoch, String(flushErr));
+      return err(
+        createPublicError({
+          code: "DM_DOMAIN_STORAGE_ERROR",
+          category: "internal",
+          message: `Failed to flush transaction committing state to storage: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+          details: flushErr
+        })
+      );
+    }
   }
   const saveRes = await context.domains.save({
     ...freshDocRes.value,
@@ -22646,7 +23099,23 @@ async function executeProjectAdvanceDomainOperationPlan(context, params) {
     if (!committedRes.ok) return committedRes;
     try {
       await context.transactionStore.flush();
-    } catch {
+    } catch (flushErr) {
+      context.transactionStore.transition(
+        txId,
+        "needs-recovery",
+        epoch,
+        "Final commit flush failed to persist to durable storage"
+      );
+      return err(
+        createPublicError({
+          code: "DM_TRANSACTION_COMMIT_UNCONFIRMED",
+          category: "recovery",
+          message: `Project advance succeeded on domain but durable transaction commit marker failed to flush: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}. Requires reconciliation.`,
+          details: flushErr,
+          userActionRequired: true,
+          retryable: false
+        })
+      );
     }
   }
   return ok({
@@ -22765,6 +23234,28 @@ async function executeProjectCancelDomainOperationPlan(context, params) {
       }
     }
   }
+  if (context.transactionStore) {
+    const tx = context.transactionStore.get(txId);
+    if (tx) {
+      context.transactionStore.save({
+        ...tx,
+        recoveryData: buildRecoveryData("executing")
+      });
+      try {
+        await context.transactionStore.flush();
+      } catch (flushErr) {
+        context.transactionStore.transition(txId, "failed", epoch, "Persistence flush of cancellation snapshots failed");
+        return err(
+          createPublicError({
+            code: "DM_DOMAIN_STORAGE_ERROR",
+            category: "internal",
+            message: `Failed to flush cancellation snapshots to storage: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+            details: flushErr
+          })
+        );
+      }
+    }
+  }
   let restoreFailed = false;
   const restoreReleased = async (reason) => {
     if (context.economyService && releasedReservationSnapshots.length > 0) {
@@ -22852,6 +23343,21 @@ async function executeProjectCancelDomainOperationPlan(context, params) {
       context.transactionStore.transition(txId, targetState, epoch, committingRes.error.message);
       return committingRes;
     }
+    try {
+      await context.transactionStore.flush();
+    } catch (flushErr) {
+      await restoreReleased(`flush committing state failed: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
+      const targetState = restoreFailed ? "needs-recovery" : "failed";
+      context.transactionStore.transition(txId, targetState, epoch, String(flushErr));
+      return err(
+        createPublicError({
+          code: "DM_DOMAIN_STORAGE_ERROR",
+          category: "internal",
+          message: `Failed to flush transaction committing state to storage: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+          details: flushErr
+        })
+      );
+    }
   }
   const saveRes = await context.domains.save({
     ...freshDocRes.value,
@@ -22870,7 +23376,23 @@ async function executeProjectCancelDomainOperationPlan(context, params) {
     if (!committedRes.ok) return committedRes;
     try {
       await context.transactionStore.flush();
-    } catch {
+    } catch (flushErr) {
+      context.transactionStore.transition(
+        txId,
+        "needs-recovery",
+        epoch,
+        "Final commit flush failed to persist to durable storage"
+      );
+      return err(
+        createPublicError({
+          code: "DM_TRANSACTION_COMMIT_UNCONFIRMED",
+          category: "recovery",
+          message: `Project cancel succeeded on domain but durable transaction commit marker failed to flush: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}. Requires reconciliation.`,
+          details: flushErr,
+          userActionRequired: true,
+          retryable: false
+        })
+      );
     }
   }
   return ok({ project: cancelledProject });
@@ -23066,90 +23588,136 @@ var ProjectsService = class {
         return ok(void 0);
       }
       const recoveryLockOwner = `recovery_${record.transactionId}`;
+      const cleanDomainUuid = normalizeJournalEntryId(data.domainUuid);
+      const reachedCommitting = record.history.some(
+        (h) => h.toState === "committing" || h.toState === "committed"
+      );
+      if (reachedCommitting) {
+        const docRes = await this.#domains.read(cleanDomainUuid);
+        if (!docRes.ok) return docRes;
+        const prjData = getDomainProjectsData(docRes.value.record);
+        const existingProject = prjData.projects.find((p) => p.id === data.projectId);
+        if (existingProject && existingProject.lifecycle === "completed") {
+          if (this.#transactionStore) {
+            this.#transactionStore.transition(
+              record.transactionId,
+              "committed",
+              record.authorityEpoch,
+              "Parent state reconciliation: project already completed on domain"
+            );
+            await this.#transactionStore.flush();
+          }
+          return ok(void 0);
+        }
+      }
       if (this.#economyService && data.creditedResourceRefs && data.creditedResourceRefs.length > 0) {
-        for (const cred of data.creditedResourceRefs) {
-          const adjRes = await this.#economyService.commitAdjust({
-            domainUuid: data.domainUuid,
-            resourceId: cred.resourceId,
-            deltaMinor: -cred.amountMinor,
-            reason: `Recovery: reverse completion reward for project ${data.projectId}`,
-            lockOwner: recoveryLockOwner
-          });
-          if (!adjRes.ok) return adjRes;
+        for (let i = 0; i < data.creditedResourceRefs.length; i++) {
+          const cred = data.creditedResourceRefs[i];
+          const stepId = `revert_credit_${i}_${cred.resourceId}_${cred.amountMinor}`;
+          if (!isCompensationStepCompleted(record, stepId, this.#transactionStore)) {
+            const adjRes = await this.#economyService.commitAdjust({
+              domainUuid: data.domainUuid,
+              resourceId: cred.resourceId,
+              deltaMinor: -cred.amountMinor,
+              reason: `Recovery: reverse completion reward for project ${data.projectId}`,
+              lockOwner: recoveryLockOwner
+            });
+            if (!adjRes.ok) return adjRes;
+            await markCompensationStepCompleted(this.#transactionStore, record, stepId);
+          }
         }
       }
       if (this.#economyService && data.debitedCostRefs && data.debitedCostRefs.length > 0) {
-        for (const deb of data.debitedCostRefs) {
-          const refRes = await this.#economyService.commitAdjust({
-            domainUuid: data.domainUuid,
-            resourceId: deb.resourceId,
-            deltaMinor: deb.amountMinor,
-            reason: `Recovery: refund completion cost for project ${data.projectId}`,
-            lockOwner: recoveryLockOwner
-          });
-          if (!refRes.ok) return refRes;
+        for (let i = 0; i < data.debitedCostRefs.length; i++) {
+          const deb = data.debitedCostRefs[i];
+          const stepId = `refund_debit_${i}_${deb.resourceId}_${deb.amountMinor}`;
+          if (!isCompensationStepCompleted(record, stepId, this.#transactionStore)) {
+            const refRes = await this.#economyService.commitAdjust({
+              domainUuid: data.domainUuid,
+              resourceId: deb.resourceId,
+              deltaMinor: deb.amountMinor,
+              reason: `Recovery: refund completion cost for project ${data.projectId}`,
+              lockOwner: recoveryLockOwner
+            });
+            if (!refRes.ok) return refRes;
+            await markCompensationStepCompleted(this.#transactionStore, record, stepId);
+          }
         }
       }
       if (this.#economyService && data.consumedReservationSnapshots && data.consumedReservationSnapshots.length > 0) {
         for (const snap of data.consumedReservationSnapshots) {
-          const restRes = await this.#economyService.restoreReservation({
-            domainUuid: data.domainUuid,
-            reservationSnapshot: snap.reservation,
-            consumedAmount: snap.consumedAmount,
-            reason: `Recovery: restore consumed reservation ${snap.reservation.id} for project ${data.projectId}`,
-            lockOwner: recoveryLockOwner
-          });
-          if (!restRes.ok) return restRes;
+          const stepId = `restore_res_${snap.reservation.id}`;
+          if (!isCompensationStepCompleted(record, stepId, this.#transactionStore)) {
+            const restRes = await this.#economyService.restoreReservation({
+              domainUuid: data.domainUuid,
+              reservationSnapshot: snap.reservation,
+              consumedAmount: snap.consumedAmount,
+              reason: `Recovery: restore consumed reservation ${snap.reservation.id} for project ${data.projectId}`,
+              lockOwner: recoveryLockOwner
+            });
+            if (!restRes.ok) return restRes;
+            await markCompensationStepCompleted(this.#transactionStore, record, stepId);
+          }
         }
       }
       const peopleService = this.#peopleService ?? new PeopleService(this.#domains);
       if (data.releasedWorkforceSnapshots && data.releasedWorkforceSnapshots.length > 0) {
         for (const wf of data.releasedWorkforceSnapshots) {
-          const restWf = await peopleService.restoreWorkforceReservation({
-            domainUuid: data.domainUuid,
-            projectId: data.projectId,
-            reservationId: wf.reservationId
-          });
-          if (!restWf.ok) return restWf;
+          const stepId = `restore_wf_${wf.reservationId}`;
+          if (!isCompensationStepCompleted(record, stepId, this.#transactionStore)) {
+            const restWf = await peopleService.restoreWorkforceReservation({
+              domainUuid: data.domainUuid,
+              projectId: data.projectId,
+              reservationId: wf.reservationId
+            });
+            if (!restWf.ok) return restWf;
+            await markCompensationStepCompleted(this.#transactionStore, record, stepId);
+          }
         }
       }
       if (data.createdFacilityIds && data.createdFacilityIds.length > 0) {
-        const cleanDomainUuid = normalizeJournalEntryId(data.domainUuid);
-        const docRes = await this.#domains.read(cleanDomainUuid);
-        if (!docRes.ok) return docRes;
-        const facData = getDomainFacilitiesData(docRes.value.record);
-        const remainingFacilities = facData.facilities.filter(
-          (f) => !data.createdFacilityIds.includes(f.id)
-        );
-        if (remainingFacilities.length !== facData.facilities.length) {
-          const updatedRecord = withDomainFacilitiesData(docRes.value.record, {
-            ...facData,
-            facilities: Object.freeze(remainingFacilities)
+        const stepId = `rollback_facilities_${data.createdFacilityIds.join("_")}`;
+        if (!isCompensationStepCompleted(record, stepId, this.#transactionStore)) {
+          const docRes = await this.#domains.read(cleanDomainUuid);
+          if (!docRes.ok) return docRes;
+          const facData = getDomainFacilitiesData(docRes.value.record);
+          const remainingFacilities = facData.facilities.filter(
+            (f) => !data.createdFacilityIds.includes(f.id)
+          );
+          if (remainingFacilities.length !== facData.facilities.length) {
+            const updatedRecord = withDomainFacilitiesData(docRes.value.record, {
+              ...facData,
+              facilities: Object.freeze(remainingFacilities)
+            });
+            const saveRes = await this.#domains.save({
+              ...docRes.value,
+              record: updatedRecord
+            });
+            if (!saveRes.ok) return saveRes;
+          }
+          await markCompensationStepCompleted(this.#transactionStore, record, stepId);
+        }
+      }
+      if (data.projectSnapshot) {
+        const stepId = `restore_project_snapshot_${data.projectId}`;
+        if (!isCompensationStepCompleted(record, stepId, this.#transactionStore)) {
+          const docRes = await this.#domains.read(cleanDomainUuid);
+          if (!docRes.ok) return docRes;
+          const prjData = getDomainProjectsData(docRes.value.record);
+          const restoredProjects = prjData.projects.map(
+            (p) => p.id === data.projectId ? { ...data.projectSnapshot, updatedAt: Date.now() } : p
+          );
+          const updatedRecord = withDomainProjectsData(docRes.value.record, {
+            ...prjData,
+            projects: Object.freeze(restoredProjects)
           });
           const saveRes = await this.#domains.save({
             ...docRes.value,
             record: updatedRecord
           });
           if (!saveRes.ok) return saveRes;
+          await markCompensationStepCompleted(this.#transactionStore, record, stepId);
         }
-      }
-      if (data.projectSnapshot) {
-        const cleanDomainUuid = normalizeJournalEntryId(data.domainUuid);
-        const docRes = await this.#domains.read(cleanDomainUuid);
-        if (!docRes.ok) return docRes;
-        const prjData = getDomainProjectsData(docRes.value.record);
-        const restoredProjects = prjData.projects.map(
-          (p) => p.id === data.projectId ? { ...data.projectSnapshot, updatedAt: Date.now() } : p
-        );
-        const updatedRecord = withDomainProjectsData(docRes.value.record, {
-          ...prjData,
-          projects: Object.freeze(restoredProjects)
-        });
-        const saveRes = await this.#domains.save({
-          ...docRes.value,
-          record: updatedRecord
-        });
-        if (!saveRes.ok) return saveRes;
       }
       return ok(void 0);
     });
@@ -23159,16 +23727,43 @@ var ProjectsService = class {
         return ok(void 0);
       }
       const recoveryLockOwner = `recovery_${record.transactionId}`;
+      const cleanDomainUuid = normalizeJournalEntryId(data.domainUuid);
+      const reachedCommitting = record.history.some(
+        (h) => h.toState === "committing" || h.toState === "committed"
+      );
+      if (reachedCommitting) {
+        const docRes = await this.#domains.read(cleanDomainUuid);
+        if (!docRes.ok) return docRes;
+        const prjData = getDomainProjectsData(docRes.value.record);
+        const existingProject = prjData.projects.find((p) => p.id === data.projectId);
+        if (existingProject && data.expectedWorkCompleted !== void 0 && existingProject.workCompleted >= data.expectedWorkCompleted) {
+          if (this.#transactionStore) {
+            this.#transactionStore.transition(
+              record.transactionId,
+              "committed",
+              record.authorityEpoch,
+              "Parent state reconciliation: project work already advanced on domain"
+            );
+            await this.#transactionStore.flush();
+          }
+          return ok(void 0);
+        }
+      }
       if (this.#economyService && data.debitedCosts && Array.isArray(data.debitedCosts)) {
-        for (const cost of data.debitedCosts) {
-          const refRes = await this.#economyService.commitAdjust({
-            domainUuid: data.domainUuid,
-            resourceId: cost.resourceId,
-            deltaMinor: cost.amountMinor,
-            reason: `Recovery: refund progressive cost for project ${data.projectId}`,
-            lockOwner: recoveryLockOwner
-          });
-          if (!refRes.ok) return refRes;
+        for (let i = 0; i < data.debitedCosts.length; i++) {
+          const cost = data.debitedCosts[i];
+          const stepId = `refund_advance_cost_${i}_${cost.resourceId}_${cost.amountMinor}`;
+          if (!isCompensationStepCompleted(record, stepId, this.#transactionStore)) {
+            const refRes = await this.#economyService.commitAdjust({
+              domainUuid: data.domainUuid,
+              resourceId: cost.resourceId,
+              deltaMinor: cost.amountMinor,
+              reason: `Recovery: refund progressive cost for project ${data.projectId}`,
+              lockOwner: recoveryLockOwner
+            });
+            if (!refRes.ok) return refRes;
+            await markCompensationStepCompleted(this.#transactionStore, record, stepId);
+          }
         }
       }
       return ok(void 0);
@@ -23179,26 +23774,56 @@ var ProjectsService = class {
         return ok(void 0);
       }
       const recoveryLockOwner = `recovery_${record.transactionId}`;
+      const cleanDomainUuid = normalizeJournalEntryId(data.domainUuid);
+      const reachedCommitting = record.history.some(
+        (h) => h.toState === "committing" || h.toState === "committed"
+      );
+      if (reachedCommitting) {
+        const docRes = await this.#domains.read(cleanDomainUuid);
+        if (!docRes.ok) return docRes;
+        const prjData = getDomainProjectsData(docRes.value.record);
+        const existingProject = prjData.projects.find((p) => p.id === data.projectId);
+        if (existingProject && existingProject.lifecycle === "cancelled") {
+          if (this.#transactionStore) {
+            this.#transactionStore.transition(
+              record.transactionId,
+              "committed",
+              record.authorityEpoch,
+              "Parent state reconciliation: project already cancelled on domain"
+            );
+            await this.#transactionStore.flush();
+          }
+          return ok(void 0);
+        }
+      }
       if (this.#economyService && data.releasedReservationSnapshots && Array.isArray(data.releasedReservationSnapshots)) {
         for (const snap of data.releasedReservationSnapshots) {
-          const restRes = await this.#economyService.restoreReservation({
-            domainUuid: data.domainUuid,
-            reservationSnapshot: snap,
-            reason: `Recovery: restore cancelled reservation for project ${data.projectId}`,
-            lockOwner: recoveryLockOwner
-          });
-          if (!restRes.ok) return restRes;
+          const stepId = `restore_cancel_res_${snap.id}`;
+          if (!isCompensationStepCompleted(record, stepId, this.#transactionStore)) {
+            const restRes = await this.#economyService.restoreReservation({
+              domainUuid: data.domainUuid,
+              reservationSnapshot: snap,
+              reason: `Recovery: restore cancelled reservation for project ${data.projectId}`,
+              lockOwner: recoveryLockOwner
+            });
+            if (!restRes.ok) return restRes;
+            await markCompensationStepCompleted(this.#transactionStore, record, stepId);
+          }
         }
       }
       const peopleService = this.#peopleService ?? new PeopleService(this.#domains);
       if (data.releasedWorkforceSnapshots && Array.isArray(data.releasedWorkforceSnapshots)) {
         for (const wf of data.releasedWorkforceSnapshots) {
-          const restWf = await peopleService.restoreWorkforceReservation({
-            domainUuid: data.domainUuid,
-            projectId: data.projectId,
-            reservationId: wf.reservationId
-          });
-          if (!restWf.ok) return restWf;
+          const stepId = `restore_cancel_wf_${wf.reservationId}`;
+          if (!isCompensationStepCompleted(record, stepId, this.#transactionStore)) {
+            const restWf = await peopleService.restoreWorkforceReservation({
+              domainUuid: data.domainUuid,
+              projectId: data.projectId,
+              reservationId: wf.reservationId
+            });
+            if (!restWf.ok) return restWf;
+            await markCompensationStepCompleted(this.#transactionStore, record, stepId);
+          }
         }
       }
       return ok(void 0);
@@ -23209,36 +23834,71 @@ var ProjectsService = class {
         return ok(void 0);
       }
       const recoveryLockOwner = `recovery_${record.transactionId}`;
+      const cleanDomainUuid = normalizeJournalEntryId(data.domainUuid);
       const peopleService = this.#peopleService ?? new PeopleService(this.#domains);
+      const reachedCommitting = record.history.some(
+        (h) => h.toState === "committing" || h.toState === "committed"
+      );
+      if (reachedCommitting) {
+        const docRes = await this.#domains.read(cleanDomainUuid);
+        if (!docRes.ok) return docRes;
+        const prjData = getDomainProjectsData(docRes.value.record);
+        const existingProject = prjData.projects.find((p) => p.id === data.projectId);
+        if (existingProject) {
+          if (this.#transactionStore) {
+            this.#transactionStore.transition(
+              record.transactionId,
+              "committed",
+              record.authorityEpoch,
+              "Parent state reconciliation: project already created on domain"
+            );
+            await this.#transactionStore.flush();
+          }
+          return ok(void 0);
+        }
+      }
       if (data.allocatedWorkforceReservationId) {
-        const relWf = await peopleService.releaseWorkforceReservation({
-          domainUuid: data.domainUuid,
-          projectId: data.projectId,
-          reservationId: data.allocatedWorkforceReservationId
-        });
-        if (!relWf.ok) return relWf;
+        const stepId = `release_wf_${data.allocatedWorkforceReservationId}`;
+        if (!isCompensationStepCompleted(record, stepId, this.#transactionStore)) {
+          const relWf = await peopleService.releaseWorkforceReservation({
+            domainUuid: data.domainUuid,
+            projectId: data.projectId,
+            reservationId: data.allocatedWorkforceReservationId
+          });
+          if (!relWf.ok) return relWf;
+          await markCompensationStepCompleted(this.#transactionStore, record, stepId);
+        }
       }
       if (this.#economyService && data.createdReservationIds && Array.isArray(data.createdReservationIds)) {
         for (const resId of data.createdReservationIds) {
-          const relRes = await this.#economyService.releaseReservation({
-            domainUuid: data.domainUuid,
-            reservationId: resId,
-            reason: `Recovery: release reservation for project start ${data.projectId}`,
-            lockOwner: recoveryLockOwner
-          });
-          if (!relRes.ok) return relRes;
+          const stepId = `release_res_${resId}`;
+          if (!isCompensationStepCompleted(record, stepId, this.#transactionStore)) {
+            const relRes = await this.#economyService.releaseReservation({
+              domainUuid: data.domainUuid,
+              reservationId: resId,
+              reason: `Recovery: release reservation for project start ${data.projectId}`,
+              lockOwner: recoveryLockOwner
+            });
+            if (!relRes.ok) return relRes;
+            await markCompensationStepCompleted(this.#transactionStore, record, stepId);
+          }
         }
       }
       if (this.#economyService && data.debitedCosts && Array.isArray(data.debitedCosts)) {
-        for (const cost of data.debitedCosts) {
-          const refRes = await this.#economyService.commitAdjust({
-            domainUuid: data.domainUuid,
-            resourceId: cost.resourceId,
-            deltaMinor: cost.amountMinor,
-            reason: `Recovery: refund upfront cost for project start ${data.projectId}`,
-            lockOwner: recoveryLockOwner
-          });
-          if (!refRes.ok) return refRes;
+        for (let i = 0; i < data.debitedCosts.length; i++) {
+          const cost = data.debitedCosts[i];
+          const stepId = `refund_start_cost_${i}_${cost.resourceId}_${cost.amountMinor}`;
+          if (!isCompensationStepCompleted(record, stepId, this.#transactionStore)) {
+            const refRes = await this.#economyService.commitAdjust({
+              domainUuid: data.domainUuid,
+              resourceId: cost.resourceId,
+              deltaMinor: cost.amountMinor,
+              reason: `Recovery: refund upfront cost for project start ${data.projectId}`,
+              lockOwner: recoveryLockOwner
+            });
+            if (!refRes.ok) return refRes;
+            await markCompensationStepCompleted(this.#transactionStore, record, stepId);
+          }
         }
       }
       return ok(void 0);
@@ -24677,6 +25337,8 @@ var FacilitiesService = class {
       facilityId: facility.id,
       domainUuid: cleanDomainUuid,
       debitedCosts: Object.freeze([...debitedCosts]),
+      facilitySnapshot: facility,
+      expectedFacilityRevision: facility.revision + 1,
       authorityEpoch: epoch,
       correlationId: params.correlationId,
       causationId: params.causationId,
@@ -24748,7 +25410,21 @@ var FacilitiesService = class {
           const tx = this.#transactionStore.get(txId);
           if (tx) {
             this.#transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
-            await this.#transactionStore.flush();
+            try {
+              await this.#transactionStore.flush();
+            } catch (flushErr) {
+              await compensateDebits(`flush failure after debit: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
+              const targetState = compensationFailed ? "needs-recovery" : "failed";
+              this.#transactionStore.transition(txId, targetState, epoch, "Flush failure after maintenance debit");
+              return err(
+                createPublicError({
+                  code: "DM_DOMAIN_STORAGE_ERROR",
+                  category: "internal",
+                  message: `Failed to persist transaction update after debit: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+                  details: flushErr
+                })
+              );
+            }
           }
         }
       }
@@ -24792,6 +25468,21 @@ var FacilitiesService = class {
         this.#transactionStore.transition(txId, targetState, epoch, committingRes.error.message);
         return committingRes;
       }
+      try {
+        await this.#transactionStore.flush();
+      } catch (flushErr) {
+        await compensateDebits(`flush before domain save failed: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
+        const targetState = compensationFailed ? "needs-recovery" : "failed";
+        this.#transactionStore.transition(txId, targetState, epoch, String(flushErr));
+        return err(
+          createPublicError({
+            code: "DM_DOMAIN_STORAGE_ERROR",
+            category: "internal",
+            message: `Failed to persist committing state before domain update: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+            details: flushErr
+          })
+        );
+      }
     }
     const saveRes = await this.#domains.save({
       ...freshDocRes.value,
@@ -24810,7 +25501,23 @@ var FacilitiesService = class {
       if (!committedRes.ok) return committedRes;
       try {
         await this.#transactionStore.flush();
-      } catch {
+      } catch (flushErr) {
+        this.#transactionStore.transition(
+          txId,
+          "needs-recovery",
+          epoch,
+          "Final commit flush failed to persist to durable storage"
+        );
+        return err(
+          createPublicError({
+            code: "DM_TRANSACTION_COMMIT_UNCONFIRMED",
+            category: "recovery",
+            message: `Facility maintenance succeeded on domain but durable transaction commit marker failed to flush: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}. Requires reconciliation.`,
+            details: flushErr,
+            userActionRequired: true,
+            retryable: false
+          })
+        );
       }
     }
     return ok({ facility: updatedFacility });
@@ -24876,6 +25583,8 @@ var FacilitiesService = class {
       facilityId: facility.id,
       domainUuid: cleanDomainUuid,
       debitedCosts: Object.freeze([...debitedCosts]),
+      facilitySnapshot: facility,
+      expectedFacilityRevision: facility.revision + 1,
       authorityEpoch: epoch,
       correlationId: params.correlationId,
       causationId: params.causationId,
@@ -24947,7 +25656,21 @@ var FacilitiesService = class {
           const tx = this.#transactionStore.get(txId);
           if (tx) {
             this.#transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
-            await this.#transactionStore.flush();
+            try {
+              await this.#transactionStore.flush();
+            } catch (flushErr) {
+              await compensateDebits(`flush failure after debit: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
+              const targetState = compensationFailed ? "needs-recovery" : "failed";
+              this.#transactionStore.transition(txId, targetState, epoch, "Flush failure after repair debit");
+              return err(
+                createPublicError({
+                  code: "DM_DOMAIN_STORAGE_ERROR",
+                  category: "internal",
+                  message: `Failed to persist transaction update after debit: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+                  details: flushErr
+                })
+              );
+            }
           }
         }
       }
@@ -24991,6 +25714,21 @@ var FacilitiesService = class {
         this.#transactionStore.transition(txId, targetState, epoch, committingRes.error.message);
         return committingRes;
       }
+      try {
+        await this.#transactionStore.flush();
+      } catch (flushErr) {
+        await compensateDebits(`flush before domain save failed: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
+        const targetState = compensationFailed ? "needs-recovery" : "failed";
+        this.#transactionStore.transition(txId, targetState, epoch, String(flushErr));
+        return err(
+          createPublicError({
+            code: "DM_DOMAIN_STORAGE_ERROR",
+            category: "internal",
+            message: `Failed to persist committing state before domain update: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+            details: flushErr
+          })
+        );
+      }
     }
     const saveRes = await this.#domains.save({
       ...freshDocRes.value,
@@ -25009,7 +25747,23 @@ var FacilitiesService = class {
       if (!committedRes.ok) return committedRes;
       try {
         await this.#transactionStore.flush();
-      } catch {
+      } catch (flushErr) {
+        this.#transactionStore.transition(
+          txId,
+          "needs-recovery",
+          epoch,
+          "Final commit flush failed to persist to durable storage"
+        );
+        return err(
+          createPublicError({
+            code: "DM_TRANSACTION_COMMIT_UNCONFIRMED",
+            category: "recovery",
+            message: `Facility repair succeeded on domain but durable transaction commit marker failed to flush: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}. Requires reconciliation.`,
+            details: flushErr,
+            userActionRequired: true,
+            retryable: false
+          })
+        );
       }
     }
     return ok({ facility: updatedFacility });
@@ -25108,16 +25862,72 @@ var FacilitiesService = class {
         return ok(void 0);
       }
       const recoveryLockOwner = `recovery_${record.transactionId}`;
+      const cleanDomainUuid = normalizeJournalEntryId(data.domainUuid);
+      const reachedCommitting = record.history.some(
+        (h) => h.toState === "committing" || h.toState === "committed"
+      );
+      if (reachedCommitting) {
+        const docRes = await this.#domains.read(cleanDomainUuid);
+        if (!docRes.ok) return docRes;
+        const facData = getDomainFacilitiesData(docRes.value.record);
+        const currentFacility = facData.facilities.find((f) => f.id === data.facilityId);
+        if (currentFacility && data.expectedFacilityRevision !== void 0 && currentFacility.revision >= data.expectedFacilityRevision) {
+          if (this.#transactionStore) {
+            this.#transactionStore.transition(
+              record.transactionId,
+              "committed",
+              record.authorityEpoch,
+              "Parent state reconciliation: facility maintenance already updated on domain"
+            );
+            await this.#transactionStore.flush();
+          }
+          return ok(void 0);
+        }
+      }
+      if (data.facilitySnapshot) {
+        const stepId = `restore_facility_snapshot_${data.facilityId}`;
+        if (!isCompensationStepCompleted(record, stepId, this.#transactionStore)) {
+          const docRes = await this.#domains.read(cleanDomainUuid);
+          if (!docRes.ok) return docRes;
+          const facData = getDomainFacilitiesData(docRes.value.record);
+          const currentFacility = facData.facilities.find((f) => f.id === data.facilityId);
+          if (currentFacility && currentFacility.revision !== data.facilitySnapshot.revision) {
+            const restoredFacility = {
+              ...data.facilitySnapshot,
+              id: data.facilityId,
+              updatedAt: Date.now()
+            };
+            const restoredFacilities = facData.facilities.map(
+              (f) => f.id === data.facilityId ? restoredFacility : f
+            );
+            const updatedRecord = withDomainFacilitiesData(docRes.value.record, {
+              ...facData,
+              facilities: Object.freeze(restoredFacilities)
+            });
+            const saveRes = await this.#domains.save({
+              ...docRes.value,
+              record: updatedRecord
+            });
+            if (!saveRes.ok) return saveRes;
+          }
+          await markCompensationStepCompleted(this.#transactionStore, record, stepId);
+        }
+      }
       if (this.#economyService && data.debitedCosts && Array.isArray(data.debitedCosts)) {
-        for (const cost of data.debitedCosts) {
-          const refRes = await this.#economyService.commitAdjust({
-            domainUuid: data.domainUuid,
-            resourceId: cost.resourceId,
-            deltaMinor: cost.amount,
-            reason: `Recovery: refund maintenance cost for facility ${data.facilityId}`,
-            lockOwner: recoveryLockOwner
-          });
-          if (!refRes.ok) return refRes;
+        for (let i = 0; i < data.debitedCosts.length; i++) {
+          const cost = data.debitedCosts[i];
+          const stepId = `refund_fac_maint_${i}_${cost.resourceId}_${cost.amount}`;
+          if (!isCompensationStepCompleted(record, stepId, this.#transactionStore)) {
+            const refRes = await this.#economyService.commitAdjust({
+              domainUuid: data.domainUuid,
+              resourceId: cost.resourceId,
+              deltaMinor: cost.amount,
+              reason: `Recovery: refund maintenance cost for facility ${data.facilityId}`,
+              lockOwner: recoveryLockOwner
+            });
+            if (!refRes.ok) return refRes;
+            await markCompensationStepCompleted(this.#transactionStore, record, stepId);
+          }
         }
       }
       return ok(void 0);
@@ -25128,16 +25938,72 @@ var FacilitiesService = class {
         return ok(void 0);
       }
       const recoveryLockOwner = `recovery_${record.transactionId}`;
+      const cleanDomainUuid = normalizeJournalEntryId(data.domainUuid);
+      const reachedCommitting = record.history.some(
+        (h) => h.toState === "committing" || h.toState === "committed"
+      );
+      if (reachedCommitting) {
+        const docRes = await this.#domains.read(cleanDomainUuid);
+        if (!docRes.ok) return docRes;
+        const facData = getDomainFacilitiesData(docRes.value.record);
+        const currentFacility = facData.facilities.find((f) => f.id === data.facilityId);
+        if (currentFacility && data.expectedFacilityRevision !== void 0 && currentFacility.revision >= data.expectedFacilityRevision) {
+          if (this.#transactionStore) {
+            this.#transactionStore.transition(
+              record.transactionId,
+              "committed",
+              record.authorityEpoch,
+              "Parent state reconciliation: facility repair already updated on domain"
+            );
+            await this.#transactionStore.flush();
+          }
+          return ok(void 0);
+        }
+      }
+      if (data.facilitySnapshot) {
+        const stepId = `restore_facility_snapshot_${data.facilityId}`;
+        if (!isCompensationStepCompleted(record, stepId, this.#transactionStore)) {
+          const docRes = await this.#domains.read(cleanDomainUuid);
+          if (!docRes.ok) return docRes;
+          const facData = getDomainFacilitiesData(docRes.value.record);
+          const currentFacility = facData.facilities.find((f) => f.id === data.facilityId);
+          if (currentFacility && currentFacility.revision !== data.facilitySnapshot.revision) {
+            const restoredFacility = {
+              ...data.facilitySnapshot,
+              id: data.facilityId,
+              updatedAt: Date.now()
+            };
+            const restoredFacilities = facData.facilities.map(
+              (f) => f.id === data.facilityId ? restoredFacility : f
+            );
+            const updatedRecord = withDomainFacilitiesData(docRes.value.record, {
+              ...facData,
+              facilities: Object.freeze(restoredFacilities)
+            });
+            const saveRes = await this.#domains.save({
+              ...docRes.value,
+              record: updatedRecord
+            });
+            if (!saveRes.ok) return saveRes;
+          }
+          await markCompensationStepCompleted(this.#transactionStore, record, stepId);
+        }
+      }
       if (this.#economyService && data.debitedCosts && Array.isArray(data.debitedCosts)) {
-        for (const cost of data.debitedCosts) {
-          const refRes = await this.#economyService.commitAdjust({
-            domainUuid: data.domainUuid,
-            resourceId: cost.resourceId,
-            deltaMinor: cost.amount,
-            reason: `Recovery: refund repair cost for facility ${data.facilityId}`,
-            lockOwner: recoveryLockOwner
-          });
-          if (!refRes.ok) return refRes;
+        for (let i = 0; i < data.debitedCosts.length; i++) {
+          const cost = data.debitedCosts[i];
+          const stepId = `refund_fac_repair_${i}_${cost.resourceId}_${cost.amount}`;
+          if (!isCompensationStepCompleted(record, stepId, this.#transactionStore)) {
+            const refRes = await this.#economyService.commitAdjust({
+              domainUuid: data.domainUuid,
+              resourceId: cost.resourceId,
+              deltaMinor: cost.amount,
+              reason: `Recovery: refund repair cost for facility ${data.facilityId}`,
+              lockOwner: recoveryLockOwner
+            });
+            if (!refRes.ok) return refRes;
+            await markCompensationStepCompleted(this.#transactionStore, record, stepId);
+          }
         }
       }
       return ok(void 0);
@@ -26145,6 +27011,8 @@ async function executeDowntimeStartPlan(context, params) {
       );
     }
   }
+  const activityId = `dt-${createOpaqueId("prj").slice(4)}`;
+  const now = Date.now();
   const txId = createOpaqueId("tx");
   const cmdId = params.commandId ? params.commandId.startsWith("cmd_") ? params.commandId : `cmd_${params.commandId}` : createCommandId();
   const epoch = params.authorityEpoch ?? 1;
@@ -26158,6 +27026,7 @@ async function executeDowntimeStartPlan(context, params) {
       recoveryData: {
         type: "downtime:start",
         domainUuid: cleanDomainUuid,
+        activityId,
         definitionId: params.definitionId,
         correlationId: params.correlationId,
         causationId: params.causationId,
@@ -26229,13 +27098,25 @@ async function executeDowntimeStartPlan(context, params) {
               status: "executing"
             }
           });
-          await context.transactionStore.flush();
+          try {
+            await context.transactionStore.flush();
+          } catch (flushErr) {
+            await compensateDebits(`flush failure after debit: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
+            const targetState = compensationFailed ? "needs-recovery" : "failed";
+            context.transactionStore.transition(txId, targetState, epoch, "Flush failure after upfront debit");
+            return err(
+              createPublicError({
+                code: "DM_DOMAIN_STORAGE_ERROR",
+                category: "internal",
+                message: `Failed to persist transaction update after debit: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+                details: flushErr
+              })
+            );
+          }
         }
       }
     }
   }
-  const activityId = `dt-${createOpaqueId("prj").slice(4)}`;
-  const now = Date.now();
   const newActivity = {
     id: activityId,
     domainUuid: cleanDomainUuid,
@@ -26275,6 +27156,21 @@ async function executeDowntimeStartPlan(context, params) {
       context.transactionStore.transition(txId, targetState, epoch, committingRes.error.message);
       return committingRes;
     }
+    try {
+      await context.transactionStore.flush();
+    } catch (flushErr) {
+      await compensateDebits(`flush before domain save failed: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
+      const targetState = compensationFailed ? "needs-recovery" : "failed";
+      context.transactionStore.transition(txId, targetState, epoch, String(flushErr));
+      return err(
+        createPublicError({
+          code: "DM_DOMAIN_STORAGE_ERROR",
+          category: "internal",
+          message: `Failed to persist committing state before domain update: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+          details: flushErr
+        })
+      );
+    }
   }
   const saveRes = await context.domains.save({
     ...freshDocRes.value,
@@ -26293,7 +27189,23 @@ async function executeDowntimeStartPlan(context, params) {
     if (!committedRes.ok) return committedRes;
     try {
       await context.transactionStore.flush();
-    } catch {
+    } catch (flushErr) {
+      context.transactionStore.transition(
+        txId,
+        "needs-recovery",
+        epoch,
+        "Final commit flush failed to persist to durable storage"
+      );
+      return err(
+        createPublicError({
+          code: "DM_TRANSACTION_COMMIT_UNCONFIRMED",
+          category: "recovery",
+          message: `Downtime start succeeded on domain but durable transaction commit marker failed to flush: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}. Requires reconciliation.`,
+          details: flushErr,
+          userActionRequired: true,
+          retryable: false
+        })
+      );
     }
   }
   return ok({ activity: newActivity });
@@ -26412,7 +27324,21 @@ async function executeDowntimeResolutionPlan(context, params) {
                   status: "executing"
                 }
               });
-              await context.transactionStore.flush();
+              try {
+                await context.transactionStore.flush();
+              } catch (flushErr) {
+                await compensateCredits(`flush failure after credit: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
+                const targetState = compensationFailed ? "needs-recovery" : "failed";
+                context.transactionStore.transition(txId, targetState, epoch, "Flush failure after credit");
+                return err(
+                  createPublicError({
+                    code: "DM_DOMAIN_STORAGE_ERROR",
+                    category: "internal",
+                    message: `Failed to persist transaction update after credit: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+                    details: flushErr
+                  })
+                );
+              }
             }
           }
           outcomesApplied.push({
@@ -26584,6 +27510,21 @@ async function executeDowntimeResolutionPlan(context, params) {
       context.transactionStore.transition(txId, targetState, epoch, committingRes.error.message);
       return committingRes;
     }
+    try {
+      await context.transactionStore.flush();
+    } catch (flushErr) {
+      await compensateCredits(`flush before domain save failed: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
+      const targetState = compensationFailed ? "needs-recovery" : "failed";
+      context.transactionStore.transition(txId, targetState, epoch, String(flushErr));
+      return err(
+        createPublicError({
+          code: "DM_DOMAIN_STORAGE_ERROR",
+          category: "internal",
+          message: `Failed to persist committing state before domain update: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+          details: flushErr
+        })
+      );
+    }
   }
   const saveRes = await context.domains.save({
     ...freshDocRes.value,
@@ -26602,7 +27543,23 @@ async function executeDowntimeResolutionPlan(context, params) {
     if (!committedRes.ok) return committedRes;
     try {
       await context.transactionStore.flush();
-    } catch {
+    } catch (flushErr) {
+      context.transactionStore.transition(
+        txId,
+        "needs-recovery",
+        epoch,
+        "Final commit flush failed to persist to durable storage"
+      );
+      return err(
+        createPublicError({
+          code: "DM_TRANSACTION_COMMIT_UNCONFIRMED",
+          category: "recovery",
+          message: `Downtime resolution succeeded on domain but durable transaction commit marker failed to flush: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}. Requires reconciliation.`,
+          details: flushErr,
+          userActionRequired: true,
+          retryable: false
+        })
+      );
     }
   }
   return ok({
@@ -26804,16 +27761,45 @@ var DowntimeService = class {
         return ok(void 0);
       }
       const recoveryLockOwner = `recovery_${record.transactionId}`;
+      const cleanDomainUuid = normalizeJournalEntryId(data.domainUuid);
+      const reachedCommitting = record.history.some(
+        (h) => h.toState === "committing" || h.toState === "committed"
+      );
+      if (reachedCommitting) {
+        const docRes = await this.#domains.read(cleanDomainUuid);
+        if (!docRes.ok) return docRes;
+        const dtData = getDomainDowntimeData(docRes.value.record);
+        const existingActivity = dtData.activities.find(
+          (a) => data.activityId && a.id === data.activityId || !data.activityId && a.definitionId === data.definitionId
+        );
+        if (existingActivity) {
+          if (this.#transactionStore) {
+            this.#transactionStore.transition(
+              record.transactionId,
+              "committed",
+              record.authorityEpoch,
+              "Parent state reconciliation: downtime activity already created on domain"
+            );
+            await this.#transactionStore.flush();
+          }
+          return ok(void 0);
+        }
+      }
       if (this.#economyService && data.debitedCosts && Array.isArray(data.debitedCosts)) {
-        for (const cost of data.debitedCosts) {
-          const refRes = await this.#economyService.commitAdjust({
-            domainUuid: data.domainUuid,
-            resourceId: cost.resourceId,
-            deltaMinor: cost.amount,
-            reason: `Recovery: refund upfront cost for downtime activity ${data.definitionId}`,
-            lockOwner: recoveryLockOwner
-          });
-          if (!refRes.ok) return refRes;
+        for (let i = 0; i < data.debitedCosts.length; i++) {
+          const cost = data.debitedCosts[i];
+          const stepId = `refund_dt_start_${i}_${cost.resourceId}_${cost.amount}`;
+          if (!isCompensationStepCompleted(record, stepId, this.#transactionStore)) {
+            const refRes = await this.#economyService.commitAdjust({
+              domainUuid: data.domainUuid,
+              resourceId: cost.resourceId,
+              deltaMinor: cost.amount,
+              reason: `Recovery: refund upfront cost for downtime activity ${data.definitionId}`,
+              lockOwner: recoveryLockOwner
+            });
+            if (!refRes.ok) return refRes;
+            await markCompensationStepCompleted(this.#transactionStore, record, stepId);
+          }
         }
       }
       return ok(void 0);
@@ -26824,16 +27810,43 @@ var DowntimeService = class {
         return ok(void 0);
       }
       const recoveryLockOwner = `recovery_${record.transactionId}`;
+      const cleanDomainUuid = normalizeJournalEntryId(data.domainUuid);
+      const reachedCommitting = record.history.some(
+        (h) => h.toState === "committing" || h.toState === "committed"
+      );
+      if (reachedCommitting) {
+        const docRes = await this.#domains.read(cleanDomainUuid);
+        if (!docRes.ok) return docRes;
+        const dtData = getDomainDowntimeData(docRes.value.record);
+        const existingActivity = dtData.activities.find((a) => a.id === data.activityId);
+        if (existingActivity && existingActivity.lifecycle === "completed") {
+          if (this.#transactionStore) {
+            this.#transactionStore.transition(
+              record.transactionId,
+              "committed",
+              record.authorityEpoch,
+              "Parent state reconciliation: downtime activity already completed on domain"
+            );
+            await this.#transactionStore.flush();
+          }
+          return ok(void 0);
+        }
+      }
       if (this.#economyService && data.creditedResources && Array.isArray(data.creditedResources)) {
-        for (const cred of data.creditedResources) {
-          const refRes = await this.#economyService.commitAdjust({
-            domainUuid: data.domainUuid,
-            resourceId: cred.resourceId,
-            deltaMinor: -cred.amount,
-            reason: `Recovery: reverse outcome credit for downtime activity ${data.activityId}`,
-            lockOwner: recoveryLockOwner
-          });
-          if (!refRes.ok) return refRes;
+        for (let i = 0; i < data.creditedResources.length; i++) {
+          const cred = data.creditedResources[i];
+          const stepId = `reverse_dt_credit_${i}_${cred.resourceId}_${cred.amount}`;
+          if (!isCompensationStepCompleted(record, stepId, this.#transactionStore)) {
+            const refRes = await this.#economyService.commitAdjust({
+              domainUuid: data.domainUuid,
+              resourceId: cred.resourceId,
+              deltaMinor: -cred.amount,
+              reason: `Recovery: reverse outcome credit for downtime activity ${data.activityId}`,
+              lockOwner: recoveryLockOwner
+            });
+            if (!refRes.ok) return refRes;
+            await markCompensationStepCompleted(this.#transactionStore, record, stepId);
+          }
         }
       }
       return ok(void 0);

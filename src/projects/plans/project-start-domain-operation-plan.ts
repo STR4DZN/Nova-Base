@@ -302,7 +302,19 @@ export async function executeProjectStartDomainOperationPlan(
           const tx = context.transactionStore.get(txId);
           if (tx) {
             context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
-            await context.transactionStore.flush();
+            try {
+              await context.transactionStore.flush();
+            } catch (flushErr) {
+              await compensate(`Persistence flush failed after upfront debit: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
+              return err(
+                createPublicError({
+                  code: "DM_DOMAIN_STORAGE_ERROR",
+                  category: "internal",
+                  message: `Failed to flush transaction update after upfront debit: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+                  details: flushErr
+                })
+              );
+            }
           }
         }
       } else if (cost.timing === "reserved") {
@@ -329,7 +341,19 @@ export async function executeProjectStartDomainOperationPlan(
           const tx = context.transactionStore.get(txId);
           if (tx) {
             context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
-            await context.transactionStore.flush();
+            try {
+              await context.transactionStore.flush();
+            } catch (flushErr) {
+              await compensate(`Persistence flush failed after reservation: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
+              return err(
+                createPublicError({
+                  code: "DM_DOMAIN_STORAGE_ERROR",
+                  category: "internal",
+                  message: `Failed to flush transaction update after reservation: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+                  details: flushErr
+                })
+              );
+            }
           }
         }
       }
@@ -364,7 +388,19 @@ export async function executeProjectStartDomainOperationPlan(
       const tx = context.transactionStore.get(txId);
       if (tx) {
         context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
-        await context.transactionStore.flush();
+        try {
+          await context.transactionStore.flush();
+        } catch (flushErr) {
+          await compensate(`Persistence flush failed after workforce allocation: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
+          return err(
+            createPublicError({
+              code: "DM_DOMAIN_STORAGE_ERROR",
+              category: "internal",
+              message: `Failed to flush transaction update after workforce allocation: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+              details: flushErr
+            })
+          );
+        }
       }
     }
   }
@@ -411,6 +447,19 @@ export async function executeProjectStartDomainOperationPlan(
       await compensate(`transition to committing failed: ${committingRes.error.message}`);
       return committingRes;
     }
+    try {
+      await context.transactionStore.flush();
+    } catch (flushErr) {
+      await compensate(`Persistence flush failed for committing state: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
+      return err(
+        createPublicError({
+          code: "DM_DOMAIN_STORAGE_ERROR",
+          category: "internal",
+          message: `Failed to flush transaction committing state to storage: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+          details: flushErr
+        })
+      );
+    }
   }
 
   const updateRes = await context.domains.save({
@@ -428,8 +477,23 @@ export async function executeProjectStartDomainOperationPlan(
     if (!committedRes.ok) return committedRes;
     try {
       await context.transactionStore.flush();
-    } catch {
-      // already committed
+    } catch (flushErr) {
+      context.transactionStore.transition(
+        txId,
+        "needs-recovery",
+        epoch,
+        "Final commit flush failed to persist to durable storage"
+      );
+      return err(
+        createPublicError({
+          code: "DM_TRANSACTION_COMMIT_UNCONFIRMED",
+          category: "recovery",
+          message: `Project start succeeded on domain but durable transaction commit marker failed to flush: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}. Requires reconciliation.`,
+          details: flushErr,
+          userActionRequired: true,
+          retryable: false
+        })
+      );
     }
   }
 

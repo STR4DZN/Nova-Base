@@ -2578,6 +2578,7 @@ test("G5-REVAL4-004 (Fault 5): Recovery execution with recovery_<txId> lockOwner
     commandId: cmdId,
     authorityEpoch: 1,
     lockKeys: [`domain:${normalizeJournalEntryId(env.rawDoc.uuid)}`, `facility:${facilityId}`],
+    safeAutoRecovery: true,
     recoveryData: {
       type: "facilities:maintenance",
       facilityId,
@@ -2688,6 +2689,7 @@ test("G5-REVAL4-006 (Fault 7): Project completion recovery restores consumed eco
     commandId: createCommandId(),
     authorityEpoch: 1,
     lockKeys: tx.lockKeys,
+    safeAutoRecovery: true,
     recoveryData: tx.recoveryData
   });
   env.transactionStore.save(recTx);
@@ -3067,6 +3069,7 @@ test("G5-REVAL4-010 Scenario C: Facility repair crash after debit recovers clean
     commandId: "cmd_sim_repair_crash" as any,
     authorityEpoch: 1,
     lockKeys: [`domain:${env.rawDoc.id}`, `facility:${facilityId}`],
+    safeAutoRecovery: true,
     recoveryData: {
       type: "facilities:repair",
       facilityId,
@@ -3141,6 +3144,7 @@ test("G5-REVAL4-004 & G5-REVAL4-006 Scenario D: Project start crash after upfron
     commandId: "cmd_sim_prj_start_crash" as any,
     authorityEpoch: 1,
     lockKeys: [`domain:${env.rawDoc.id}`, `project:${projectId}`],
+    safeAutoRecovery: true,
     recoveryData: {
       type: "projects:start",
       projectId,
@@ -3207,6 +3211,7 @@ test("G5-REVAL4-001 & G5-REVAL4-004 Scenario E: Downtime start crash after upfro
     commandId: "cmd_sim_dt_start_crash" as any,
     authorityEpoch: 1,
     lockKeys: [`domain:${env.rawDoc.id}`],
+    safeAutoRecovery: true,
     recoveryData: {
       type: "downtime:start",
       domainUuid: env.rawDoc.id,
@@ -3233,6 +3238,1139 @@ test("G5-REVAL4-001 & G5-REVAL4-004 Scenario E: Downtime start crash after upfro
   assert.ok(recoveredTx);
   assert.equal(recoveredTx.state, "compensated");
 });
+
+// ---------------------------------------------------------------------------
+// TEST 42: G5-REVAL5-009 Scenario 1 — recoveryData flush fails after child write
+// ---------------------------------------------------------------------------
+test("G5-REVAL5-009 Scenario 1: recoveryData flush fails after child write (compensates & returns storage error)", async () => {
+  let record = createInitialRecord();
+  record = withDomainEconomyData(record, {
+    schemaVersion: 1,
+    accounts: [
+      {
+        mode: "native",
+        domainUuid: "JournalEntry.dom-adv-1",
+        resourceId: "domain-manager:materials",
+        balanceMinor: 200,
+        baseCapacityMinor: null
+      }
+    ]
+  });
+  const env = setupTestEnvironment(record);
+
+  // Register project with upfront cost 50
+  env.projectRegistry.register({
+    id: "domain-manager:flush-fail-project",
+    version: 1,
+    label: "Flush Fail Project",
+    tags: ["infrastructure"],
+    progressResolverId: "domain-manager:standard",
+    defaultWorkRequired: 100,
+    requirements: [],
+    costs: [
+      { resourceId: "domain-manager:materials", amountMinor: 50, timing: "upfront" }
+    ],
+    rewards: []
+  });
+
+  // Intercept transactionStore.flush(): allow 1st flush (prepared), fail on 2nd (after upfront debit)
+  let flushCount = 0;
+  const originalFlush = env.transactionStore.flush.bind(env.transactionStore);
+  env.transactionStore.flush = async () => {
+    flushCount++;
+    if (flushCount === 2) {
+      throw new Error("Injected disk failure after child write flush");
+    }
+    return originalFlush();
+  };
+
+  const startRes = await env.projectsService.startProject({
+    domainUuid: env.rawDoc.uuid,
+    definitionId: "domain-manager:flush-fail-project",
+    name: "Flush Fail Project",
+    workRequired: 100,
+    userId: "gm-user"
+  });
+
+  env.transactionStore.flush = originalFlush;
+
+  assert.equal(startRes.ok, false);
+  assert.equal(startRes.error.code, "DM_DOMAIN_STORAGE_ERROR");
+
+  // Verify debit was compensated/refunded: balance remains 200
+  const doc = (await env.domains.read(env.rawDoc.id)).value;
+  const matAcc = doc.record.definition.capabilities.config["domain-manager:economy"].accounts.find(
+    (a: any) => a.resourceId === "domain-manager:materials"
+  );
+  assert.equal(matAcc.balanceMinor, 200, "Upfront debit must be compensated when recoveryData flush fails");
+});
+
+// ---------------------------------------------------------------------------
+// TEST 43: G5-REVAL5-009 Scenario 2 — Crash after parent Domain save reconciles to committed without re-mutating
+// ---------------------------------------------------------------------------
+test("G5-REVAL5-009 Scenario 2: Crash after parent Domain save and before durable committed reconciles to committed without re-mutating", async () => {
+  let record = createInitialRecord();
+  record = withDomainEconomyData(record, {
+    schemaVersion: 1,
+    accounts: [
+      {
+        mode: "native",
+        domainUuid: "JournalEntry.dom-adv-1",
+        resourceId: "domain-manager:materials",
+        balanceMinor: 200,
+        baseCapacityMinor: null
+      }
+    ]
+  });
+  const env = setupTestEnvironment(record);
+  env.projectsService.registerRecoveryCompensators(env.recoveryService);
+
+  // Setup project that completed
+  const startRes = await env.projectsService.startProject({
+    domainUuid: env.rawDoc.uuid,
+    definitionId: "domain-manager:fortified-gate",
+    name: "Completed Prj",
+    workRequired: 10,
+    userId: "gm-user"
+  });
+  checkOk(startRes, "Project Start");
+  const actualProjectId = startRes.value.project.id;
+
+  await env.projectsService.advanceProject({
+    domainUuid: env.rawDoc.uuid,
+    projectId: actualProjectId,
+    delta: 10,
+    userId: "gm-user"
+  });
+
+  // Credit reward materials of 100
+  await env.economyService.commitAdjust({
+    domainUuid: env.rawDoc.uuid,
+    resourceId: "domain-manager:materials",
+    deltaMinor: 100,
+    reason: "Completion reward"
+  });
+
+  // Update domain to mark project completed
+  let doc = (await env.domains.read(env.rawDoc.id)).value;
+  let prjData = getDomainProjectsData(doc.record);
+  const updatedProjects = prjData.projects.map((p) =>
+    p.id === actualProjectId ? { ...p, lifecycle: "completed" as const, revision: p.revision + 1 } : p
+  );
+  await env.domains.save({
+    ...doc,
+    record: withDomainProjectsData(doc.record, { ...prjData, projects: Object.freeze(updatedProjects) })
+  });
+
+  // Simulate a transaction that reached "committing", domain save succeeded, but crashed before committed
+  const txId = "tx_reconcile_scenario_2";
+  const txRecord = createTransactionRecord({
+    transactionId: txId,
+    commandId: "cmd_reconcile_scenario_2" as any,
+    authorityEpoch: 1,
+    lockKeys: [`domain:${env.rawDoc.id}`, `project:${actualProjectId}`],
+    safeAutoRecovery: true,
+    recoveryData: {
+      type: "projects:completion",
+      domainUuid: env.rawDoc.id,
+      projectId: actualProjectId,
+      creditedResourceRefs: [{ resourceId: "domain-manager:materials", amountMinor: 100 }],
+      debitedCostRefs: [],
+      createdFacilityIds: []
+    }
+  });
+  env.transactionStore.save(txRecord);
+  env.transactionStore.transition(txId, "claimed", 1);
+  env.transactionStore.transition(txId, "prepared", 1);
+  env.transactionStore.transition(txId, "committing", 1);
+  env.transactionStore.transition(txId, "needs-recovery", 1); // Startup scanner converts uncommitted to needs-recovery
+  await env.transactionStore.flush();
+
+  // Run recoverAll
+  const recoveryResults = await env.recoveryService.recoverAll(1);
+  assert.equal(recoveryResults.length, 1);
+  checkOk(recoveryResults[0], "Recovery should succeed via parent reconciliation");
+
+  // Reconciled to committed!
+  const txAfter = env.transactionStore.get(txId);
+  assert.equal(txAfter?.state, "committed", "Transaction must be reconciled to committed");
+
+  // Materials reward of 100 was NOT rolled back (balance remains 250)
+  doc = (await env.domains.read(env.rawDoc.id)).value;
+  const matAcc = doc.record.definition.capabilities.config["domain-manager:economy"].accounts.find(
+    (a: any) => a.resourceId === "domain-manager:materials"
+  );
+  assert.equal(matAcc.balanceMinor, 250, "Reward must not be reversed since parent save had succeeded");
+});
+
+// ---------------------------------------------------------------------------
+// TEST 44: G5-REVAL5-009 Scenario 3 — Final committed flush fails (returns DM_TRANSACTION_COMMIT_UNCONFIRMED & marks needs-recovery)
+// ---------------------------------------------------------------------------
+test("G5-REVAL5-009 Scenario 3: Final committed flush fails (returns DM_TRANSACTION_COMMIT_UNCONFIRMED & marks needs-recovery)", async () => {
+  let record = createInitialRecord();
+  record = withDomainEconomyData(record, {
+    schemaVersion: 1,
+    accounts: [
+      {
+        mode: "native",
+        domainUuid: "JournalEntry.dom-adv-1",
+        resourceId: "domain-manager:materials",
+        balanceMinor: 200,
+        baseCapacityMinor: null
+      }
+    ]
+  });
+  const env = setupTestEnvironment(record);
+
+  const facRes = await env.facilitiesService.createFacility({
+    domainUuid: env.rawDoc.uuid,
+    definitionId: "domain-manager:storehouse",
+    name: "Maintenance Storehouse"
+  });
+  checkOk(facRes, "Create facility");
+  const facilityId = facRes.value.facility.id;
+
+  // Intercept flush to fail on the final flush (after domain save, when committing -> committed)
+  let shouldFailFlush = false;
+  const originalSave = env.domains.save.bind(env.domains);
+  env.domains.save = async (doc: any) => {
+    const res = await originalSave(doc);
+    const tx = env.transactionStore.getByCommandId(maintCmdId);
+    if (res.ok && tx?.state === "committing") {
+      // Parent save succeeded while committing! Next flush is the commit flush
+      shouldFailFlush = true;
+    }
+    return res;
+  };
+  const originalFlush = env.transactionStore.flush.bind(env.transactionStore);
+  env.transactionStore.flush = async () => {
+    if (shouldFailFlush) {
+      throw new Error("Disk full on final transaction commit flush");
+    }
+    return originalFlush();
+  };
+
+  const maintCmdId = "cmd_maint_commit_fail" as CommandId;
+  const maintRes = await env.facilitiesService.maintainFacility({
+    domainUuid: env.rawDoc.uuid,
+    facilityId,
+    commandId: maintCmdId,
+    userId: "gm-user"
+  });
+
+  env.domains.save = originalSave;
+  env.transactionStore.flush = originalFlush;
+
+  assert.equal(maintRes.ok, false);
+  assert.equal(maintRes.error.code, "DM_TRANSACTION_COMMIT_UNCONFIRMED");
+
+  // In-memory transaction must be in needs-recovery
+  const tx = env.transactionStore.getByCommandId(maintCmdId);
+  assert.ok(tx);
+  assert.equal(tx.state, "needs-recovery");
+});
+
+// ---------------------------------------------------------------------------
+// TEST 45: G5-REVAL5-009 Scenario 4 — Project Cancel crash after release restores reservations/workforce cleanly
+// ---------------------------------------------------------------------------
+test("G5-REVAL5-009 Scenario 4: Project Cancel crash after release with snapshots persisted before release (restores reservations/workforce cleanly)", async () => {
+  let record = createInitialRecord();
+  record = withDomainEconomyData(record, {
+    schemaVersion: 1,
+    accounts: [
+      {
+        mode: "native",
+        domainUuid: "JournalEntry.dom-adv-1",
+        resourceId: "domain-manager:materials",
+        balanceMinor: 200,
+        baseCapacityMinor: null
+      }
+    ]
+  });
+  record = withDomainPeopleData(record, {
+    ...createDefaultDomainPeopleData(),
+    populationGroups: [
+      {
+        id: "pop_00000000-0000-0000-0000-000000000015",
+        name: "Builders",
+        count: 20,
+        includedInTotal: true,
+        tags: [],
+        workforceContributions: [{ workforceTypeId: "general", amount: 10 }]
+      }
+    ]
+  });
+  const env = setupTestEnvironment(record);
+  env.projectsService.registerRecoveryCompensators(env.recoveryService);
+
+  env.projectRegistry.register({
+    id: "domain-manager:cancel-restore-project",
+    version: 1,
+    label: "Cancel Restore Project",
+    tags: ["infrastructure"],
+    progressResolverId: "domain-manager:standard",
+    defaultWorkRequired: 100,
+    requirements: [],
+    costs: [
+      { resourceId: "domain-manager:materials", amountMinor: 50, timing: "reserved" }
+    ],
+    rewards: []
+  });
+
+  const startRes = await env.projectsService.startProject({
+    domainUuid: env.rawDoc.uuid,
+    definitionId: "domain-manager:cancel-restore-project",
+    name: "Cancel Restore Prj",
+    workRequired: 100,
+    workforceRequired: 4,
+    userId: "gm-user"
+  });
+  checkOk(startRes, "Project Start");
+  const projectId = startRes.value.project.id;
+
+  // Verify reservation exists
+  const activeResvs = env.economyService.listReservations({ domainUuid: env.rawDoc.uuid, status: "active" });
+  assert.equal(activeResvs.length, 1);
+  const econResvSnapshot = activeResvs[0];
+
+  // Verify workforce exists
+  let peopleDoc = (await env.domains.read(env.rawDoc.id)).value;
+  let peopleData = getDomainPeopleData(peopleDoc.record);
+  const wfResv = peopleData.reservations.find((r) => r.targetRef === `project:${projectId}`);
+  assert.ok(wfResv);
+  const wfResvId = wfResv.id;
+
+  // Release reservation and workforce (simulating child releases during cancel)
+  const relEconRes = await env.economyService.releaseReservation({
+    domainUuid: econResvSnapshot.domainUuid,
+    reservationId: econResvSnapshot.id,
+    reason: "Simulate cancel release"
+  });
+  checkOk(relEconRes, "Release reservation before cancel crash simulation");
+
+  const relWfRes = await env.peopleService.releaseWorkforceReservation({
+    domainUuid: env.rawDoc.uuid,
+    projectId,
+    reservationId: wfResvId
+  });
+  checkOk(relWfRes, "Release workforce before cancel crash simulation");
+
+  // Verify they are released
+  assert.equal(env.economyService.listReservations({ domainUuid: econResvSnapshot.domainUuid, status: "active" }).length, 0);
+
+  // Now create a needs-recovery transaction with the persisted snapshots
+  const cancelTxId = "tx_sim_cancel_crash_4";
+  const txRecord = createTransactionRecord({
+    transactionId: cancelTxId,
+    commandId: "cmd_sim_cancel_crash_4" as any,
+    authorityEpoch: 1,
+    lockKeys: [`domain:${env.rawDoc.id}`, `project:${projectId}`],
+    safeAutoRecovery: true,
+    recoveryData: {
+      type: "projects:cancel",
+      domainUuid: env.rawDoc.id,
+      projectId,
+      releasedReservationSnapshots: [econResvSnapshot],
+      releasedWorkforceSnapshots: [{ reservationId: wfResvId }]
+    }
+  });
+  env.transactionStore.save(txRecord);
+  env.transactionStore.transition(cancelTxId, "claimed", 1);
+  env.transactionStore.transition(cancelTxId, "prepared", 1);
+  await env.transactionStore.flush();
+
+  // Run recovery
+  const recRes = await env.recoveryService.recoverAll(1);
+  assert.equal(recRes.length, 1);
+  checkOk(recRes[0], "Cancel recovery");
+
+  // Verify economic reservation was restored to active
+  const restoredEconResvs = env.economyService.listReservations({ domainUuid: econResvSnapshot.domainUuid, status: "active" });
+  assert.equal(restoredEconResvs.length, 1, "Economic reservation must be restored to active");
+
+  // Verify workforce reservation was restored to active
+  peopleDoc = (await env.domains.read(env.rawDoc.id)).value;
+  peopleData = getDomainPeopleData(peopleDoc.record);
+  const restoredWf = peopleData.reservations.find((r) => r.id === wfResvId);
+  assert.equal(restoredWf?.status, "active", "Workforce reservation must be restored to active");
+});
+
+// ---------------------------------------------------------------------------
+// TEST 46: G5-REVAL5-009 Scenario 5 — Second attempt of recovery after partial compensation success (idempotent, skips completed step)
+// ---------------------------------------------------------------------------
+test("G5-REVAL5-009 Scenario 5: Second attempt of recovery after partial compensation success (idempotent, skips already completed step)", async () => {
+  let record = createInitialRecord();
+  record = withDomainEconomyData(record, {
+    schemaVersion: 1,
+    accounts: [
+      {
+        mode: "native",
+        domainUuid: "JournalEntry.dom-adv-1",
+        resourceId: "domain-manager:materials",
+        balanceMinor: 200,
+        baseCapacityMinor: null
+      },
+      {
+        mode: "native",
+        domainUuid: "JournalEntry.dom-adv-1",
+        resourceId: "domain-manager:supplies",
+        balanceMinor: 100,
+        baseCapacityMinor: null
+      }
+    ]
+  });
+  const env = setupTestEnvironment(record);
+  env.projectsService.registerRecoveryCompensators(env.recoveryService);
+
+  // Credit 50 materials (Step 1) and debit 30 supplies (Step 2)
+  await env.economyService.commitAdjust({
+    domainUuid: env.rawDoc.uuid,
+    resourceId: "domain-manager:materials",
+    deltaMinor: 50,
+    reason: "Completion reward"
+  });
+  await env.economyService.commitAdjust({
+    domainUuid: env.rawDoc.uuid,
+    resourceId: "domain-manager:supplies",
+    deltaMinor: -30,
+    reason: "Completion debit"
+  });
+
+  const txId = "tx_partial_comp_5";
+  const txRecord = createTransactionRecord({
+    transactionId: txId,
+    commandId: "cmd_partial_comp_5" as any,
+    authorityEpoch: 1,
+    lockKeys: [`domain:${env.rawDoc.id}`],
+    safeAutoRecovery: true,
+    recoveryData: {
+      type: "projects:completion",
+      domainUuid: env.rawDoc.id,
+      projectId: "prj-5",
+      creditedResourceRefs: [{ resourceId: "domain-manager:materials", amountMinor: 50 }],
+      debitedCostRefs: [{ resourceId: "domain-manager:supplies", amountMinor: 30 }]
+    }
+  });
+  env.transactionStore.save(txRecord);
+  env.transactionStore.transition(txId, "claimed", 1);
+  env.transactionStore.transition(txId, "prepared", 1);
+  await env.transactionStore.flush();
+
+  // On first recovery attempt, inject failure on refunding debited costs (Step 2)
+  let attempt = 1;
+  const originalCommitAdjust = env.economyService.commitAdjust.bind(env.economyService);
+  env.economyService.commitAdjust = async (args: any) => {
+    if (attempt === 1 && args.resourceId === "domain-manager:supplies") {
+      return err(
+        createPublicError({
+          code: "DM_ECON_FAIL",
+          category: "internal",
+          message: "Injected economy failure during step 2 of compensation"
+        })
+      );
+    }
+    return originalCommitAdjust(args);
+  };
+
+  const recRes1 = await env.recoveryService.recoverAll(1);
+  assert.equal(recRes1[0].ok, false, "First recovery must fail on step 2");
+
+  // Step 1 completed: materials debited back (250 -> 200)
+  let doc = (await env.domains.read(env.rawDoc.id)).value;
+  let econ = tryGetDomainEconomyData(doc.record).value;
+  let matAcc = econ.accounts.find((a) => a.resourceId === "domain-manager:materials");
+  assert.equal(matAcc?.balanceMinor, 200, "Materials reverted to 200 in step 1");
+
+  // Transaction is still in needs-recovery with completedCompensationSteps recording step 1
+  const txMid = env.transactionStore.get(txId);
+  assert.equal(txMid?.state, "needs-recovery");
+
+  // Second recovery attempt: step 1 must be SKIPPED, step 2 must SUCCEED
+  attempt = 2;
+  const recRes2 = await env.recoveryService.recoverAll(1);
+  checkOk(recRes2[0], "Second recovery attempt must succeed");
+
+  // Materials must still be 200 (not debited again to 150!)
+  doc = (await env.domains.read(env.rawDoc.id)).value;
+  econ = tryGetDomainEconomyData(doc.record).value;
+  matAcc = econ.accounts.find((a) => a.resourceId === "domain-manager:materials");
+  assert.equal(matAcc?.balanceMinor, 200, "Materials must not be double-debited on 2nd recovery attempt");
+
+  // Supplies must now be refunded (+30: 70 -> 100)
+  let supAcc = econ.accounts.find((a) => a.resourceId === "domain-manager:supplies");
+  assert.equal(supAcc?.balanceMinor, 100, "Supplies refunded to 100 in step 2");
+
+  const txFinal = env.transactionStore.get(txId);
+  assert.equal(txFinal?.state, "compensated");
+});
+
+// ---------------------------------------------------------------------------
+// TEST 47: G5-REVAL5-009 Scenario 6 — Multiple onCompletion costs where second fails (refunds first debit cleanly)
+// ---------------------------------------------------------------------------
+test("G5-REVAL5-009 Scenario 6: Multiple onCompletion costs where second fails (refunds first debit cleanly)", async () => {
+  let record = createInitialRecord();
+  record = withDomainEconomyData(record, {
+    schemaVersion: 1,
+    accounts: [
+      {
+        mode: "native",
+        domainUuid: "JournalEntry.dom-adv-1",
+        resourceId: "domain-manager:materials",
+        balanceMinor: 200,
+        baseCapacityMinor: null
+      },
+      {
+        mode: "native",
+        domainUuid: "JournalEntry.dom-adv-1",
+        resourceId: "domain-manager:supplies",
+        balanceMinor: 20, // Insufficient for 50 supplies cost!
+        baseCapacityMinor: null
+      }
+    ]
+  });
+  const env = setupTestEnvironment(record);
+
+  env.projectRegistry.register({
+    id: "domain-manager:multi-cost-comp-project",
+    version: 1,
+    label: "Multi Cost Prj",
+    tags: ["infrastructure"],
+    progressResolverId: "domain-manager:standard",
+    defaultWorkRequired: 10,
+    requirements: [],
+    costs: [
+      { resourceId: "domain-manager:materials", amountMinor: 50, timing: "onCompletion" },
+      { resourceId: "domain-manager:supplies", amountMinor: 50, timing: "onCompletion" }
+    ],
+    rewards: []
+  });
+
+  const startRes = await env.projectsService.startProject({
+    domainUuid: env.rawDoc.uuid,
+    definitionId: "domain-manager:multi-cost-comp-project",
+    name: "Multi Cost Prj",
+    workRequired: 10,
+    userId: "gm-user"
+  });
+  checkOk(startRes, "Project Start");
+  const projectId = startRes.value.project.id;
+
+  await env.projectsService.advanceProject({
+    domainUuid: env.rawDoc.uuid,
+    projectId,
+    delta: 10,
+    userId: "gm-user"
+  });
+
+  // Attempt completion: materials cost (50) succeeds, supplies cost (50) fails
+  const compRes = await env.projectsService.completeProject({
+    domainUuid: env.rawDoc.uuid,
+    projectId,
+    userId: "gm-user"
+  });
+
+  assert.equal(compRes.ok, false);
+
+  // Verify materials was refunded: balance remains 200
+  const doc = (await env.domains.read(env.rawDoc.id)).value;
+  const econ = tryGetDomainEconomyData(doc.record).value;
+  const matAcc = econ.accounts.find((a) => a.resourceId === "domain-manager:materials");
+  assert.equal(matAcc?.balanceMinor, 200, "First onCompletion cost must be refunded when second cost fails");
+
+  // Project must remain active (not completed)
+  const prj = getDomainProjectsData(doc.record).projects.find((p) => p.id === projectId);
+  assert.equal(prj?.lifecycle, "active");
+});
+
+// ---------------------------------------------------------------------------
+// TEST 48: G5-REVAL5-009 Scenario 7 — Workforce release fails during Project Completion (fail-closed, blocks completion)
+// ---------------------------------------------------------------------------
+test("G5-REVAL5-009 Scenario 7: Workforce release fails during Project Completion (fail-closed, blocks completion)", async () => {
+  let record = createInitialRecord();
+  record = withDomainPeopleData(record, {
+    ...createDefaultDomainPeopleData(),
+    populationGroups: [
+      {
+        id: "pop_00000000-0000-0000-0000-000000000017",
+        name: "Builders",
+        count: 20,
+        includedInTotal: true,
+        tags: [],
+        workforceContributions: [{ workforceTypeId: "general", amount: 10 }]
+      }
+    ]
+  });
+  const env = setupTestEnvironment(record);
+
+  env.projectRegistry.register({
+    id: "domain-manager:wf-fail-project",
+    version: 1,
+    label: "WF Fail Prj",
+    tags: ["infrastructure"],
+    progressResolverId: "domain-manager:standard",
+    defaultWorkRequired: 10,
+    requirements: [],
+    costs: [],
+    rewards: []
+  });
+
+  const startRes = await env.projectsService.startProject({
+    domainUuid: env.rawDoc.uuid,
+    definitionId: "domain-manager:wf-fail-project",
+    name: "WF Fail Prj",
+    workRequired: 10,
+    workforceRequired: 4,
+    userId: "gm-user"
+  });
+  checkOk(startRes, "Project Start");
+  const projectId = startRes.value.project.id;
+
+  await env.projectsService.advanceProject({
+    domainUuid: env.rawDoc.uuid,
+    projectId,
+    delta: 10,
+    userId: "gm-user"
+  });
+
+  // Inject failure on peopleService.releaseWorkforceReservation
+  const originalWfRelease = env.peopleService.releaseWorkforceReservation.bind(env.peopleService);
+  env.peopleService.releaseWorkforceReservation = async () => {
+    return err(
+      createPublicError({
+        code: "DM_PEOPLE_RELEASE_FAULT",
+        category: "internal",
+        message: "Injected workforce release failure"
+      })
+    );
+  };
+
+  const compCmdId = "cmd_comp_wf_fail" as CommandId;
+  const compRes = await env.projectsService.completeProject({
+    domainUuid: env.rawDoc.uuid,
+    projectId,
+    commandId: compCmdId,
+    userId: "gm-user"
+  });
+
+  env.peopleService.releaseWorkforceReservation = originalWfRelease;
+
+  assert.equal(compRes.ok, false, "Completion must fail closed when workforce release fails");
+
+  // Project must remain active (NOT completed)
+  const doc = (await env.domains.read(env.rawDoc.id)).value;
+  const prj = getDomainProjectsData(doc.record).projects.find((p) => p.id === projectId);
+  assert.equal(prj?.lifecycle, "active");
+
+  // Transaction must fail closed (failed or needs-recovery)
+  const tx = env.transactionStore.getByCommandId(compCmdId);
+  assert.ok(tx);
+  assert.ok(tx.state === "failed" || tx.state === "needs-recovery", "Transaction must not commit");
+});
+
+// ---------------------------------------------------------------------------
+// TEST 49: G5-REVAL5-009 Scenario 8 — safeAutoRecovery=false remains in needs-recovery on startup recoverAll() while holding recovery lock
+// ---------------------------------------------------------------------------
+test("G5-REVAL5-009 Scenario 8: safeAutoRecovery=false remains in needs-recovery on startup recoverAll() while holding recovery lock", async () => {
+  const env = setupTestEnvironment();
+
+  const unsafeTxId = "tx_unsafe_scenario_8";
+  const lockKey = `domain:${env.rawDoc.id}`;
+  const txRecord = createTransactionRecord({
+    transactionId: unsafeTxId,
+    commandId: "cmd_unsafe_scenario_8" as any,
+    authorityEpoch: 1,
+    lockKeys: [lockKey],
+    safeAutoRecovery: false, // Explicitly unsafe for automatic recovery!
+    recoveryData: {
+      type: "facilities:maintenance",
+      domainUuid: env.rawDoc.id,
+      facilityId: "fac-1"
+    }
+  });
+  env.transactionStore.save(txRecord);
+  env.transactionStore.transition(unsafeTxId, "claimed", 1);
+  env.transactionStore.transition(unsafeTxId, "prepared", 1);
+  env.transactionStore.transition(unsafeTxId, "needs-recovery", 1);
+  await env.transactionStore.flush();
+
+  // Startup scan / recoverAll(1)
+  const recoveryResults = await env.recoveryService.recoverAll(1);
+  assert.equal(recoveryResults.length, 0, "No transactions should be auto-recovered when safeAutoRecovery is false");
+
+  // Transaction remains in needs-recovery
+  const txAfter = env.transactionStore.get(unsafeTxId);
+  assert.equal(txAfter?.state, "needs-recovery", "Transaction must remain in needs-recovery");
+
+  // Recovery lock must remain held in lockManager
+  assert.equal(env.lockManager.isLocked(lockKey), true, "Recovery lock must remain held to prevent conflicting operations");
+
+  // Manual recovery with includeUnsafe works
+  const manualResults = await env.recoveryService.recoverAll(1, { includeUnsafe: true });
+  assert.equal(manualResults.length, 1);
+  checkOk(manualResults[0], "Manual recovery with includeUnsafe succeeds");
+
+  const txFinal = env.transactionStore.get(unsafeTxId);
+  assert.equal(txFinal?.state, "compensated");
+  assert.equal(env.lockManager.isLocked(lockKey), false, "Recovery lock released after manual compensation");
+});
+
+// ---------------------------------------------------------------------------
+// TEST 50: G5-REVAL5-009 Scenario 9 — Facility save already applied + transaction still committing (reconciles to committed)
+// ---------------------------------------------------------------------------
+test("G5-REVAL5-009 Scenario 9: Facility save already applied + transaction still committing reconciles to committed", async () => {
+  let record = createInitialRecord();
+  record = withDomainEconomyData(record, {
+    schemaVersion: 1,
+    accounts: [
+      {
+        mode: "native",
+        domainUuid: "JournalEntry.dom-adv-1",
+        resourceId: "domain-manager:materials",
+        balanceMinor: 200,
+        baseCapacityMinor: null
+      }
+    ]
+  });
+  const env = setupTestEnvironment(record);
+  env.facilitiesService.registerRecoveryCompensators(env.recoveryService);
+
+  const facRes = await env.facilitiesService.createFacility({
+    domainUuid: env.rawDoc.uuid,
+    definitionId: "domain-manager:storehouse",
+    name: "Repair Storehouse"
+  });
+  checkOk(facRes, "Create facility");
+  const facilityId = facRes.value.facility.id;
+
+  // Apply damage so facility revision is 2, integrity 50
+  await env.facilitiesService.applyDamage({
+    domainUuid: env.rawDoc.uuid,
+    facilityId,
+    damage: 50,
+    userId: "gm-user"
+  });
+
+  // Debit repair cost of 20
+  await env.economyService.commitAdjust({
+    domainUuid: env.rawDoc.uuid,
+    resourceId: "domain-manager:materials",
+    deltaMinor: -20,
+    reason: "Repair debit"
+  });
+
+  // Facility save on domain succeeded: integrity restored, revision 3
+  let doc = (await env.domains.read(env.rawDoc.id)).value;
+  let facData = getDomainFacilitiesData(doc.record);
+  const updatedFacilities = facData.facilities.map((f) =>
+    f.id === facilityId
+      ? {
+          ...f,
+          integrity: { current: f.integrity.max, max: f.integrity.max },
+          revision: 3,
+          updatedAt: Date.now()
+        }
+      : f
+  );
+  await env.domains.save({
+    ...doc,
+    record: withDomainFacilitiesData(doc.record, { ...facData, facilities: Object.freeze(updatedFacilities) })
+  });
+
+  // Transaction crashed while in "committing" (after domain save, before final committed state flushed)
+  const txId = "tx_fac_scenario_9";
+  const txRecord = createTransactionRecord({
+    transactionId: txId,
+    commandId: "cmd_fac_scenario_9" as any,
+    authorityEpoch: 1,
+    lockKeys: [`domain:${env.rawDoc.id}`, `facility:${facilityId}`],
+    safeAutoRecovery: true,
+    recoveryData: {
+      type: "facilities:repair",
+      domainUuid: env.rawDoc.id,
+      facilityId,
+      expectedFacilityRevision: 3,
+      debitedCosts: [{ resourceId: "domain-manager:materials", amount: 20 }]
+    }
+  });
+  env.transactionStore.save(txRecord);
+  env.transactionStore.transition(txId, "claimed", 1);
+  env.transactionStore.transition(txId, "prepared", 1);
+  env.transactionStore.transition(txId, "committing", 1);
+  env.transactionStore.transition(txId, "needs-recovery", 1); // Startup scan
+  await env.transactionStore.flush();
+
+  // Run recoverAll
+  const recoveryResults = await env.recoveryService.recoverAll(1);
+  assert.equal(recoveryResults.length, 1);
+  checkOk(recoveryResults[0], "Facility recovery succeeds via parent reconciliation");
+
+  // Reconciled to committed!
+  const txAfter = env.transactionStore.get(txId);
+  assert.equal(txAfter?.state, "committed", "Transaction must be reconciled to committed");
+
+  // Materials cost (20) was NOT refunded (balance remains 180)
+  doc = (await env.domains.read(env.rawDoc.id)).value;
+  const matAcc = doc.record.definition.capabilities.config["domain-manager:economy"].accounts.find(
+    (a: any) => a.resourceId === "domain-manager:materials"
+  );
+  assert.equal(matAcc.balanceMinor, 180, "Repair cost must not be refunded when facility repair already applied");
+});
+
+// ---------------------------------------------------------------------------
+// TEST 51: G5-REVAL5-AUDIT Scenario 10 — Project completion flush failure after facility creation
+// ---------------------------------------------------------------------------
+test("G5-REVAL5-AUDIT Scenario 10: Project completion flush failure after facility creation fails closed, compensates, and updates recoveryData", async () => {
+  let record = createInitialRecord();
+  record = withDomainEconomyData(record, {
+    schemaVersion: 1,
+    accounts: [
+      {
+        mode: "native",
+        domainUuid: "JournalEntry.dom-adv-1",
+        resourceId: "domain-manager:materials",
+        balanceMinor: 200,
+        baseCapacityMinor: null
+      }
+    ]
+  });
+  const env = setupTestEnvironment(record);
+
+  // Register project that creates a facility on completion
+  env.projectRegistry.register({
+    id: "domain-manager:fac-create-prj",
+    version: 1,
+    label: "Facility Creation Project",
+    tags: ["infrastructure"],
+    progressResolverId: "domain-manager:standard",
+    defaultWorkRequired: 10,
+    requirements: [],
+    costs: [],
+    rewards: [
+      { type: "facility:create", targetRef: "domain-manager:storehouse", description: "Created Storehouse", value: 1 }
+    ]
+  });
+
+  const startRes = await env.projectsService.startProject({
+    domainUuid: env.rawDoc.uuid,
+    definitionId: "domain-manager:fac-create-prj",
+    name: "Storehouse Builder",
+    workRequired: 10,
+    userId: "gm-user"
+  });
+  checkOk(startRes, "Project start");
+  const projectId = startRes.value.project.id;
+
+  await env.projectsService.advanceProject({
+    domainUuid: env.rawDoc.uuid,
+    projectId,
+    delta: 10,
+    userId: "gm-user"
+  });
+
+  // Intercept flush: fail on the flush that happens right after facility creation
+  let flushCount = 0;
+  const originalFlush = env.transactionStore.flush.bind(env.transactionStore);
+  env.transactionStore.flush = async () => {
+    flushCount++;
+    // 1st flush is prepared. 2nd flush is after facility creation!
+    if (flushCount === 2) {
+      throw new Error("Disk error after facility creation flush");
+    }
+    return originalFlush();
+  };
+
+  const compRes = await env.projectsService.completeProject({
+    domainUuid: env.rawDoc.uuid,
+    projectId,
+    commandId: "cmd_complete_fac_flush_fail" as any,
+    userId: "gm-user"
+  });
+
+  env.transactionStore.flush = originalFlush;
+
+  assert.equal(compRes.ok, false);
+  assert.equal(compRes.error.code, "DM_DOMAIN_STORAGE_ERROR");
+
+  // Verify that the created facility was compensated/rolled back
+  const doc = (await env.domains.read(env.rawDoc.id)).value;
+  const facData = getDomainFacilitiesData(doc.record);
+  assert.equal(facData.facilities.length, 0, "Facility creation must be rolled back on flush error");
+
+  // Transaction must be in failed or needs-recovery
+  const tx = env.transactionStore.getByCommandId("cmd_complete_fac_flush_fail" as any);
+  assert.ok(tx);
+  assert.ok(tx.state === "failed" || tx.state === "needs-recovery");
+});
+
+// ---------------------------------------------------------------------------
+// TEST 52: G5-REVAL5-AUDIT Scenario 11 — Project completion flush failure after resource credit
+// ---------------------------------------------------------------------------
+test("G5-REVAL5-AUDIT Scenario 11: Project completion flush failure after resource credit fails closed, compensates, and updates recoveryData", async () => {
+  let record = createInitialRecord();
+  record = withDomainEconomyData(record, {
+    schemaVersion: 1,
+    accounts: [
+      {
+        mode: "native",
+        domainUuid: "JournalEntry.dom-adv-1",
+        resourceId: "domain-manager:materials",
+        balanceMinor: 200,
+        baseCapacityMinor: null
+      }
+    ]
+  });
+  const env = setupTestEnvironment(record);
+
+  env.projectRegistry.register({
+    id: "domain-manager:credit-prj",
+    version: 1,
+    label: "Reward Project",
+    tags: ["economy"],
+    progressResolverId: "domain-manager:standard",
+    defaultWorkRequired: 10,
+    requirements: [],
+    costs: [],
+    rewards: [
+      { type: "resource:credit", targetRef: "domain-manager:materials", description: "Reward Materials", value: 50 }
+    ]
+  });
+
+  const startRes = await env.projectsService.startProject({
+    domainUuid: env.rawDoc.uuid,
+    definitionId: "domain-manager:credit-prj",
+    name: "Credit Builder",
+    workRequired: 10,
+    userId: "gm-user"
+  });
+  checkOk(startRes, "Project start");
+  const projectId = startRes.value.project.id;
+
+  await env.projectsService.advanceProject({
+    domainUuid: env.rawDoc.uuid,
+    projectId,
+    delta: 10,
+    userId: "gm-user"
+  });
+
+  // Intercept flush: fail on the flush that happens right after resource credit
+  let flushCount = 0;
+  const originalFlush = env.transactionStore.flush.bind(env.transactionStore);
+  env.transactionStore.flush = async () => {
+    flushCount++;
+    // 1st flush is prepared. 2nd flush is after resource credit!
+    if (flushCount === 2) {
+      throw new Error("Disk error after resource credit flush");
+    }
+    return originalFlush();
+  };
+
+  const compRes = await env.projectsService.completeProject({
+    domainUuid: env.rawDoc.uuid,
+    projectId,
+    commandId: "cmd_complete_cred_flush_fail" as any,
+    userId: "gm-user"
+  });
+
+  env.transactionStore.flush = originalFlush;
+
+  assert.equal(compRes.ok, false);
+  assert.equal(compRes.error.code, "DM_DOMAIN_STORAGE_ERROR");
+
+  // Verify that credited resources were debited back (materials back to 200)
+  const doc = (await env.domains.read(env.rawDoc.id)).value;
+  const econ = tryGetDomainEconomyData(doc.record).value;
+  const materials = econ.accounts.find((a) => a.resourceId === "domain-manager:materials")!.balanceMinor;
+  assert.equal(materials, 200, "Credited resources must be debited back on flush error");
+
+  const tx = env.transactionStore.getByCommandId("cmd_complete_cred_flush_fail" as any);
+  assert.ok(tx);
+  assert.ok(tx.state === "failed" || tx.state === "needs-recovery");
+});
+
+// ---------------------------------------------------------------------------
+// TEST 53: G5-REVAL5-AUDIT Scenario 12 — RecoveryService startup scan flushes transitioned needs-recovery records to disk
+// ---------------------------------------------------------------------------
+test("G5-REVAL5-AUDIT Scenario 12: RecoveryService scanOnStartup flushes transitioned committing records to disk", async () => {
+  const env = setupTestEnvironment();
+  const txId = "tx_startup_flush_test";
+  const tx = createTransactionRecord({
+    transactionId: txId,
+    commandId: "cmd_startup_flush" as any,
+    authorityEpoch: 1,
+    lockKeys: [`domain:${env.rawDoc.id}`],
+    safeAutoRecovery: false
+  });
+  env.transactionStore.save(tx);
+  env.transactionStore.transition(txId, "claimed", 1);
+  env.transactionStore.transition(txId, "prepared", 1);
+  env.transactionStore.transition(txId, "committing", 1);
+
+  let flushCalled = false;
+  const originalFlush = env.transactionStore.flush.bind(env.transactionStore);
+  env.transactionStore.flush = async () => {
+    flushCalled = true;
+    return originalFlush();
+  };
+
+  await env.recoveryService.scanOnStartup(1);
+  env.transactionStore.flush = originalFlush;
+
+  assert.equal(flushCalled, true, "scanOnStartup must flush store when uncommitted transactions are transitioned");
+  const storedTx = env.transactionStore.get(txId);
+  assert.equal(storedTx?.state, "needs-recovery");
+});
+
+// ---------------------------------------------------------------------------
+// TEST 54: G5-REVAL5-AUDIT Scenario 13 — RecoveryService recoverTransaction flushes compensated state to disk and handles flush error
+// ---------------------------------------------------------------------------
+test("G5-REVAL5-AUDIT Scenario 13: recoverTransaction fails closed and transitions back to needs-recovery if compensated flush fails", async () => {
+  const env = setupTestEnvironment();
+  const txId = "tx_comp_flush_fail";
+  const tx = createTransactionRecord({
+    transactionId: txId,
+    commandId: "cmd_comp_flush_fail" as any,
+    authorityEpoch: 1,
+    lockKeys: [`domain:${env.rawDoc.id}`],
+    safeAutoRecovery: true,
+    recoveryData: {
+      type: "downtime:start",
+      domainUuid: env.rawDoc.id,
+      definitionId: "domain-manager:crafting",
+      debitedCosts: []
+    }
+  });
+  env.transactionStore.save(tx);
+  env.transactionStore.transition(txId, "claimed", 1);
+  env.transactionStore.transition(txId, "prepared", 1);
+  env.transactionStore.transition(txId, "needs-recovery", 1);
+
+  // Register compensator
+  env.downtimeService.registerRecoveryCompensators(env.recoveryService);
+
+  // Intercept flush to fail on compensated transition flush
+  const originalFlush = env.transactionStore.flush.bind(env.transactionStore);
+  env.transactionStore.flush = async () => {
+    throw new Error("Disk write error during compensated transition flush");
+  };
+
+  const recRes = await env.recoveryService.recoverTransaction(txId, 1);
+  env.transactionStore.flush = originalFlush;
+
+  assert.equal(recRes.ok, false);
+  assert.equal(recRes.error.code, "DM_DOMAIN_STORAGE_ERROR");
+
+  const storedTx = env.transactionStore.get(txId);
+  assert.equal(storedTx?.state, "needs-recovery", "Transaction must revert to needs-recovery if final flush fails");
+});
+
+// ---------------------------------------------------------------------------
+// TEST 55: G5-REVAL5-AUDIT Scenario 14 — Compensator parent state reconciliation fails closed on domain read error
+// ---------------------------------------------------------------------------
+test("G5-REVAL5-AUDIT Scenario 14: Compensator parent state reconciliation fails closed on domain read error", async () => {
+  const env = setupTestEnvironment();
+  const txId = "tx_reconcile_read_fail";
+  const tx = createTransactionRecord({
+    transactionId: txId,
+    commandId: "cmd_reconcile_read_fail" as any,
+    authorityEpoch: 1,
+    lockKeys: [`domain:${env.rawDoc.id}`],
+    safeAutoRecovery: true,
+    recoveryData: {
+      type: "projects:advance",
+      domainUuid: env.rawDoc.id,
+      projectId: "prj-some",
+      expectedWorkCompleted: 10,
+      debitedCosts: [{ resourceId: "domain-manager:materials", amountMinor: 20 }]
+    }
+  });
+  env.transactionStore.save(tx);
+  env.transactionStore.transition(txId, "claimed", 1);
+  env.transactionStore.transition(txId, "prepared", 1);
+  env.transactionStore.transition(txId, "committing", 1);
+  env.transactionStore.transition(txId, "needs-recovery", 1);
+
+  env.projectsService.registerRecoveryCompensators(env.recoveryService);
+
+  // Fail domain read
+  const originalRead = env.domains.read.bind(env.domains);
+  env.domains.read = async () => {
+    return err(createPublicError({
+      code: "DM_DOMAIN_STORAGE_ERROR",
+      category: "storage",
+      message: "Domain read disk error"
+    }));
+  };
+
+  const recRes = await env.recoveryService.recoverTransaction(txId, 1);
+  env.domains.read = originalRead;
+
+  assert.equal(recRes.ok, false, "Recovery must fail closed when domain read fails during reconciliation");
+  assert.equal(recRes.error.code, "DM_RECOVERY_COMPENSATION_FAILED");
+
+  const storedTx = env.transactionStore.get(txId);
+  assert.equal(storedTx?.state, "needs-recovery", "Transaction must remain in needs-recovery");
+});
+
+// ---------------------------------------------------------------------------
+// TEST 56: G5-REVAL5-AUDIT Scenario 15 — Facility snapshot restoration fails closed on domain read error without marking step completed
+// ---------------------------------------------------------------------------
+test("G5-REVAL5-AUDIT Scenario 15: Facility snapshot restoration fails closed on domain read error without marking step completed", async () => {
+  const env = setupTestEnvironment();
+  const txId = "tx_restore_read_fail";
+  const tx = createTransactionRecord({
+    transactionId: txId,
+    commandId: "cmd_restore_read_fail" as any,
+    authorityEpoch: 1,
+    lockKeys: [`domain:${env.rawDoc.id}`],
+    safeAutoRecovery: true,
+    recoveryData: {
+      type: "facilities:maintenance",
+      domainUuid: env.rawDoc.id,
+      facilityId: "fac-test-1",
+      expectedFacilityRevision: 2,
+      facilitySnapshot: {
+        id: "fac-test-1",
+        definitionId: "domain-manager:storehouse",
+        name: "Storehouse",
+        lifecycle: "active",
+        readiness: "ready",
+        integrity: { current: 100, max: 100 },
+        revision: 1,
+        maintenanceCostDue: null,
+        scheduledRepairs: [],
+        createdAt: Date.now(),
+        updatedAt: Date.now()
+      } as any
+    }
+  });
+  env.transactionStore.save(tx);
+  env.transactionStore.transition(txId, "claimed", 1);
+  env.transactionStore.transition(txId, "prepared", 1);
+  env.transactionStore.transition(txId, "needs-recovery", 1);
+
+  env.facilitiesService.registerRecoveryCompensators(env.recoveryService);
+
+  // Fail domain read
+  const originalRead = env.domains.read.bind(env.domains);
+  env.domains.read = async () => {
+    return err(createPublicError({
+      code: "DM_DOMAIN_STORAGE_ERROR",
+      category: "storage",
+      message: "Domain read storage error during facility snapshot restoration"
+    }));
+  };
+
+  const recRes = await env.recoveryService.recoverTransaction(txId, 1);
+  env.domains.read = originalRead;
+
+  assert.equal(recRes.ok, false);
+  assert.equal(recRes.error.code, "DM_RECOVERY_COMPENSATION_FAILED");
+
+  const storedTx = env.transactionStore.get(txId);
+  const completedSteps = (storedTx?.recoveryData as any)?.completedCompensationSteps ?? [];
+  assert.equal(completedSteps.includes("restore_facility_snapshot_fac-test-1"), false, "Failed restoration must NOT mark step as completed");
+});
+
 
 
 

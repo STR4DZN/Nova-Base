@@ -58,6 +58,7 @@ export class RecoveryService {
     currentEpoch: number
   ): Promise<readonly TransactionRecord[]> {
     const unresolved = this.#transactionStore.listUnresolved();
+    let transitionedAny = false;
 
     for (const record of unresolved) {
       // DEC-724–731: "committing após failover vira needs-recovery até reconciliation."
@@ -68,6 +69,7 @@ export class RecoveryService {
           currentEpoch,
           "Startup recovery scan: transition uncommitted transaction to needs-recovery"
         );
+        transitionedAny = true;
       }
 
       // Block affected lock keys so damaged domains are protected while independent domains continue
@@ -80,6 +82,14 @@ export class RecoveryService {
         if (lockRes.ok) {
           this.#heldRecoveryLocks.set(record.transactionId, lockRes.value);
         }
+      }
+    }
+
+    if (transitionedAny) {
+      try {
+        await this.#transactionStore.flush();
+      } catch {
+        // Startup scan best-effort flush; unresolved list is re-queried below
       }
     }
 
@@ -196,6 +206,26 @@ export class RecoveryService {
       "Transaction successfully compensated during recovery"
     );
 
+    if (finalTransition.ok) {
+      try {
+        await this.#transactionStore.flush();
+      } catch (flushErr) {
+        this.#transactionStore.transition(
+          transactionId,
+          "needs-recovery",
+          currentEpoch,
+          `Failed to flush compensated state: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`
+        );
+        return err(
+          createPublicError({
+            code: "DM_DOMAIN_STORAGE_ERROR",
+            category: "internal",
+            message: `Transaction compensated in memory but failed to flush to storage: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`
+          })
+        );
+      }
+    }
+
     this.#releaseRecoveryLock(transactionId);
     return finalTransition;
   }
@@ -209,15 +239,21 @@ export class RecoveryService {
   }
 
   /**
-   * Recovers all unresolved transactions using registered compensators.
+   * Recovers unresolved transactions using registered compensators.
+   * Auto-recovers ONLY transactions where safeAutoRecovery === true unless includeUnsafe is explicitly requested
+   * (Master Spec §11.10, G5-REVAL5-001). Transactions left without auto-recovery remain in needs-recovery.
    */
   async recoverAll(
-    currentEpoch: number
+    currentEpoch: number,
+    options?: { readonly includeUnsafe?: boolean }
   ): Promise<readonly Result<TransactionRecord, PublicError>[]> {
     const unresolved = await this.scanOnStartup(currentEpoch);
     const results: Result<TransactionRecord, PublicError>[] = [];
     for (const tx of unresolved) {
       if (!isFinalTransactionState(tx.state)) {
+        if (!tx.safeAutoRecovery && !options?.includeUnsafe) {
+          continue;
+        }
         const res = await this.recoverTransaction(tx.transactionId, currentEpoch);
         results.push(res);
       }
@@ -231,4 +267,51 @@ export class RecoveryService {
     }
     this.#heldRecoveryLocks.clear();
   }
+}
+
+/**
+ * Checks whether a compensation step has already been completed during a prior recovery attempt
+ * (G5-REVAL5-005: Idempotency under partial compensation failure and retry).
+ */
+export function isCompensationStepCompleted(
+  record: TransactionRecord,
+  stepId: string,
+  transactionStore?: TransactionStore
+): boolean {
+  const currentRecord = transactionStore?.get(record.transactionId) ?? record;
+  const data = currentRecord.recoveryData as Record<string, any> | undefined;
+  const steps = data?.completedCompensationSteps;
+  return Array.isArray(steps) && steps.includes(stepId);
+}
+
+/**
+ * Persists progress of an individual compensation step to ensure idempotency across recovery retries
+ * (G5-REVAL5-005).
+ */
+export async function markCompensationStepCompleted(
+  transactionStore: TransactionStore | undefined,
+  record: TransactionRecord,
+  stepId: string
+): Promise<TransactionRecord> {
+  const currentRecord = transactionStore?.get(record.transactionId) ?? record;
+  const currentData = (currentRecord.recoveryData as Record<string, any>) ?? {};
+  const currentSteps: string[] = Array.isArray(currentData.completedCompensationSteps)
+    ? [...currentData.completedCompensationSteps]
+    : [];
+  if (!currentSteps.includes(stepId)) {
+    currentSteps.push(stepId);
+  }
+  const updatedRecord: TransactionRecord = {
+    ...currentRecord,
+    recoveryData: {
+      ...currentData,
+      completedCompensationSteps: Object.freeze(currentSteps)
+    },
+    updatedAt: Date.now()
+  };
+  if (transactionStore) {
+    transactionStore.save(updatedRecord);
+    await transactionStore.flush();
+  }
+  return updatedRecord;
 }

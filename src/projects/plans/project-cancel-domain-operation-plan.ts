@@ -189,6 +189,30 @@ export async function executeProjectCancelDomainOperationPlan(
     }
   }
 
+  // G5-REVAL5-003: Persist and flush recovery snapshots BEFORE releasing reservations or workforce
+  if (context.transactionStore) {
+    const tx = context.transactionStore.get(txId);
+    if (tx) {
+      context.transactionStore.save({
+        ...tx,
+        recoveryData: buildRecoveryData("executing")
+      });
+      try {
+        await context.transactionStore.flush();
+      } catch (flushErr) {
+        context.transactionStore.transition(txId, "failed", epoch, "Persistence flush of cancellation snapshots failed");
+        return err(
+          createPublicError({
+            code: "DM_DOMAIN_STORAGE_ERROR",
+            category: "internal",
+            message: `Failed to flush cancellation snapshots to storage: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+            details: flushErr
+          })
+        );
+      }
+    }
+  }
+
   let restoreFailed = false;
   const restoreReleased = async (reason: string) => {
     // Restore economic reservations
@@ -288,6 +312,21 @@ export async function executeProjectCancelDomainOperationPlan(
       context.transactionStore.transition(txId, targetState, epoch, committingRes.error.message);
       return committingRes;
     }
+    try {
+      await context.transactionStore.flush();
+    } catch (flushErr) {
+      await restoreReleased(`flush committing state failed: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
+      const targetState = restoreFailed ? "needs-recovery" : "failed";
+      context.transactionStore.transition(txId, targetState, epoch, String(flushErr));
+      return err(
+        createPublicError({
+          code: "DM_DOMAIN_STORAGE_ERROR",
+          category: "internal",
+          message: `Failed to flush transaction committing state to storage: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+          details: flushErr
+        })
+      );
+    }
   }
 
   const saveRes = await context.domains.save({
@@ -310,8 +349,23 @@ export async function executeProjectCancelDomainOperationPlan(
     if (!committedRes.ok) return committedRes;
     try {
       await context.transactionStore.flush();
-    } catch {
-      // already committed
+    } catch (flushErr) {
+      context.transactionStore.transition(
+        txId,
+        "needs-recovery",
+        epoch,
+        "Final commit flush failed to persist to durable storage"
+      );
+      return err(
+        createPublicError({
+          code: "DM_TRANSACTION_COMMIT_UNCONFIRMED",
+          category: "recovery",
+          message: `Project cancel succeeded on domain but durable transaction commit marker failed to flush: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}. Requires reconciliation.`,
+          details: flushErr,
+          userActionRequired: true,
+          retryable: false
+        })
+      );
     }
   }
 

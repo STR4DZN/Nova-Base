@@ -205,7 +205,21 @@ export async function executeDowntimeResolutionPlan(
                   status: "executing"
                 }
               });
-              await context.transactionStore.flush();
+              try {
+                await context.transactionStore.flush();
+              } catch (flushErr) {
+                await compensateCredits(`flush failure after credit: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
+                const targetState = compensationFailed ? "needs-recovery" : "failed";
+                context.transactionStore.transition(txId, targetState, epoch, "Flush failure after credit");
+                return err(
+                  createPublicError({
+                    code: "DM_DOMAIN_STORAGE_ERROR",
+                    category: "internal",
+                    message: `Failed to persist transaction update after credit: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+                    details: flushErr
+                  })
+                );
+              }
             }
           }
           outcomesApplied.push({
@@ -398,6 +412,21 @@ export async function executeDowntimeResolutionPlan(
       context.transactionStore.transition(txId, targetState, epoch, committingRes.error.message);
       return committingRes;
     }
+    try {
+      await context.transactionStore.flush();
+    } catch (flushErr) {
+      await compensateCredits(`flush before domain save failed: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
+      const targetState = compensationFailed ? "needs-recovery" : "failed";
+      context.transactionStore.transition(txId, targetState, epoch, String(flushErr));
+      return err(
+        createPublicError({
+          code: "DM_DOMAIN_STORAGE_ERROR",
+          category: "internal",
+          message: `Failed to persist committing state before domain update: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+          details: flushErr
+        })
+      );
+    }
   }
 
   const saveRes = await context.domains.save({
@@ -419,8 +448,23 @@ export async function executeDowntimeResolutionPlan(
     if (!committedRes.ok) return committedRes;
     try {
       await context.transactionStore.flush();
-    } catch {
-      // already committed
+    } catch (flushErr) {
+      context.transactionStore.transition(
+        txId,
+        "needs-recovery",
+        epoch,
+        "Final commit flush failed to persist to durable storage"
+      );
+      return err(
+        createPublicError({
+          code: "DM_TRANSACTION_COMMIT_UNCONFIRMED",
+          category: "recovery",
+          message: `Downtime resolution succeeded on domain but durable transaction commit marker failed to flush: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}. Requires reconciliation.`,
+          details: flushErr,
+          userActionRequired: true,
+          retryable: false
+        })
+      );
     }
   }
 

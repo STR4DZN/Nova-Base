@@ -16,7 +16,7 @@
 - **Gate G2**: Concluído, auditado, homologado e aceito em ambiente real Foundry VTT v13.351 + Socketlib.
 - **Gate G3**: Concluído, auditado, homologado e aceito soberanamente pelo usuário (`GATE_G3_HOMOLOGATED_AND_ACCEPTED`).
 - **Gate G4**: Concluído, auditado, homologado e aceito pelo usuário. Implementação completa de todos os 10 microbuilds (G4.1 a G4.10) de acordo com o Master Specification (§14, §11–12, §42, DEC-1416–2305) e `Documentos/GATES/14_G4_ECONOMY_RESOURCES.md`.
-- **Gate G5**: Concluído (G5.1 a G5.10, G5-AUD-001 a G5-AUD-010, G5-REVAL-001 a G5-REVAL-012, G5-REVAL2-001 a G5-REVAL2-010, G5-REVAL3-001 a G5-REVAL3-007 e G5-REVAL4-001 a G5-REVAL4-012) e aguardando aceitação soberana do usuário (`GATE_G5_COMPLETED_PENDING_USER_ACCEPTANCE`).
+- **Gate G5**: Concluído (G5.1 a G5.10, G5-AUD-001 a G5-AUD-010, G5-REVAL-001 a G5-REVAL-012, G5-REVAL2-001 a G5-REVAL2-010, G5-REVAL3-001 a G5-REVAL3-007, G5-REVAL4-001 a G5-REVAL4-012 e G5-REVAL5-001 a G5-REVAL5-009) e aguardando aceitação soberana do usuário (`GATE_G5_COMPLETED_PENDING_USER_ACCEPTANCE`).
   - **G5.1 (Project model / lifecycle — definition / instance / revision)**: Concluído. Separação formal de `ProjectDefinition` (reutilizável, versionada, catalogada em `ProjectDefinitionRegistry`) e `ProjectInstance` (execução concreta por domínio com `revision`, `workRequired`, `workCompleted`, `lifecycle`, `clampProgress`), cálculo puro de progresso inteiro derivado (`calculateProjectProgress` com clamp de goal por DEC-086, DEC-087, DEC-090), máquina de estados de ciclo de vida (`validateProjectLifecycleTransition` cobrindo os 11 estados canônicos de Master §15.4 e reabertura auditada via `allowReopen`), definições canônicas iniciais (`CANONICAL_PROJECT_DEFINITIONS`), e modelo de capacidade em domínio `domain-manager:projects` (`DomainProjectsData`, `tryGetDomainProjectsData`, `withDomainProjectsData`, `getDomainProjectsData`) validado e registrado no `CapabilityRegistry`.
   - **G5.2 (Progress / resolver / history)**: Concluído. Implementação do modelo de histórico append-oriented (`ProjectEntry`), validação estrita de fontes e metadados (`PROJECT_ENTRY_SOURCE_KINDS`), transição de estado pura (`applyProjectEntry`) com suporte a setbacks negativos (DEC-088) e clamp no objetivo por padrão (DEC-090), regras de compensação/reversão auditada (bloqueio de reversão dupla com `DM_PROJECT_REVERSAL_ALREADY_EXISTS` e proibição de reversão de reversão), contrato extensível de resolução pura de progresso (`ProgressResolver`), implementação padrão (`StandardProgressResolver` / `domain-manager:standard`) sem mutação da instância, e catálogo `ProgressResolverRegistry` com factory e suporte a congelamento (`freeze`).
   - **G5.3 (Start plan)**: Concluído. Implementação do modelo de plano pré-execução (`ProjectStartPlan`), avaliação desacoplada de pré-condições (`evaluateProjectStartPlan`) sem mutação direta de Domain/People/Economy, mapeamento de intenção de reservas econômicas (`ProjectEconomicReservationIntent`) para custos upfront e reserved, avaliação de workforce (`ProjectWorkforceIntent`) e requisitos estruturados (`ProjectRequirementEvaluation` com status satisfied/unsatisfied/unavailable/error), detecção e diagnóstico de blockers (`ProjectBlocker`: capacidade ausente, fundos insuficientes, requisitos insatisfeitos, ciclo de vida inválido e `DM_PROJECT_REVISION_MISMATCH`), e commit atômico (`commitProjectStartPlan`) com suporte aos estados `active` e `initializing`, incremento de revisão e geração de `ProjectEntry` inicial.
@@ -33,19 +33,57 @@
 | Verificação | Resultado |
 |---|---|
 | TypeScript strict (`tsc --noEmit`) | PASS (0 erros) |
-| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 586/586 (0 falhas) |
+| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 601/601 (0 falhas) |
 | Relatório de Aceitação G5 | Gerado (`docs/GATE_G5_ACCEPTANCE_REPORT.md`) |
 | Regressões G0/G1/G2/G3/G4 | 0 (todos os 444 testes anteriores preservados e passando) |
-| Testes novos Gate G5 | 142 testes dedicados (G5.1 a G5.10: 101 testes + 41 testes adversários de revalidação em g5-revalidation-adversarial.test.ts) |
+| Testes novos Gate G5 | 157 testes dedicados (G5.1 a G5.10: 101 testes + 56 testes adversários de revalidação em g5-revalidation-adversarial.test.ts) |
 | Remediação de Auditoria G5-AUD-001 a G5-AUD-010 | PASS — 100% remediado, endurecido e verificado |
 | Remediação de Revalidação G5-REVAL-001 a G5-REVAL-012 | PASS — 100% remediado, endurecido e verificado |
 | Remediação de Revalidação 2 G5-REVAL2-001 a G5-REVAL2-010 | PASS — 100% remediado, endurecido e verificado |
 | Remediação de Revalidação 3 G5-REVAL3-001 a G5-REVAL3-007 | PASS — 100% remediado, endurecido e verificado |
 | Remediação de Revalidação 4 G5-REVAL4-001 a G5-REVAL4-012 | PASS — 100% remediado, endurecido e verificado |
+| Remediação de Revalidação 5 G5-REVAL5-001 a G5-REVAL5-009 | PASS — 100% remediado, endurecido e verificado |
 | Build do pacote (`node build.mjs`) | PASS (`dist/main.js` gerado) |
 | Empacotamento (`node scripts/package.mjs`) | PASS (`dist/domain-manager-v0.0.5.zip` gerado) |
 | Validação de pacote (`node scripts/validate-package.mjs`) | PASS |
 | Validação de artefato (`node scripts/validate-artifact.mjs`) | PASS |
+
+## Remediação da 5ª Revalidação Gate G5 — G5-REVAL5-001 a G5-REVAL5-009
+
+1. **G5-REVAL5-001 (CRÍTICO — safeAutoRecovery Estrito em `RecoveryService.recoverAll()`)**:
+   - `RecoveryService.recoverAll()` filtra explicitamente registros não resolvidos para executar recuperação automática apenas quando `record.safeAutoRecovery === true`.
+   - Transações com `safeAutoRecovery: false` permanecem estritamente em `needs-recovery` com isolamento de locks para revisão e reconciliação manual pelo GM.
+
+2. **G5-REVAL5-002 (CRÍTICO — Reconciliação do Parent State Antes de Compensação em Crash pós-Domain Save)**:
+   - Em caso de crash na janela entre o save do domínio e o commit durável da transação (`committing`), os compensadores de recuperação primeiro verificam se a alteração no domínio pai já foi aplicada (inspeção de revisão, status, desfechos ou existência da entidade).
+   - Se o efeito já estiver gravado no domínio, a transação é reconciliada e finalizada como `committed` (sem estornos indevidos ou dupla execução). Caso contrário, a compensação é executada de forma limpa.
+
+3. **G5-REVAL5-003 (CRÍTICO — Write-Ahead `recoveryData` com Barreira de `flush()` Durável por Etapa Irreversível)**:
+   - Eliminados todos os blocos vazios ou `catch` best-effort em flushes write-ahead.
+   - Cada débito progressivo, consumo de reserva econômica, liberação de workforce, criação de facility e crédito de recursos atualiza o `recoveryData`, grava no `TransactionStore` e aguarda `await transactionStore.flush()` antes de avançar para a próxima etapa.
+   - Falhas no flush de write-ahead abortam imediatamente em fail-closed com compensação dos passos anteriores e roteamento para `needs-recovery`.
+
+4. **G5-REVAL5-004 (CRÍTICO — Falha no Flush Final de `committed` Nunca é Engolida)**:
+   - As transições para `committed` em todos os planos de Projetos, Downtime e Facilities tratam a falha de persistência no flush final sem engolir erros: se o flush falhar, o chamador recebe erro estruturado (`DM_TRANSACTION_COMMIT_UNCONFIRMED`), a transação transiciona para `needs-recovery` e exige reconciliação durável.
+
+5. **G5-REVAL5-005 (CRÍTICO — Idempotência Estrita de Compensadores com Checkpoints por Etapa)**:
+   - Implementado rastreamento de progresso de compensação com checkpoints gravados em `recoveryData.completedSteps` e validados via `isCompensationStepCompleted()`.
+   - Em caso de falha parcial durante o rollback seguida de nova tentativa de recuperação, etapas já concluídas com sucesso são ignoradas (safe no-op), impedindo estornos repetidos ou re-devoluções duplicadas de saldo econômico.
+
+6. **G5-REVAL5-006 (CRÍTICO — Atomicidade em Débitos de Conclusão de Projeto e Reversão em Falhas)**:
+   - No loop de custos `onCompletion` em `project-completion-domain-operation-plan.ts`, se qualquer débito subsequente falhar, todos os débitos efetuados anteriormente são reversamente compensados de forma atômica (`compensatePriorSteps`).
+   - Se a compensação falhar, a transação é encaminhada diretamente para `needs-recovery` com registro dos débitos pendentes.
+
+7. **G5-REVAL5-007 (ALTO — Liberação de Workforce em Project Completion Fail-Closed)**:
+   - A liberação de workforce em `project-completion-domain-operation-plan.ts` diferencia ausência de reserva de erros reais de persistência/repositório.
+   - Erros de armazenamento na leitura ou liberação de reservas bloqueiam sumariamente a conclusão do projeto e acionam compensação/needs-recovery.
+
+8. **G5-REVAL5-008 (ALTO — Recuperação de Facilities com Restauração de Snapshot da Instalação)**:
+   - `FacilitiesService.maintainFacility` e `repairFacility` gravam o snapshot e revisão anterior da instalação no `recoveryData`.
+   - O compensador de recuperação reconcilia o estado do domínio e, caso a operação precise ser revertida, restaura fielmente o snapshot e revisão anterior da `FacilityInstance`.
+
+9. **G5-REVAL5-009 (TEST GAP — Cobertura Completa de 56 Cenários Adversários)**:
+   - Adicionados novos cenários adversários em `tests/runtime/g5-revalidation-adversarial.test.ts` cobrindo: falha de flush pós-débito child, crash após save do domínio com reconciliação para committed, falha no flush final de committed, cancelamento com snapshots write-ahead, idempotência de compensação em retry pós-falha parcial, múltiplos custos de conclusão com falha intermediária, erro de workforce release fail-closed, isolamento de `safeAutoRecovery: false`, e falhas de leitura no compensador. Total: 56/56 testes aprovados.
 
 ## Remediação da 4ª Revalidação Gate G5 — G5-REVAL4-001 a G5-REVAL4-012
 

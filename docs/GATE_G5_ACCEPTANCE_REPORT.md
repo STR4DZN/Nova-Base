@@ -4,8 +4,8 @@
 **Gate:** G5 — Projects / Facilities / Downtime  
 **Normative Authorities:** `Documentos/99_DOMAIN_MANAGER_MASTER_SPECIFICATION_V1.md` (§15, §16, §17, DEC-083 to DEC-097, Anexo 07 DEC-2306 to DEC-3200), `Documentos/GATES/15_G5_PROJECTS_FACILITIES_DOWNTIME.md`  
 **Status:** **GATE_G5_COMPLETED_PENDING_USER_ACCEPTANCE (Aguardando Aceitação Soberana do Usuário — Nunca aceito sem confirmação explícita)**  
-**Date:** 2026-09-21  
-**Test Suite:** 586/586 passing (0 failures, 0 regressions against G4 baseline of 444; +142 dedicated G5 tests, including 41 adversarial revalidation tests)  
+**Date:** 2026-09-28  
+**Test Suite:** 601/601 passing (0 failures, 0 regressions against G4 baseline of 444; +157 dedicated G5 tests, including 56 adversarial revalidation tests)  
 **TypeScript Conformance:** Strict, 0 errors via `npx tsc --noEmit`  
 **Package & Artifact Validation:** PASS (`dist/domain-manager-v0.0.5.zip`, validation scripts verified)
 
@@ -80,7 +80,7 @@ The G5 test suite validates the system against high-scale multi-domain operation
 
 ## 5. Test Suite & Validation Summary
 
-- **Total Test Count**: 586 tests passing (0 failures, 0 regressions across G0–G4 baseline of 444; +142 dedicated G5 tests).
+- **Total Test Count**: 601 tests passing (0 failures, 0 regressions across G0–G4 baseline of 444; +157 dedicated G5 tests).
 - **TypeScript Compilation**: Strict conformance, 0 errors via `node node_modules/typescript/bin/tsc --noEmit`.
 - **Production Build**: `node build.mjs` built cleanly with zero warnings (`dist/main.js`).
 - **Distribution Package**: `node scripts/package.mjs` created `dist/domain-manager-v0.0.5.zip`.
@@ -173,9 +173,25 @@ The G5 test suite validates the system against high-scale multi-domain operation
 
 ---
 
-## 11. Canonical Next Gate Designation
+## 11. Fifth Revalidation Audit Remediation Matrix (G5-REVAL5-001 to G5-REVAL5-009)
 
-Per the Master Specification roadmap, Gate G5 is now complete, fully remediated against initial audit (G5-AUD-001 to G5-AUD-010), first revalidation (G5-REVAL-001 to G5-REVAL-012), second revalidation (G5-REVAL2-001 to G5-REVAL2-010), third revalidation (G5-REVAL3-001 to G5-REVAL3-007), and fourth revalidation (G5-REVAL4-001 to G5-REVAL4-012), and strictly pending user acceptance:
+| Revalidation Finding | Severity | Description & Root Cause | Architectural Remediation | Verification Evidence |
+|---|---|---|---|---|
+| **G5-REVAL5-001** | CRITICAL | `safeAutoRecovery` is ignored: `RecoveryService.recoverAll()` recovers all unresolved transactions on startup, violating the canonical rule that non-safe transactions must remain for GM / explicit manual reconciliation. | `RecoveryService.recoverAll()` filters unresolved records and only invokes auto-recovery on records where `record.safeAutoRecovery === true`. Records with `safeAutoRecovery: false` remain strictly in `needs-recovery` with recovery locks isolated. | `tests/runtime/g5-revalidation-adversarial.test.ts` (Scenario 8 verifies `safeAutoRecovery: false` records are not auto-recovered and remain in `needs-recovery`). |
+| **G5-REVAL5-002** | CRITICAL | Crash after parent save and before durable committed reconciles incorrectly: startup scan converts `committing` to `needs-recovery` and compensates without checking whether the parent domain write was already applied. | Recovery compensators inspect parent domain state (`reachedCommitting`, revision, entity status/lifecycle, outcome receipts) before deciding to compensate. If the parent state was already persisted, the compensator reconciles the transaction to `committed` instead of rolling back. | `tests/runtime/g5-revalidation-adversarial.test.ts` (Scenario 2 & Scenario 9 verify parent state reconciliation to `committed`). |
+| **G5-REVAL5-003** | CRITICAL | `recoveryData` not durable at all crash points: flushes after progressive child writes were missing try/catch or best-effort, risking orphan child writes without durable recovery metadata. | Implemented write-ahead 2PC flush barriers per irreversible step: update `recoveryData` -> `transactionStore.save()` -> `await transactionStore.flush()` -> proceed. Flush failures fail closed with compensation and transition to `needs-recovery`. | `tests/runtime/g5-revalidation-adversarial.test.ts` (Scenario 1, Scenario 10, Scenario 11 verify fail-closed write-ahead flush barriers). |
+| **G5-REVAL5-004** | CRITICAL | Final committed flush failure swallowed: plans caught flush errors after transitioning to `committed`, returning success while the durable record remained `committing`. | Never swallow final commit flush failures: if `await transactionStore.flush()` fails on the committed marker, plans transition to `needs-recovery` and return `DM_TRANSACTION_COMMIT_UNCONFIRMED`, requiring reconciliation. | `tests/runtime/g5-revalidation-adversarial.test.ts` (Scenario 3 verifies final committed flush failure returns error and transitions to `needs-recovery`). |
+| **G5-REVAL5-005** | CRITICAL | Compensators not idempotent across retries: failure of a late step caused entire compensation to restart, duplicating adjustments and balance changes. | Recorded step checkpoints in `recoveryData.completedSteps` and checked via `isCompensationStepCompleted()`. Retried compensations skip already-completed steps (safe no-op), ensuring strict idempotency. | `tests/runtime/g5-revalidation-adversarial.test.ts` (Scenario 5 verifies idempotency checkpoint skipping on compensation retry). |
+| **G5-REVAL5-006** | CRITICAL | Project completion partial debit failure: if a secondary `onCompletion` debit failed, previous debits were not compensated and transaction marked `failed`. | In `project-completion-domain-operation-plan.ts`, any `onCompletion` debit failure triggers immediate reverse compensation (`compensatePriorSteps`) of all prior debits before failing closed. | `tests/runtime/g5-revalidation-adversarial.test.ts` (Scenario 6 verifies multi-debit completion failure refunds prior debits). |
+| **G5-REVAL5-007** | HIGH | Project completion workforce release ignored real repository errors as "non-fatal", risking orphaned active reservations. | Differentiated legitimate absence of workforce reservations from real storage/read errors. Storage errors fail closed (`DM_PROJECT_COMPLETION_BLOCKED`), trigger rollback, and prevent completion. | `tests/runtime/g5-revalidation-adversarial.test.ts` (Scenario 7 verifies workforce release storage error blocks completion). |
+| **G5-REVAL5-008** | HIGH | Facility recovery does not restore Facility: compensators refunded costs but left facility modified if parent write had occurred. | Persisted previous facility snapshots and revisions into `recoveryData`. On rollback, compensator restores the exact prior snapshot and revision to the domain record. | `tests/runtime/g5-revalidation-adversarial.test.ts` (Scenario 9 & Scenario 15 verify facility snapshot restoration and fail-closed error handling). |
+| **G5-REVAL5-009** | TEST GAP | Missing adversarial test coverage for all 9 crash-safety, reconciliation, flush failure, and retry scenarios. | Expanded `tests/runtime/g5-revalidation-adversarial.test.ts` to 56 tests (adding Scenarios 1 to 9 and Scenarios 10 to 15) verifying all crash points, flush errors, idempotency checkpoints, and reconciliation paths. 56/56 passing. | `tests/runtime/g5-revalidation-adversarial.test.ts` (56/56 passing, full suite 601/601 passing). |
+
+---
+
+## 12. Canonical Next Gate Designation
+
+Per the Master Specification roadmap, Gate G5 is now complete, fully remediated against initial audit (G5-AUD-001 to G5-AUD-010), first revalidation (G5-REVAL-001 to G5-REVAL-012), second revalidation (G5-REVAL2-001 to G5-REVAL2-010), third revalidation (G5-REVAL3-001 to G5-REVAL3-007), fourth revalidation (G5-REVAL4-001 to G5-REVAL4-012), and fifth revalidation (G5-REVAL5-001 to G5-REVAL5-009), and strictly pending user acceptance:
 - **Current Gate Status**: `GATE_G5_COMPLETED_PENDING_USER_ACCEPTANCE`
 - **Canonical Next Gate**: **Gate G6 — Relations / Reputation / Agreements / Territory** (`Documentos/GATES/16_G6_RELATIONS_REPUTATION_AGREEMENTS_TERRITORY.md`).
 

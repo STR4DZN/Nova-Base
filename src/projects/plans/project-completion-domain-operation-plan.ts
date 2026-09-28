@@ -17,7 +17,8 @@ import type { ChildReceipt } from "./project-plan-types.js";
 import type { Reservation } from "../../economy/reservations/reservation-types.js";
 import type { EconomyService } from "../../economy/services/economy-service.js";
 import type { FacilitiesService } from "../../facilities/services/facilities-service.js";
-import type { PublicPeopleApi } from "../../people/services/people-service.js";
+import { getDomainFacilitiesData, withDomainFacilitiesData } from "../../facilities/facility-data.js";
+import { PeopleService, type PublicPeopleApi } from "../../people/services/people-service.js";
 import type { TransactionStore } from "../../mutations/transaction-store.js";
 import { createTransactionRecord } from "../../mutations/transaction-record.js";
 
@@ -54,6 +55,7 @@ export interface ProjectCompletionRecoveryData {
   readonly consumedReservationIds: readonly string[];
   readonly consumedReservationSnapshots?: readonly { reservation: Reservation; consumedAmount: number }[];
   readonly releasedWorkforceSnapshots?: readonly { reservationId: string; amount: number; workforceTypeId: string }[];
+  readonly expectedRevision?: number;
   readonly authorityEpoch: number;
   readonly correlationId?: string;
   readonly causationId?: string;
@@ -157,6 +159,7 @@ export async function executeProjectCompletionDomainOperationPlan(
     consumedReservationIds: Object.freeze([...consumedReservationIds]),
     consumedReservationSnapshots: Object.freeze([...consumedReservationSnapshots]),
     releasedWorkforceSnapshots: Object.freeze([...releasedWorkforceSnapshots]),
+    expectedRevision: project.revision + 1,
     authorityEpoch: epoch,
     correlationId: params.correlationId,
     causationId: params.causationId,
@@ -194,7 +197,91 @@ export async function executeProjectCompletionDomainOperationPlan(
     }
   }
 
-  // 2. Execute onCompletion costs with fail-closed validation (G5-REVAL2-003, G5-REVAL3-002)
+  let compensationFailed = false;
+  const compensatePriorSteps = async (reason: string) => {
+    // 1. Revert credited resources
+    if (context.economyService && creditedResourceRefs.length > 0) {
+      for (const cred of creditedResourceRefs) {
+        const revRes = await context.economyService.commitAdjust({
+          domainUuid: cleanDomainUuid,
+          resourceId: cred.resourceId,
+          deltaMinor: -cred.amountMinor,
+          reason: `Compensation: ${reason}`,
+          lockOwner: params.commandId
+        });
+        if (!revRes.ok) {
+          compensationFailed = true;
+        }
+      }
+    }
+    // 2. Refund debited costs (G5-REVAL5-006)
+    if (context.economyService && debitedCostRefs.length > 0) {
+      for (const cost of debitedCostRefs) {
+        const refRes = await context.economyService.commitAdjust({
+          domainUuid: cleanDomainUuid,
+          resourceId: cost.resourceId,
+          deltaMinor: cost.amountMinor,
+          reason: `Compensation: ${reason}`,
+          lockOwner: params.commandId
+        });
+        if (!refRes.ok) {
+          compensationFailed = true;
+        }
+      }
+    }
+    // 3. Restore consumed reservations
+    if (context.economyService && consumedReservationSnapshots.length > 0) {
+      for (const snap of consumedReservationSnapshots) {
+        const restRes = await context.economyService.restoreReservation({
+          domainUuid: cleanDomainUuid,
+          reservationSnapshot: snap.reservation,
+          consumedAmount: snap.consumedAmount,
+          reason: `Compensation: ${reason}`,
+          lockOwner: params.commandId
+        });
+        if (!restRes.ok) {
+          compensationFailed = true;
+        }
+      }
+    }
+    // 4. Restore released workforce reservations
+    const peopleService = context.peopleService ?? new PeopleService(context.domains);
+    if (releasedWorkforceSnapshots.length > 0) {
+      for (const wf of releasedWorkforceSnapshots) {
+        const restWf = await peopleService.restoreWorkforceReservation({
+          domainUuid: cleanDomainUuid,
+          projectId: project.id,
+          reservationId: wf.reservationId,
+          userId: params.userId
+        });
+        if (!restWf.ok) {
+          compensationFailed = true;
+        }
+      }
+    }
+    // 5. Rollback created facilities
+    if (context.facilitiesService && createdFacilityIds.length > 0) {
+      const freshDoc = await context.domains.read(cleanDomainUuid);
+      if (freshDoc.ok) {
+        const facData = getDomainFacilitiesData(freshDoc.value.record);
+        const remaining = facData.facilities.filter((f) => !createdFacilityIds.includes(f.id));
+        if (remaining.length !== facData.facilities.length) {
+          const updatedRec = withDomainFacilitiesData(freshDoc.value.record, {
+            ...facData,
+            facilities: Object.freeze(remaining)
+          });
+          const sRes = await context.domains.save({ ...freshDoc.value, record: updatedRec });
+          if (!sRes.ok) {
+            compensationFailed = true;
+          }
+        }
+      } else {
+        compensationFailed = true;
+      }
+    }
+  };
+
+  // 2. Execute onCompletion costs with fail-closed validation (G5-REVAL2-003, G5-REVAL3-002, G5-REVAL5-006)
   if (context.economyService) {
     for (const cost of definition.costs) {
       if (cost.timing === "onCompletion") {
@@ -206,8 +293,14 @@ export async function executeProjectCompletionDomainOperationPlan(
           lockOwner: params.commandId
         });
         if (!debitRes.ok) {
+          await compensatePriorSteps(`Failed to debit onCompletion cost for '${cost.resourceId}': ${debitRes.error.message}`);
           if (context.transactionStore) {
-            context.transactionStore.transition(txId, "failed", epoch, debitRes.error.message);
+            const targetState = compensationFailed ? "needs-recovery" : "failed";
+            const tx = context.transactionStore.get(txId);
+            if (tx) {
+              context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData(targetState) });
+            }
+            context.transactionStore.transition(txId, targetState, epoch, debitRes.error.message);
           }
           return err(
             createPublicError({
@@ -219,6 +312,33 @@ export async function executeProjectCompletionDomainOperationPlan(
           );
         }
         debitedCostRefs.push({ resourceId: cost.resourceId, amountMinor: cost.amountMinor });
+        if (context.transactionStore) {
+          const tx = context.transactionStore.get(txId);
+          if (tx) {
+            context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
+            try {
+              await context.transactionStore.flush();
+            } catch (flushErr) {
+              await compensatePriorSteps(`Persistence flush failed after onCompletion debit: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
+              if (context.transactionStore) {
+                const targetState = compensationFailed ? "needs-recovery" : "failed";
+                const curTx = context.transactionStore.get(txId);
+                if (curTx) {
+                  context.transactionStore.save({ ...curTx, recoveryData: buildRecoveryData(targetState) });
+                }
+                context.transactionStore.transition(txId, targetState, epoch, String(flushErr));
+              }
+              return err(
+                createPublicError({
+                  code: "DM_DOMAIN_STORAGE_ERROR",
+                  category: "internal",
+                  message: `Failed to flush transaction update after onCompletion debit: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+                  details: flushErr
+                })
+              );
+            }
+          }
+        }
       }
     }
   }
@@ -255,6 +375,7 @@ export async function executeProjectCompletionDomainOperationPlan(
         });
         if (!consumeRes.ok) {
           // G5-REVAL3-003: Consume failure MUST NOT be silently ignored!
+          await compensatePriorSteps(`Failed to consume reservation '${resId}': ${consumeRes.error.message}`);
           if (context.transactionStore) {
             const tx = context.transactionStore.get(txId);
             if (tx) {
@@ -277,41 +398,119 @@ export async function executeProjectCompletionDomainOperationPlan(
           const tx = context.transactionStore.get(txId);
           if (tx) {
             context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
-            await context.transactionStore.flush();
+            try {
+              await context.transactionStore.flush();
+            } catch (flushErr) {
+              await compensatePriorSteps(`Persistence flush failed after reservation consume: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
+              if (context.transactionStore) {
+                const targetState = compensationFailed ? "needs-recovery" : "failed";
+                context.transactionStore.transition(txId, targetState, epoch, String(flushErr));
+              }
+              return err(
+                createPublicError({
+                  code: "DM_DOMAIN_STORAGE_ERROR",
+                  category: "internal",
+                  message: `Failed to flush transaction update after reservation consume: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+                  details: flushErr
+                })
+              );
+            }
           }
         }
       }
     }
   }
 
-  // 4. Release workforce reservations via People API (G5-REVAL3-001, G5-REVAL3-003, G5-REVAL4-006)
+  // 4. Release workforce reservations via People API (G5-REVAL3-001, G5-REVAL3-003, G5-REVAL4-006, G5-REVAL5-007)
   if (context.peopleService) {
+    let hasActiveReservations = false;
     if ("getReservations" in context.peopleService) {
       const pRes = await context.peopleService.getReservations(cleanDomainUuid);
-      if (pRes.ok) {
-        for (const r of pRes.value) {
-          if (r.targetRef === `project:${project.id}` && r.status === "active") {
-            releasedWorkforceSnapshots.push({
-              reservationId: r.id,
-              amount: r.amount,
-              workforceTypeId: r.workforceTypeId
-            });
+      if (!pRes.ok) {
+        await compensatePriorSteps(`Failed to inspect workforce reservations: ${pRes.error.message}`);
+        if (context.transactionStore) {
+          const targetState = compensationFailed ? "needs-recovery" : "failed";
+          const tx = context.transactionStore.get(txId);
+          if (tx) {
+            context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData(targetState) });
           }
+          context.transactionStore.transition(txId, targetState, epoch, pRes.error.message);
+        }
+        return err(
+          createPublicError({
+            code: "DM_PROJECT_COMPLETION_BLOCKED",
+            category: "conflict",
+            message: `Failed to inspect workforce reservations for project '${project.id}': ${pRes.error.message}`,
+            details: pRes.error
+          })
+        );
+      }
+      for (const r of pRes.value) {
+        if (r.targetRef === `project:${project.id}` && r.status === "active") {
+          hasActiveReservations = true;
+          releasedWorkforceSnapshots.push({
+            reservationId: r.id,
+            amount: r.amount,
+            workforceTypeId: r.workforceTypeId
+          });
         }
       }
+    } else {
+      hasActiveReservations = true;
     }
-    const wfRelRes = await context.peopleService.releaseWorkforceReservation({
-      domainUuid: cleanDomainUuid,
-      projectId: project.id,
-      userId: params.userId
-    });
-    if (!wfRelRes.ok) {
-      // Non-fatal if domain doesn't track workforce reservations, but log if error
-    } else if (releasedWorkforceSnapshots.length > 0 && context.transactionStore) {
-      const tx = context.transactionStore.get(txId);
-      if (tx) {
-        context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
-        await context.transactionStore.flush();
+
+    // G5-REVAL5-007: Only release if there were active workforce reservations. Real errors fail-closed.
+    if (hasActiveReservations) {
+      const wfRelRes = await context.peopleService.releaseWorkforceReservation({
+        domainUuid: cleanDomainUuid,
+        projectId: project.id,
+        userId: params.userId
+      });
+      if (!wfRelRes.ok) {
+        await compensatePriorSteps(`Failed to release workforce reservation: ${wfRelRes.error.message}`);
+        if (context.transactionStore) {
+          const targetState = compensationFailed ? "needs-recovery" : "failed";
+          const tx = context.transactionStore.get(txId);
+          if (tx) {
+            context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData(targetState) });
+          }
+          context.transactionStore.transition(txId, targetState, epoch, wfRelRes.error.message);
+        }
+        return err(
+          createPublicError({
+            code: "DM_PROJECT_COMPLETION_BLOCKED",
+            category: "conflict",
+            message: `Failed to release workforce reservation for project '${project.id}': ${wfRelRes.error.message}`,
+            details: wfRelRes.error
+          })
+        );
+      }
+      if (context.transactionStore) {
+        const tx = context.transactionStore.get(txId);
+        if (tx) {
+          context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
+          try {
+            await context.transactionStore.flush();
+          } catch (flushErr) {
+            await compensatePriorSteps(`Persistence flush failed after workforce release: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
+            if (context.transactionStore) {
+              const targetState = compensationFailed ? "needs-recovery" : "failed";
+              const curTx = context.transactionStore.get(txId);
+              if (curTx) {
+                context.transactionStore.save({ ...curTx, recoveryData: buildRecoveryData(targetState) });
+              }
+              context.transactionStore.transition(txId, targetState, epoch, String(flushErr));
+            }
+            return err(
+              createPublicError({
+                code: "DM_DOMAIN_STORAGE_ERROR",
+                category: "internal",
+                message: `Failed to flush transaction update after workforce release: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+                details: flushErr
+              })
+            );
+          }
+        }
       }
     }
   }
@@ -343,6 +542,31 @@ export async function executeProjectCompletionDomainOperationPlan(
     });
     if (facRes.ok) {
       createdFacilityIds.push(facRes.value.facility.id);
+      if (context.transactionStore) {
+        const tx = context.transactionStore.get(txId);
+        if (tx) {
+          context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
+          try {
+            await context.transactionStore.flush();
+          } catch (flushErr) {
+            await compensatePriorSteps(`Persistence flush failed after facility creation: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
+            const targetState = compensationFailed ? "needs-recovery" : "failed";
+            const curTx = context.transactionStore.get(txId);
+            if (curTx) {
+              context.transactionStore.save({ ...curTx, recoveryData: buildRecoveryData(targetState) });
+            }
+            context.transactionStore.transition(txId, targetState, epoch, String(flushErr));
+            return err(
+              createPublicError({
+                code: "DM_DOMAIN_STORAGE_ERROR",
+                category: "internal",
+                message: `Failed to flush transaction update after facility creation: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+                details: flushErr
+              })
+            );
+          }
+        }
+      }
       executedReceipts[effect.id] = {
         childReceiptId: createOpaqueId("rep"),
         subsystem: "facility",
@@ -393,6 +617,31 @@ export async function executeProjectCompletionDomainOperationPlan(
     });
     if (econRes.ok) {
       creditedResourceRefs.push({ resourceId: effect.targetRef, amountMinor: deltaMinor });
+      if (context.transactionStore) {
+        const tx = context.transactionStore.get(txId);
+        if (tx) {
+          context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData("executing") });
+          try {
+            await context.transactionStore.flush();
+          } catch (flushErr) {
+            await compensatePriorSteps(`Persistence flush failed after resource credit: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
+            const targetState = compensationFailed ? "needs-recovery" : "failed";
+            const curTx = context.transactionStore.get(txId);
+            if (curTx) {
+              context.transactionStore.save({ ...curTx, recoveryData: buildRecoveryData(targetState) });
+            }
+            context.transactionStore.transition(txId, targetState, epoch, String(flushErr));
+            return err(
+              createPublicError({
+                code: "DM_DOMAIN_STORAGE_ERROR",
+                category: "internal",
+                message: `Failed to flush transaction update after resource credit: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+                details: flushErr
+              })
+            );
+          }
+        }
+      }
       executedReceipts[effect.id] = {
         childReceiptId: createOpaqueId("rep"),
         subsystem: "economy",
@@ -476,7 +725,7 @@ export async function executeProjectCompletionDomainOperationPlan(
     }
   }
 
-  // Update recoveryData with all accumulated side effect state
+  // Update recoveryData with all accumulated side effect state (G5-REVAL5-003)
   if (context.transactionStore) {
     const tx = context.transactionStore.get(txId);
     if (tx) {
@@ -484,6 +733,25 @@ export async function executeProjectCompletionDomainOperationPlan(
         ...tx,
         recoveryData: buildRecoveryData(partialFailure ? "needs-recovery" : "executing")
       });
+      try {
+        await context.transactionStore.flush();
+      } catch (flushErr) {
+        await compensatePriorSteps(`Persistence flush failed at side effects checkpoint: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
+        const targetState = compensationFailed ? "needs-recovery" : "failed";
+        const curTx = context.transactionStore.get(txId);
+        if (curTx) {
+          context.transactionStore.save({ ...curTx, recoveryData: buildRecoveryData(targetState) });
+        }
+        context.transactionStore.transition(txId, targetState, epoch, String(flushErr));
+        return err(
+          createPublicError({
+            code: "DM_DOMAIN_STORAGE_ERROR",
+            category: "internal",
+            message: `Failed to flush transaction update at side effects checkpoint: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+            details: flushErr
+          })
+        );
+      }
     }
   }
 
@@ -583,6 +851,25 @@ export async function executeProjectCompletionDomainOperationPlan(
       context.transactionStore.transition(txId, "needs-recovery", epoch, committingRes.error.message);
       return committingRes;
     }
+    try {
+      await context.transactionStore.flush();
+    } catch (flushErr) {
+      await compensatePriorSteps(`Persistence flush failed while entering committing state: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`);
+      const targetState = compensationFailed ? "needs-recovery" : "failed";
+      const tx = context.transactionStore.get(txId);
+      if (tx) {
+        context.transactionStore.save({ ...tx, recoveryData: buildRecoveryData(targetState) });
+      }
+      context.transactionStore.transition(txId, targetState, epoch, String(flushErr));
+      return err(
+        createPublicError({
+          code: "DM_DOMAIN_STORAGE_ERROR",
+          category: "internal",
+          message: `Failed to persist committing state before domain update: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+          details: flushErr
+        })
+      );
+    }
   }
 
   const updateRes = await context.domains.save({
@@ -619,8 +906,23 @@ export async function executeProjectCompletionDomainOperationPlan(
       if (!committedRes.ok) return committedRes;
       try {
         await context.transactionStore.flush();
-      } catch {
-        // already committed
+      } catch (flushErr) {
+        context.transactionStore.transition(
+          txId,
+          "needs-recovery",
+          epoch,
+          "Final commit flush failed to persist to durable storage"
+        );
+        return err(
+          createPublicError({
+            code: "DM_TRANSACTION_COMMIT_UNCONFIRMED",
+            category: "recovery",
+            message: `Project completion succeeded on domain but durable transaction commit marker failed to flush: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}. Requires reconciliation.`,
+            details: flushErr,
+            userActionRequired: true,
+            retryable: false
+          })
+        );
       }
     }
   }

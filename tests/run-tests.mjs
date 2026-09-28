@@ -47,7 +47,10 @@ try {
   });
 
   const userArgs = process.argv.slice(2).filter((a) => a !== filterArg);
-  execFileSync(process.execPath, ["--test", ...userArgs, ...findBuiltTests(outputRoot)], {
+  const defaultConcurrency = userArgs.some((a) => a.startsWith("--test-concurrency"))
+    ? []
+    : ["--test-concurrency=1"];
+  execFileSync(process.execPath, ["--test", ...defaultConcurrency, ...userArgs, ...findBuiltTests(outputRoot)], {
     stdio: "inherit"
   });
 } finally {

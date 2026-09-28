@@ -24,7 +24,11 @@ import { getDomainFacilitiesData } from "../../facilities/facility-data.js";
 import type { ChildReceipt } from "../../projects/plans/project-plan-types.js";
 import { tryGetDomainPeopleData } from "../../people/people-data.js";
 import type { TransactionStore } from "../../mutations/transaction-store.js";
-import type { RecoveryService } from "../../mutations/recovery-service.js";
+import {
+  type RecoveryService,
+  isCompensationStepCompleted,
+  markCompensationStepCompleted
+} from "../../mutations/recovery-service.js";
 import { executeDowntimeStartPlan } from "../plans/downtime-start-plan.js";
 import { executeDowntimeResolutionPlan } from "../plans/downtime-resolution-plan.js";
 
@@ -327,16 +331,50 @@ export class DowntimeService {
         return ok(undefined);
       }
       const recoveryLockOwner = `recovery_${record.transactionId}`;
+      const cleanDomainUuid = normalizeJournalEntryId(data.domainUuid);
+
+      // Parent State Reconciliation (G5-REVAL5-002)
+      const reachedCommitting = record.history.some(
+        (h) => h.toState === "committing" || h.toState === "committed"
+      );
+      if (reachedCommitting) {
+        const docRes = await this.#domains.read(cleanDomainUuid);
+        if (!docRes.ok) return docRes;
+        const dtData = getDomainDowntimeData(docRes.value.record);
+        const existingActivity = dtData.activities.find(
+          (a) =>
+            (data.activityId && a.id === data.activityId) ||
+            (!data.activityId && a.definitionId === data.definitionId)
+        );
+        if (existingActivity) {
+          if (this.#transactionStore) {
+            this.#transactionStore.transition(
+              record.transactionId,
+              "committed",
+              record.authorityEpoch,
+              "Parent state reconciliation: downtime activity already created on domain"
+            );
+            await this.#transactionStore.flush();
+          }
+          return ok(undefined);
+        }
+      }
+
       if (this.#economyService && data.debitedCosts && Array.isArray(data.debitedCosts)) {
-        for (const cost of data.debitedCosts) {
-          const refRes = await this.#economyService.commitAdjust({
-            domainUuid: data.domainUuid,
-            resourceId: cost.resourceId,
-            deltaMinor: cost.amount,
-            reason: `Recovery: refund upfront cost for downtime activity ${data.definitionId}`,
-            lockOwner: recoveryLockOwner
-          });
-          if (!refRes.ok) return refRes;
+        for (let i = 0; i < data.debitedCosts.length; i++) {
+          const cost = data.debitedCosts[i];
+          const stepId = `refund_dt_start_${i}_${cost.resourceId}_${cost.amount}`;
+          if (!isCompensationStepCompleted(record, stepId, this.#transactionStore)) {
+            const refRes = await this.#economyService.commitAdjust({
+              domainUuid: data.domainUuid,
+              resourceId: cost.resourceId,
+              deltaMinor: cost.amount,
+              reason: `Recovery: refund upfront cost for downtime activity ${data.definitionId}`,
+              lockOwner: recoveryLockOwner
+            });
+            if (!refRes.ok) return refRes;
+            await markCompensationStepCompleted(this.#transactionStore, record, stepId);
+          }
         }
       }
       return ok(undefined);
@@ -348,16 +386,46 @@ export class DowntimeService {
         return ok(undefined);
       }
       const recoveryLockOwner = `recovery_${record.transactionId}`;
+      const cleanDomainUuid = normalizeJournalEntryId(data.domainUuid);
+
+      // Parent State Reconciliation (G5-REVAL5-002)
+      const reachedCommitting = record.history.some(
+        (h) => h.toState === "committing" || h.toState === "committed"
+      );
+      if (reachedCommitting) {
+        const docRes = await this.#domains.read(cleanDomainUuid);
+        if (!docRes.ok) return docRes;
+        const dtData = getDomainDowntimeData(docRes.value.record);
+        const existingActivity = dtData.activities.find((a) => a.id === data.activityId);
+        if (existingActivity && existingActivity.lifecycle === "completed") {
+          if (this.#transactionStore) {
+            this.#transactionStore.transition(
+              record.transactionId,
+              "committed",
+              record.authorityEpoch,
+              "Parent state reconciliation: downtime activity already completed on domain"
+            );
+            await this.#transactionStore.flush();
+          }
+          return ok(undefined);
+        }
+      }
+
       if (this.#economyService && data.creditedResources && Array.isArray(data.creditedResources)) {
-        for (const cred of data.creditedResources) {
-          const refRes = await this.#economyService.commitAdjust({
-            domainUuid: data.domainUuid,
-            resourceId: cred.resourceId,
-            deltaMinor: -cred.amount,
-            reason: `Recovery: reverse outcome credit for downtime activity ${data.activityId}`,
-            lockOwner: recoveryLockOwner
-          });
-          if (!refRes.ok) return refRes;
+        for (let i = 0; i < data.creditedResources.length; i++) {
+          const cred = data.creditedResources[i];
+          const stepId = `reverse_dt_credit_${i}_${cred.resourceId}_${cred.amount}`;
+          if (!isCompensationStepCompleted(record, stepId, this.#transactionStore)) {
+            const refRes = await this.#economyService.commitAdjust({
+              domainUuid: data.domainUuid,
+              resourceId: cred.resourceId,
+              deltaMinor: -cred.amount,
+              reason: `Recovery: reverse outcome credit for downtime activity ${data.activityId}`,
+              lockOwner: recoveryLockOwner
+            });
+            if (!refRes.ok) return refRes;
+            await markCompensationStepCompleted(this.#transactionStore, record, stepId);
+          }
         }
       }
       return ok(undefined);
