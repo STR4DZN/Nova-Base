@@ -11,6 +11,16 @@ export const isNamespaced = (x: unknown): x is string => isText(x) && /^[a-z0-9]
 export const isVisibility = (x: unknown): x is "public" | "restricted" | "secret" => x === "public" || x === "restricted" || x === "secret";
 export const isTypedRef = (x: unknown): x is TypedRef => isRecord(x) && isText(x.type)
   && ((isText(x.id) && x.uuid === undefined) || (isFoundryUuid(x.uuid) && x.id === undefined));
+/** Durable entities are JSON data, without command transport's 1000-item budget.
+ * Shared objects serialize normally; only cycles along the current path fail. */
+export function isJsonData(value: unknown, depth = 0, path = new WeakSet<object>()): boolean {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (typeof value !== "object" || depth > 64 || (!Array.isArray(value) && !isRecord(value)) || path.has(value)) return false;
+  path.add(value);
+  const valid = Object.values(value).every(x => isJsonData(x, depth + 1, path));
+  path.delete(value); return valid;
+}
 export const failure = (code: `DM_${string}`, message: string, category: "validation" | "conflict" | "not-found" | "permission" = "validation"): Result<never> =>
   err(createPublicError({ code, category, message }));
 export function immutable<T>(value: T): T {

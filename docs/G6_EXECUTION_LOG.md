@@ -8,9 +8,9 @@ muda para PASS após teste. Estado final exige integração vertical, não somen
 | --- | --- | --- |
 | G6.1 | PASS (61 testes) | Definitions/instances/parties/axes/lifecycle |
 | G6.2 | PASS (10 testes) | Modificadores base/temporários, stacking, expiry, incidents/reversals/ended; projeção filtra fontes antes do cálculo |
-| G6.3 | PASS (9 testes) | Tracks, audience, entries/reversals, decay/bands/projeção |
-| G6.4 | PENDENTE | Agreement independente, proposals/counter/accept, lifecycle/amendments |
-| G6.5 | PENDENTE | Obligations/evidence/compliance, rights/grants via contratos |
+| G6.3 | PASS (10 testes) | Tracks, audience, entries/reversals, decay/bands/projeção |
+| G6.4 | PASS (11 testes; modelo) | Agreement independente, proposals/counter/accept, lifecycle/amendments |
+| G6.5 | PASS (10 testes; contratos) | Obligations/evidence/compliance, rights/grants via contratos |
 | G6.6 | PENDENTE | Hierarquia física/admin, raízes/ciclos/reparent |
 | G6.7 | PENDENTE | Claims/recognition/presence/influence/access, links/transfers/disputes |
 | G6.8 | PENDENTE | CapabilityResolver com provenance; expiry retira grants |
@@ -41,5 +41,7 @@ claim/recognition, links/transfer/occupation/dispute e autoridade/projeção/esc
 
 Checkout: Nova-Base-smoke-fix, baseline main `99f8d0c` (PR #3).
 G6.1 não é ligado ao runtime. Release G5 v0.0.6 não contém G6 funcional ainda.
-Próxima ação exata: implementar e testar G6.4. Atualizar este arquivo e
+Próxima ação exata: implementar e testar G6.6. Owners reais/recovery e persistência serão ligados na integração vertical G6.9 antes da aceitação G6.10. Atualizar este arquivo e
 BUILD_STATE a cada etapa, preservar relatórios e criar checkpoints git duráveis.
+
+Checkpoint remoto G6.2/G6.3: branch `feat/g6-continuous`, commit `a1dbf1d9345997038f9c3f73683a69f73e6e78c9`.

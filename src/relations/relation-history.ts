@@ -1,8 +1,7 @@
 import { ok, type Result } from "../core/contracts/result.js";
 import { isFoundryUuid, type TypedRef } from "../core/identity/refs.js";
 import { isOpaqueId } from "../core/identity/ids.js";
-import { isJsonSafe } from "../commands/command-envelope.js";
-import { boundedInteger, failure, immutable, isNamespaced, isRecord, isSafeInteger, isText,
+import { boundedInteger, isJsonData, failure, immutable, isNamespaced, isRecord, isSafeInteger, isText,
   isTimestamp, isVisibility, revisionGuard } from "../core/validation/value-validation.js";
 import type { RelationBaseAxis, RelationDefinition, RelationInstance, RelationVisibility } from "./types/relation-types.js";
 import { validateRelationInstance } from "./types/relation-validation.js";
@@ -57,7 +56,7 @@ function scoreValid(score: unknown, r: RelationInstance, d: RelationDefinition, 
     && r.parties.some(p => p.id === score.fromPartyId) && r.parties.some(p => p.id === score.toPartyId);
 }
 export function validateRelationState(raw: unknown, d: RelationDefinition): Result<RelationState> {
-  if (!isRecord(raw) || !isJsonSafe(raw)) return failure("DM_RELATION_STATE_INVALID", "Relation state must be a JSON-safe object");
+  if (!isRecord(raw) || !isJsonData(raw)) return failure("DM_RELATION_STATE_INVALID", "Relation state must be a JSON-safe object");
   const relation = validateRelationInstance(raw.relation, d); if (!relation.ok) return relation;
   if (!Array.isArray(raw.modifiers) || !Array.isArray(raw.events)) return failure("DM_RELATION_STATE_INVALID", "Modifiers and events must be lists");
   const modifierIds = new Set<string>(), eventIds = new Set<string>(), reversals = new Set<string>();

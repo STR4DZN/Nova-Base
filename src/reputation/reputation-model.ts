@@ -1,8 +1,7 @@
-import { isJsonSafe } from "../commands/command-envelope.js";
 import { ok, type Result } from "../core/contracts/result.js";
 import { isOpaqueId } from "../core/identity/ids.js";
 import type { TypedRef } from "../core/identity/refs.js";
-import { boundedInteger, failure, immutable, isNamespaced, isRecord, isSafeInteger,
+import { boundedInteger, isJsonData, failure, immutable, isNamespaced, isRecord, isSafeInteger,
   isText, isTimestamp, isTypedRef, isVisibility, revisionGuard } from "../core/validation/value-validation.js";
 import type { RelationPartyRef, RelationVisibility } from "../relations/types/relation-types.js";
 import { validateRelationPartyRef } from "../relations/types/relation-validation.js";
@@ -33,7 +32,7 @@ export interface ReputationRecord {
   readonly tracks: readonly ReputationTrack[]; readonly entries: readonly ReputationEntry[];
 }
 export function validateReputationTrackDefinition(raw: unknown): Result<ReputationTrackDefinition> {
-  if (!isRecord(raw) || !isJsonSafe(raw) || !isNamespaced(raw.id) || !isTimestamp(raw.version) || raw.version < 1 || !isText(raw.label)
+  if (!isRecord(raw) || !isJsonData(raw) || !isNamespaced(raw.id) || !isTimestamp(raw.version) || raw.version < 1 || !isText(raw.label)
     || !isSafeInteger(raw.minimum) || !isSafeInteger(raw.maximum) || raw.maximum < raw.minimum || !isSafeInteger(raw.baseline)
     || raw.baseline < raw.minimum || raw.baseline > raw.maximum || !isVisibility(raw.visibility)
     || (raw.publicPresentation !== "hidden" && raw.publicPresentation !== "band" && raw.publicPresentation !== "score") || !Array.isArray(raw.bands))
@@ -66,7 +65,7 @@ export class ReputationTrackRegistry {
   freeze(): void { this.#frozen = true; }
 }
 export function validateReputationRecord(raw: unknown, registry: ReputationTrackRegistry): Result<ReputationRecord> {
-  if (!isRecord(raw) || !isJsonSafe(raw) || raw.schemaVersion !== 1 || !isOpaqueId(raw.id, "rep") || !isTimestamp(raw.revision)
+  if (!isRecord(raw) || !isJsonData(raw) || raw.schemaVersion !== 1 || !isOpaqueId(raw.id, "rep") || !isTimestamp(raw.revision)
     || !isText(raw.label) || !isVisibility(raw.visibility) || !isTimestamp(raw.createdAt) || !isTimestamp(raw.updatedAt)
     || raw.updatedAt < raw.createdAt || !Array.isArray(raw.tracks) || !raw.tracks.length || !Array.isArray(raw.entries))
     return failure("DM_REPUTATION_RECORD_INVALID", "Invalid reputation identity, timestamps or track/entry lists");

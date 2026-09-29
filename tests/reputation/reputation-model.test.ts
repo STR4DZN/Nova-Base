@@ -106,3 +106,13 @@ test("G6.3: large score deltas use exact arithmetic and reject unrepresentable a
   assert.equal(first.tracks[0].score, 0);
   assert.equal(adjustReputation(first, registry, input(first, { delta: Number.MAX_SAFE_INTEGER })).ok, true);
 });
+test("G6.3: durable history supports 2000 entries and shared source refs but rejects cycles", () => {
+  const { record, registry } = fixture(), source = { type: "incident", id: "gm" };
+  const entries = Array.from({ length: 2000 }, (_, i) => ({ id: `entry-${i}`, trackId: definition.id, kind: "adjustment" as const,
+    delta: i % 2 ? -1 : 1, before: i % 2 ? 21 : 20, after: i % 2 ? 20 : 21, source, reason: "Recorded incident",
+    at: i + 1, worldTick: null, reversalOf: null }));
+  const large = { ...record, updatedAt: 2000, entries };
+  assert.equal(validateReputationRecord(large, registry).ok, true);
+  assert.deepEqual(unwrap(validateReputationRecord(JSON.parse(JSON.stringify(large)), registry)), large);
+  const cyclic: any = { ...record }; cyclic.cycle = cyclic; assert.equal(validateReputationRecord(cyclic, registry).ok, false);
+});
