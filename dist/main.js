@@ -14905,7 +14905,7 @@ var G2DiagnosticsProvider = class {
 
 // src/core/versioning/build-metadata.ts
 var BUILD_METADATA = Object.freeze({
-  moduleVersion: "0.0.5",
+  moduleVersion: "0.0.6",
   buildChannel: "dev",
   target: "foundry-vtt"
 });

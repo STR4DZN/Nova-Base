@@ -2,7 +2,7 @@
 
 ## Identidade
 
-- Module version: `0.0.5`
+- Module version: `0.0.6`
 - Gate de código atual: `G5 — Projects / Facilities / Downtime (Remediação de Revalidação Concluída / Aguardando Aceitação Soberana)`
 - Estado local: `GATE_G5_COMPLETED_PENDING_USER_ACCEPTANCE`
 - Estado externo: `GATE_G4_ACCEPTED_GATE_G5_COMPLETED_PENDING_USER_ACCEPTANCE`
@@ -46,7 +46,7 @@
 | Remediação de Revalidação 6 G5-REVAL6-001 a G5-REVAL6-005 | PASS — 100% remediado, endurecido e verificado |
 | Remediação Master G5 (Patches A–F & Kernel Hardening T1–T15) | PASS — CompositeMutationSession, lockKey factory, RecoveryFenceRegistry, TransactionalChildHandler, pre-allocated entity intents, compensator intent fallback, lock release triggers e safe-mode enforcement |
 | Build do pacote (`node build.mjs`) | PASS (`dist/main.js` gerado) |
-| Empacotamento (`node scripts/package.mjs`) | PASS (`dist/domain-manager-v0.0.5.zip` gerado) |
+| Empacotamento (`node scripts/package.mjs`) | PASS (`dist/domain-manager-v0.0.6.zip` gerado) |
 | Validação de pacote (`node scripts/validate-package.mjs`) | PASS |
 | Validação de artefato (`node scripts/validate-artifact.mjs`) | PASS |
 

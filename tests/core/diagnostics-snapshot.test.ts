@@ -6,7 +6,7 @@ test("diagnostics snapshot exposes only safe bootstrap metadata", () => {
   const snapshot = createDiagnosticsSnapshot();
 
   assert.deepEqual(snapshot, {
-    moduleVersion: "0.0.5",
+    moduleVersion: "0.0.6",
     buildChannel: "dev",
     target: "foundry-vtt",
     diagnosticScope: "bootstrap"

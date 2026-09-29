@@ -7,7 +7,7 @@
 **Date:** 2026-09-29  
 **Test Suite:** 679/679 passing (0 failures, 0 regressions against G4 baseline of 444; +235 dedicated G5 tests, including 66 adversarial revalidation tests + 34 master remediation tests + 34 kernel hardening tests T1–T22)  
 **TypeScript Conformance:** Strict, 0 errors via `npx tsc --noEmit`  
-**Package & Artifact Validation:** PASS (`dist/domain-manager-v0.0.5.zip`, validation scripts verified)
+**Package & Artifact Validation:** PASS (`dist/domain-manager-v0.0.6.zip`, validation scripts verified)
 
 ---
 
@@ -80,10 +80,10 @@ The G5 test suite validates the system against high-scale multi-domain operation
 
 ## 5. Test Suite & Validation Summary
 
-- **Total Test Count**: 667 tests passing (0 failures, 0 regressions across G0–G4 baseline of 444; +223 dedicated G5 tests).
+- **Total Test Count**: 679 tests passing (0 failures, 0 regressions across G0–G4 baseline of 444; +235 dedicated G5 tests).
 - **TypeScript Compilation**: Strict conformance, 0 errors via `node node_modules/typescript/bin/tsc --noEmit`.
 - **Production Build**: `node build.mjs` built cleanly with zero warnings (`dist/main.js`).
-- **Distribution Package**: `node scripts/package.mjs` created `dist/domain-manager-v0.0.5.zip`.
+- **Distribution Package**: `node scripts/package.mjs` created `dist/domain-manager-v0.0.6.zip`.
 - **Package Validation**: `node scripts/validate-package.mjs` passed with 0 errors.
 - **Artifact Validation**: `node scripts/validate-artifact.mjs` passed with 0 errors.
 
