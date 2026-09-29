@@ -10,7 +10,8 @@ import type { ProjectContributorRef } from "../types/project-entry-types.js";
 import { getDomainProjectsData, PROJECTS_CAPABILITY_ID, withDomainProjectsData } from "../project-data.js";
 import { evaluateProjectStartPlan, commitProjectStartPlan } from "./project-start-plan-service.js";
 import type { EconomyService } from "../../economy/services/economy-service.js";
-import { PeopleService, type PublicPeopleApi } from "../../people/services/people-service.js";
+import { WorkforceReservationService } from "../../people/services/workforce-reservation-service.js";
+import type { WorkforceReservationPort } from "../../people/services/workforce-reservation-port.js";
 import type { TransactionStore } from "../../mutations/transaction-store.js";
 import { createTransactionRecord, type TransactionRecord } from "../../mutations/transaction-record.js";
 import { compensateProjectStart } from "../services/project-recovery-compensators.js";
@@ -45,7 +46,7 @@ export interface ProjectStartDomainOperationContext {
   readonly domains: DomainRepositoryContract;
   readonly projectRegistry: ProjectDefinitionRegistry;
   readonly economyService?: EconomyService;
-  readonly peopleService?: PublicPeopleApi;
+  readonly workforceReservations?: WorkforceReservationPort;
   readonly transactionStore?: TransactionStore;
   readonly recoveryFenceRegistry?: RecoveryFenceRegistry;
 }
@@ -185,7 +186,7 @@ export async function executeProjectStartDomainOperationPlan(
     : createCommandId();
   const epoch = params.authorityEpoch ?? 1;
 
-  const peopleService = context.peopleService ?? new PeopleService(context.domains);
+  const workforceReservations = context.workforceReservations ?? new WorkforceReservationService(context.domains);
 
   // Finding 2: Lock set for Project Start is domain-only!
   const canonicalStartLock = lockKey.domain(cleanDomainUuid);
@@ -277,7 +278,7 @@ export async function executeProjectStartDomainOperationPlan(
       {
         domains: context.domains,
         economyService: context.economyService,
-        peopleService,
+        workforceReservations,
         transactionStore: context.transactionStore
       },
       { lockOwner: params.commandId, skipReconciliation: true }
@@ -403,7 +404,7 @@ export async function executeProjectStartDomainOperationPlan(
         operationRef: opRef
       },
       execute: async () =>
-        peopleService.allocateWorkforceReservation({
+        workforceReservations.allocateWorkforceReservation({
           domainUuid: cleanDomainUuid,
           projectId: draftProject.id,
           amount: wfRequired,

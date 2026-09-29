@@ -16,7 +16,7 @@ import type { ChildReceipt } from "./project-plan-types.js";
 import type { Reservation } from "../../economy/reservations/reservation-types.js";
 import type { EconomyService } from "../../economy/services/economy-service.js";
 import type { FacilitiesService } from "../../facilities/services/facilities-service.js";
-import { PeopleService, type PublicPeopleApi } from "../../people/services/people-service.js";
+import type { WorkforceReservationPort } from "../../people/services/workforce-reservation-port.js";
 import type { TransactionStore } from "../../mutations/transaction-store.js";
 import { createTransactionRecord } from "../../mutations/transaction-record.js";
 import { compensateProjectCompletion } from "../services/project-recovery-compensators.js";
@@ -46,7 +46,7 @@ export interface ProjectCompletionDomainOperationContext {
   readonly projectRegistry: ProjectDefinitionRegistry;
   readonly economyService?: EconomyService;
   readonly facilitiesService?: FacilitiesService;
-  readonly peopleService?: PublicPeopleApi;
+  readonly workforceReservations?: WorkforceReservationPort;
   readonly transactionStore?: TransactionStore;
   readonly childHandlerRegistry?: TransactionalChildHandlerRegistry;
 }
@@ -271,7 +271,7 @@ export async function executeProjectCompletionDomainOperationPlan(
         domains: context.domains,
         economyService: context.economyService,
         facilitiesService: context.facilitiesService,
-        peopleService: context.peopleService,
+        workforceReservations: context.workforceReservations,
         transactionStore: context.transactionStore
       },
       { lockOwner: params.commandId, skipReconciliation: true }
@@ -393,11 +393,11 @@ export async function executeProjectCompletionDomainOperationPlan(
     }
   }
 
-  // 3. Release workforce reservations via People API
-  if (context.peopleService) {
+  // 3. Release workforce reservations via the internal workforce port
+  if (context.workforceReservations) {
     let hasActiveReservations = false;
-    if ("getReservations" in context.peopleService) {
-      const pRes = await context.peopleService.getReservations(cleanDomainUuid);
+    if ("getReservations" in context.workforceReservations) {
+      const pRes = await context.workforceReservations.getReservations(cleanDomainUuid);
       if (!pRes.ok) {
         return session.failAndCompensate(
           createPublicError({
@@ -433,7 +433,7 @@ export async function executeProjectCompletionDomainOperationPlan(
         idempotencyKey: `${session.transactionId}:${stepId}`,
         intent: { projectId: project.id },
         execute: async () => {
-          return context.peopleService!.releaseWorkforceReservation({
+          return context.workforceReservations!.releaseWorkforceReservation({
             domainUuid: cleanDomainUuid,
             projectId: project.id,
             userId: params.userId
