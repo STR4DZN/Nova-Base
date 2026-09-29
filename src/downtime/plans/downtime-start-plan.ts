@@ -100,6 +100,17 @@ export async function executeDowntimeStartPlan(
     );
   }
 
+  // null is an explicit indefinite duration; only undefined uses the default.
+  const durationTicks = params.durationTicks !== undefined
+    ? params.durationTicks
+    : definition.defaultDurationTicks !== undefined ? definition.defaultDurationTicks : 10;
+  if (durationTicks !== null && (!Number.isSafeInteger(durationTicks) || durationTicks < 0)) {
+    return err(createPublicError({
+      code: "DM_DOWNTIME_INVALID_DURATION", category: "validation",
+      message: "Downtime durationTicks must be a non-negative safe integer or null"
+    }));
+  }
+
   // 1. Participant verification
   const participants: DowntimeParticipant[] = [];
   if (params.participants && params.participants.length > 0) {
@@ -419,7 +430,7 @@ export async function executeDowntimeStartPlan(
     scope: params.scope ?? definition.scope ?? "domain",
     lifecycle: "inProgress",
     elapsedTicks: 0,
-    durationTicks: params.durationTicks ?? definition.defaultDurationTicks ?? 10,
+    durationTicks,
     participants: Object.freeze(participants),
     tags: Object.freeze([...(definition.tags ?? [])]),
     createdAt: now,

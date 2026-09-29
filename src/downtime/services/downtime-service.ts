@@ -93,6 +93,8 @@ export interface CompleteActivityParams {
   readonly authorityEpoch?: number;
   readonly lockKeys?: readonly string[];
   readonly transactionContext?: TransactionExecutionContext;
+  /** Internal advance-to-completion progress, committed atomically with outcomes. */
+  readonly elapsedTicks?: number;
 }
 
 export class DowntimeService {
@@ -199,6 +201,12 @@ export class DowntimeService {
     }
 
     const newTicks = activity.elapsedTicks + Math.max(0, params.ticks);
+    if (!Number.isSafeInteger(newTicks)) {
+      return err(createPublicError({
+        code: "DM_DOWNTIME_INVALID_ELAPSED_TICKS", category: "validation",
+        message: "Downtime elapsedTicks must remain a non-negative safe integer"
+      }));
+    }
     const duration = activity.durationTicks;
     const shouldComplete = duration !== null && duration !== undefined && newTicks >= duration;
 
@@ -211,7 +219,8 @@ export class DowntimeService {
         commandId: params.commandId,
         correlationId: params.correlationId,
         causationId: params.causationId,
-        authorityEpoch: params.authorityEpoch
+        authorityEpoch: params.authorityEpoch,
+        elapsedTicks: newTicks
       });
       if (!compRes.ok) return compRes;
       return ok({ activity: compRes.value.activity, completed: true });

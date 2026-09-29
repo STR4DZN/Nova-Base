@@ -225,6 +225,14 @@ export async function compensateDowntimeResolution(
         }
       }
       if (step.subsystem === "custom") {
+        // The built-in narrative path produces only a receipt. Custom handlers using
+        // the same operation name remain subject to registry reconciliation below.
+        if (step.operation === "narrative:event" &&
+            step.stepId.startsWith("downtime-resolution:narrative:") &&
+            step.intent?.builtinReceiptOnly === true) {
+          await markCompensationStepCompleted(context.transactionStore, record, stepId);
+          continue;
+        }
         const handler: TransactionalChildHandler | undefined =
           context.childHandlerRegistry?.get(step.operation);
 
