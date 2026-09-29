@@ -33,10 +33,10 @@
 | Verificação | Resultado |
 |---|---|
 | TypeScript strict (`tsc --noEmit`) | PASS (0 erros) |
-| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 676/676 (0 falhas, 0 regressões) |
+| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 679/679 (0 falhas, 0 regressões) |
 | Relatório de Aceitação G5 | Gerado (`docs/GATE_G5_ACCEPTANCE_REPORT.md`) |
 | Regressões G0/G1/G2/G3/G4 | 0 (todos os 444 testes anteriores preservados e passando) |
-| Testes novos Gate G5 | 232 testes dedicados (G5.1 a G5.10: 101 testes + 66 testes adversários em g5-revalidation-adversarial.test.ts + 10 testes de lock-set em g5-lockset-contract.test.ts + 5 testes de fence em g5-recovery-fence.test.ts + 19 testes de kernel em g5-transaction-kernel.test.ts + 31 testes de hardening T1–T21 em g5-kernel-hardening.test.ts) |
+| Testes novos Gate G5 | 235 testes dedicados (G5.1 a G5.10: 101 testes + 66 testes adversários em g5-revalidation-adversarial.test.ts + 10 testes de lock-set em g5-lockset-contract.test.ts + 5 testes de fence em g5-recovery-fence.test.ts + 19 testes de kernel em g5-transaction-kernel.test.ts + 34 testes de hardening T1–T22 em g5-kernel-hardening.test.ts) |
 | Remediação de Auditoria G5-AUD-001 a G5-AUD-010 | PASS — 100% remediado, endurecido e verificado |
 | Remediação de Revalidação G5-REVAL-001 a G5-REVAL-012 | PASS — 100% remediado, endurecido e verificado |
 | Remediação de Revalidação 2 G5-REVAL2-001 a G5-REVAL2-010 | PASS — 100% remediado, endurecido e verificado |
@@ -517,10 +517,23 @@
 5. **Suíte de Testes de Hardening T21-A a T21-F**:
    - 6 novos cenários cobrindo Caso A (provider-only), Caso B (ledger-only), idempotência de retry, falha antes da gravação (not-applied), fail-closed em incerteza (unknown) e captura de falha de flush do provedor em `CompositeMutationSession`.
 
+## Remediação de Gap Residual — Inclusão de Steps "executing" na Recuperação de Instalações (T22)
+
+1. **Inclusão do Estado `executing` no Filtro de Steps de Instalações**:
+   - Em `src/facilities/services/facility-recovery-compensators.ts`, o filtro de passos de compensação foi alinhado aos compensadores de Projetos e Downtime para incluir `step.state !== "executing"`.
+   - Steps em estado `executing` após crash não são mais ignorados silenciosamente, sendo encaminhados à reconciliação atômica via `economyService.compensateAdjustment(...)`.
+2. **Reconciliação Fail-Safe sem Compensação Cega**:
+   - Se o efeito econômico foi gravado antes do crash, a reconciliação detecta o débito e aplica o estorno correspondente exatamente uma vez, restaurando o saldo inicial e liberando a recovery fence após transição para `compensated`.
+   - Se o processo caiu antes da mutação econômica, a reconciliação reporta `not-applied` e age como no-op seguro sem emissão de estornos fantasmas.
+3. **Suíte de Testes de Hardening T22-A a T22-C**:
+   - `T22-A`: Facility Maintenance com step `executing` e débito aplicado -> recuperação detecta débito, estorna exatamente uma vez, saldo restaurado, transação `compensated`, fence liberada.
+   - `T22-B`: Facility Repair com step `executing` e débito NÃO aplicado -> reconciliação `not-applied`, saldo mantido sem estornos fantasmas, transação `compensated`.
+   - `T22-C`: Facility Maintenance com step `executing` e recurso provider-backed aplicado -> integração completa com a matriz T21 Provider↔Ledger.
+
 ## Próxima ação canônica
 
 - **Aguardar Aceitação Soberana do Usuário para o Gate G5 (Projects / Facilities / Downtime)**:
-  - Todas as 10 microbuilds do Gate G5 (G5.1 a G5.10), todos os 10 itens de auditoria inicial (G5-AUD-001 a G5-AUD-010), todos os 12 itens da 1ª revalidação (G5-REVAL-001 a G5-REVAL-012), todos os 10 itens da 2ª revalidação (G5-REVAL2-001 a G5-REVAL2-010), todos os 7 itens da 3ª revalidação (G5-REVAL3-001 a G5-REVAL3-007), todos os itens das revalidações 4, 5, 6, Master Remediation, e os testes de hardening T1 a T21 foram integralmente implementados, endurecidos e verificados (676/676 testes passando, 0 erros de compilação TypeScript, validações de pacote e artefato aprovadas).
+  - Todas as 10 microbuilds do Gate G5 (G5.1 a G5.10), todos os 10 itens de auditoria inicial (G5-AUD-001 a G5-AUD-010), todos os 12 itens da 1ª revalidação (G5-REVAL-001 a G5-REVAL-012), todos os 10 itens da 2ª revalidação (G5-REVAL2-001 a G5-REVAL2-010), todos os 7 itens da 3ª revalidação (G5-REVAL3-001 a G5-REVAL3-007), todos os itens das revalidações 4, 5, 6, Master Remediation, e os testes de hardening T1 a T22 foram integralmente implementados, endurecidos e verificados (679/679 testes passando, 0 erros de compilação TypeScript, validações de pacote e artefato aprovadas).
   - Relatório formal de aceitação emitido em `docs/GATE_G5_ACCEPTANCE_REPORT.md`.
   - Próximo gate canônico após a aceitação formal do Gate G5 pelo usuário: **Gate G6 — Relations / Reputation / Agreements / Territory** (`Documentos/GATES/16_G6_RELATIONS_REPUTATION_AGREEMENTS_TERRITORY.md`).
   - Rastreabilidade histórica: Gates G0 a G4 concluídos, auditados e homologados.

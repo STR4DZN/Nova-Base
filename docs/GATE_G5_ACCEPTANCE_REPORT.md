@@ -5,7 +5,7 @@
 **Normative Authorities:** `Documentos/99_DOMAIN_MANAGER_MASTER_SPECIFICATION_V1.md` (§15, §16, §17, DEC-083 to DEC-097, Anexo 07 DEC-2306 to DEC-3200), `Documentos/GATES/15_G5_PROJECTS_FACILITIES_DOWNTIME.md`  
 **Status:** **GATE_G5_COMPLETED_PENDING_USER_ACCEPTANCE (Aguardando Aceitação Soberana do Usuário — Nunca aceito sem confirmação explícita)**  
 **Date:** 2026-09-29  
-**Test Suite:** 676/676 passing (0 failures, 0 regressions against G4 baseline of 444; +232 dedicated G5 tests, including 66 adversarial revalidation tests + 34 master remediation tests + 31 kernel hardening tests T1–T21)  
+**Test Suite:** 679/679 passing (0 failures, 0 regressions against G4 baseline of 444; +235 dedicated G5 tests, including 66 adversarial revalidation tests + 34 master remediation tests + 34 kernel hardening tests T1–T22)  
 **TypeScript Conformance:** Strict, 0 errors via `npx tsc --noEmit`  
 **Package & Artifact Validation:** PASS (`dist/domain-manager-v0.0.5.zip`, validation scripts verified)
 
@@ -272,9 +272,17 @@ The G5 test suite validates the system against high-scale multi-domain operation
 
 ---
 
-## 19. Canonical Next Gate Designation
+## 19. Final Residual Gap Matrix (Facility Recovery Executing-Step Reconciliation — Tests T22-A through T22-C)
 
-Per the Master Specification roadmap, Gate G5 is now complete, fully remediated against initial audit (G5-AUD-001 to G5-AUD-010), first revalidation (G5-REVAL-001 to G5-REVAL-012), second revalidation (G5-REVAL2-001 to G5-REVAL2-010), third revalidation (G5-REVAL3-001 to G5-REVAL3-007), fourth revalidation (G5-REVAL4-001 to G5-REVAL4-012), fifth revalidation (G5-REVAL5-001 to G5-REVAL5-009), sixth revalidation (G5-REVAL6-001 to G5-REVAL6-005), the Master Remediation (DOMAIN_MANAGER_G5_MASTER_REMEDIACAO_FINAL), the Master Acceptance Audit Hardening (Patches A–F and Production Blockers 1–5), Commit 836ee57 Revalidation (Blockers A–D and Tests T16-A to T19), the Final Static Blocker (Provider Recovery Single Ownership — Tests T20-A to T20-C), and the Final Real Static Blocker (Provider ↔ Ledger Atomicity in Child Recovery — Tests T21-A to T21-F), and strictly pending user acceptance:
+| Residual Gap Scenario | Severity | Description & Root Cause | Architectural Remediation | Verification Evidence |
+|---|---|---|---|---|
+| **Facility Executing-Step Filter** | CRITICAL | In `src/facilities/services/facility-recovery-compensators.ts`, the compensator step loop filtered out steps not in `applied`, `unknown`, or `compensating`, ignoring `executing`. After a crash between `executing` and `applied` receipt, economic costs debited for Maintenance/Repair were not compensated, yet the transaction transitioned to `compensated` and removed the recovery fence, leaving balances un-refunded. | Added `step.state !== "executing"` to the step filter condition. Steps in `executing` are routed to `EconomyService.compensateAdjustment(...)`, which uses `reconcileAdjustment` (for native accounts) and `reconcileProviderAdjustment` (for provider accounts). If the debit was applied before crash, it is refunded exactly once; if not applied, it acts as a no-op without phantom refunds. | `tests/runtime/g5-kernel-hardening.test.ts` (T22-A verifies executing maintenance step with applied debit is refunded exactly once, balance restored, transaction compensated, fence removed; T22-B verifies executing repair step without applied debit acts as no-op without phantom refund; T22-C verifies provider-backed resource integration). |
+
+---
+
+## 20. Canonical Next Gate Designation
+
+Per the Master Specification roadmap, Gate G5 is now complete, fully remediated against initial audit (G5-AUD-001 to G5-AUD-010), first revalidation (G5-REVAL-001 to G5-REVAL-012), second revalidation (G5-REVAL2-001 to G5-REVAL2-010), third revalidation (G5-REVAL3-001 to G5-REVAL3-007), fourth revalidation (G5-REVAL4-001 to G5-REVAL4-012), fifth revalidation (G5-REVAL5-001 to G5-REVAL5-009), sixth revalidation (G5-REVAL6-001 to G5-REVAL6-005), the Master Remediation (DOMAIN_MANAGER_G5_MASTER_REMEDIACAO_FINAL), the Master Acceptance Audit Hardening (Patches A–F and Production Blockers 1–5), Commit 836ee57 Revalidation (Blockers A–D and Tests T16-A to T19), the Final Static Blocker (Provider Recovery Single Ownership — Tests T20-A to T20-C), the Final Real Static Blocker (Provider ↔ Ledger Atomicity in Child Recovery — Tests T21-A to T21-F), and the Final Residual Gap (Facility Recovery Executing-Step Reconciliation — Tests T22-A to T22-C), and strictly pending user acceptance:
 - **Current Gate Status**: `GATE_G5_COMPLETED_PENDING_USER_ACCEPTANCE`
 - **Canonical Next Gate**: **Gate G6 — Relations / Reputation / Agreements / Territory** (`Documentos/GATES/16_G6_RELATIONS_REPUTATION_AGREEMENTS_TERRITORY.md`).
 - **Policy**: Gate G6 must NEVER be started without explicit sovereign confirmation from the user.

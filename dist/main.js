@@ -27285,7 +27285,7 @@ async function compensateFacilityOperation(recordOrId, context, options) {
   if (Array.isArray(data.steps) && data.steps.length > 0) {
     const steps = [...data.steps].reverse();
     for (const step of steps) {
-      if (step.state !== "applied" && step.state !== "unknown" && step.state !== "compensating") {
+      if (step.state !== "applied" && step.state !== "unknown" && step.state !== "compensating" && step.state !== "executing") {
         continue;
       }
       const stepId = step.stepId;

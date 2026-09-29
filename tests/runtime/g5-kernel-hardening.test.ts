@@ -28,6 +28,7 @@ import {
   compensateProjectStart,
   compensateProjectCompletion
 } from "../../src/projects/services/project-recovery-compensators.js";
+import { compensateFacilityOperation } from "../../src/facilities/services/facility-recovery-compensators.js";
 import {
   createDefaultDomainFacilitiesData,
   getDomainFacilitiesData,
@@ -3993,5 +3994,337 @@ test("T21-F: provider flush falha no commitAdjust -> classificado imediatamente 
   // 4. Recovery fence is active on the domain
   assert.equal(fenceRegistry.isScopeBlocked([canonicalDomainLock]), true, "Recovery fence must be active on domain");
 });
+
+// ---------------------------------------------------------------------------
+// T22-A: Facility Maintenance: executing + effect aplicado -> recovery detecta debit, compensa e restaura saldo exatamente 1 vez
+// ---------------------------------------------------------------------------
+test("T22-A: Facility Maintenance: executing + effect aplicado -> recovery detecta debit, compensa e restaura saldo exatamente 1 vez", async () => {
+  const { domains } = createMockDomainDoc("dom-t22a", 1000);
+  const resourceRegistry = createDefaultResourceRegistry();
+  const lockManager = new LockManager();
+  const txStore = new TransactionStore(new InMemoryTransactionStorageAdapter());
+  const reservationStore = new ReservationStore(new InMemoryReservationStorageAdapter());
+  const ledgerStore = new LedgerStore(new InMemoryLedgerStorageAdapter());
+  const fenceRegistry = new RecoveryFenceRegistry();
+  const recoveryService = new RecoveryService({
+    lockManager,
+    transactionStore: txStore,
+    fenceRegistry
+  });
+
+  const economyService = new EconomyService({
+    domains,
+    resourceRegistry,
+    ledgerStore,
+    reservationStore,
+    lockManager,
+    transactionStore: txStore,
+    recoveryService
+  });
+
+  const facilityRegistry = createDefaultFacilityRegistry();
+  new FacilitiesService({
+    domains,
+    facilityRegistry,
+    economyService,
+    transactionStore: txStore,
+    lockManager,
+    recoveryService
+  });
+
+  const canonicalDomainLock = lockKey.domain("dom-t22a");
+  const canonicalFacilityLock = lockKey.facility("fac-t22a");
+  const txId = "tx-maint-t22a";
+  const opRef = `${txId}:step_maint_materials`;
+
+  // 1. Simulate the economic effect being applied to domain before crash
+  const debitRes = await economyService.commitAdjust({
+    domainUuid: "dom-t22a",
+    resourceId: "domain-manager:materials",
+    deltaMinor: -100,
+    reason: "Facility maintenance cost",
+    idempotencyKey: opRef,
+    parentTransactionId: txId,
+    recoveryOwner: "parent"
+  });
+  assert.equal(debitRes.ok, true);
+
+  // Balance is now 900
+  const accAfterDebit = await economyService.getAccount("dom-t22a", "domain-manager:materials");
+  assert.equal((accAfterDebit.value as any).balanceMinor, 900);
+
+  // 2. Simulate process crash before receipt was marked applied:
+  // Transaction survived with step state "executing"
+  const parentTx = {
+    ...createTransactionRecord({
+      transactionId: txId,
+      commandId: createCommandId(),
+      authorityEpoch: 1,
+      lockKeys: [canonicalDomainLock, canonicalFacilityLock],
+      safeAutoRecovery: true,
+      recoveryData: {
+        type: "facilities:maintenance",
+        domainUuid: "dom-t22a",
+        facilityId: "fac-t22a",
+        steps: [
+          {
+            stepId: "step_maint_materials",
+            subsystem: "economy",
+            operation: "adjust",
+            operationRef: opRef,
+            intent: { resourceId: "domain-manager:materials", deltaMinor: -100 },
+            state: "executing" as const
+          }
+        ]
+      }
+    }),
+    state: "needs-recovery" as const
+  };
+  txStore.save(parentTx);
+
+  // Install recovery fence to simulate unresolved state
+  fenceRegistry.installFence({
+    transactionId: txId,
+    lockKeys: [canonicalDomainLock, canonicalFacilityLock],
+    reason: "Simulate unresolved state"
+  });
+  assert.equal(fenceRegistry.isScopeBlocked([canonicalDomainLock]), true);
+
+  // 3. Run recovery
+  const recRes = await recoveryService.recoverTransaction(txId, 1);
+  assert.equal(recRes.ok, true);
+
+  // 4. Assertions:
+  // Refunded exactly once, balance back to 1000
+  const accAfterRec = await economyService.getAccount("dom-t22a", "domain-manager:materials");
+  assert.equal((accAfterRec.value as any).balanceMinor, 1000);
+
+  // Transaction transitioned to "compensated"
+  const updatedTx = txStore.get(txId);
+  assert.ok(updatedTx);
+  assert.equal(updatedTx.state, "compensated");
+
+  // Recovery fence removed after completion
+  assert.equal(fenceRegistry.isScopeBlocked([canonicalDomainLock]), false);
+});
+
+// ---------------------------------------------------------------------------
+// T22-B: Facility Repair: executing + effect NÃO aplicado -> reconcile = not-applied, nenhum refund fantasma
+// ---------------------------------------------------------------------------
+test("T22-B: Facility Repair: executing + effect NÃO aplicado -> reconcile = not-applied, nenhum refund fantasma", async () => {
+  const { domains } = createMockDomainDoc("dom-t22b", 1000);
+  const resourceRegistry = createDefaultResourceRegistry();
+  const lockManager = new LockManager();
+  const txStore = new TransactionStore(new InMemoryTransactionStorageAdapter());
+  const reservationStore = new ReservationStore(new InMemoryReservationStorageAdapter());
+  const ledgerStore = new LedgerStore(new InMemoryLedgerStorageAdapter());
+  const fenceRegistry = new RecoveryFenceRegistry();
+  const recoveryService = new RecoveryService({
+    lockManager,
+    transactionStore: txStore,
+    fenceRegistry
+  });
+
+  const economyService = new EconomyService({
+    domains,
+    resourceRegistry,
+    ledgerStore,
+    reservationStore,
+    lockManager,
+    transactionStore: txStore,
+    recoveryService
+  });
+
+  const facilityRegistry = createDefaultFacilityRegistry();
+  new FacilitiesService({
+    domains,
+    facilityRegistry,
+    economyService,
+    transactionStore: txStore,
+    lockManager,
+    recoveryService
+  });
+
+  const canonicalDomainLock = lockKey.domain("dom-t22b");
+  const canonicalFacilityLock = lockKey.facility("fac-t22b");
+  const txId = "tx-repair-t22b";
+  const opRef = `${txId}:step_repair_materials`;
+
+  // Economic effect was NOT applied before crash (e.g. crashed during executing intent flush before Economy write)
+  const accBefore = await economyService.getAccount("dom-t22b", "domain-manager:materials");
+  assert.equal((accBefore.value as any).balanceMinor, 1000);
+
+  // Transaction survived with step state "executing"
+  const parentTx = {
+    ...createTransactionRecord({
+      transactionId: txId,
+      commandId: createCommandId(),
+      authorityEpoch: 1,
+      lockKeys: [canonicalDomainLock, canonicalFacilityLock],
+      safeAutoRecovery: true,
+      recoveryData: {
+        type: "facilities:repair",
+        domainUuid: "dom-t22b",
+        facilityId: "fac-t22b",
+        steps: [
+          {
+            stepId: "step_repair_materials",
+            subsystem: "economy",
+            operation: "adjust",
+            operationRef: opRef,
+            intent: { resourceId: "domain-manager:materials", deltaMinor: -150 },
+            state: "executing" as const
+          }
+        ]
+      }
+    }),
+    state: "needs-recovery" as const
+  };
+  txStore.save(parentTx);
+
+  fenceRegistry.installFence({
+    transactionId: txId,
+    lockKeys: [canonicalDomainLock, canonicalFacilityLock],
+    reason: "Simulate unresolved state"
+  });
+
+  // Run recovery
+  const recRes = await recoveryService.recoverTransaction(txId, 1);
+  assert.equal(recRes.ok, true);
+
+  // Assertions:
+  // No phantom refund: balance remains exactly 1000 (NOT 1150!)
+  const accAfterRec = await economyService.getAccount("dom-t22b", "domain-manager:materials");
+  assert.equal((accAfterRec.value as any).balanceMinor, 1000);
+
+  // Transaction transitioned to "compensated"
+  const updatedTx = txStore.get(txId);
+  assert.ok(updatedTx);
+  assert.equal(updatedTx.state, "compensated");
+
+  // Recovery fence removed after completion
+  assert.equal(fenceRegistry.isScopeBlocked([canonicalDomainLock]), false);
+});
+
+// ---------------------------------------------------------------------------
+// T22-C: Facility Maintenance: executing + provider-backed resource effect aplicado -> recovery com T21
+// ---------------------------------------------------------------------------
+test("T22-C: Facility Maintenance: executing + provider-backed resource effect aplicado -> recovery com T21", async () => {
+  const { domains, getDoc } = createMockDomainDoc("dom-t22c", 1000);
+  const resourceRegistry = createDefaultResourceRegistry();
+  const lockManager = new LockManager();
+  const txStore = new TransactionStore(new InMemoryTransactionStorageAdapter());
+  const reservationStore = new ReservationStore(new InMemoryReservationStorageAdapter());
+  const ledgerStore = new LedgerStore(new InMemoryLedgerStorageAdapter());
+  const fenceRegistry = new RecoveryFenceRegistry();
+  const recoveryService = new RecoveryService({
+    lockManager,
+    transactionStore: txStore,
+    fenceRegistry
+  });
+
+  const provider = new ManualCurrencyProvider();
+  provider.setBalance("account-gems-t22c", 1000);
+  const providerRegistry = new ProviderRegistry();
+  providerRegistry.register(provider);
+
+  const doc = getDoc();
+  const econ = (doc.record.definition.capabilities.config as any)["domain-manager:economy"];
+  econ.accounts = [
+    {
+      domainUuid: "dom-t22c",
+      resourceId: "provider:gems",
+      mode: "provider",
+      providerId: MANUAL_CURRENCY_PROVIDER_ID,
+      providerRef: "account-gems-t22c",
+      balanceMinor: 1000,
+      baseCapacityMinor: null
+    }
+  ];
+  await domains.save(doc);
+
+  const economyService = new EconomyService({
+    domains,
+    resourceRegistry,
+    ledgerStore,
+    reservationStore,
+    lockManager,
+    transactionStore: txStore,
+    recoveryService,
+    providerRegistry
+  });
+
+  const facilityRegistry = createDefaultFacilityRegistry();
+  new FacilitiesService({
+    domains,
+    facilityRegistry,
+    economyService,
+    transactionStore: txStore,
+    lockManager,
+    recoveryService
+  });
+
+  const canonicalDomainLock = lockKey.domain("dom-t22c");
+  const canonicalFacilityLock = lockKey.facility("fac-t22c");
+  const txId = "tx-maint-t22c";
+  const opRef = `${txId}:step_maint_gems`;
+
+  // Mutate provider and ledger before crash
+  await provider.mutateCurrency("account-gems-t22c", -250, "Maintenance gems cost", { operationRef: opRef });
+  assert.equal((await provider.getCurrencyBalance("account-gems-t22c")).value, 750);
+  ledgerStore.append({
+    domainUuid: "dom-t22c",
+    resourceId: "provider:gems",
+    deltaMinor: -250,
+    kind: "adjustment",
+    transactionId: txId,
+    source: { type: "adjustment", ref: opRef, reason: "Maintenance gems" }
+  });
+  await ledgerStore.flush();
+
+  // Transaction survived with step state "executing"
+  const parentTx = {
+    ...createTransactionRecord({
+      transactionId: txId,
+      commandId: createCommandId(),
+      authorityEpoch: 1,
+      lockKeys: [canonicalDomainLock, canonicalFacilityLock],
+      safeAutoRecovery: true,
+      recoveryData: {
+        type: "facilities:maintenance",
+        domainUuid: "dom-t22c",
+        facilityId: "fac-t22c",
+        steps: [
+          {
+            stepId: "step_maint_gems",
+            subsystem: "economy",
+            operation: "adjust",
+            operationRef: opRef,
+            intent: { resourceId: "provider:gems", deltaMinor: -250 },
+            state: "executing" as const
+          }
+        ]
+      }
+    }),
+    state: "needs-recovery" as const
+  };
+  txStore.save(parentTx);
+
+  // Run recovery
+  const recRes = await recoveryService.recoverTransaction(txId, 1);
+  assert.equal(recRes.ok, true);
+
+  // Assertions:
+  // Provider balance restored to 1000
+  assert.equal((await provider.getCurrencyBalance("account-gems-t22c")).value, 1000);
+  // Net ledger delta is 0
+  const ledgerEntries = ledgerStore.query({ domainUuid: "dom-t22c" });
+  assert.equal(ledgerEntries.length, 2);
+  assert.equal(ledgerEntries.reduce((s, e) => s + e.deltaMinor, 0), 0);
+
+  // Transaction is compensated
+  assert.equal(txStore.get(txId)?.state, "compensated");
+});
+
 
 
