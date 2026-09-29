@@ -54,6 +54,8 @@ export interface DowntimeResolutionPlanParams {
   readonly authorityEpoch?: number;
   readonly lockKeys?: readonly string[];
   readonly transactionContext?: TransactionExecutionContext;
+  /** Supplied by the internal advance path, never taken from public command payloads. */
+  readonly elapsedTicks?: number;
 }
 
 /**
@@ -107,6 +109,14 @@ export async function executeDowntimeResolutionPlan(
         message: `Cannot complete activity '${params.activityId}' with lifecycle '${activity.lifecycle}'. Must be 'inProgress'`
       })
     );
+  }
+
+  const elapsedTicks = params.elapsedTicks ?? activity.elapsedTicks;
+  if (!Number.isSafeInteger(elapsedTicks) || elapsedTicks < activity.elapsedTicks) {
+    return err(createPublicError({
+      code: "DM_DOWNTIME_INVALID_ELAPSED_TICKS", category: "validation",
+      message: "Completion elapsedTicks must be a safe integer at least equal to current progress"
+    }));
   }
 
   const definition = context.downtimeRegistry.get(activity.definitionId);
@@ -383,7 +393,8 @@ export async function executeDowntimeResolutionPlan(
           targetRef: outcome.id ?? cleanDomainUuid,
           idempotencyKey: `${session.transactionId}:${stepId}`,
           operationRef: opRef,
-          intent: { outcomeId: outcome.id, parameters: outcome.parameters, operationRef: opRef },
+          // This built-in event only creates a transaction receipt, with no external write.
+          intent: { outcomeId: outcome.id, parameters: outcome.parameters, operationRef: opRef, builtinReceiptOnly: true },
           execute: async () =>
             ok<ChildReceipt>({
               childReceiptId: createOpaqueId("rep"),
@@ -397,6 +408,8 @@ export async function executeDowntimeResolutionPlan(
         });
         if (narrativeRes.ok) {
           outcomesApplied.push(narrativeRes.value);
+        } else {
+          return session.failAndCompensate(narrativeRes.error, runCompensator);
         }
       } else {
         if (!isOptional) {
@@ -431,6 +444,7 @@ export async function executeDowntimeResolutionPlan(
 
   const updatedActivity: DowntimeInstance = {
     ...activity,
+    elapsedTicks,
     lifecycle: "completed",
     updatedAt: Date.now(),
     revision: activity.revision + 1

@@ -29021,6 +29021,10 @@ async function compensateDowntimeResolution(recordOrId, context, options) {
         }
       }
       if (step.subsystem === "custom") {
+        if (step.operation === "narrative:event" && step.stepId.startsWith("downtime-resolution:narrative:") && step.intent?.builtinReceiptOnly === true) {
+          await markCompensationStepCompleted(context.transactionStore, record, stepId);
+          continue;
+        }
         const handler = context.childHandlerRegistry?.get(step.operation);
         if (!handler) {
           return err(
@@ -29133,6 +29137,14 @@ async function executeDowntimeStartPlan(context, params) {
         message: `Downtime definition '${params.definitionId}' not found`
       })
     );
+  }
+  const durationTicks = params.durationTicks !== void 0 ? params.durationTicks : definition.defaultDurationTicks !== void 0 ? definition.defaultDurationTicks : 10;
+  if (durationTicks !== null && (!Number.isSafeInteger(durationTicks) || durationTicks < 0)) {
+    return err(createPublicError({
+      code: "DM_DOWNTIME_INVALID_DURATION",
+      category: "validation",
+      message: "Downtime durationTicks must be a non-negative safe integer or null"
+    }));
   }
   const participants = [];
   if (params.participants && params.participants.length > 0) {
@@ -29405,7 +29417,7 @@ async function executeDowntimeStartPlan(context, params) {
     scope: params.scope ?? definition.scope ?? "domain",
     lifecycle: "inProgress",
     elapsedTicks: 0,
-    durationTicks: params.durationTicks ?? definition.defaultDurationTicks ?? 10,
+    durationTicks,
     participants: Object.freeze(participants),
     tags: Object.freeze([...definition.tags ?? []]),
     createdAt: now,
@@ -29470,6 +29482,14 @@ async function executeDowntimeResolutionPlan(context, params) {
         message: `Cannot complete activity '${params.activityId}' with lifecycle '${activity.lifecycle}'. Must be 'inProgress'`
       })
     );
+  }
+  const elapsedTicks = params.elapsedTicks ?? activity.elapsedTicks;
+  if (!Number.isSafeInteger(elapsedTicks) || elapsedTicks < activity.elapsedTicks) {
+    return err(createPublicError({
+      code: "DM_DOWNTIME_INVALID_ELAPSED_TICKS",
+      category: "validation",
+      message: "Completion elapsedTicks must be a safe integer at least equal to current progress"
+    }));
   }
   const definition = context.downtimeRegistry.get(activity.definitionId);
   const outcomesToExecute = definition?.outcomeDefinitions ?? [];
@@ -29707,7 +29727,8 @@ async function executeDowntimeResolutionPlan(context, params) {
           targetRef: outcome.id ?? cleanDomainUuid,
           idempotencyKey: `${session.transactionId}:${stepId}`,
           operationRef: opRef,
-          intent: { outcomeId: outcome.id, parameters: outcome.parameters, operationRef: opRef },
+          // This built-in event only creates a transaction receipt, with no external write.
+          intent: { outcomeId: outcome.id, parameters: outcome.parameters, operationRef: opRef, builtinReceiptOnly: true },
           execute: async () => ok({
             childReceiptId: createOpaqueId("rep"),
             subsystem: "custom",
@@ -29720,6 +29741,8 @@ async function executeDowntimeResolutionPlan(context, params) {
         });
         if (narrativeRes.ok) {
           outcomesApplied.push(narrativeRes.value);
+        } else {
+          return session.failAndCompensate(narrativeRes.error, runCompensator);
         }
       } else {
         if (!isOptional) {
@@ -29751,6 +29774,7 @@ async function executeDowntimeResolutionPlan(context, params) {
   }
   const updatedActivity = {
     ...activity,
+    elapsedTicks,
     lifecycle: "completed",
     updatedAt: Date.now(),
     revision: activity.revision + 1
@@ -29889,6 +29913,13 @@ var DowntimeService = class {
       );
     }
     const newTicks = activity.elapsedTicks + Math.max(0, params.ticks);
+    if (!Number.isSafeInteger(newTicks)) {
+      return err(createPublicError({
+        code: "DM_DOWNTIME_INVALID_ELAPSED_TICKS",
+        category: "validation",
+        message: "Downtime elapsedTicks must remain a non-negative safe integer"
+      }));
+    }
     const duration = activity.durationTicks;
     const shouldComplete = duration !== null && duration !== void 0 && newTicks >= duration;
     if (shouldComplete) {
@@ -29900,7 +29931,8 @@ var DowntimeService = class {
         commandId: params.commandId,
         correlationId: params.correlationId,
         causationId: params.causationId,
-        authorityEpoch: params.authorityEpoch
+        authorityEpoch: params.authorityEpoch,
+        elapsedTicks: newTicks
       });
       if (!compRes.ok) return compRes;
       return ok({ activity: compRes.value.activity, completed: true });
