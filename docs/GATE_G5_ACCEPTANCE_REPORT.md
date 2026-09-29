@@ -3,9 +3,9 @@
 **Subsystems:** Projects (`domain-manager:projects`), Facilities (`domain-manager:facilities`), Downtime (`domain-manager:downtime`)  
 **Gate:** G5 — Projects / Facilities / Downtime  
 **Normative Authorities:** `Documentos/99_DOMAIN_MANAGER_MASTER_SPECIFICATION_V1.md` (§15, §16, §17, DEC-083 to DEC-097, Anexo 07 DEC-2306 to DEC-3200), `Documentos/GATES/15_G5_PROJECTS_FACILITIES_DOWNTIME.md`  
-**Status:** **GATE_G5_COMPLETED_PENDING_USER_ACCEPTANCE (Aguardando Aceitação Soberana do Usuário — Nunca aceito sem confirmação explícita)**  
+**Status:** **GATE_G5_ACCEPTED — user-reported smoke PASS and authorized continuation on 2026-09-29**
 **Date:** 2026-09-29  
-**Test Suite:** 679/679 passing (0 failures, 0 regressions against G4 baseline of 444; +235 dedicated G5 tests, including 66 adversarial revalidation tests + 34 master remediation tests + 34 kernel hardening tests T1–T22)  
+**Test Suite:** 693/693 passing at G5 smoke-fix closeout; 754/754 after the isolated G6.1 model tests. Historical matrices below retain their original counts.
 **TypeScript Conformance:** Strict, 0 errors via `npx tsc --noEmit`  
 **Package & Artifact Validation:** PASS (`dist/domain-manager-v0.0.6.zip`, validation scripts verified)
 
@@ -282,10 +282,9 @@ The G5 test suite validates the system against high-scale multi-domain operation
 
 ## 20. Canonical Next Gate Designation
 
-Per the Master Specification roadmap, Gate G5 is now complete, fully remediated against initial audit (G5-AUD-001 to G5-AUD-010), first revalidation (G5-REVAL-001 to G5-REVAL-012), second revalidation (G5-REVAL2-001 to G5-REVAL2-010), third revalidation (G5-REVAL3-001 to G5-REVAL3-007), fourth revalidation (G5-REVAL4-001 to G5-REVAL4-012), fifth revalidation (G5-REVAL5-001 to G5-REVAL5-009), sixth revalidation (G5-REVAL6-001 to G5-REVAL6-005), the Master Remediation (DOMAIN_MANAGER_G5_MASTER_REMEDIACAO_FINAL), the Master Acceptance Audit Hardening (Patches A–F and Production Blockers 1–5), Commit 836ee57 Revalidation (Blockers A–D and Tests T16-A to T19), the Final Static Blocker (Provider Recovery Single Ownership — Tests T20-A to T20-C), the Final Real Static Blocker (Provider ↔ Ledger Atomicity in Child Recovery — Tests T21-A to T21-F), and the Final Residual Gap (Facility Recovery Executing-Step Reconciliation — Tests T22-A to T22-C), and strictly pending user acceptance:
-- **Current Gate Status**: `GATE_G5_COMPLETED_PENDING_USER_ACCEPTANCE`
+Gate G5 implementation and remediations are complete. On 2026-09-29 the user reported that the supplied JS passed every test in their Foundry and authorized continuing to the next steps. This records user acceptance, not independently captured evidence for each remote/reload/failover phase.
+- **Current Gate Status**: `GATE_G5_ACCEPTED`
 - **Canonical Next Gate**: **Gate G6 — Relations / Reputation / Agreements / Territory** (`Documentos/GATES/16_G6_RELATIONS_REPUTATION_AGREEMENTS_TERRITORY.md`).
-- **Policy**: Gate G6 must NEVER be started without explicit sovereign confirmation from the user.
-
+- **Continuation**: User confirmation received; G6.1 implemented and tested. Further microbuilds follow `docs/BUILD_STATE.md`.
 
 
