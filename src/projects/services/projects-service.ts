@@ -308,7 +308,8 @@ export class ProjectsService {
         economyService: this.#economyService,
         facilitiesService: this.#facilitiesService,
         peopleService: this.#peopleService,
-        transactionStore: this.#transactionStore
+        transactionStore: this.#transactionStore,
+        childHandlerRegistry: this.#childHandlerRegistry
       },
       params
     );

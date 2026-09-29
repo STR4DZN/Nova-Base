@@ -17237,6 +17237,22 @@ var EconomyService = class {
             sourceRef: params.idempotencyKey
           });
           if (existingEntries2.length > 0) {
+            if (existingReceipt && existingReceipt.state !== "ledger-confirmed") {
+              const confirmedReceipt = {
+                ...existingReceipt,
+                state: "ledger-confirmed",
+                ledgerEntryId: existingEntries2[0].id
+              };
+              const updatedReceipts2 = (econData.operationReceipts ?? []).map(
+                (r) => r.operationRef === params.idempotencyKey ? confirmedReceipt : r
+              );
+              const updatedRecord2 = withDomainEconomyData(doc.record, {
+                ...econData,
+                operationReceipts: Object.freeze(updatedReceipts2)
+              });
+              const updateRes = await this.#domains.update({ ...doc, record: updatedRecord2 });
+              if (!updateRes.ok) return updateRes;
+            }
             return ok({
               account: existingAccount,
               entry: existingEntries2[0],
@@ -17282,7 +17298,8 @@ var EconomyService = class {
               ...econData,
               operationReceipts: Object.freeze(updatedReceipts2)
             });
-            await this.#domains.update({ ...doc, record: updatedRecord2 });
+            const updateRes = await this.#domains.update({ ...doc, record: updatedRecord2 });
+            if (!updateRes.ok) return updateRes;
           }
           return ok({
             account: existingAccount,
@@ -17374,6 +17391,7 @@ var EconomyService = class {
           }
         }
         const transactionId = createOpaqueId("tx");
+        const providerOperationRef = params.idempotencyKey ?? transactionId;
         const cmdId = params.commandId ?? createOpaqueId("cmd");
         const epoch = params.authorityEpoch ?? 1;
         const txRecord = createTransactionRecord({
@@ -17388,6 +17406,7 @@ var EconomyService = class {
             resourceId: params.resourceId,
             providerId: providerAccount.providerId,
             providerRef: providerAccount.providerRef,
+            providerOperationRef,
             deltaMinor: delta,
             reason: params.reason,
             userId: params.userId,
@@ -17408,7 +17427,7 @@ var EconomyService = class {
             providerAccount.providerRef,
             delta,
             params.reason,
-            { operationRef: transactionId }
+            { operationRef: providerOperationRef }
           );
         } catch (caughtErr) {
           unknownOutcome = true;
@@ -17630,19 +17649,18 @@ var EconomyService = class {
           ledgerEntryId: entryRes.value.id
         };
         const latestDocRes = await this.#domains.read(this.#cleanUuid(params.domainUuid));
-        if (latestDocRes.ok) {
-          const latestEcon = tryGetDomainEconomyData(latestDocRes.value.record);
-          if (latestEcon.ok) {
-            const receipts = (latestEcon.value.operationReceipts ?? []).map(
-              (r) => r.operationRef === params.idempotencyKey ? confirmedReceipt : r
-            );
-            const updatedWithConfirmed = withDomainEconomyData(latestDocRes.value.record, {
-              ...latestEcon.value,
-              operationReceipts: Object.freeze(receipts)
-            });
-            await this.#domains.update({ ...latestDocRes.value, record: updatedWithConfirmed });
-          }
-        }
+        if (!latestDocRes.ok) return latestDocRes;
+        const latestEcon = tryGetDomainEconomyData(latestDocRes.value.record);
+        if (!latestEcon.ok) return latestEcon;
+        const receipts = (latestEcon.value.operationReceipts ?? []).map(
+          (r) => r.operationRef === params.idempotencyKey ? confirmedReceipt : r
+        );
+        const updatedWithConfirmed = withDomainEconomyData(latestDocRes.value.record, {
+          ...latestEcon.value,
+          operationReceipts: Object.freeze(receipts)
+        });
+        const confirmRes = await this.#domains.update({ ...latestDocRes.value, record: updatedWithConfirmed });
+        if (!confirmRes.ok) return confirmRes;
       }
       this.#evaluateThresholds(
         params.domainUuid,
@@ -18824,13 +18842,14 @@ var EconomyService = class {
           })
         );
       }
+      const opRef = data.providerOperationRef ?? record.transactionId;
       let providerOutcome = "unknown";
       if (typeof provider.reconcile === "function") {
         const recRes = await provider.reconcile(
           data.domainUuid,
           data.resourceId,
           data.providerRef ?? "",
-          record.transactionId
+          opRef
         );
         if (!recRes.ok) {
           return recRes;
@@ -18898,7 +18917,8 @@ var EconomyService = class {
             data.resourceId,
             data.providerRef ?? "",
             -data.deltaMinor,
-            `Recovery compensation for aborted adjustment ${record.transactionId}`
+            `Recovery compensation for aborted adjustment ${record.transactionId}`,
+            { operationRef: opRef }
           );
           if (!compRes.ok) {
             return compRes;
@@ -22667,7 +22687,7 @@ async function compensateProjectCompletion(recordOrId, context, options) {
         }
       }
       if (step.subsystem === "custom") {
-        const handler = context.childHandlerRegistry?.get(step.operation) ?? context.sideEffectHandlers?.[step.operation];
+        const handler = context.childHandlerRegistry?.get(step.operation);
         if (!handler) {
           return err(
             createPublicError({
@@ -22678,7 +22698,17 @@ async function compensateProjectCompletion(recordOrId, context, options) {
           );
         }
         const opRef = step.operationRef ?? step.stepId;
-        if (typeof handler === "object" && typeof handler.reconcile === "function") {
+        const isUncertain = step.state === "unknown" || step.state === "executing";
+        if (isUncertain) {
+          if (typeof handler !== "object" || typeof handler.reconcile !== "function") {
+            return err(
+              createPublicError({
+                code: "DM_RECOVERY_HANDLER_CONTRACT_INSUFFICIENT",
+                category: "conflict",
+                message: `Recovery handler for custom operation '${step.operation}' must provide reconcile() for uncertain step '${step.stepId}'`
+              })
+            );
+          }
           const recRes = await handler.reconcile(opRef);
           if (!recRes.ok) return recRes;
           if (recRes.value === "not-applied") {
@@ -22694,10 +22724,27 @@ async function compensateProjectCompletion(recordOrId, context, options) {
               })
             );
           }
+          if (typeof handler.compensate !== "function") {
+            return err(
+              createPublicError({
+                code: "DM_RECOVERY_HANDLER_CONTRACT_INSUFFICIENT",
+                category: "conflict",
+                message: `Recovery handler for custom operation '${step.operation}' must provide compensate() when reconcile returns applied`
+              })
+            );
+          }
         }
         if (typeof handler === "object" && typeof handler.compensate === "function") {
           const compRes = await handler.compensate(opRef, step.receipt);
           if (compRes && !compRes.ok) return compRes;
+        } else if (!isUncertain) {
+          return err(
+            createPublicError({
+              code: "DM_RECOVERY_HANDLER_CONTRACT_INSUFFICIENT",
+              category: "conflict",
+              message: `Recovery handler for custom operation '${step.operation}' must provide compensate() for applied step '${step.stepId}'`
+            })
+          );
         }
       }
       await markCompensationStepCompleted(context.transactionStore, record, stepId);
@@ -24525,10 +24572,11 @@ async function executeProjectCompletionDomainOperationPlan(context, params) {
     }
   }
   for (const effect of plan.sideEffects.filter((e) => e.type !== "facility" && e.type !== "facility:create" && e.type !== "resource" && e.type !== "resource:credit")) {
-    if (params.sideEffectHandlers && params.sideEffectHandlers[effect.type]) {
+    const registeredHandler = context.childHandlerRegistry?.get(effect.type);
+    const rawHandler = registeredHandler ?? params.sideEffectHandlers?.[effect.type];
+    if (rawHandler) {
       const stepId = `project-complete:custom:${effect.id}`;
       const opRef = `${session.transactionId}:${stepId}`;
-      const rawHandler = params.sideEffectHandlers[effect.type];
       const customStepRes = await session.runChildStep({
         stepId,
         subsystem: "custom",
@@ -24654,6 +24702,22 @@ async function executeProjectCompletionDomainOperationPlan(context, params) {
   }
   if (!sideEffectHandlers["resource:credit"]) {
     sideEffectHandlers["resource:credit"] = sideEffectHandlers.resource;
+  }
+  for (const effect of plan.sideEffects) {
+    if (!sideEffectHandlers[effect.type]) {
+      sideEffectHandlers[effect.type] = (eff) => {
+        return executedReceipts[eff.id] ?? {
+          childReceiptId: createOpaqueId("rep"),
+          subsystem: eff.type.startsWith("facility") ? "facility" : eff.type.startsWith("resource") ? "economy" : "custom",
+          action: eff.type,
+          targetRef: eff.targetRef,
+          payload: eff.value,
+          success: false,
+          error: "No receipt generated",
+          appliedAt: Date.now()
+        };
+      };
+    }
   }
   const commitRes = commitProjectCompletion(plan, project, {
     userId: params.userId,
@@ -25298,7 +25362,8 @@ var ProjectsService = class {
         economyService: this.#economyService,
         facilitiesService: this.#facilitiesService,
         peopleService: this.#peopleService,
-        transactionStore: this.#transactionStore
+        transactionStore: this.#transactionStore,
+        childHandlerRegistry: this.#childHandlerRegistry
       },
       params
     );
@@ -28471,7 +28536,7 @@ async function compensateDowntimeResolution(recordOrId, context, options) {
         }
       }
       if (step.subsystem === "custom") {
-        const handler = context.childHandlerRegistry?.get(step.operation) ?? context.outcomeHandlers?.[step.operation];
+        const handler = context.childHandlerRegistry?.get(step.operation);
         if (!handler) {
           return err(
             createPublicError({
@@ -28482,7 +28547,17 @@ async function compensateDowntimeResolution(recordOrId, context, options) {
           );
         }
         const opRef = step.operationRef ?? step.stepId;
-        if (typeof handler === "object" && typeof handler.reconcile === "function") {
+        const isUncertain = step.state === "unknown" || step.state === "executing";
+        if (isUncertain) {
+          if (typeof handler !== "object" || typeof handler.reconcile !== "function") {
+            return err(
+              createPublicError({
+                code: "DM_RECOVERY_HANDLER_CONTRACT_INSUFFICIENT",
+                category: "conflict",
+                message: `Recovery handler for custom operation '${step.operation}' must provide reconcile() for uncertain step '${step.stepId}'`
+              })
+            );
+          }
           const recRes = await handler.reconcile(opRef);
           if (!recRes.ok) return recRes;
           if (recRes.value === "not-applied") {
@@ -28498,10 +28573,27 @@ async function compensateDowntimeResolution(recordOrId, context, options) {
               })
             );
           }
+          if (typeof handler.compensate !== "function") {
+            return err(
+              createPublicError({
+                code: "DM_RECOVERY_HANDLER_CONTRACT_INSUFFICIENT",
+                category: "conflict",
+                message: `Recovery handler for custom operation '${step.operation}' must provide compensate() when reconcile returns applied`
+              })
+            );
+          }
         }
         if (typeof handler === "object" && typeof handler.compensate === "function") {
           const compRes = await handler.compensate(opRef, step.receipt);
           if (compRes && !compRes.ok) return compRes;
+        } else if (!isUncertain) {
+          return err(
+            createPublicError({
+              code: "DM_RECOVERY_HANDLER_CONTRACT_INSUFFICIENT",
+              category: "conflict",
+              message: `Recovery handler for custom operation '${step.operation}' must provide compensate() for applied step '${step.stepId}'`
+            })
+          );
         }
       }
       await markCompensationStepCompleted(context.transactionStore, record, stepId);
@@ -29031,11 +29123,8 @@ async function executeDowntimeResolutionPlan(context, params) {
         }
       }
     } else {
-      const handlers = {
-        ...context.defaultOutcomeHandlers ?? {},
-        ...params.outcomeHandlers ?? {}
-      };
-      const handler = handlers[outcome.type];
+      const registeredHandler = context.childHandlerRegistry?.get(outcome.type);
+      const handler = registeredHandler ?? context.defaultOutcomeHandlers?.[outcome.type] ?? params.outcomeHandlers?.[outcome.type];
       if (handler) {
         const stepId = `downtime-resolution:custom:${outcome.id}`;
         const opRef = `${session.transactionId}:${stepId}`;
@@ -29353,7 +29442,8 @@ var DowntimeService = class {
         economyService: this.#economyService,
         facilitiesService: this.#facilitiesService,
         transactionStore: this.#transactionStore,
-        defaultOutcomeHandlers: this.#outcomeHandlers
+        defaultOutcomeHandlers: this.#outcomeHandlers,
+        childHandlerRegistry: this.#childHandlerRegistry
       },
       params
     );
@@ -33939,7 +34029,9 @@ function composeDomainManagerRuntime(options = {}) {
     childHandlerRegistry
   });
   let authorityTransitionLock = Promise.resolve();
+  let authorityTransitionSequence = 0;
   const handleAuthorityTransition = async () => {
+    const currentSequence = ++authorityTransitionSequence;
     const previousLock = authorityTransitionLock;
     let releaseLock = () => {
     };
@@ -33949,26 +34041,40 @@ function composeDomainManagerRuntime(options = {}) {
     commandBus.setMutationsEnabled(false);
     try {
       await previousLock;
+      commandBus.setMutationsEnabled(false);
+      let reconcileFailed = false;
       if (authority && typeof authority.reconcile === "function") {
         try {
           await authority.reconcile();
         } catch {
+          reconcileFailed = true;
         }
+      }
+      if (reconcileFailed) {
+        commandBus.setMutationsEnabled(false);
+        return;
       }
       if (authority.service.isCurrentUser()) {
         const currentEpoch = authority.service.getStatus().authorityEpoch;
         try {
           await recovery.scanOnStartup(currentEpoch);
           await recovery.recoverAll(currentEpoch);
-          commandBus.setMutationsEnabled(true);
+          if (currentSequence === authorityTransitionSequence) {
+            commandBus.setMutationsEnabled(true);
+          }
         } catch {
           commandBus.setMutationsEnabled(false);
         }
       } else {
-        commandBus.setMutationsEnabled(true);
+        if (currentSequence === authorityTransitionSequence) {
+          commandBus.setMutationsEnabled(true);
+        }
       }
     } finally {
       releaseLock();
+    }
+    if (currentSequence !== authorityTransitionSequence) {
+      await authorityTransitionLock;
     }
   };
   const registry = new CommandRegistry();

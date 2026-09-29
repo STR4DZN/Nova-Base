@@ -808,6 +808,22 @@ export class EconomyService {
           });
 
           if (existingEntries.length > 0) {
+            if (existingReceipt && existingReceipt.state !== "ledger-confirmed") {
+              const confirmedReceipt: OperationReceiptRecord = {
+                ...existingReceipt,
+                state: "ledger-confirmed",
+                ledgerEntryId: existingEntries[0].id
+              };
+              const updatedReceipts = (econData.operationReceipts ?? []).map((r) =>
+                r.operationRef === params.idempotencyKey ? confirmedReceipt : r
+              );
+              const updatedRecord = withDomainEconomyData(doc.record, {
+                ...econData,
+                operationReceipts: Object.freeze(updatedReceipts)
+              });
+              const updateRes = await this.#domains.update({ ...doc, record: updatedRecord });
+              if (!updateRes.ok) return updateRes;
+            }
             return ok({
               account: existingAccount,
               entry: existingEntries[0],
@@ -863,7 +879,8 @@ export class EconomyService {
               ...econData,
               operationReceipts: Object.freeze(updatedReceipts)
             });
-            await this.#domains.update({ ...doc, record: updatedRecord });
+            const updateRes = await this.#domains.update({ ...doc, record: updatedRecord });
+            if (!updateRes.ok) return updateRes;
           }
 
           return ok({
@@ -963,6 +980,7 @@ export class EconomyService {
         }
 
         const transactionId = createOpaqueId("tx");
+        const providerOperationRef = params.idempotencyKey ?? transactionId;
         const cmdId = params.commandId ?? (createOpaqueId("cmd") as any);
         const epoch = params.authorityEpoch ?? 1;
 
@@ -978,6 +996,7 @@ export class EconomyService {
             resourceId: params.resourceId,
             providerId: providerAccount.providerId,
             providerRef: providerAccount.providerRef,
+            providerOperationRef,
             deltaMinor: delta,
             reason: params.reason,
             userId: params.userId,
@@ -1000,7 +1019,7 @@ export class EconomyService {
             providerAccount.providerRef,
             delta,
             params.reason,
-            { operationRef: transactionId }
+            { operationRef: providerOperationRef }
           );
         } catch (caughtErr: unknown) {
           unknownOutcome = true;
@@ -1263,19 +1282,18 @@ export class EconomyService {
           ledgerEntryId: entryRes.value.id
         };
         const latestDocRes = await this.#domains.read(this.#cleanUuid(params.domainUuid));
-        if (latestDocRes.ok) {
-          const latestEcon = tryGetDomainEconomyData(latestDocRes.value.record);
-          if (latestEcon.ok) {
-            const receipts = (latestEcon.value.operationReceipts ?? []).map((r) =>
-              r.operationRef === params.idempotencyKey ? confirmedReceipt : r
-            );
-            const updatedWithConfirmed = withDomainEconomyData(latestDocRes.value.record, {
-              ...latestEcon.value,
-              operationReceipts: Object.freeze(receipts)
-            });
-            await this.#domains.update({ ...latestDocRes.value, record: updatedWithConfirmed });
-          }
-        }
+        if (!latestDocRes.ok) return latestDocRes;
+        const latestEcon = tryGetDomainEconomyData(latestDocRes.value.record);
+        if (!latestEcon.ok) return latestEcon;
+        const receipts = (latestEcon.value.operationReceipts ?? []).map((r) =>
+          r.operationRef === params.idempotencyKey ? confirmedReceipt : r
+        );
+        const updatedWithConfirmed = withDomainEconomyData(latestDocRes.value.record, {
+          ...latestEcon.value,
+          operationReceipts: Object.freeze(receipts)
+        });
+        const confirmRes = await this.#domains.update({ ...latestDocRes.value, record: updatedWithConfirmed });
+        if (!confirmRes.ok) return confirmRes;
       }
 
       this.#evaluateThresholds(
@@ -2712,13 +2730,14 @@ export class EconomyService {
         );
       }
 
+      const opRef = data.providerOperationRef ?? record.transactionId;
       let providerOutcome: "written" | "not-written" | "unknown" = "unknown";
       if (typeof (provider as any).reconcile === "function") {
         const recRes = await (provider as any).reconcile(
           data.domainUuid,
           data.resourceId,
           data.providerRef ?? "",
-          record.transactionId
+          opRef
         );
         if (!recRes.ok) {
           return recRes;
@@ -2795,7 +2814,8 @@ export class EconomyService {
             data.resourceId,
             data.providerRef ?? "",
             -data.deltaMinor,
-            `Recovery compensation for aborted adjustment ${record.transactionId}`
+            `Recovery compensation for aborted adjustment ${record.transactionId}`,
+            { operationRef: opRef }
           );
           if (!compRes.ok) {
             return compRes;

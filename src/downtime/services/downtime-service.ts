@@ -250,7 +250,8 @@ export class DowntimeService {
         economyService: this.#economyService,
         facilitiesService: this.#facilitiesService,
         transactionStore: this.#transactionStore,
-        defaultOutcomeHandlers: this.#outcomeHandlers
+        defaultOutcomeHandlers: this.#outcomeHandlers,
+        childHandlerRegistry: this.#childHandlerRegistry
       },
       params
     );

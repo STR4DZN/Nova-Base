@@ -262,8 +262,7 @@ export async function compensateDowntimeResolution(
       }
       if (step.subsystem === "custom") {
         const handler: TransactionalChildHandler | undefined =
-          context.childHandlerRegistry?.get(step.operation) ??
-          (context.outcomeHandlers as any)?.[step.operation];
+          context.childHandlerRegistry?.get(step.operation);
 
         if (!handler) {
           return err(
@@ -276,8 +275,20 @@ export async function compensateDowntimeResolution(
         }
 
         const opRef = step.operationRef ?? step.stepId;
-        if (typeof handler === "object" && typeof handler.reconcile === "function") {
-          const recRes = await handler.reconcile(opRef);
+        const isUncertain = step.state === "unknown" || step.state === "executing";
+
+        if (isUncertain) {
+          if (typeof handler !== "object" || typeof (handler as any).reconcile !== "function") {
+            return err(
+              createPublicError({
+                code: "DM_RECOVERY_HANDLER_CONTRACT_INSUFFICIENT",
+                category: "conflict",
+                message: `Recovery handler for custom operation '${step.operation}' must provide reconcile() for uncertain step '${step.stepId}'`
+              })
+            );
+          }
+
+          const recRes = await handler.reconcile!(opRef);
           if (!recRes.ok) return recRes;
           if (recRes.value === "not-applied") {
             await markCompensationStepCompleted(context.transactionStore, record, stepId);
@@ -292,11 +303,29 @@ export async function compensateDowntimeResolution(
               })
             );
           }
+          // Reconcile is "applied" -> must have compensate
+          if (typeof (handler as any).compensate !== "function") {
+            return err(
+              createPublicError({
+                code: "DM_RECOVERY_HANDLER_CONTRACT_INSUFFICIENT",
+                category: "conflict",
+                message: `Recovery handler for custom operation '${step.operation}' must provide compensate() when reconcile returns applied`
+              })
+            );
+          }
         }
 
-        if (typeof handler === "object" && typeof handler.compensate === "function") {
-          const compRes = await handler.compensate(opRef, step.receipt);
+        if (typeof handler === "object" && typeof (handler as any).compensate === "function") {
+          const compRes = await handler.compensate!(opRef, step.receipt);
           if (compRes && !compRes.ok) return compRes;
+        } else if (!isUncertain) {
+          return err(
+            createPublicError({
+              code: "DM_RECOVERY_HANDLER_CONTRACT_INSUFFICIENT",
+              category: "conflict",
+              message: `Recovery handler for custom operation '${step.operation}' must provide compensate() for applied step '${step.stepId}'`
+            })
+          );
         }
       }
       await markCompensationStepCompleted(context.transactionStore, record, stepId);

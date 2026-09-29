@@ -21,7 +21,7 @@ import type { TransactionStore } from "../../mutations/transaction-store.js";
 import { createTransactionRecord } from "../../mutations/transaction-record.js";
 import { compensateDowntimeResolution } from "../services/downtime-recovery-compensators.js";
 import { lockKey } from "../../mutations/lock-keys.js";
-import type { TransactionalChildHandler } from "../../mutations/child-handler-contract.js";
+import type { TransactionalChildHandler, TransactionalChildHandlerRegistry } from "../../mutations/child-handler-contract.js";
 import {
   CompositeMutationSession,
   type TransactionExecutionContext
@@ -37,6 +37,7 @@ export interface DowntimeResolutionPlanContext {
   readonly economyService?: EconomyService;
   readonly facilitiesService?: FacilitiesService;
   readonly transactionStore?: TransactionStore;
+  readonly childHandlerRegistry?: TransactionalChildHandlerRegistry;
   readonly defaultOutcomeHandlers?: Readonly<Record<string, DowntimeOutcomeHandler>>;
 }
 
@@ -275,11 +276,11 @@ export async function executeDowntimeResolutionPlan(
         }
       }
     } else {
-      const handlers = {
-        ...(context.defaultOutcomeHandlers ?? {}),
-        ...(params.outcomeHandlers ?? {})
-      };
-      const handler = handlers[outcome.type];
+      const registeredHandler = context.childHandlerRegistry?.get(outcome.type);
+      const handler =
+        registeredHandler ??
+        context.defaultOutcomeHandlers?.[outcome.type] ??
+        params.outcomeHandlers?.[outcome.type];
       if (handler) {
         const stepId = `downtime-resolution:custom:${outcome.id}`;
         const opRef = `${session.transactionId}:${stepId}`;

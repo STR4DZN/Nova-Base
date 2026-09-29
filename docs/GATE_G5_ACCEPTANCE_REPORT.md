@@ -5,7 +5,7 @@
 **Normative Authorities:** `Documentos/99_DOMAIN_MANAGER_MASTER_SPECIFICATION_V1.md` (§15, §16, §17, DEC-083 to DEC-097, Anexo 07 DEC-2306 to DEC-3200), `Documentos/GATES/15_G5_PROJECTS_FACILITIES_DOWNTIME.md`  
 **Status:** **GATE_G5_COMPLETED_PENDING_USER_ACCEPTANCE (Aguardando Aceitação Soberana do Usuário — Nunca aceito sem confirmação explícita)**  
 **Date:** 2026-09-29  
-**Test Suite:** 660/660 passing (0 failures, 0 regressions against G4 baseline of 444; +216 dedicated G5 tests, including 66 adversarial revalidation tests + 34 master remediation tests + 15 kernel hardening tests T1–T15)  
+**Test Suite:** 667/667 passing (0 failures, 0 regressions against G4 baseline of 444; +223 dedicated G5 tests, including 66 adversarial revalidation tests + 34 master remediation tests + 22 kernel hardening tests T1–T19)  
 **TypeScript Conformance:** Strict, 0 errors via `npx tsc --noEmit`  
 **Package & Artifact Validation:** PASS (`dist/domain-manager-v0.0.5.zip`, validation scripts verified)
 
@@ -80,7 +80,7 @@ The G5 test suite validates the system against high-scale multi-domain operation
 
 ## 5. Test Suite & Validation Summary
 
-- **Total Test Count**: 657 tests passing (0 failures, 0 regressions across G0–G4 baseline of 444; +213 dedicated G5 tests).
+- **Total Test Count**: 667 tests passing (0 failures, 0 regressions across G0–G4 baseline of 444; +223 dedicated G5 tests).
 - **TypeScript Compilation**: Strict conformance, 0 errors via `node node_modules/typescript/bin/tsc --noEmit`.
 - **Production Build**: `node build.mjs` built cleanly with zero warnings (`dist/main.js`).
 - **Distribution Package**: `node scripts/package.mjs` created `dist/domain-manager-v0.0.5.zip`.
@@ -242,9 +242,20 @@ The G5 test suite validates the system against high-scale multi-domain operation
 
 ---
 
-## 16. Canonical Next Gate Designation
+## 16. Commit 836ee57 Revalidation Matrix (Residual Blockers A through D & Tests T16-A through T19)
 
-Per the Master Specification roadmap, Gate G5 is now complete, fully remediated against initial audit (G5-AUD-001 to G5-AUD-010), first revalidation (G5-REVAL-001 to G5-REVAL-012), second revalidation (G5-REVAL2-001 to G5-REVAL2-010), third revalidation (G5-REVAL3-001 to G5-REVAL3-007), fourth revalidation (G5-REVAL4-001 to G5-REVAL4-012), fifth revalidation (G5-REVAL5-001 to G5-REVAL5-009), sixth revalidation (G5-REVAL6-001 to G5-REVAL6-005), the Master Remediation (DOMAIN_MANAGER_G5_MASTER_REMEDIACAO_FINAL), and the Master Acceptance Audit Hardening (Patches A–F and Production Blockers 1–5), and strictly pending user acceptance:
+| Residual Blocker | Severity | Description & Root Cause | Architectural Remediation | Verification Evidence |
+|---|---|---|---|---|
+| **Blocker A** | CRITICAL | Race condition in `AuthorityRecoveryBarrier` during overlapping calls to `handleAuthorityTransition`. An incoming transition waiting on `previousLock` would wake up after an earlier transition re-enabled mutations, allowing mutations to run concurrently while scan/recovery was ongoing. In addition, `authority.reconcile()` errors were swallowed. | Added monotonic `authorityTransitionSequence` and strict mutex exclusion in `DomainManagerRuntime.handleAuthorityTransition`. Waiting transitions immediately re-disable mutations (`setMutationsEnabled(false)`) upon waking from `previousLock`. Reconciliation errors fail closed, keeping safe mode active (`setMutationsEnabled(false)`) and rejecting mutations while diagnostics remain available. | `tests/runtime/g5-kernel-hardening.test.ts` (T16-A verifies concurrent overlapping transitions keep mutations disabled until last scan finishes; T16-B verifies reconcile error maintains safe mode). |
+| **Blocker B** | CRITICAL | Provider adjustment `providerOperationRef` unification. In `EconomyService.commitAdjust`, provider-backed operations generated independent IDs, preventing outer `reconcileAdjustment` from correlating `applied` vs `not-applied` states. | Unified `providerOperationRef = params.idempotencyKey ?? transactionId`. Stored in `txRecord.recoveryData.providerOperationRef`, passed as `{ operationRef: providerOperationRef }` in `provider.mutateBalance`, and used in compensation rollback (`{ operationRef: opRef }`). Outer `reconcileAdjustment` matches using the identical stable reference. | `tests/runtime/g5-kernel-hardening.test.ts` (T17 verifies provider operationRef is passed to mutateBalance, stored in recoveryData, matched by reconcileAdjustment, and used in compensation rollback). |
+| **Blocker C** | CRITICAL | Authoritative child handler registry and mandatory recovery contracts. Subsystems accepted custom handlers directly without prioritizing `childHandlerRegistry`, and recovery lacked contract verification for `reconcile` and `compensate`. | Injected `childHandlerRegistry` as primary authority in `ProjectsService`, `DowntimeService`, `ProjectCompletionDomainOperationPlan`, and `DowntimeResolutionPlan`. Forwarded custom receipts to avoid `partialFailure`. In recovery (`compensateProjectCompletion`, `compensateDowntimeResolution`), uncertain steps (`unknown`, `executing`) require `reconcile()`. If `reconcile=applied` (or step is `applied`), `compensate()` is mandatory. Missing contracts fail closed with `DM_RECOVERY_HANDLER_CONTRACT_INSUFFICIENT`, retaining `needs-recovery` and active fence without blind compensation. | `tests/runtime/g5-kernel-hardening.test.ts` (T18-A verifies Project Completion with TransactionalChildHandler; T18-B verifies Downtime Resolution with TransactionalChildHandler; T18-C verifies fail-closed `DM_RECOVERY_HANDLER_CONTRACT_INSUFFICIENT` without blind compensation). |
+| **Blocker D** | HIGH | `commitAdjust` validates `DomainRepository.update` Result for `ledger-confirmed` receipt persistence in both reconstruction and normal flows, and retry reconciles unconfirmed receipts. | In `EconomyService.commitAdjust`, explicitly verified Result of `domains.update` for `ledger-confirmed` receipts in both normal and reconstruction flows without swallowing errors. In retry where ledger entry exists but domain receipt is unconfirmed (`balance-applied`), retry promotes and confirms receipt to `ledger-confirmed` with `ledgerEntryId`. | `tests/runtime/g5-kernel-hardening.test.ts` (T19 verifies update failure returns error fail-closed and retry reconciles receipt to ledger-confirmed). |
+
+---
+
+## 17. Canonical Next Gate Designation
+
+Per the Master Specification roadmap, Gate G5 is now complete, fully remediated against initial audit (G5-AUD-001 to G5-AUD-010), first revalidation (G5-REVAL-001 to G5-REVAL-012), second revalidation (G5-REVAL2-001 to G5-REVAL2-010), third revalidation (G5-REVAL3-001 to G5-REVAL3-007), fourth revalidation (G5-REVAL4-001 to G5-REVAL4-012), fifth revalidation (G5-REVAL5-001 to G5-REVAL5-009), sixth revalidation (G5-REVAL6-001 to G5-REVAL6-005), the Master Remediation (DOMAIN_MANAGER_G5_MASTER_REMEDIACAO_FINAL), the Master Acceptance Audit Hardening (Patches A–F and Production Blockers 1–5), and Commit 836ee57 Revalidation (Blockers A–D and Tests T16-A to T19), and strictly pending user acceptance:
 - **Current Gate Status**: `GATE_G5_COMPLETED_PENDING_USER_ACCEPTANCE`
 - **Canonical Next Gate**: **Gate G6 — Relations / Reputation / Agreements / Territory** (`Documentos/GATES/16_G6_RELATIONS_REPUTATION_AGREEMENTS_TERRITORY.md`).
 - **Policy**: Gate G6 must NEVER be started without explicit sovereign confirmation from the user.

@@ -21,7 +21,7 @@ import type { TransactionStore } from "../../mutations/transaction-store.js";
 import { createTransactionRecord } from "../../mutations/transaction-record.js";
 import { compensateProjectCompletion } from "../services/project-recovery-compensators.js";
 import { lockKey } from "../../mutations/lock-keys.js";
-import type { TransactionalChildHandler } from "../../mutations/child-handler-contract.js";
+import type { TransactionalChildHandler, TransactionalChildHandlerRegistry } from "../../mutations/child-handler-contract.js";
 import {
   CompositeMutationSession,
   type TransactionExecutionContext
@@ -48,6 +48,7 @@ export interface ProjectCompletionDomainOperationContext {
   readonly facilitiesService?: FacilitiesService;
   readonly peopleService?: PublicPeopleApi;
   readonly transactionStore?: TransactionStore;
+  readonly childHandlerRegistry?: TransactionalChildHandlerRegistry;
 }
 
 export interface ProjectCompletionRecoveryData {
@@ -618,10 +619,11 @@ export async function executeProjectCompletionDomainOperationPlan(
 
   // Handle custom side effects via session.runChildStep (Section 7, INV-03 to INV-06)
   for (const effect of plan.sideEffects.filter((e) => e.type !== "facility" && e.type !== "facility:create" && e.type !== "resource" && e.type !== "resource:credit")) {
-    if (params.sideEffectHandlers && params.sideEffectHandlers[effect.type]) {
+    const registeredHandler = context.childHandlerRegistry?.get(effect.type);
+    const rawHandler = registeredHandler ?? params.sideEffectHandlers?.[effect.type];
+    if (rawHandler) {
       const stepId = `project-complete:custom:${effect.id}`;
       const opRef = `${session.transactionId}:${stepId}`;
-      const rawHandler = params.sideEffectHandlers[effect.type];
 
       const customStepRes = await session.runChildStep<Record<string, unknown>, ChildReceipt>({
         stepId,
@@ -763,6 +765,25 @@ export async function executeProjectCompletionDomainOperationPlan(
   }
   if (!sideEffectHandlers["resource:credit"]) {
     sideEffectHandlers["resource:credit"] = sideEffectHandlers.resource;
+  }
+
+  for (const effect of plan.sideEffects) {
+    if (!sideEffectHandlers[effect.type]) {
+      sideEffectHandlers[effect.type] = (eff) => {
+        return (
+          executedReceipts[eff.id] ?? {
+            childReceiptId: createOpaqueId("rep"),
+            subsystem: eff.type.startsWith("facility") ? "facility" : eff.type.startsWith("resource") ? "economy" : "custom",
+            action: eff.type,
+            targetRef: eff.targetRef,
+            payload: eff.value,
+            success: false,
+            error: "No receipt generated",
+            appliedAt: Date.now()
+          }
+        );
+      };
+    }
   }
 
   const commitRes = commitProjectCompletion(plan, project, {

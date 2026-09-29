@@ -319,7 +319,9 @@ export function composeDomainManagerRuntime(
   });
 
   let authorityTransitionLock = Promise.resolve();
+  let authorityTransitionSequence = 0;
   const handleAuthorityTransition = async (): Promise<void> => {
+    const currentSequence = ++authorityTransitionSequence;
     const previousLock = authorityTransitionLock;
     let releaseLock: () => void = () => {};
     authorityTransitionLock = new Promise<void>((resolve) => {
@@ -332,13 +334,23 @@ export function composeDomainManagerRuntime(
     try {
       await previousLock;
 
+      // Re-disable mutations when entering critical section
+      commandBus.setMutationsEnabled(false);
+
       // 2. Await authority reconciliation
+      let reconcileFailed = false;
       if (authority && typeof (authority as any).reconcile === "function") {
         try {
           await (authority as any).reconcile();
         } catch {
-          // Reconcile errors handled
+          reconcileFailed = true;
         }
+      }
+
+      if (reconcileFailed) {
+        // Reconciliation failure leaves safe mode active
+        commandBus.setMutationsEnabled(false);
+        return;
       }
 
       // 3. If local host is elected Primary Authority, scan unresolved, install fences, and recover
@@ -347,15 +359,23 @@ export function composeDomainManagerRuntime(
         try {
           await recovery.scanOnStartup(currentEpoch);
           await recovery.recoverAll(currentEpoch);
-          commandBus.setMutationsEnabled(true);
+          if (currentSequence === authorityTransitionSequence) {
+            commandBus.setMutationsEnabled(true);
+          }
         } catch {
           commandBus.setMutationsEnabled(false);
         }
       } else {
-        commandBus.setMutationsEnabled(true);
+        if (currentSequence === authorityTransitionSequence) {
+          commandBus.setMutationsEnabled(true);
+        }
       }
     } finally {
       releaseLock();
+    }
+
+    if (currentSequence !== authorityTransitionSequence) {
+      await authorityTransitionLock;
     }
   };
 

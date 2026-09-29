@@ -2510,12 +2510,12 @@ test("G5-REVAL4-003 (Fault 4): Failed compensation transitions transaction to ne
   checkOk(facRes, "Create facility");
   const facilityId = facRes.value.facility.id;
 
-  // Inject failure in domain save after maintenance debits
-  let debitSaveDone = false;
+  // Inject failure in domain save after maintenance debits (accounting for balance + ledger-confirmed updates)
+  let debitSaveCount = 0;
   const originalSave = env.domains.save.bind(env.domains);
   env.domains.save = async (params) => {
-    if (!debitSaveDone) {
-      debitSaveDone = true;
+    if (debitSaveCount < 2) {
+      debitSaveCount++;
       return originalSave(params);
     }
     return err(createPublicError({

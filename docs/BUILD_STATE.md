@@ -33,10 +33,10 @@
 | Verificação | Resultado |
 |---|---|
 | TypeScript strict (`tsc --noEmit`) | PASS (0 erros) |
-| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 660/660 (0 falhas, 0 regressões) |
+| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 667/667 (0 falhas, 0 regressões) |
 | Relatório de Aceitação G5 | Gerado (`docs/GATE_G5_ACCEPTANCE_REPORT.md`) |
 | Regressões G0/G1/G2/G3/G4 | 0 (todos os 444 testes anteriores preservados e passando) |
-| Testes novos Gate G5 | 216 testes dedicados (G5.1 a G5.10: 101 testes + 66 testes adversários em g5-revalidation-adversarial.test.ts + 10 testes de lock-set em g5-lockset-contract.test.ts + 5 testes de fence em g5-recovery-fence.test.ts + 19 testes de kernel em g5-transaction-kernel.test.ts + 15 testes de hardening T1–T15 em g5-kernel-hardening.test.ts) |
+| Testes novos Gate G5 | 223 testes dedicados (G5.1 a G5.10: 101 testes + 66 testes adversários em g5-revalidation-adversarial.test.ts + 10 testes de lock-set em g5-lockset-contract.test.ts + 5 testes de fence em g5-recovery-fence.test.ts + 19 testes de kernel em g5-transaction-kernel.test.ts + 22 testes de hardening T1–T19 em g5-kernel-hardening.test.ts) |
 | Remediação de Auditoria G5-AUD-001 a G5-AUD-010 | PASS — 100% remediado, endurecido e verificado |
 | Remediação de Revalidação G5-REVAL-001 a G5-REVAL-012 | PASS — 100% remediado, endurecido e verificado |
 | Remediação de Revalidação 2 G5-REVAL2-001 a G5-REVAL2-010 | PASS — 100% remediado, endurecido e verificado |
@@ -140,6 +140,32 @@
    - A chamada `ledgerStore.flush()` é protegida por try/catch fail-closed, retornando `DM_DOMAIN_STORAGE_ERROR` caso a persistência durável no disco falhe.
    - Em caso de sucesso na reconstrução, o recibo é atualizado duravelmente no documento do domínio com `state: "ledger-confirmed"` e `ledgerEntryId: entry.id`.
    - Testado e verificado pelos testes **T10** e **T14**.
+
+## Remediação de Revalidação do Commit 836ee57 — Blockers A a D e Testes T16-A a T19
+
+1. **Item A (CRÍTICO — Race condition no AuthorityRecoveryBarrier)**:
+   - Em `DomainManagerRuntime.handleAuthorityTransition`, adicionado contador sequencial monotônico `authorityTransitionSequence` e garantia estrita de exclusão mútua.
+   - Quando chamadas concorrentes entram na barreira enquanto uma transição anterior ainda está executando (`previousLock`), ao acordar da espera a rotina reaplica imediatamente `setMutationsEnabled(false)` antes de verificar se o estado de autoridade mudou.
+   - Caso `authority.reconcile()` lance ou retorne erro, a transição falha em modo fechado com safe mode ativo (`setMutationsEnabled(false)` mantido), garantindo que comandos mutantes continuem rejeitados e diagnósticos permaneçam acessíveis.
+   - Testado e verificado pelos testes **T16-A** e **T16-B**.
+
+2. **Item B (CRÍTICO — Unificação de providerOperationRef na Economia)**:
+   - Em `EconomyService.commitAdjust`, definido `providerOperationRef = params.idempotencyKey ?? transactionId`.
+   - Esse identificador unificado é registrado em `txRecord.recoveryData.providerOperationRef`, repassado como `{ operationRef: providerOperationRef }` ao `provider.mutateBalance` e utilizado no rollback de compensação do provedor (`{ operationRef: opRef }`).
+   - A reconciliação externa via `reconcileAdjustment` consulta `provider.reconcileAdjustment` com essa mesma chave estável, eliminando discrepâncias entre o `operationRef` interno do provedor e a referência registrada no journal da transação.
+   - Testado e verificado pelo teste **T17**.
+
+3. **Item C (CRÍTICO — TransactionalChildHandlerRegistry como Fonte Autoritativa em Execução e Recuperação)**:
+   - Injetado `childHandlerRegistry` como fonte primária com precedência sobre fallbacks em `ProjectsService`, `DowntimeService`, `ProjectCompletionDomainOperationPlan` e `DowntimeResolutionPlan`.
+   - Em `ProjectCompletionDomainOperationPlan`, handlers customizados agora têm seus recibos mapeados adequadamente para `sideEffectHandlers` para evitar falso positivo de `partialFailure`.
+   - Nos compensadores de recuperação (`compensateProjectCompletion` e `compensateDowntimeResolution`), para steps em estado `unknown` ou `executing`, o método `reconcile()` é obrigatório. Se o desfecho for `applied` (ou se o step já estava `applied`), o método `compensate()` é obrigatório.
+   - Caso o handler não implemente o contrato requerido, a recuperação falha fechada com `DM_RECOVERY_HANDLER_CONTRACT_INSUFFICIENT`, retendo a transação em `needs-recovery` com recovery fence ativa e sem compensação cega.
+   - Testado e verificado pelos testes **T18-A**, **T18-B** e **T18-C**.
+
+4. **Item D (ALTO — Validação Fail-Closed da Persistência de ledger-confirmed e Reconciliação no Retry)**:
+   - Em `EconomyService.commitAdjust`, validado formalmente o `Result` retornado por `this.#domains.update(...)` tanto no fluxo normal quanto na rota de reconstrução do ledger, retornando o erro caso a persistência falhe sem mascarar o problema.
+   - Em retentativas idempotentes onde o ledger entry já existe fisicamente mas o recibo no documento do domínio permaneceu em `balance-applied`, o recibo é atualizado e confirmado com `state: "ledger-confirmed"` e `ledgerEntryId`.
+   - Testado e verificado pelo teste **T19**.
 
 ## Remediação da 6ª Revalidação Gate G5 — G5-REVAL6-001 a G5-REVAL6-005
 
