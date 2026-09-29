@@ -13,6 +13,10 @@ import type { FacilitiesService } from "../../facilities/services/facilities-ser
 import { PeopleService, type PublicPeopleApi } from "../../people/services/people-service.js";
 import { getDomainProjectsData, withDomainProjectsData } from "../project-data.js";
 import { getDomainFacilitiesData, withDomainFacilitiesData } from "../../facilities/facility-data.js";
+import type {
+  TransactionalChildHandler,
+  TransactionalChildHandlerRegistry
+} from "../../mutations/child-handler-contract.js";
 
 export interface ProjectCompensatorContext {
   readonly domains: DomainRepositoryContract;
@@ -20,6 +24,8 @@ export interface ProjectCompensatorContext {
   readonly facilitiesService?: FacilitiesService;
   readonly peopleService?: PublicPeopleApi;
   readonly transactionStore?: TransactionStore;
+  readonly childHandlerRegistry?: TransactionalChildHandlerRegistry;
+  readonly sideEffectHandlers?: Record<string, any>;
 }
 
 export interface ProjectCompensationOptions {
@@ -95,6 +101,28 @@ export async function compensateProjectStart(
           if (!isCompensationStepCompleted(record, stepId, context.transactionStore)) {
             const intent = step.intent as { resourceId: string; deltaMinor: number };
             if (intent && intent.deltaMinor < 0) {
+              if (step.state === "unknown" || step.state === "executing") {
+                const opRef = step.operationRef ?? step.stepId;
+                const recRes = await context.economyService.reconcileAdjustment({
+                  domainUuid: cleanDomainUuid,
+                  operationRef: opRef,
+                  resourceId: intent.resourceId
+                });
+                if (!recRes.ok || recRes.value === "unknown") {
+                  return err(
+                    createPublicError({
+                      code: "DM_RECOVERY_RECONCILIATION_UNCERTAIN",
+                      category: "conflict",
+                      message: `Economy adjustment reconciliation uncertain for operationRef '${opRef}'`
+                    })
+                  );
+                }
+                if (recRes.value === "not-applied") {
+                  await markCompensationStepCompleted(context.transactionStore, record, stepId);
+                  continue;
+                }
+              }
+
               const idempotencyKey = `${record.transactionId}:compensation:${stepId}`;
               const refRes = await context.economyService.commitAdjust({
                 domainUuid: data.domainUuid,
@@ -290,7 +318,7 @@ export async function compensateProjectAdvance(
   if (Array.isArray(data.steps) && data.steps.length > 0) {
     const steps = [...data.steps].reverse();
     for (const step of steps) {
-      if (step.state !== "applied" && step.state !== "unknown" && step.state !== "compensating") {
+      if (step.state !== "applied" && step.state !== "unknown" && step.state !== "compensating" && step.state !== "executing") {
         continue;
       }
       const stepId = step.stepId;
@@ -300,6 +328,28 @@ export async function compensateProjectAdvance(
       if (step.subsystem === "economy" && step.operation === "adjust" && context.economyService) {
         const intent = step.intent as { resourceId: string; deltaMinor: number };
         if (intent && intent.deltaMinor < 0) {
+          if (step.state === "unknown" || step.state === "executing") {
+            const opRef = step.operationRef ?? step.stepId;
+            const recRes = await context.economyService.reconcileAdjustment({
+              domainUuid: cleanDomainUuid,
+              operationRef: opRef,
+              resourceId: intent.resourceId
+            });
+            if (!recRes.ok || recRes.value === "unknown") {
+              return err(
+                createPublicError({
+                  code: "DM_RECOVERY_RECONCILIATION_UNCERTAIN",
+                  category: "conflict",
+                  message: `Economy adjustment reconciliation uncertain for operationRef '${opRef}'`
+                })
+              );
+            }
+            if (recRes.value === "not-applied") {
+              await markCompensationStepCompleted(context.transactionStore, record, stepId);
+              continue;
+            }
+          }
+
           const idempotencyKey = `${record.transactionId}:compensation:${stepId}`;
           const refRes = await context.economyService.commitAdjust({
             domainUuid: data.domainUuid,
@@ -502,6 +552,28 @@ export async function compensateProjectCompletion(
         if (step.operation === "adjust") {
           const intent = step.intent as { resourceId: string; deltaMinor: number };
           if (intent) {
+            if (step.state === "unknown" || step.state === "executing") {
+              const opRef = step.operationRef ?? step.stepId;
+              const recRes = await context.economyService.reconcileAdjustment({
+                domainUuid: cleanDomainUuid,
+                operationRef: opRef,
+                resourceId: intent.resourceId
+              });
+              if (!recRes.ok || recRes.value === "unknown") {
+                return err(
+                  createPublicError({
+                    code: "DM_RECOVERY_RECONCILIATION_UNCERTAIN",
+                    category: "conflict",
+                    message: `Economy adjustment reconciliation uncertain for operationRef '${opRef}'`
+                  })
+                );
+              }
+              if (recRes.value === "not-applied") {
+                await markCompensationStepCompleted(context.transactionStore, record, stepId);
+                continue;
+              }
+            }
+
             const idempotencyKey = `${record.transactionId}:compensation:${stepId}`;
             const refRes = await context.economyService.commitAdjust({
               domainUuid: data.domainUuid,
@@ -537,10 +609,42 @@ export async function compensateProjectCompletion(
           }
         }
       }
-      if (step.subsystem === "custom" && (context as any).sideEffectHandlers) {
-        const handler = (context as any).sideEffectHandlers[step.operation];
-        if (handler && typeof handler === "object" && typeof handler.compensate === "function") {
-          const compRes = await handler.compensate(step.operationRef ?? step.stepId, step.receipt);
+      if (step.subsystem === "custom") {
+        const handler: TransactionalChildHandler | undefined =
+          context.childHandlerRegistry?.get(step.operation) ??
+          (context.sideEffectHandlers as any)?.[step.operation];
+
+        if (!handler) {
+          return err(
+            createPublicError({
+              code: "DM_RECOVERY_HANDLER_UNAVAILABLE",
+              category: "conflict",
+              message: `Recovery handler for custom operation '${step.operation}' is not available in registry`
+            })
+          );
+        }
+
+        const opRef = step.operationRef ?? step.stepId;
+        if (typeof handler === "object" && typeof handler.reconcile === "function") {
+          const recRes = await handler.reconcile(opRef);
+          if (!recRes.ok) return recRes;
+          if (recRes.value === "not-applied") {
+            await markCompensationStepCompleted(context.transactionStore, record, stepId);
+            continue;
+          }
+          if (recRes.value === "unknown") {
+            return err(
+              createPublicError({
+                code: "DM_RECOVERY_RECONCILIATION_UNCERTAIN",
+                category: "conflict",
+                message: `Reconciliation for custom operation '${step.operation}' returned unknown outcome`
+              })
+            );
+          }
+        }
+
+        if (typeof handler === "object" && typeof handler.compensate === "function") {
+          const compRes = await handler.compensate(opRef, step.receipt);
           if (compRes && !compRes.ok) return compRes;
         }
       }

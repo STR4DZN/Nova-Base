@@ -10,11 +10,17 @@ import {
 } from "../../mutations/recovery-service.js";
 import type { EconomyService } from "../../economy/services/economy-service.js";
 import { getDomainDowntimeData } from "../downtime-data.js";
+import type {
+  TransactionalChildHandler,
+  TransactionalChildHandlerRegistry
+} from "../../mutations/child-handler-contract.js";
 
 export interface DowntimeCompensatorContext {
   readonly domains: DomainRepositoryContract;
   readonly economyService?: EconomyService;
   readonly transactionStore?: TransactionStore;
+  readonly childHandlerRegistry?: TransactionalChildHandlerRegistry;
+  readonly outcomeHandlers?: Record<string, any>;
 }
 
 export interface DowntimeCompensationOptions {
@@ -81,7 +87,7 @@ export async function compensateDowntimeStart(
   if (Array.isArray(data.steps) && data.steps.length > 0) {
     const steps = [...data.steps].reverse();
     for (const step of steps) {
-      if (step.state !== "applied" && step.state !== "unknown" && step.state !== "compensating") {
+      if (step.state !== "applied" && step.state !== "unknown" && step.state !== "compensating" && step.state !== "executing") {
         continue;
       }
       const stepId = step.stepId;
@@ -91,6 +97,28 @@ export async function compensateDowntimeStart(
       if (step.subsystem === "economy" && step.operation === "adjust" && context.economyService) {
         const intent = step.intent as { resourceId: string; deltaMinor: number };
         if (intent && intent.deltaMinor < 0) {
+          if (step.state === "unknown" || step.state === "executing") {
+            const opRef = step.operationRef ?? step.stepId;
+            const recRes = await context.economyService.reconcileAdjustment({
+              domainUuid: cleanDomainUuid,
+              operationRef: opRef,
+              resourceId: intent.resourceId
+            });
+            if (!recRes.ok || recRes.value === "unknown") {
+              return err(
+                createPublicError({
+                  code: "DM_RECOVERY_RECONCILIATION_UNCERTAIN",
+                  category: "conflict",
+                  message: `Economy adjustment reconciliation uncertain for operationRef '${opRef}'`
+                })
+              );
+            }
+            if (recRes.value === "not-applied") {
+              await markCompensationStepCompleted(context.transactionStore, record, stepId);
+              continue;
+            }
+          }
+
           const idempotencyKey = `${record.transactionId}:compensation:${stepId}`;
           const refRes = await context.economyService.commitAdjust({
             domainUuid: data.domainUuid,
@@ -198,6 +226,28 @@ export async function compensateDowntimeResolution(
       if (step.subsystem === "economy" && step.operation === "adjust" && context.economyService) {
         const intent = step.intent as { resourceId: string; deltaMinor: number };
         if (intent && intent.deltaMinor > 0) {
+          if (step.state === "unknown" || step.state === "executing") {
+            const opRef = step.operationRef ?? step.stepId;
+            const recRes = await context.economyService.reconcileAdjustment({
+              domainUuid: cleanDomainUuid,
+              operationRef: opRef,
+              resourceId: intent.resourceId
+            });
+            if (!recRes.ok || recRes.value === "unknown") {
+              return err(
+                createPublicError({
+                  code: "DM_RECOVERY_RECONCILIATION_UNCERTAIN",
+                  category: "conflict",
+                  message: `Economy adjustment reconciliation uncertain for operationRef '${opRef}'`
+                })
+              );
+            }
+            if (recRes.value === "not-applied") {
+              await markCompensationStepCompleted(context.transactionStore, record, stepId);
+              continue;
+            }
+          }
+
           const idempotencyKey = `${record.transactionId}:compensation:${stepId}`;
           const revRes = await context.economyService.commitAdjust({
             domainUuid: data.domainUuid,
@@ -210,10 +260,42 @@ export async function compensateDowntimeResolution(
           if (!revRes.ok) return revRes;
         }
       }
-      if (step.subsystem === "custom" && (context as any).outcomeHandlers) {
-        const handler = (context as any).outcomeHandlers[step.operation];
-        if (handler && typeof handler === "object" && typeof handler.compensate === "function") {
-          const compRes = await handler.compensate(step.operationRef ?? step.stepId, step.receipt);
+      if (step.subsystem === "custom") {
+        const handler: TransactionalChildHandler | undefined =
+          context.childHandlerRegistry?.get(step.operation) ??
+          (context.outcomeHandlers as any)?.[step.operation];
+
+        if (!handler) {
+          return err(
+            createPublicError({
+              code: "DM_RECOVERY_HANDLER_UNAVAILABLE",
+              category: "conflict",
+              message: `Recovery handler for custom operation '${step.operation}' is not available in registry`
+            })
+          );
+        }
+
+        const opRef = step.operationRef ?? step.stepId;
+        if (typeof handler === "object" && typeof handler.reconcile === "function") {
+          const recRes = await handler.reconcile(opRef);
+          if (!recRes.ok) return recRes;
+          if (recRes.value === "not-applied") {
+            await markCompensationStepCompleted(context.transactionStore, record, stepId);
+            continue;
+          }
+          if (recRes.value === "unknown") {
+            return err(
+              createPublicError({
+                code: "DM_RECOVERY_RECONCILIATION_UNCERTAIN",
+                category: "conflict",
+                message: `Reconciliation for custom operation '${step.operation}' returned unknown outcome`
+              })
+            );
+          }
+        }
+
+        if (typeof handler === "object" && typeof handler.compensate === "function") {
+          const compRes = await handler.compensate(opRef, step.receipt);
           if (compRes && !compRes.ok) return compRes;
         }
       }

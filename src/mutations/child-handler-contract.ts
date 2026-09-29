@@ -13,3 +13,33 @@ export interface TransactionalChildHandler<TInput = unknown, TReceipt = ChildRec
   reconcile?(operationRef: string): Promise<Result<ReconcileOutcome, PublicError>>;
   compensate?(operationRef: string, receipt?: unknown): Promise<Result<void, PublicError>>;
 }
+
+/**
+ * Registry of stable child and custom transactional handlers surviving restarts and failovers.
+ */
+export interface TransactionalChildHandlerRegistry {
+  register(handlerKey: string, handler: TransactionalChildHandler): void;
+  get(handlerKey: string): TransactionalChildHandler | undefined;
+  has(handlerKey: string): boolean;
+  clear(): void;
+}
+
+export class DefaultTransactionalChildHandlerRegistry implements TransactionalChildHandlerRegistry {
+  readonly #handlers = new Map<string, TransactionalChildHandler>();
+
+  register(handlerKey: string, handler: TransactionalChildHandler): void {
+    this.#handlers.set(handlerKey, handler);
+  }
+
+  get(handlerKey: string): TransactionalChildHandler | undefined {
+    return this.#handlers.get(handlerKey);
+  }
+
+  has(handlerKey: string): boolean {
+    return this.#handlers.has(handlerKey);
+  }
+
+  clear(): void {
+    this.#handlers.clear();
+  }
+}

@@ -33,10 +33,10 @@
 | Verificação | Resultado |
 |---|---|
 | TypeScript strict (`tsc --noEmit`) | PASS (0 erros) |
-| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 657/657 (0 falhas, 0 regressões) |
+| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 660/660 (0 falhas, 0 regressões) |
 | Relatório de Aceitação G5 | Gerado (`docs/GATE_G5_ACCEPTANCE_REPORT.md`) |
 | Regressões G0/G1/G2/G3/G4 | 0 (todos os 444 testes anteriores preservados e passando) |
-| Testes novos Gate G5 | 213 testes dedicados (G5.1 a G5.10: 101 testes + 66 testes adversários em g5-revalidation-adversarial.test.ts + 10 testes de lock-set em g5-lockset-contract.test.ts + 5 testes de fence em g5-recovery-fence.test.ts + 19 testes de kernel em g5-transaction-kernel.test.ts + 12 testes de hardening T1–T12 em g5-kernel-hardening.test.ts) |
+| Testes novos Gate G5 | 216 testes dedicados (G5.1 a G5.10: 101 testes + 66 testes adversários em g5-revalidation-adversarial.test.ts + 10 testes de lock-set em g5-lockset-contract.test.ts + 5 testes de fence em g5-recovery-fence.test.ts + 19 testes de kernel em g5-transaction-kernel.test.ts + 15 testes de hardening T1–T15 em g5-kernel-hardening.test.ts) |
 | Remediação de Auditoria G5-AUD-001 a G5-AUD-010 | PASS — 100% remediado, endurecido e verificado |
 | Remediação de Revalidação G5-REVAL-001 a G5-REVAL-012 | PASS — 100% remediado, endurecido e verificado |
 | Remediação de Revalidação 2 G5-REVAL2-001 a G5-REVAL2-010 | PASS — 100% remediado, endurecido e verificado |
@@ -44,7 +44,7 @@
 | Remediação de Revalidação 4 G5-REVAL4-001 a G5-REVAL4-012 | PASS — 100% remediado, endurecido e verificado |
 | Remediação de Revalidação 5 G5-REVAL5-001 a G5-REVAL5-009 | PASS — 100% remediado, endurecido e verificado |
 | Remediação de Revalidação 6 G5-REVAL6-001 a G5-REVAL6-005 | PASS — 100% remediado, endurecido e verificado |
-| Remediação Master G5 (Patches A–F & Kernel Hardening) | PASS — CompositeMutationSession, lockKey factory, RecoveryFenceRegistry, TransactionalChildHandler, pre-allocated entity intents, compensator intent fallback, lock release triggers e safe-mode enforcement |
+| Remediação Master G5 (Patches A–F & Kernel Hardening T1–T15) | PASS — CompositeMutationSession, lockKey factory, RecoveryFenceRegistry, TransactionalChildHandler, pre-allocated entity intents, compensator intent fallback, lock release triggers e safe-mode enforcement |
 | Build do pacote (`node build.mjs`) | PASS (`dist/main.js` gerado) |
 | Empacotamento (`node scripts/package.mjs`) | PASS (`dist/domain-manager-v0.0.5.zip` gerado) |
 | Validação de pacote (`node scripts/validate-package.mjs`) | PASS |
@@ -105,9 +105,41 @@
 5. **Patch E — Enforçamento de Safe-Mode em Falha de Recovery no Startup**:
    - `CommandBus` e `DomainManagerRuntime` implementam modo de segurança (`setMutationsEnabled(false)`): comandos mutantes são sumariamente rejeitados com `DM_RUNTIME_SAFE_MODE` enquanto consultas e leituras permanecem disponíveis.
 
-6. **Patch F — Suíte de Testes de Endurecimento T1–T12 e Matriz de Crash Points G1/G2/G3**:
+6. **Patch F — Suíte de Testes de Endurecimento T1–T15 e Matriz de Crash Points G1/G2/G3**:
    - `tests/runtime/g5-transaction-kernel.test.ts`: Cenário G5-GROUP-G atualizado para testar explicitamente os 3 crash points canônicos: G1 (crash no intent planejado antes da execução), G2 (crash no flush do recibo após execução de efeito filho), G3 (crash no flush com recibo já gravado).
-   - `tests/runtime/g5-kernel-hardening.test.ts`: 12 cenários rigorosos cobrindo sobrevivência de IDs pré-alocados, timeouts de steps, rejeição segura não-aplicada, falha de flush do recibo, fallback de compensadores, retentativa via listener de liberação de locks, bloqueio por safe mode, idempotência de ajustes econômicos e verificação estrita do contrato `TransactionalChildHandler`.
+   - `tests/runtime/g5-kernel-hardening.test.ts`: 15 cenários rigorosos cobrindo sobrevivência de IDs pré-alocados, timeouts de steps, rejeição segura não-aplicada, falha de flush do recibo, fallback de compensadores, retentativa via listener de liberação de locks, bloqueio por safe mode, idempotência de ajustes econômicos, verificação estrita do contrato `TransactionalChildHandler`, unicidade de `operationRef` (T13), reconstrução fail-closed do ledger (T14) e barreira de transição de autoridade primária com bloqueio seletivo de recovery fence (T15).
+
+## Remediação de Revalidação Final de Endurecimento Gate G5 (Blockers 1–5 & Testes T1–T15)
+
+1. **Blocker 1 — Unicidade Estrita de `operationRef` entre Transações**:
+   - `CompositeMutationSession.runChildStep` gera determinística e unicamente `operationRef` como `${session.transactionId}:${stepId}` (ou `${session.transactionId}:${stepDef.operationRef}` se especificado), garantindo que IDs de steps nunca colidam entre transações distintas nem entre planos sucessivos.
+   - IDs pré-alocados de reservas econômicas (`reservationId`) e workforce (`workforceReservationId`) incorporam monotonicamente o `transactionId`.
+   - Testado e verificado pelo teste **T13**.
+
+2. **Blocker 2 — Registro Estável de Handlers Filhos no Runtime e Fail-Closed em Recovery**:
+   - Adicionada instância canônica compartilhada de `TransactionalChildHandlerRegistry` em `DomainManagerRuntimeOptions`, exposta no runtime e injetada em `ProjectsService` e `DowntimeService`.
+   - Durante recuperação (`compensateProjectCompletion`, `compensateDowntimeResolution`), se o custom handler para um step `unknown` ou `executing` não estiver registrado no runtime, a recuperação falha fechada com `DM_RECOVERY_HANDLER_UNAVAILABLE`, mantendo a transação em `needs-recovery` com recovery fence ativa.
+   - Se o handler estiver registrado e implementar `reconcile()`, o resultado do reconcile determina o curso: `not-applied` (não compensa), `applied` (executa compensação do handler), `unknown` (mantém em `needs-recovery`).
+   - Testado e verificado pelos testes **T6** e **T7**.
+
+3. **Blocker 3 — Reconciliação Econômica Pré-Compensação (`EconomyService.reconcileAdjustment`)**:
+   - Adicionado método `reconcileAdjustment(operationRef)` no `EconomyService` que consulta o `LedgerStore` e os `operationReceipts` do domínio para determinar o estado exato da mutação (`applied`, `not-applied`, `unknown`).
+   - Os compensadores de Projetos e Downtime invocam `reconcileAdjustment` antes de emitir estornos/reversões para steps econômicos que caíram em `unknown` ou `executing`. Se `not-applied`, o estorno é ignorado (evitando criação indevida de saldo). Se `applied`, o estorno é executado. Se `unknown`, falha fechado e mantém a fence.
+   - Testado e verificado pelo teste **T5**.
+
+4. **Blocker 4 — Barreira de Recuperação no Failover de Autoridade Primária Durante a Sessão**:
+   - `DomainManagerRuntime.handleAuthorityTransition` implementa serialização determinística via mutex assíncrono.
+   - Ao iniciar a transição, mutações no `CommandBus` são desabilitadas sincronamente (`setMutationsEnabled(false)`).
+   - Aguarda a reconciliação da autoridade. Se o host local for eleito Autoridade Primária, executa `scanOnStartup(currentEpoch)` instalando as recovery fences e executando safe auto-recovery para transações seguras.
+   - Somente após a instalação das fences e recuperação segura, as mutações são reabilitadas (`setMutationsEnabled(true)`).
+   - Comandos que chegam durante a transição são rejeitados pelo barreira de safe mode. Comandos após a transição sobre domínios afetados são bloqueados pela fence com `DM_RECOVERY_SCOPE_BLOCKED`, enquanto domínios não afetados operam normalmente.
+   - Testado e verificado pelos testes **T8** e **T15**.
+
+5. **Blocker 5 — Reconstrução Fail-Closed do Ledger e Confirmação de Recibo**:
+   - `EconomyService.commitAdjust` na rota de retentativa pós-restart/reidratação valida o resultado de `ledgerStore.append`.
+   - A chamada `ledgerStore.flush()` é protegida por try/catch fail-closed, retornando `DM_DOMAIN_STORAGE_ERROR` caso a persistência durável no disco falhe.
+   - Em caso de sucesso na reconstrução, o recibo é atualizado duravelmente no documento do domínio com `state: "ledger-confirmed"` e `ledgerEntryId: entry.id`.
+   - Testado e verificado pelos testes **T10** e **T14**.
 
 ## Remediação da 6ª Revalidação Gate G5 — G5-REVAL6-001 a G5-REVAL6-005
 

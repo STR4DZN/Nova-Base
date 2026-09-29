@@ -110,6 +110,10 @@ import {
   type PublicDowntimeApi
 } from "../downtime/api/public-downtime-api.js";
 import { registerDowntimeCommands } from "../downtime/commands/downtime-commands.js";
+import {
+  type TransactionalChildHandlerRegistry,
+  DefaultTransactionalChildHandlerRegistry
+} from "../mutations/child-handler-contract.js";
 
 /**
  * Public API exposed to external modules / users via module.api.
@@ -164,6 +168,8 @@ export interface DomainManagerRuntime {
   readonly projectRegistry: ProjectDefinitionRegistry;
   readonly facilityRegistry: FacilityDefinitionRegistry;
   readonly downtimeRegistry: DowntimeDefinitionRegistry;
+  readonly childHandlerRegistry: TransactionalChildHandlerRegistry;
+  handleAuthorityTransition(): Promise<void>;
   initialize(): Promise<void>;
   destroy(): void;
 }
@@ -193,6 +199,7 @@ export interface DomainManagerRuntimeOptions {
   readonly projectRegistry?: ProjectDefinitionRegistry;
   readonly facilityRegistry?: FacilityDefinitionRegistry;
   readonly downtimeRegistry?: DowntimeDefinitionRegistry;
+  readonly childHandlerRegistry?: TransactionalChildHandlerRegistry;
 }
 
 /**
@@ -281,6 +288,9 @@ export function composeDomainManagerRuntime(
   const facilityRegistry = options.facilityRegistry ?? createDefaultFacilityRegistry();
   const downtimeRegistry = options.downtimeRegistry ?? createDefaultDowntimeRegistry();
 
+  const childHandlerRegistry =
+    options.childHandlerRegistry ?? new DefaultTransactionalChildHandlerRegistry();
+
   const facilitiesService = new FacilitiesService({
     domains: mutableDomainRepo,
     facilityRegistry,
@@ -295,7 +305,8 @@ export function composeDomainManagerRuntime(
     facilitiesService,
     peopleService: people,
     transactionStore,
-    recoveryService: recovery
+    recoveryService: recovery,
+    childHandlerRegistry
   });
   const downtimeService = new DowntimeService({
     domains: mutableDomainRepo,
@@ -303,8 +314,50 @@ export function composeDomainManagerRuntime(
     economyService,
     facilitiesService,
     transactionStore,
-    recoveryService: recovery
+    recoveryService: recovery,
+    childHandlerRegistry
   });
+
+  let authorityTransitionLock = Promise.resolve();
+  const handleAuthorityTransition = async (): Promise<void> => {
+    const previousLock = authorityTransitionLock;
+    let releaseLock: () => void = () => {};
+    authorityTransitionLock = new Promise<void>((resolve) => {
+      releaseLock = resolve;
+    });
+
+    // 1. Immediately disable mutating commands synchronously
+    commandBus.setMutationsEnabled(false);
+
+    try {
+      await previousLock;
+
+      // 2. Await authority reconciliation
+      if (authority && typeof (authority as any).reconcile === "function") {
+        try {
+          await (authority as any).reconcile();
+        } catch {
+          // Reconcile errors handled
+        }
+      }
+
+      // 3. If local host is elected Primary Authority, scan unresolved, install fences, and recover
+      if (authority.service.isCurrentUser()) {
+        const currentEpoch = authority.service.getStatus().authorityEpoch;
+        try {
+          await recovery.scanOnStartup(currentEpoch);
+          await recovery.recoverAll(currentEpoch);
+          commandBus.setMutationsEnabled(true);
+        } catch {
+          commandBus.setMutationsEnabled(false);
+        }
+      } else {
+        commandBus.setMutationsEnabled(true);
+      }
+    } finally {
+      releaseLock();
+    }
+  };
 
   const registry = new CommandRegistry();
   registerDomainCommandHandlers(registry, coordinator, mutableDomainRepo);
@@ -460,6 +513,8 @@ export function composeDomainManagerRuntime(
     projectRegistry,
     facilityRegistry,
     downtimeRegistry,
+    childHandlerRegistry,
+    handleAuthorityTransition,
     initialize: async () => {
       try {
         await transactionStore.rehydrate();
@@ -475,6 +530,13 @@ export function composeDomainManagerRuntime(
         const manualCurrency = providerRegistry.get(MANUAL_CURRENCY_PROVIDER_ID);
         if (manualCurrency && "rehydrate" in manualCurrency && typeof (manualCurrency as any).rehydrate === "function") {
           await (manualCurrency as any).rehydrate();
+        }
+
+        // Listen for authority failover during session and trigger recovery barrier (Blocker 4)
+        if (authority && authority.service && typeof authority.service.onChanged === "function") {
+          authority.service.onChanged(() => {
+            void handleAuthorityTransition();
+          });
         }
       } catch (initErr) {
         commandBus.setMutationsEnabled(false);

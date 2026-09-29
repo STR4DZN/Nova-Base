@@ -481,16 +481,19 @@ export async function executeProjectCompletionDomainOperationPlan(
 
     const anticipatedFacilityId = `fac-${createOpaqueId("prj").slice("prj_".length)}`;
     const stepId = `project-complete:facility:${effect.id}`;
+    const opRef = `${session.transactionId}:${stepId}`;
     const facStepRes = await session.runChildStep({
       stepId,
       subsystem: "facility",
       operation: "createFacility",
       targetRef: effect.targetRef,
       idempotencyKey: `${session.transactionId}:${stepId}`,
+      operationRef: opRef,
       intent: {
         definitionId: effect.targetRef,
         name: effect.description,
-        facilityId: anticipatedFacilityId
+        facilityId: anticipatedFacilityId,
+        operationRef: opRef
       },
       execute: async () => {
         return context.facilitiesService!.createFacility({
@@ -498,7 +501,7 @@ export async function executeProjectCompletionDomainOperationPlan(
           definitionId: effect.targetRef!,
           name: effect.description,
           facilityId: anticipatedFacilityId,
-          operationRef: stepId
+          operationRef: opRef
         });
       }
     });
@@ -617,7 +620,7 @@ export async function executeProjectCompletionDomainOperationPlan(
   for (const effect of plan.sideEffects.filter((e) => e.type !== "facility" && e.type !== "facility:create" && e.type !== "resource" && e.type !== "resource:credit")) {
     if (params.sideEffectHandlers && params.sideEffectHandlers[effect.type]) {
       const stepId = `project-complete:custom:${effect.id}`;
-      const opRef = stepId;
+      const opRef = `${session.transactionId}:${stepId}`;
       const rawHandler = params.sideEffectHandlers[effect.type];
 
       const customStepRes = await session.runChildStep<Record<string, unknown>, ChildReceipt>({
@@ -632,7 +635,8 @@ export async function executeProjectCompletionDomainOperationPlan(
           effectType: effect.type,
           targetRef: effect.targetRef,
           value: effect.value,
-          description: effect.description
+          description: effect.description,
+          operationRef: opRef
         },
         execute: async () => {
           let handlerRes: any;

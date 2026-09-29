@@ -282,7 +282,7 @@ export async function executeDowntimeResolutionPlan(
       const handler = handlers[outcome.type];
       if (handler) {
         const stepId = `downtime-resolution:custom:${outcome.id}`;
-        const opRef = stepId;
+        const opRef = `${session.transactionId}:${stepId}`;
         const stepRes = await session.runChildStep<Record<string, unknown>, ChildReceipt>({
           stepId,
           subsystem: "custom",
@@ -294,7 +294,8 @@ export async function executeDowntimeResolutionPlan(
             outcomeId: outcome.id,
             outcomeType: outcome.type,
             parameters: outcome.parameters,
-            optional: isOptional
+            optional: isOptional,
+            operationRef: opRef
           },
           execute: async () => {
             let handlerRes: any;
@@ -371,14 +372,15 @@ export async function executeDowntimeResolutionPlan(
       } else if (outcome.type === "narrative:event") {
         // Built-in handling for canonical narrative events / logs
         const stepId = `downtime-resolution:narrative:${outcome.id}`;
+        const opRef = `${session.transactionId}:${stepId}`;
         const narrativeRes = await session.runChildStep<Record<string, unknown>, ChildReceipt>({
           stepId,
           subsystem: "custom",
           operation: outcome.type,
           targetRef: outcome.id ?? cleanDomainUuid,
           idempotencyKey: `${session.transactionId}:${stepId}`,
-          operationRef: stepId,
-          intent: { outcomeId: outcome.id, parameters: outcome.parameters },
+          operationRef: opRef,
+          intent: { outcomeId: outcome.id, parameters: outcome.parameters, operationRef: opRef },
           execute: async () =>
             ok<ChildReceipt>({
               childReceiptId: createOpaqueId("rep"),

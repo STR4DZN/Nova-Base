@@ -36,6 +36,7 @@ import {
   compensateDowntimeResolution
 } from "./downtime-recovery-compensators.js";
 import type { TransactionExecutionContext } from "../../mutations/composite-mutation-session.js";
+import type { TransactionalChildHandlerRegistry } from "../../mutations/child-handler-contract.js";
 
 export type DowntimeOutcomeHandler = (outcome: any) => Promise<ChildReceipt> | ChildReceipt;
 
@@ -47,6 +48,7 @@ export interface DowntimeServiceOptions {
   readonly transactionStore?: TransactionStore;
   readonly recoveryService?: RecoveryService;
   readonly outcomeHandlers?: Record<string, DowntimeOutcomeHandler>;
+  readonly childHandlerRegistry?: TransactionalChildHandlerRegistry;
 }
 
 export interface StartActivityParams {
@@ -101,6 +103,7 @@ export class DowntimeService {
   readonly #transactionStore?: TransactionStore;
   readonly #recoveryService?: RecoveryService;
   readonly #outcomeHandlers?: Record<string, DowntimeOutcomeHandler>;
+  readonly #childHandlerRegistry?: TransactionalChildHandlerRegistry;
 
   constructor(options: DowntimeServiceOptions) {
     this.#domains = options.domains;
@@ -110,9 +113,14 @@ export class DowntimeService {
     this.#transactionStore = options.transactionStore;
     this.#recoveryService = options.recoveryService;
     this.#outcomeHandlers = options.outcomeHandlers;
+    this.#childHandlerRegistry = options.childHandlerRegistry;
     if (this.#recoveryService) {
       this.registerRecoveryCompensators(this.#recoveryService);
     }
+  }
+
+  get childHandlerRegistry(): TransactionalChildHandlerRegistry | undefined {
+    return this.#childHandlerRegistry;
   }
 
   #cleanId(idOrUuid: string): string {
@@ -351,7 +359,8 @@ export class DowntimeService {
         {
           domains: this.#domains,
           economyService: this.#economyService,
-          transactionStore: this.#transactionStore
+          transactionStore: this.#transactionStore,
+          childHandlerRegistry: this.#childHandlerRegistry
         }
       );
     });

@@ -6,7 +6,7 @@ import type { DomainRepositoryContract } from "../../storage/repositories/domain
 import type { ResourceDefinitionRegistry } from "../definitions/resource-registry.js";
 import type { ResourceDefinition } from "../definitions/resource-definition-types.js";
 import type { LedgerStore } from "../ledger/ledger-store.js";
-import type { LedgerEntry, LedgerEntryKind, LedgerEntrySource } from "../ledger/ledger-types.js";
+import { CANONICAL_LEDGER_KINDS, type LedgerEntry, type LedgerEntryKind, type LedgerEntrySource } from "../ledger/ledger-types.js";
 import { normalizeDomainId } from "../../core/identity/refs.js";
 import type { ReservationStore, ReservationFilter } from "../reservations/reservation-store.js";
 import type { Reservation, ReservationSource } from "../reservations/reservation-types.js";
@@ -46,6 +46,7 @@ import {
   evaluateCapacity,
   resolveEffectiveCapacity
 } from "../accounts/capacity-resolver.js";
+import type { ReconcileOutcome } from "../../mutations/child-handler-contract.js";
 
 export type DerivedAccountResolver = (
   domainUuid: string,
@@ -241,6 +242,81 @@ export class EconomyService {
 
   getReservationByOperationRef(operationRef: string): Reservation | undefined {
     return this.#reservationStore.getByOperationRef(operationRef);
+  }
+
+  /**
+   * Reconciles an uncertain economy adjustment step during recovery (Master Revalidation 7).
+   * Returns:
+   * - "applied": side-effect was written to domain/ledger/provider; safe to compensate.
+   * - "not-applied": side-effect was definitely not written; do not compensate (avoid creating money).
+   * - "unknown": status cannot be determined; keep needs-recovery and retain recovery fence.
+   */
+  async reconcileAdjustment(params: {
+    readonly domainUuid: string;
+    readonly operationRef: string;
+    readonly resourceId: string;
+  }): Promise<Result<ReconcileOutcome, PublicError>> {
+    const docRes = await this.#domains.read(this.#cleanUuid(params.domainUuid));
+    if (!docRes.ok) {
+      return ok("unknown");
+    }
+    const econDataRes = tryGetDomainEconomyData(docRes.value.record);
+    if (!econDataRes.ok) {
+      return ok("unknown");
+    }
+    const econData = econDataRes.value;
+    const account = econData.accounts.find((a) => a.resourceId === params.resourceId);
+    if (!account) {
+      return ok("not-applied");
+    }
+
+    if (account.mode === "provider") {
+      const providerAccount = account as ProviderResourceAccount;
+      if (this.#providerRegistry) {
+        const provider = this.#providerRegistry.get(providerAccount.providerId);
+        if (provider && "reconcile" in provider && typeof (provider as any).reconcile === "function") {
+          try {
+            const recRes = await (provider as any).reconcile(
+              params.domainUuid,
+              params.resourceId,
+              providerAccount.providerRef,
+              params.operationRef
+            );
+            if (recRes && recRes.ok && recRes.value) {
+              if (recRes.value.outcome === "written") return ok("applied");
+              if (recRes.value.outcome === "not-written") return ok("not-applied");
+              return ok("unknown");
+            }
+          } catch {
+            return ok("unknown");
+          }
+        }
+      }
+      return ok("unknown");
+    }
+
+    // Native mode: check operationReceipts, appliedIdempotencyKeys and ledgerStore
+    const receipt = econData.operationReceipts?.find(
+      (r) => r.operationRef === params.operationRef
+    );
+    if (receipt) {
+      return ok("applied");
+    }
+
+    const isKeyApplied = econData.appliedIdempotencyKeys?.includes(params.operationRef);
+    if (isKeyApplied) {
+      return ok("applied");
+    }
+
+    const ledgerEntries = this.#ledgerStore.query({
+      domainUuid: params.domainUuid,
+      sourceRef: params.operationRef
+    });
+    if (ledgerEntries.length > 0) {
+      return ok("applied");
+    }
+
+    return ok("not-applied");
   }
 
   async getAccount(
@@ -742,7 +818,10 @@ export class EconomyService {
           // Balance was applied but LedgerStore has no entry (e.g. crash after domain balance save, before ledger flush).
           // Reconcile/reconstruct ledger entry without re-applying balance!
           const delta = existingReceipt ? existingReceipt.deltaMinor : (params.deltaMinor ?? 0);
-          const kind = (existingReceipt?.kind as LedgerEntryKind) ?? "adjustment";
+          const kind =
+            existingReceipt && (CANONICAL_LEDGER_KINDS as readonly string[]).includes(existingReceipt.kind)
+              ? (existingReceipt.kind as LedgerEntryKind)
+              : "adjustment";
           const reason = existingReceipt?.reason ?? params.reason ?? "Reconciled ledger entry";
 
           const recRes = this.#ledgerStore.append({
@@ -757,13 +836,39 @@ export class EconomyService {
             }
           });
 
-          if (recRes.ok) {
+          if (!recRes.ok) return recRes;
+
+          try {
             await this.#ledgerStore.flush();
+          } catch (flushErr) {
+            return err(
+              createPublicError({
+                code: "DM_DOMAIN_STORAGE_ERROR",
+                category: "internal",
+                message: `Failed to flush reconstructed ledger entry: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`
+              })
+            );
+          }
+
+          if (existingReceipt) {
+            const confirmedReceipt: OperationReceiptRecord = {
+              ...existingReceipt,
+              state: "ledger-confirmed",
+              ledgerEntryId: recRes.value.id
+            };
+            const updatedReceipts = (econData.operationReceipts ?? []).map((r) =>
+              r.operationRef === params.idempotencyKey ? confirmedReceipt : r
+            );
+            const updatedRecord = withDomainEconomyData(doc.record, {
+              ...econData,
+              operationReceipts: Object.freeze(updatedReceipts)
+            });
+            await this.#domains.update({ ...doc, record: updatedRecord });
           }
 
           return ok({
             account: existingAccount,
-            entry: recRes.ok ? recRes.value : undefined,
+            entry: recRes.value,
             isNoop: true
           });
         }
@@ -1138,7 +1243,40 @@ export class EconomyService {
         return entryRes;
       }
 
-      await this.#ledgerStore.flush();
+      try {
+        await this.#ledgerStore.flush();
+      } catch (flushErr) {
+        return err(
+          createPublicError({
+            code: "DM_DOMAIN_STORAGE_ERROR",
+            category: "internal",
+            message: `Failed to flush ledger: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`
+          })
+        );
+      }
+
+      // Update receipt to ledger-confirmed
+      if (params.idempotencyKey) {
+        const confirmedReceipt: OperationReceiptRecord = {
+          ...newReceipt,
+          state: "ledger-confirmed",
+          ledgerEntryId: entryRes.value.id
+        };
+        const latestDocRes = await this.#domains.read(this.#cleanUuid(params.domainUuid));
+        if (latestDocRes.ok) {
+          const latestEcon = tryGetDomainEconomyData(latestDocRes.value.record);
+          if (latestEcon.ok) {
+            const receipts = (latestEcon.value.operationReceipts ?? []).map((r) =>
+              r.operationRef === params.idempotencyKey ? confirmedReceipt : r
+            );
+            const updatedWithConfirmed = withDomainEconomyData(latestDocRes.value.record, {
+              ...latestEcon.value,
+              operationReceipts: Object.freeze(receipts)
+            });
+            await this.#domains.update({ ...latestDocRes.value, record: updatedWithConfirmed });
+          }
+        }
+      }
 
       this.#evaluateThresholds(
         params.domainUuid,

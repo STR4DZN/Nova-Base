@@ -40,11 +40,12 @@ async function reconcileAuthority(): Promise<void> {
 Hooks.once("init", () => {
   registerFoundryPrimaryAuthoritySettings({
     onPreferredChanged: () => {
-      void reconcileAuthority();
+      void runtime?.handleAuthorityTransition();
     },
     onAuthorityStateChanged: (value) => {
       try {
         runtime?.authority.synchronizePersistedState(value);
+        void runtime?.handleAuthorityTransition();
       } catch (error) {
         logger.error("Primary Authority state synchronization failed", {
           error: error instanceof Error ? error.message : String(error)
@@ -71,37 +72,14 @@ Hooks.once("ready", async () => {
     return;
   }
 
-  // Await authority readiness and reconciliation before recovery scan
-  await reconcileAuthority();
-
-  // If this host is the elected Primary Authority at startup, run recovery scan and recover (Patch D)
-  if (runtime.authority.service.isCurrentUser()) {
-    const currentEpoch = runtime.authority.service.getStatus().authorityEpoch;
-    try {
-      await runtime.recovery.scanOnStartup(currentEpoch);
-      const results = await runtime.recovery.recoverAll(currentEpoch);
-      if (results.length > 0) {
-        logger.info(
-          `Startup recovery processed ${results.length} transactions`,
-          { processedCount: results.length }
-        );
-      }
-      runtime.commandBus.setMutationsEnabled(true);
-    } catch (error: unknown) {
-      logger.error("Startup recovery scan or auto-recovery failed, entering safe mode", {
-        error: error instanceof Error ? error.message : String(error)
-      });
-      runtime.commandBus.setMutationsEnabled(false);
-    }
-  } else {
-    runtime.commandBus.setMutationsEnabled(true);
-  }
+  // Await authority readiness, reconciliation, startup scan and recovery barrier (Patch D & Blocker 4)
+  await runtime.handleAuthorityTransition();
 
   // Publish module.api AFTER fences and recovery scan are installed
   publishModuleApi(runtime);
 
   Hooks.on("userConnected", () => {
-    void reconcileAuthority();
+    void runtime?.handleAuthorityTransition();
   });
 
   logger.info("ready", BUILD_METADATA);

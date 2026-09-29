@@ -49,13 +49,18 @@ import type {
   FoundryAuthorityUserLike,
   PrimaryAuthorityHost
 } from "../../src/authority/foundry-primary-authority-adapter.js";
-import type { TransactionalChildHandler, ReconcileOutcome } from "../../src/mutations/child-handler-contract.js";
+import {
+  type TransactionalChildHandler,
+  type ReconcileOutcome,
+  DefaultTransactionalChildHandlerRegistry
+} from "../../src/mutations/child-handler-contract.js";
 import { ok, err, type Result } from "../../src/core/contracts/result.js";
 import { createPublicError, type PublicError } from "../../src/core/contracts/public-error.js";
 import { createTransactionRecord, type TransactionRecord } from "../../src/mutations/transaction-record.js";
 import { executeProjectStartDomainOperationPlan } from "../../src/projects/plans/project-start-domain-operation-plan.js";
 import { executeProjectCompletionDomainOperationPlan } from "../../src/projects/plans/project-completion-domain-operation-plan.js";
 import { executeDowntimeResolutionPlan } from "../../src/downtime/plans/downtime-resolution-plan.js";
+import { compensateDowntimeResolution } from "../../src/downtime/services/downtime-recovery-compensators.js";
 import {
   createDefaultProjectRegistry,
   ProjectDefinitionRegistry
@@ -79,12 +84,23 @@ import type { ChildReceipt } from "../../src/projects/plans/project-plan-types.j
 function createMockDomainDoc(id: string, initialBalance = 1000) {
   let doc = {
     id,
-    uuid: id,
+    uuid: id.startsWith("JournalEntry.") ? id : `JournalEntry.${id}`,
+    name: "Hardening Test Domain",
+    get flags() {
+      return { "domain-manager": doc.record };
+    },
+    ownership: { default: 0, "gm-1": 3, "gm-a": 3, "gm-b": 3 },
+    update: async (data: Record<string, unknown>) => {
+      const payload = data["flags.domain-manager"];
+      if (payload !== undefined) {
+        doc.record = JSON.parse(JSON.stringify(payload));
+      }
+    },
     record: {
       schemaVersion: 1,
       revision: 1,
       definition: {
-        identity: { aliases: [], summary: "Hardening Test Domain" },
+        identity: { aliases: [], summary: "Hardening Test Domain", description: "" },
         classification: { kind: "base", scale: "small", tags: [] },
         hierarchy: { parentDomainUuid: null },
         capabilities: {
@@ -694,7 +710,7 @@ test("T4: Project Completion / Facility create (real facility create -> receipt 
 // T5: Provider child timeout (unknown outcome) -> parent marked needs-recovery, fence active, NO blind compensation
 // ---------------------------------------------------------------------------
 test("T5: Provider child timeout (unknown outcome) -> parent marked needs-recovery, fence active, NO blind compensation", async () => {
-  const { domains } = createMockDomainDoc("dom-t5", 1000);
+  const { domains, getDoc } = createMockDomainDoc("dom-t5", 1000);
   const resourceRegistry = createDefaultResourceRegistry();
   const lockManager = new LockManager();
   const ledgerStore = new LedgerStore(new InMemoryLedgerStorageAdapter());
@@ -770,6 +786,154 @@ test("T5: Provider child timeout (unknown outcome) -> parent marked needs-recove
   // Logical fence must be installed and active
   const domainKey = lockKey.domain("dom-t5");
   assert.equal(fenceRegistry.isScopeBlocked([domainKey]), true);
+
+  // -------------------------------------------------------------------------
+  // T5 Hardening: Post-restart recovery of uncertain economy step with reconciliation
+  // -------------------------------------------------------------------------
+  // Case 5a: Reconciliation reports "applied" -> recovery compensates (refunds debit) once
+  const recoveryService = new RecoveryService({
+    lockManager,
+    transactionStore: txStore,
+    recoveryFenceRegistry: fenceRegistry
+  });
+
+  // Re-read or simulate that 50 was debited before the crash
+  const midDoc = getDoc();
+  const midEcon = (midDoc.record.definition.capabilities.config as any)["domain-manager:economy"];
+  midEcon.accounts[0].balanceMinor = 950;
+  await domains.save(midDoc);
+
+  let reconcileCallCount = 0;
+  let reconcileOpRef = "";
+  economyService.reconcileAdjustment = async (args) => {
+    reconcileCallCount++;
+    reconcileOpRef = args.operationRef;
+    return ok("applied");
+  };
+
+  // Restore normal commitAdjust for refund
+  economyService.commitAdjust = async (args) => {
+    const d = getDoc();
+    const econ = (d.record.definition.capabilities.config as any)["domain-manager:economy"];
+    econ.accounts[0].balanceMinor += args.deltaMinor;
+    await domains.save(d);
+    return ok({ balanceMinor: econ.accounts[0].balanceMinor, isNoop: false });
+  };
+
+  const recResApplied = await recoveryService.recoverTransaction(
+    tx.transactionId,
+    1,
+    async (rec) => compensateProjectStart(rec, { domains, economyService, transactionStore: txStore })
+  );
+
+  assert.equal(recResApplied.ok, true);
+  assert.equal(recResApplied.value.state, "compensated");
+  assert.equal(reconcileCallCount, 1);
+  assert.ok(reconcileOpRef.startsWith(`${tx.transactionId}:`), "Reconciliation must use scoped operationRef");
+
+  // Balance refunded from 950 back to 1000
+  const afterRefundDoc = getDoc();
+  const afterRefundEcon = (afterRefundDoc.record.definition.capabilities.config as any)["domain-manager:economy"];
+  assert.equal(afterRefundEcon.accounts[0].balanceMinor, 1000);
+
+  // Idempotency: repeated recovery call is safe no-op
+  const recResIdemp = await recoveryService.recoverTransaction(
+    tx.transactionId,
+    1,
+    async (rec) => compensateProjectStart(rec, { domains, economyService, transactionStore: txStore })
+  );
+  assert.equal(recResIdemp.ok, true);
+  assert.equal(afterRefundEcon.accounts[0].balanceMinor, 1000);
+
+  // Case 5b: Interrupted step where reconciliation reports "not-applied" -> do NOT compensate
+  const txNotApplied = createTransactionRecord({
+    transactionId: "tx-t5-not-applied",
+    commandId: createCommandId(),
+    authorityEpoch: 1,
+    lockKeys: [domainKey],
+    safeAutoRecovery: false
+  });
+  const notAppliedOpRef = `${txNotApplied.transactionId}:start_upfront_cost_0`;
+  txStore.save({
+    ...txNotApplied,
+    state: "needs-recovery",
+    recoveryData: {
+      type: "projects:start",
+      domainUuid: "dom-t5",
+      projectId: "prj-t5-na",
+      steps: [
+        {
+          stepId: "start_upfront_cost_0",
+          subsystem: "economy",
+          operation: "adjust",
+          state: "unknown",
+          operationRef: notAppliedOpRef,
+          intent: {
+            resourceId: "domain-manager:materials",
+            deltaMinor: -50
+          }
+        }
+      ]
+    } as any
+  });
+
+  economyService.reconcileAdjustment = async () => ok("not-applied");
+
+  const recResNotApplied = await recoveryService.recoverTransaction(
+    txNotApplied.transactionId,
+    1,
+    async (rec) => compensateProjectStart(rec, { domains, economyService, transactionStore: txStore })
+  );
+
+  assert.equal(recResNotApplied.ok, true);
+  assert.equal(recResNotApplied.value.state, "compensated");
+  // Balance was NOT increased (must remain 1000, no money created from thin air)
+  const afterNaDoc = getDoc();
+  const afterNaEcon = (afterNaDoc.record.definition.capabilities.config as any)["domain-manager:economy"];
+  assert.equal(afterNaEcon.accounts[0].balanceMinor, 1000);
+
+  // Case 5c: Reconciliation reports "unknown" -> fails closed, stays in needs-recovery
+  const txUnknown = createTransactionRecord({
+    transactionId: "tx-t5-unknown",
+    commandId: createCommandId(),
+    authorityEpoch: 1,
+    lockKeys: [domainKey],
+    safeAutoRecovery: false
+  });
+  txStore.save({
+    ...txUnknown,
+    state: "needs-recovery",
+    recoveryData: {
+      type: "projects:start",
+      domainUuid: "dom-t5",
+      projectId: "prj-t5-unk",
+      steps: [
+        {
+          stepId: "start_upfront_cost_0",
+          subsystem: "economy",
+          operation: "adjust",
+          state: "unknown",
+          operationRef: `${txUnknown.transactionId}:start_upfront_cost_0`,
+          intent: {
+            resourceId: "domain-manager:materials",
+            deltaMinor: -50
+          }
+        }
+      ]
+    } as any
+  });
+
+  economyService.reconcileAdjustment = async () => ok("unknown");
+
+  const recResUnk = await recoveryService.recoverTransaction(
+    txUnknown.transactionId,
+    1,
+    async (rec) => compensateProjectStart(rec, { domains, economyService, transactionStore: txStore })
+  );
+
+  assert.equal(recResUnk.ok, false);
+  const unkRecord = txStore.get(txUnknown.transactionId)!;
+  assert.equal(unkRecord.state, "needs-recovery");
 });
 
 // ---------------------------------------------------------------------------
@@ -874,6 +1038,59 @@ test("T6: Project custom handler (handler mutates state & throws -> step marked 
   const reconRes = await customHandler.reconcile!(step.operationRef ?? step.stepId);
   assert.equal(reconRes.ok, true);
   assert.equal(reconRes.value, "applied");
+
+  // -------------------------------------------------------------------------
+  // T6 Hardening: Post-restart recovery with TransactionalChildHandlerRegistry
+  // -------------------------------------------------------------------------
+  const lockManager = new LockManager();
+  const recoveryService = new RecoveryService({
+    lockManager,
+    transactionStore: txStore,
+    recoveryFenceRegistry: fenceRegistry
+  });
+
+  // Case 6a: Recovery without handler registered in childHandlerRegistry -> fails closed (DM_RECOVERY_HANDLER_UNAVAILABLE)
+  const emptyRegistry = new DefaultTransactionalChildHandlerRegistry();
+  const recResNoHandler = await recoveryService.recoverTransaction(
+    tx.transactionId,
+    1,
+    async (rec) => compensateProjectCompletion(rec, {
+      domains,
+      transactionStore: txStore,
+      childHandlerRegistry: emptyRegistry
+    })
+  );
+
+  assert.equal(recResNoHandler.ok, false);
+  assert.equal(
+    (recResNoHandler.error.details as any)?.code ?? recoveryService.lastRecoveryError?.code,
+    "DM_RECOVERY_HANDLER_UNAVAILABLE"
+  );
+  // Transaction remains in needs-recovery!
+  const txStillNeedsRec = txStore.get(tx.transactionId)!;
+  assert.equal(txStillNeedsRec.state, "needs-recovery");
+
+  // Case 6b: Recovery with handler registered in childHandlerRegistry -> reconciles & compensates successfully
+  const populatedRegistry = new DefaultTransactionalChildHandlerRegistry();
+  populatedRegistry.register("custom:telemetry", customHandler);
+
+  const recResWithHandler = await recoveryService.recoverTransaction(
+    tx.transactionId,
+    1,
+    async (rec) => compensateProjectCompletion(rec, {
+      domains,
+      transactionStore: txStore,
+      childHandlerRegistry: populatedRegistry
+    })
+  );
+
+  assert.equal(recResWithHandler.ok, true);
+  assert.equal(recResWithHandler.value.state, "compensated");
+
+  // Verify externalLogs has reconcile and compensate with the unique operationRef
+  const expectedOpRef = step.operationRef ?? `${tx.transactionId}:${step.stepId}`;
+  assert.ok(externalLogs.includes(`reconcile:${expectedOpRef}`));
+  assert.ok(externalLogs.includes(`compensate:${expectedOpRef}`));
 });
 
 // ---------------------------------------------------------------------------
@@ -975,6 +1192,53 @@ test("T7: Downtime custom handler (handler mutates & throws -> step marked unkno
   const step = (tx.recoveryData as any).steps?.find((s: any) => s.subsystem === "custom");
   assert.ok(step);
   assert.equal(step.state, "unknown");
+
+  // -------------------------------------------------------------------------
+  // T7 Hardening: Post-restart recovery for Downtime custom handler
+  // -------------------------------------------------------------------------
+  const lockManager = new LockManager();
+  const recoveryService = new RecoveryService({
+    lockManager,
+    transactionStore: txStore
+  });
+
+  // Case 7a: Missing handler in childHandlerRegistry -> fails closed with DM_RECOVERY_HANDLER_UNAVAILABLE
+  const emptyDtRegistry = new DefaultTransactionalChildHandlerRegistry();
+  const recResNoHandler = await recoveryService.recoverTransaction(
+    tx.transactionId,
+    1,
+    async (rec) => compensateDowntimeResolution(rec, {
+      domains,
+      transactionStore: txStore,
+      childHandlerRegistry: emptyDtRegistry
+    })
+  );
+
+  assert.equal(recResNoHandler.ok, false);
+  assert.equal(
+    (recResNoHandler.error.details as any)?.code ?? recoveryService.lastRecoveryError?.code,
+    "DM_RECOVERY_HANDLER_UNAVAILABLE"
+  );
+  assert.equal(txStore.get(tx.transactionId)!.state, "needs-recovery");
+
+  // Case 7b: Handler registered in childHandlerRegistry -> reconciles & compensates successfully
+  const populatedDtRegistry = new DefaultTransactionalChildHandlerRegistry();
+  populatedDtRegistry.register("narrative:chronicle", customOutcomeHandler);
+
+  const recResWithHandler = await recoveryService.recoverTransaction(
+    tx.transactionId,
+    1,
+    async (rec) => compensateDowntimeResolution(rec, {
+      domains,
+      transactionStore: txStore,
+      childHandlerRegistry: populatedDtRegistry
+    })
+  );
+
+  assert.equal(recResWithHandler.ok, true);
+  assert.equal(recResWithHandler.value.state, "compensated");
+  const expectedDtOpRef = step.operationRef ?? `${tx.transactionId}:${step.stepId}`;
+  assert.ok(chronicleEntries.includes(`record:${expectedDtOpRef}`));
 });
 
 // ---------------------------------------------------------------------------
@@ -1355,4 +1619,449 @@ test("T12: Facilities checkpoint flush failure during maintainFacility -> fails 
   const finalDoc = getDoc();
   const finalEcon = (finalDoc.record.definition.capabilities.config as any)["domain-manager:economy"];
   assert.ok(finalEcon.accounts[0].balanceMinor === 1000 || tx.state === "needs-recovery");
+});
+
+// ---------------------------------------------------------------------------
+// T13: OperationRef uniqueness across consecutive transactions (different transactionIds produce non-colliding operationRefs)
+// ---------------------------------------------------------------------------
+test("T13: OperationRef uniqueness across consecutive transactions (different transactionIds produce non-colliding operationRefs)", async () => {
+  const { domains } = createMockDomainDoc("dom-t13", 2000);
+  const resourceRegistry = createDefaultResourceRegistry();
+  const lockManager = new LockManager();
+  const ledgerStore = new LedgerStore(new InMemoryLedgerStorageAdapter());
+  const reservationStore = new ReservationStore(new InMemoryReservationStorageAdapter());
+  const txStore = new TransactionStore(new InMemoryTransactionStorageAdapter());
+  const projectRegistry = createDefaultProjectRegistry();
+  const peopleService = new PeopleService(domains);
+
+  projectRegistry.register({
+    id: "test:proj-opref-unique",
+    version: 1,
+    label: "Unique OpRef Project",
+    progressResolverId: "domain-manager:standard",
+    defaultWorkRequired: 100,
+    tags: ["test"],
+    requirements: [],
+    costs: [
+      {
+        resourceId: "domain-manager:materials",
+        amountMinor: 100,
+        timing: "reserved"
+      }
+    ],
+    rewards: []
+  });
+
+  const economyService = new EconomyService({
+    domains,
+    resourceRegistry,
+    ledgerStore,
+    reservationStore,
+    lockManager
+  });
+
+  // Run first project start
+  const planRes1 = await executeProjectStartDomainOperationPlan(
+    {
+      domains,
+      projectRegistry,
+      economyService,
+      peopleService,
+      transactionStore: txStore
+    },
+    {
+      domainUuid: "dom-t13",
+      definitionId: "test:proj-opref-unique",
+      commandId: createCommandId(),
+      authorityEpoch: 1
+    }
+  );
+  assert.equal(planRes1.ok, true);
+
+  // Run second project start
+  const planRes2 = await executeProjectStartDomainOperationPlan(
+    {
+      domains,
+      projectRegistry,
+      economyService,
+      peopleService,
+      transactionStore: txStore
+    },
+    {
+      domainUuid: "dom-t13",
+      definitionId: "test:proj-opref-unique",
+      commandId: createCommandId(),
+      authorityEpoch: 1
+    }
+  );
+  assert.equal(planRes2.ok, true);
+
+  const txs = txStore.listAll();
+  assert.equal(txs.length, 2);
+  const tx1 = txs[0];
+  const tx2 = txs[1];
+
+  const steps1 = (tx1.recoveryData as any).steps as any[];
+  const steps2 = (tx2.recoveryData as any).steps as any[];
+
+  assert.ok(steps1.length > 0);
+  assert.ok(steps2.length > 0);
+
+  const opRefs1 = steps1.map((s) => s.operationRef);
+  const opRefs2 = steps2.map((s) => s.operationRef);
+
+  // Every operationRef in tx1 must contain tx1.transactionId
+  for (const opRef of opRefs1) {
+    assert.ok(opRef.includes(tx1.transactionId), `opRef '${opRef}' must include txId '${tx1.transactionId}'`);
+  }
+  // Every operationRef in tx2 must contain tx2.transactionId
+  for (const opRef of opRefs2) {
+    assert.ok(opRef.includes(tx2.transactionId), `opRef '${opRef}' must include txId '${tx2.transactionId}'`);
+  }
+
+  // Cross-check: No collision between tx1 and tx2 operationRefs
+  const allOpRefs = new Set([...opRefs1, ...opRefs2]);
+  assert.equal(allOpRefs.size, opRefs1.length + opRefs2.length, "All operationRefs must be mutually unique");
+
+  // Pre-allocated reservation IDs must also be distinct
+  const resId1 = steps1.find((s) => s.operation === "reserve")?.intent?.reservationId;
+  const resId2 = steps2.find((s) => s.operation === "reserve")?.intent?.reservationId;
+  assert.ok(resId1);
+  assert.ok(resId2);
+  assert.notEqual(resId1, resId2, "Pre-allocated reservationIds must never collide across transactions");
+});
+
+// ---------------------------------------------------------------------------
+// T14: Fail-closed ledger reconstruction (append Err -> Err, flush Err -> Err, success -> state: ledger-confirmed)
+// ---------------------------------------------------------------------------
+test("T14: Fail-closed ledger reconstruction (append Err -> Err, flush Err -> Err, success -> state: ledger-confirmed)", async () => {
+  const { domains, getDoc } = createMockDomainDoc("dom-t14", 1000);
+  const resourceRegistry = createDefaultResourceRegistry();
+  const lockManager = new LockManager();
+  const reservationStore = new ReservationStore(new InMemoryReservationStorageAdapter());
+
+  // Subcase 1: Append failure during reconstruction -> commitAdjust returns Err
+  class FailingAppendLedgerStore extends LedgerStore {
+    override async append(): Promise<any> {
+      return err(
+        createPublicError({
+          code: "DM_DOMAIN_STORAGE_ERROR",
+          category: "internal",
+          message: "Disk fault during ledger append"
+        })
+      );
+    }
+  }
+
+  // Seed domain doc with an unconfirmed receipt (balance already modified)
+  const opRef1 = "tx-t14:op-fail-append";
+  const doc1 = getDoc();
+  const econ1 = (doc1.record.definition.capabilities.config as any)["domain-manager:economy"];
+  econ1.accounts[0].balanceMinor = 800;
+  econ1.operationReceipts = [
+    {
+      operationRef: opRef1,
+      resourceId: "domain-manager:materials",
+      deltaMinor: -200,
+      kind: "adjustment",
+      reason: "Unconfirmed debit",
+      appliedAt: Date.now(),
+      state: "balance-applied"
+    }
+  ];
+  await domains.save(doc1);
+
+  const economyService1 = new EconomyService({
+    domains,
+    resourceRegistry,
+    ledgerStore: new FailingAppendLedgerStore(new InMemoryLedgerStorageAdapter()),
+    reservationStore,
+    lockManager
+  });
+
+  const resAppendFail = await economyService1.commitAdjust({
+    domainUuid: "dom-t14",
+    resourceId: "domain-manager:materials",
+    deltaMinor: -200,
+    reason: "Retry append fail",
+    idempotencyKey: opRef1
+  });
+  assert.equal(resAppendFail.ok, false);
+
+  // Subcase 2: Flush failure during reconstruction -> commitAdjust returns Err
+  const failingFlushAdapter = new InMemoryLedgerStorageAdapter();
+  const failingFlushLedgerStore = new LedgerStore(failingFlushAdapter);
+  failingFlushLedgerStore.flush = async () => {
+    throw new Error("Disk full on ledger flush");
+  };
+
+  const opRef2 = "tx-t14:op-fail-flush";
+  const doc2 = getDoc();
+  const econ2 = (doc2.record.definition.capabilities.config as any)["domain-manager:economy"];
+  econ2.operationReceipts = [
+    ...(econ2.operationReceipts ?? []),
+    {
+      operationRef: opRef2,
+      resourceId: "domain-manager:materials",
+      deltaMinor: -100,
+      kind: "adjustment",
+      reason: "Unconfirmed debit 2",
+      appliedAt: Date.now(),
+      state: "balance-applied"
+    }
+  ];
+  await domains.save(doc2);
+
+  const economyService2 = new EconomyService({
+    domains,
+    resourceRegistry,
+    ledgerStore: failingFlushLedgerStore,
+    reservationStore,
+    lockManager
+  });
+
+  const resFlushFail = await economyService2.commitAdjust({
+    domainUuid: "dom-t14",
+    resourceId: "domain-manager:materials",
+    deltaMinor: -100,
+    reason: "Retry flush fail",
+    idempotencyKey: opRef2
+  });
+  assert.equal(resFlushFail.ok, false);
+  assert.equal(resFlushFail.error.code, "DM_DOMAIN_STORAGE_ERROR");
+
+  // Subcase 3: Successful reconstruction -> entry created, receipt updated to ledger-confirmed
+  const healthyLedgerStore = new LedgerStore(new InMemoryLedgerStorageAdapter());
+  const opRef3 = "tx-t14:op-success-recon";
+  const doc3 = getDoc();
+  const econ3 = (doc3.record.definition.capabilities.config as any)["domain-manager:economy"];
+  econ3.operationReceipts = [
+    ...(econ3.operationReceipts ?? []),
+    {
+      operationRef: opRef3,
+      resourceId: "domain-manager:materials",
+      deltaMinor: -50,
+      kind: "adjustment",
+      reason: "Unconfirmed debit 3",
+      appliedAt: Date.now(),
+      state: "balance-applied"
+    }
+  ];
+  await domains.save(doc3);
+
+  const economyService3 = new EconomyService({
+    domains,
+    resourceRegistry,
+    ledgerStore: healthyLedgerStore,
+    reservationStore,
+    lockManager
+  });
+
+  const resReconSuccess = await economyService3.commitAdjust({
+    domainUuid: "dom-t14",
+    resourceId: "domain-manager:materials",
+    deltaMinor: -50,
+    reason: "Retry healthy recon",
+    idempotencyKey: opRef3
+  });
+
+  assert.equal(resReconSuccess.ok, true);
+  assert.equal(resReconSuccess.value.isNoop, true);
+
+  // Check ledger store has the reconstructed entry
+  const entries = healthyLedgerStore.query({ domainUuid: "dom-t14" });
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].source.ref, opRef3);
+
+  // Check domain doc receipt was updated to ledger-confirmed with ledgerEntryId
+  const finalDoc = getDoc();
+  const finalEcon = (finalDoc.record.definition.capabilities.config as any)["domain-manager:economy"];
+  const confirmedReceipt = finalEcon.operationReceipts.find((r: any) => r.operationRef === opRef3);
+  assert.ok(confirmedReceipt);
+  assert.equal(confirmedReceipt.state, "ledger-confirmed");
+  assert.equal(confirmedReceipt.ledgerEntryId, entries[0].id);
+});
+
+// ---------------------------------------------------------------------------
+// T15: Primary Authority failover recovery barrier during session (safe mode rejection before barrier, DM_RECOVERY_SCOPE_BLOCKED on affected domain, unaffected domain allowed)
+// ---------------------------------------------------------------------------
+test("T15: Primary Authority failover recovery barrier during session (safe mode rejection before barrier, DM_RECOVERY_SCOPE_BLOCKED on affected domain, unaffected domain allowed)", async () => {
+  const { domains: domains1, getDoc: getDocAffected } = createMockDomainDoc("dom-affected", 1000);
+  const { getDoc: getDocUnaffected } = createMockDomainDoc("dom-unaffected", 1000);
+
+  const txStoreAdapter = new InMemoryTransactionStorageAdapter();
+
+  // Create unresolved transaction on dom-affected with safeAutoRecovery: false
+  const unresolvedTx = createTransactionRecord({
+    transactionId: "tx-unresolved-failover",
+    commandId: createCommandId(),
+    authorityEpoch: 1,
+    lockKeys: [lockKey.domain("dom-affected")],
+    safeAutoRecovery: false
+  });
+  await txStoreAdapter.saveSnapshot({
+    records: [
+      {
+        ...unresolvedTx,
+        state: "needs-recovery"
+      }
+    ]
+  });
+
+  // Setup multi-user authority environment
+  const users: FoundryAuthorityUserLike[] = [
+    { id: "gm-a", isGM: true, active: true },
+    { id: "gm-b", isGM: true, active: true }
+  ];
+  let currentUserId: string | null = "gm-a";
+  let preferredUserId: string | null = "gm-a";
+
+  const authService = new PrimaryAuthorityService<FoundryAuthorityUserLike>(
+    {
+      getUsers: () => users,
+      getPreferredUserId: () => preferredUserId,
+      getCurrentUserId: () => currentUserId
+    },
+    {
+      authorityUserId: "gm-a",
+      authorityEpoch: 1,
+      initialized: true
+    }
+  );
+
+  let unblockReconcile: (() => void) | null = null;
+  let reconcileStarted: (() => void) | null = null;
+  const reconcileStartedPromise = new Promise<void>((r) => {
+    reconcileStarted = r;
+  });
+  const reconcileWaitPromise = new Promise<void>((r) => {
+    unblockReconcile = r;
+  });
+
+  const authorityHost: PrimaryAuthorityHost = {
+    service: authService,
+    reconcile: async () => {
+      authService.resolve();
+      reconcileStarted?.();
+      await reconcileWaitPromise;
+    },
+    synchronizePersistedState: (val) => authService.synchronizeState(val as any)
+  };
+
+  const unaffectedDoc = getDocUnaffected();
+  const projData = getDomainProjectsData(unaffectedDoc.record);
+  const activeProj = {
+    id: "prj-2",
+    definitionId: "test:proj-unaffected",
+    domainUuid: "dom-unaffected",
+    name: "Unaffected Project",
+    workRequired: 100,
+    workCompleted: 10,
+    lifecycle: "active" as const,
+    revision: 1,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    entries: []
+  };
+  unaffectedDoc.record = withDomainProjectsData(unaffectedDoc.record, {
+    ...projData,
+    projects: [activeProj]
+  });
+
+  const domainDocsMap = new Map<string, any>([
+    ["dom-affected", getDocAffected()],
+    ["dom-unaffected", unaffectedDoc]
+  ]);
+
+  const docStore: DomainDocumentStore = {
+    get: (id: string) => domainDocsMap.get(id) as any,
+    list: () => [...domainDocsMap.values()] as any,
+    create: async () => {
+      throw new Error("unexpected write");
+    }
+  };
+
+  const runtime = composeDomainManagerRuntime({
+    domainStore: docStore,
+    authority: authorityHost,
+    transactionStorageAdapter: txStoreAdapter
+  });
+
+  runtime.projectRegistry.register({
+    id: "test:proj-unaffected",
+    version: 1,
+    label: "Unaffected Project",
+    progressResolverId: "domain-manager:standard",
+    defaultWorkRequired: 100,
+    tags: ["test"],
+    requirements: [],
+    costs: [],
+    rewards: []
+  });
+
+  await runtime.initialize();
+
+  // Initially GM A is authority. Now switch local user to GM B and preferred GM to GM B (epoch 2 failover)
+  currentUserId = "gm-b";
+  preferredUserId = "gm-b";
+
+  // Trigger authority transition
+  const transitionPromise = runtime.handleAuthorityTransition();
+
+  // Await reconcile starting and setting local user to primary authority while mutations are disabled
+  await reconcileStartedPromise;
+
+  // While transition is happening, mutations are disabled in safe mode!
+  assert.equal(runtime.commandBus.mutationsEnabled, false);
+
+  const cmdOnAffectedDuring: DomainCommand = {
+    contractVersion: COMMAND_CONTRACT_VERSION_V1,
+    commandId: createCommandId(),
+    type: "projects:advance-project",
+    payload: { domainUuid: "dom-affected", projectId: "prj-1", delta: 10 },
+    issuedAtReal: Date.now()
+  };
+  const duringRes = await runtime.commandBus.execute(cmdOnAffectedDuring, { senderUserId: "gm-b" });
+  assert.equal(duringRes.ok, true);
+  assert.equal(duringRes.value.status, "rejected");
+  assert.ok(duringRes.value.error?.message.includes("safe mode"));
+
+  // Unblock transition to complete recovery scan and enable mutations
+  unblockReconcile?.();
+  await transitionPromise;
+
+  // After barrier: mutations are re-enabled
+  assert.equal(runtime.commandBus.mutationsEnabled, true);
+
+  // But dom-affected has active recovery fence!
+  assert.equal(runtime.recoveryFenceRegistry.isScopeBlocked([lockKey.domain("dom-affected")]), true);
+
+  // Command on affected domain is blocked by fence!
+  const cmdOnAffectedAfter: DomainCommand = {
+    contractVersion: COMMAND_CONTRACT_VERSION_V1,
+    commandId: createCommandId(),
+    type: "projects:advance-project",
+    payload: { domainUuid: "dom-affected", projectId: "prj-1", delta: 10 },
+    issuedAtReal: Date.now()
+  };
+  const afterAffectedRes = await runtime.commandBus.execute(cmdOnAffectedAfter, { senderUserId: "gm-b" });
+  assert.equal(afterAffectedRes.ok, true);
+  assert.equal(afterAffectedRes.value.status, "rejected");
+  assert.equal(afterAffectedRes.value.error?.code, "DM_RECOVERY_SCOPE_BLOCKED");
+
+  // Meanwhile, command on unaffected domain is NOT blocked by fence and reaches handler!
+  const cmdOnUnaffected: DomainCommand = {
+    contractVersion: COMMAND_CONTRACT_VERSION_V1,
+    commandId: createCommandId(),
+    type: "projects:advance-project",
+    payload: { domainUuid: "dom-unaffected", projectId: "prj-2", delta: 10 },
+    issuedAtReal: Date.now()
+  };
+  const unaffectedRes = await runtime.commandBus.execute(cmdOnUnaffected, { senderUserId: "gm-b" });
+  assert.equal(unaffectedRes.ok, true);
+  // It is NOT rejected by DM_RECOVERY_SCOPE_BLOCKED or safe mode
+  assert.notEqual(unaffectedRes.value.error?.code, "DM_RECOVERY_SCOPE_BLOCKED");
+  assert.notEqual(unaffectedRes.value.status, "rejected");
+
+  runtime.destroy();
 });

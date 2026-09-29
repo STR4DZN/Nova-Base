@@ -94,6 +94,10 @@ export class RecoveryService {
     return this.#fenceRegistry;
   }
 
+  get lastRecoveryError(): PublicError | undefined {
+    return this.#lastRecoveryError;
+  }
+
   registerCompensator(type: string, compensator: TransactionCompensator): void {
     this.#compensators.set(type, compensator);
   }
@@ -399,7 +403,8 @@ export class RecoveryService {
           createPublicError({
             code: "DM_RECOVERY_COMPENSATION_FAILED",
             category: "recovery",
-            message: `Compensation failed during recovery: ${compRes.error.message}`
+            message: `Compensation failed during recovery: ${compRes.error.message}`,
+            details: compRes.error
           })
         );
       }

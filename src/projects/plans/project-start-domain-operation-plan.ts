@@ -318,6 +318,7 @@ export async function executeProjectStartDomainOperationPlan(
         }
       } else if (cost.timing === "reserved") {
         const stepId = `project-start:reservation:${cost.resourceId}:${costIdx++}`;
+        const opRef = `${session.transactionId}:${stepId}`;
         const anticipatedReservationId = createOpaqueId("resv");
         const stepRes = await session.runChildStep({
           stepId,
@@ -325,12 +326,12 @@ export async function executeProjectStartDomainOperationPlan(
           operation: "reserve",
           targetRef: cleanDomainUuid,
           idempotencyKey: `${session.transactionId}:${stepId}`,
-          operationRef: stepId,
+          operationRef: opRef,
           intent: {
             resourceId: cost.resourceId,
             amountMinor: cost.amountMinor,
             reservationId: anticipatedReservationId,
-            operationRef: stepId
+            operationRef: opRef
           },
           execute: async () => {
             return context.economyService!.reserve({
@@ -340,7 +341,7 @@ export async function executeProjectStartDomainOperationPlan(
               source: { type: "project", ref: projectId },
               lockOwner: params.commandId,
               reservationId: anticipatedReservationId,
-              operationRef: stepId
+              operationRef: opRef
             });
           }
         });
@@ -373,6 +374,7 @@ export async function executeProjectStartDomainOperationPlan(
     (params.workforceAllocations?.reduce((sum, a) => sum + a.count, 0) ?? 0);
   if (wfRequired > 0) {
     const stepId = `project-start:workforce:${params.workforceAllocations?.[0]?.workforceTypeId ?? "general"}`;
+    const opRef = `${session.transactionId}:${stepId}`;
     const anticipatedWfReservationId = createOpaqueId("resv");
     const wfStepRes = await session.runChildStep({
       stepId,
@@ -380,12 +382,12 @@ export async function executeProjectStartDomainOperationPlan(
       operation: "allocateWorkforceReservation",
       targetRef: cleanDomainUuid,
       idempotencyKey: `${session.transactionId}:${stepId}`,
-      operationRef: stepId,
+      operationRef: opRef,
       intent: {
         amount: wfRequired,
         projectId: draftProject.id,
         reservationId: anticipatedWfReservationId,
-        operationRef: stepId
+        operationRef: opRef
       },
       execute: async () =>
         peopleService.allocateWorkforceReservation({
@@ -395,7 +397,7 @@ export async function executeProjectStartDomainOperationPlan(
           workforceTypeId: params.workforceAllocations?.[0]?.workforceTypeId ?? "general",
           userId: params.userId,
           reservationId: anticipatedWfReservationId,
-          operationRef: stepId
+          operationRef: opRef
         })
     });
     if (!wfStepRes.ok) {

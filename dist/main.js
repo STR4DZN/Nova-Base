@@ -8692,6 +8692,9 @@ var RecoveryService = class {
   get fenceRegistry() {
     return this.#fenceRegistry;
   }
+  get lastRecoveryError() {
+    return this.#lastRecoveryError;
+  }
   registerCompensator(type, compensator) {
     this.#compensators.set(type, compensator);
   }
@@ -8936,7 +8939,8 @@ var RecoveryService = class {
           createPublicError({
             code: "DM_RECOVERY_COMPENSATION_FAILED",
             category: "recovery",
-            message: `Compensation failed during recovery: ${compRes.error.message}`
+            message: `Compensation failed during recovery: ${compRes.error.message}`,
+            details: compRes.error
           })
         );
       }
@@ -16772,6 +16776,70 @@ var EconomyService = class {
   getReservationByOperationRef(operationRef) {
     return this.#reservationStore.getByOperationRef(operationRef);
   }
+  /**
+   * Reconciles an uncertain economy adjustment step during recovery (Master Revalidation 7).
+   * Returns:
+   * - "applied": side-effect was written to domain/ledger/provider; safe to compensate.
+   * - "not-applied": side-effect was definitely not written; do not compensate (avoid creating money).
+   * - "unknown": status cannot be determined; keep needs-recovery and retain recovery fence.
+   */
+  async reconcileAdjustment(params) {
+    const docRes = await this.#domains.read(this.#cleanUuid(params.domainUuid));
+    if (!docRes.ok) {
+      return ok("unknown");
+    }
+    const econDataRes = tryGetDomainEconomyData(docRes.value.record);
+    if (!econDataRes.ok) {
+      return ok("unknown");
+    }
+    const econData = econDataRes.value;
+    const account = econData.accounts.find((a) => a.resourceId === params.resourceId);
+    if (!account) {
+      return ok("not-applied");
+    }
+    if (account.mode === "provider") {
+      const providerAccount = account;
+      if (this.#providerRegistry) {
+        const provider = this.#providerRegistry.get(providerAccount.providerId);
+        if (provider && "reconcile" in provider && typeof provider.reconcile === "function") {
+          try {
+            const recRes = await provider.reconcile(
+              params.domainUuid,
+              params.resourceId,
+              providerAccount.providerRef,
+              params.operationRef
+            );
+            if (recRes && recRes.ok && recRes.value) {
+              if (recRes.value.outcome === "written") return ok("applied");
+              if (recRes.value.outcome === "not-written") return ok("not-applied");
+              return ok("unknown");
+            }
+          } catch {
+            return ok("unknown");
+          }
+        }
+      }
+      return ok("unknown");
+    }
+    const receipt = econData.operationReceipts?.find(
+      (r) => r.operationRef === params.operationRef
+    );
+    if (receipt) {
+      return ok("applied");
+    }
+    const isKeyApplied = econData.appliedIdempotencyKeys?.includes(params.operationRef);
+    if (isKeyApplied) {
+      return ok("applied");
+    }
+    const ledgerEntries = this.#ledgerStore.query({
+      domainUuid: params.domainUuid,
+      sourceRef: params.operationRef
+    });
+    if (ledgerEntries.length > 0) {
+      return ok("applied");
+    }
+    return ok("not-applied");
+  }
   async getAccount(domainUuid, resourceId) {
     const docRes = await this.#domains.read(this.#cleanUuid(domainUuid));
     if (!docRes.ok) {
@@ -17176,7 +17244,7 @@ var EconomyService = class {
             });
           }
           const delta = existingReceipt ? existingReceipt.deltaMinor : params.deltaMinor ?? 0;
-          const kind = existingReceipt?.kind ?? "adjustment";
+          const kind = existingReceipt && CANONICAL_LEDGER_KINDS.includes(existingReceipt.kind) ? existingReceipt.kind : "adjustment";
           const reason = existingReceipt?.reason ?? params.reason ?? "Reconciled ledger entry";
           const recRes = this.#ledgerStore.append({
             domainUuid: params.domainUuid,
@@ -17189,12 +17257,36 @@ var EconomyService = class {
               reason
             }
           });
-          if (recRes.ok) {
+          if (!recRes.ok) return recRes;
+          try {
             await this.#ledgerStore.flush();
+          } catch (flushErr) {
+            return err(
+              createPublicError({
+                code: "DM_DOMAIN_STORAGE_ERROR",
+                category: "internal",
+                message: `Failed to flush reconstructed ledger entry: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`
+              })
+            );
+          }
+          if (existingReceipt) {
+            const confirmedReceipt = {
+              ...existingReceipt,
+              state: "ledger-confirmed",
+              ledgerEntryId: recRes.value.id
+            };
+            const updatedReceipts2 = (econData.operationReceipts ?? []).map(
+              (r) => r.operationRef === params.idempotencyKey ? confirmedReceipt : r
+            );
+            const updatedRecord2 = withDomainEconomyData(doc.record, {
+              ...econData,
+              operationReceipts: Object.freeze(updatedReceipts2)
+            });
+            await this.#domains.update({ ...doc, record: updatedRecord2 });
           }
           return ok({
             account: existingAccount,
-            entry: recRes.ok ? recRes.value : void 0,
+            entry: recRes.value,
             isNoop: true
           });
         }
@@ -17520,7 +17612,38 @@ var EconomyService = class {
         await this.#domains.update(doc);
         return entryRes;
       }
-      await this.#ledgerStore.flush();
+      try {
+        await this.#ledgerStore.flush();
+      } catch (flushErr) {
+        return err(
+          createPublicError({
+            code: "DM_DOMAIN_STORAGE_ERROR",
+            category: "internal",
+            message: `Failed to flush ledger: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`
+          })
+        );
+      }
+      if (params.idempotencyKey) {
+        const confirmedReceipt = {
+          ...newReceipt,
+          state: "ledger-confirmed",
+          ledgerEntryId: entryRes.value.id
+        };
+        const latestDocRes = await this.#domains.read(this.#cleanUuid(params.domainUuid));
+        if (latestDocRes.ok) {
+          const latestEcon = tryGetDomainEconomyData(latestDocRes.value.record);
+          if (latestEcon.ok) {
+            const receipts = (latestEcon.value.operationReceipts ?? []).map(
+              (r) => r.operationRef === params.idempotencyKey ? confirmedReceipt : r
+            );
+            const updatedWithConfirmed = withDomainEconomyData(latestDocRes.value.record, {
+              ...latestEcon.value,
+              operationReceipts: Object.freeze(receipts)
+            });
+            await this.#domains.update({ ...latestDocRes.value, record: updatedWithConfirmed });
+          }
+        }
+      }
       this.#evaluateThresholds(
         params.domainUuid,
         params.resourceId,
@@ -22115,6 +22238,27 @@ async function compensateProjectStart(recordOrId, context, options) {
           if (!isCompensationStepCompleted(record, stepId, context.transactionStore)) {
             const intent = step.intent;
             if (intent && intent.deltaMinor < 0) {
+              if (step.state === "unknown" || step.state === "executing") {
+                const opRef = step.operationRef ?? step.stepId;
+                const recRes = await context.economyService.reconcileAdjustment({
+                  domainUuid: cleanDomainUuid,
+                  operationRef: opRef,
+                  resourceId: intent.resourceId
+                });
+                if (!recRes.ok || recRes.value === "unknown") {
+                  return err(
+                    createPublicError({
+                      code: "DM_RECOVERY_RECONCILIATION_UNCERTAIN",
+                      category: "conflict",
+                      message: `Economy adjustment reconciliation uncertain for operationRef '${opRef}'`
+                    })
+                  );
+                }
+                if (recRes.value === "not-applied") {
+                  await markCompensationStepCompleted(context.transactionStore, record, stepId);
+                  continue;
+                }
+              }
               const idempotencyKey = `${record.transactionId}:compensation:${stepId}`;
               const refRes = await context.economyService.commitAdjust({
                 domainUuid: data.domainUuid,
@@ -22269,7 +22413,7 @@ async function compensateProjectAdvance(recordOrId, context, options) {
   if (Array.isArray(data.steps) && data.steps.length > 0) {
     const steps = [...data.steps].reverse();
     for (const step of steps) {
-      if (step.state !== "applied" && step.state !== "unknown" && step.state !== "compensating") {
+      if (step.state !== "applied" && step.state !== "unknown" && step.state !== "compensating" && step.state !== "executing") {
         continue;
       }
       const stepId = step.stepId;
@@ -22279,6 +22423,27 @@ async function compensateProjectAdvance(recordOrId, context, options) {
       if (step.subsystem === "economy" && step.operation === "adjust" && context.economyService) {
         const intent = step.intent;
         if (intent && intent.deltaMinor < 0) {
+          if (step.state === "unknown" || step.state === "executing") {
+            const opRef = step.operationRef ?? step.stepId;
+            const recRes = await context.economyService.reconcileAdjustment({
+              domainUuid: cleanDomainUuid,
+              operationRef: opRef,
+              resourceId: intent.resourceId
+            });
+            if (!recRes.ok || recRes.value === "unknown") {
+              return err(
+                createPublicError({
+                  code: "DM_RECOVERY_RECONCILIATION_UNCERTAIN",
+                  category: "conflict",
+                  message: `Economy adjustment reconciliation uncertain for operationRef '${opRef}'`
+                })
+              );
+            }
+            if (recRes.value === "not-applied") {
+              await markCompensationStepCompleted(context.transactionStore, record, stepId);
+              continue;
+            }
+          }
           const idempotencyKey = `${record.transactionId}:compensation:${stepId}`;
           const refRes = await context.economyService.commitAdjust({
             domainUuid: data.domainUuid,
@@ -22445,6 +22610,27 @@ async function compensateProjectCompletion(recordOrId, context, options) {
         if (step.operation === "adjust") {
           const intent = step.intent;
           if (intent) {
+            if (step.state === "unknown" || step.state === "executing") {
+              const opRef = step.operationRef ?? step.stepId;
+              const recRes = await context.economyService.reconcileAdjustment({
+                domainUuid: cleanDomainUuid,
+                operationRef: opRef,
+                resourceId: intent.resourceId
+              });
+              if (!recRes.ok || recRes.value === "unknown") {
+                return err(
+                  createPublicError({
+                    code: "DM_RECOVERY_RECONCILIATION_UNCERTAIN",
+                    category: "conflict",
+                    message: `Economy adjustment reconciliation uncertain for operationRef '${opRef}'`
+                  })
+                );
+              }
+              if (recRes.value === "not-applied") {
+                await markCompensationStepCompleted(context.transactionStore, record, stepId);
+                continue;
+              }
+            }
             const idempotencyKey = `${record.transactionId}:compensation:${stepId}`;
             const refRes = await context.economyService.commitAdjust({
               domainUuid: data.domainUuid,
@@ -22480,10 +22666,37 @@ async function compensateProjectCompletion(recordOrId, context, options) {
           }
         }
       }
-      if (step.subsystem === "custom" && context.sideEffectHandlers) {
-        const handler = context.sideEffectHandlers[step.operation];
-        if (handler && typeof handler === "object" && typeof handler.compensate === "function") {
-          const compRes = await handler.compensate(step.operationRef ?? step.stepId, step.receipt);
+      if (step.subsystem === "custom") {
+        const handler = context.childHandlerRegistry?.get(step.operation) ?? context.sideEffectHandlers?.[step.operation];
+        if (!handler) {
+          return err(
+            createPublicError({
+              code: "DM_RECOVERY_HANDLER_UNAVAILABLE",
+              category: "conflict",
+              message: `Recovery handler for custom operation '${step.operation}' is not available in registry`
+            })
+          );
+        }
+        const opRef = step.operationRef ?? step.stepId;
+        if (typeof handler === "object" && typeof handler.reconcile === "function") {
+          const recRes = await handler.reconcile(opRef);
+          if (!recRes.ok) return recRes;
+          if (recRes.value === "not-applied") {
+            await markCompensationStepCompleted(context.transactionStore, record, stepId);
+            continue;
+          }
+          if (recRes.value === "unknown") {
+            return err(
+              createPublicError({
+                code: "DM_RECOVERY_RECONCILIATION_UNCERTAIN",
+                category: "conflict",
+                message: `Reconciliation for custom operation '${step.operation}' returned unknown outcome`
+              })
+            );
+          }
+        }
+        if (typeof handler === "object" && typeof handler.compensate === "function") {
+          const compRes = await handler.compensate(opRef, step.receipt);
           if (compRes && !compRes.ok) return compRes;
         }
       }
@@ -22767,7 +22980,7 @@ var CompositeMutationSession = class _CompositeMutationSession {
    * Intent persistence and flush before execute() are mandatory across all flows.
    */
   async runChildStep(stepDef) {
-    const operationRef = stepDef.operationRef ?? stepDef.stepId;
+    const operationRef = stepDef.operationRef ?? `${this.transactionId}:${stepDef.stepId}`;
     const idempotencyKey = stepDef.idempotencyKey ?? `${this.transactionId}:${stepDef.stepId}`;
     const executingStep = {
       stepId: stepDef.stepId,
@@ -23373,6 +23586,7 @@ async function executeProjectStartDomainOperationPlan(context, params) {
         }
       } else if (cost.timing === "reserved") {
         const stepId = `project-start:reservation:${cost.resourceId}:${costIdx++}`;
+        const opRef = `${session.transactionId}:${stepId}`;
         const anticipatedReservationId = createOpaqueId("resv");
         const stepRes = await session.runChildStep({
           stepId,
@@ -23380,12 +23594,12 @@ async function executeProjectStartDomainOperationPlan(context, params) {
           operation: "reserve",
           targetRef: cleanDomainUuid,
           idempotencyKey: `${session.transactionId}:${stepId}`,
-          operationRef: stepId,
+          operationRef: opRef,
           intent: {
             resourceId: cost.resourceId,
             amountMinor: cost.amountMinor,
             reservationId: anticipatedReservationId,
-            operationRef: stepId
+            operationRef: opRef
           },
           execute: async () => {
             return context.economyService.reserve({
@@ -23395,7 +23609,7 @@ async function executeProjectStartDomainOperationPlan(context, params) {
               source: { type: "project", ref: projectId },
               lockOwner: params.commandId,
               reservationId: anticipatedReservationId,
-              operationRef: stepId
+              operationRef: opRef
             });
           }
         });
@@ -23422,6 +23636,7 @@ async function executeProjectStartDomainOperationPlan(context, params) {
   const wfRequired = params.workforceRequired ?? (params.workforceAllocations?.reduce((sum, a) => sum + a.count, 0) ?? 0);
   if (wfRequired > 0) {
     const stepId = `project-start:workforce:${params.workforceAllocations?.[0]?.workforceTypeId ?? "general"}`;
+    const opRef = `${session.transactionId}:${stepId}`;
     const anticipatedWfReservationId = createOpaqueId("resv");
     const wfStepRes = await session.runChildStep({
       stepId,
@@ -23429,12 +23644,12 @@ async function executeProjectStartDomainOperationPlan(context, params) {
       operation: "allocateWorkforceReservation",
       targetRef: cleanDomainUuid,
       idempotencyKey: `${session.transactionId}:${stepId}`,
-      operationRef: stepId,
+      operationRef: opRef,
       intent: {
         amount: wfRequired,
         projectId: draftProject.id,
         reservationId: anticipatedWfReservationId,
-        operationRef: stepId
+        operationRef: opRef
       },
       execute: async () => peopleService.allocateWorkforceReservation({
         domainUuid: cleanDomainUuid,
@@ -23443,7 +23658,7 @@ async function executeProjectStartDomainOperationPlan(context, params) {
         workforceTypeId: params.workforceAllocations?.[0]?.workforceTypeId ?? "general",
         userId: params.userId,
         reservationId: anticipatedWfReservationId,
-        operationRef: stepId
+        operationRef: opRef
       })
     });
     if (!wfStepRes.ok) {
@@ -24179,16 +24394,19 @@ async function executeProjectCompletionDomainOperationPlan(context, params) {
     }
     const anticipatedFacilityId = `fac-${createOpaqueId("prj").slice("prj_".length)}`;
     const stepId = `project-complete:facility:${effect.id}`;
+    const opRef = `${session.transactionId}:${stepId}`;
     const facStepRes = await session.runChildStep({
       stepId,
       subsystem: "facility",
       operation: "createFacility",
       targetRef: effect.targetRef,
       idempotencyKey: `${session.transactionId}:${stepId}`,
+      operationRef: opRef,
       intent: {
         definitionId: effect.targetRef,
         name: effect.description,
-        facilityId: anticipatedFacilityId
+        facilityId: anticipatedFacilityId,
+        operationRef: opRef
       },
       execute: async () => {
         return context.facilitiesService.createFacility({
@@ -24196,7 +24414,7 @@ async function executeProjectCompletionDomainOperationPlan(context, params) {
           definitionId: effect.targetRef,
           name: effect.description,
           facilityId: anticipatedFacilityId,
-          operationRef: stepId
+          operationRef: opRef
         });
       }
     });
@@ -24309,7 +24527,7 @@ async function executeProjectCompletionDomainOperationPlan(context, params) {
   for (const effect of plan.sideEffects.filter((e) => e.type !== "facility" && e.type !== "facility:create" && e.type !== "resource" && e.type !== "resource:credit")) {
     if (params.sideEffectHandlers && params.sideEffectHandlers[effect.type]) {
       const stepId = `project-complete:custom:${effect.id}`;
-      const opRef = stepId;
+      const opRef = `${session.transactionId}:${stepId}`;
       const rawHandler = params.sideEffectHandlers[effect.type];
       const customStepRes = await session.runChildStep({
         stepId,
@@ -24323,7 +24541,8 @@ async function executeProjectCompletionDomainOperationPlan(context, params) {
           effectType: effect.type,
           targetRef: effect.targetRef,
           value: effect.value,
-          description: effect.description
+          description: effect.description,
+          operationRef: opRef
         },
         execute: async () => {
           let handlerRes;
@@ -24949,6 +25168,7 @@ var ProjectsService = class {
   #peopleService;
   #transactionStore;
   #recoveryService;
+  #childHandlerRegistry;
   constructor(options) {
     this.#domains = options.domains;
     this.#projectRegistry = options.projectRegistry ?? createDefaultProjectRegistry();
@@ -24957,9 +25177,13 @@ var ProjectsService = class {
     this.#peopleService = options.peopleService ?? new PeopleService(this.#domains);
     this.#transactionStore = options.transactionStore;
     this.#recoveryService = options.recoveryService;
+    this.#childHandlerRegistry = options.childHandlerRegistry;
     if (this.#recoveryService) {
       this.registerRecoveryCompensators(this.#recoveryService);
     }
+  }
+  get childHandlerRegistry() {
+    return this.#childHandlerRegistry;
   }
   get registry() {
     return this.#projectRegistry;
@@ -25132,7 +25356,8 @@ var ProjectsService = class {
           economyService: this.#economyService,
           facilitiesService: this.#facilitiesService,
           peopleService: this.#peopleService,
-          transactionStore: this.#transactionStore
+          transactionStore: this.#transactionStore,
+          childHandlerRegistry: this.#childHandlerRegistry
         }
       );
     });
@@ -28091,7 +28316,7 @@ async function compensateDowntimeStart(recordOrId, context, options) {
   if (Array.isArray(data.steps) && data.steps.length > 0) {
     const steps = [...data.steps].reverse();
     for (const step of steps) {
-      if (step.state !== "applied" && step.state !== "unknown" && step.state !== "compensating") {
+      if (step.state !== "applied" && step.state !== "unknown" && step.state !== "compensating" && step.state !== "executing") {
         continue;
       }
       const stepId = step.stepId;
@@ -28101,6 +28326,27 @@ async function compensateDowntimeStart(recordOrId, context, options) {
       if (step.subsystem === "economy" && step.operation === "adjust" && context.economyService) {
         const intent = step.intent;
         if (intent && intent.deltaMinor < 0) {
+          if (step.state === "unknown" || step.state === "executing") {
+            const opRef = step.operationRef ?? step.stepId;
+            const recRes = await context.economyService.reconcileAdjustment({
+              domainUuid: cleanDomainUuid,
+              operationRef: opRef,
+              resourceId: intent.resourceId
+            });
+            if (!recRes.ok || recRes.value === "unknown") {
+              return err(
+                createPublicError({
+                  code: "DM_RECOVERY_RECONCILIATION_UNCERTAIN",
+                  category: "conflict",
+                  message: `Economy adjustment reconciliation uncertain for operationRef '${opRef}'`
+                })
+              );
+            }
+            if (recRes.value === "not-applied") {
+              await markCompensationStepCompleted(context.transactionStore, record, stepId);
+              continue;
+            }
+          }
           const idempotencyKey = `${record.transactionId}:compensation:${stepId}`;
           const refRes = await context.economyService.commitAdjust({
             domainUuid: data.domainUuid,
@@ -28191,6 +28437,27 @@ async function compensateDowntimeResolution(recordOrId, context, options) {
       if (step.subsystem === "economy" && step.operation === "adjust" && context.economyService) {
         const intent = step.intent;
         if (intent && intent.deltaMinor > 0) {
+          if (step.state === "unknown" || step.state === "executing") {
+            const opRef = step.operationRef ?? step.stepId;
+            const recRes = await context.economyService.reconcileAdjustment({
+              domainUuid: cleanDomainUuid,
+              operationRef: opRef,
+              resourceId: intent.resourceId
+            });
+            if (!recRes.ok || recRes.value === "unknown") {
+              return err(
+                createPublicError({
+                  code: "DM_RECOVERY_RECONCILIATION_UNCERTAIN",
+                  category: "conflict",
+                  message: `Economy adjustment reconciliation uncertain for operationRef '${opRef}'`
+                })
+              );
+            }
+            if (recRes.value === "not-applied") {
+              await markCompensationStepCompleted(context.transactionStore, record, stepId);
+              continue;
+            }
+          }
           const idempotencyKey = `${record.transactionId}:compensation:${stepId}`;
           const revRes = await context.economyService.commitAdjust({
             domainUuid: data.domainUuid,
@@ -28203,10 +28470,37 @@ async function compensateDowntimeResolution(recordOrId, context, options) {
           if (!revRes.ok) return revRes;
         }
       }
-      if (step.subsystem === "custom" && context.outcomeHandlers) {
-        const handler = context.outcomeHandlers[step.operation];
-        if (handler && typeof handler === "object" && typeof handler.compensate === "function") {
-          const compRes = await handler.compensate(step.operationRef ?? step.stepId, step.receipt);
+      if (step.subsystem === "custom") {
+        const handler = context.childHandlerRegistry?.get(step.operation) ?? context.outcomeHandlers?.[step.operation];
+        if (!handler) {
+          return err(
+            createPublicError({
+              code: "DM_RECOVERY_HANDLER_UNAVAILABLE",
+              category: "conflict",
+              message: `Recovery handler for custom operation '${step.operation}' is not available in registry`
+            })
+          );
+        }
+        const opRef = step.operationRef ?? step.stepId;
+        if (typeof handler === "object" && typeof handler.reconcile === "function") {
+          const recRes = await handler.reconcile(opRef);
+          if (!recRes.ok) return recRes;
+          if (recRes.value === "not-applied") {
+            await markCompensationStepCompleted(context.transactionStore, record, stepId);
+            continue;
+          }
+          if (recRes.value === "unknown") {
+            return err(
+              createPublicError({
+                code: "DM_RECOVERY_RECONCILIATION_UNCERTAIN",
+                category: "conflict",
+                message: `Reconciliation for custom operation '${step.operation}' returned unknown outcome`
+              })
+            );
+          }
+        }
+        if (typeof handler === "object" && typeof handler.compensate === "function") {
+          const compRes = await handler.compensate(opRef, step.receipt);
           if (compRes && !compRes.ok) return compRes;
         }
       }
@@ -28744,7 +29038,7 @@ async function executeDowntimeResolutionPlan(context, params) {
       const handler = handlers[outcome.type];
       if (handler) {
         const stepId = `downtime-resolution:custom:${outcome.id}`;
-        const opRef = stepId;
+        const opRef = `${session.transactionId}:${stepId}`;
         const stepRes = await session.runChildStep({
           stepId,
           subsystem: "custom",
@@ -28756,7 +29050,8 @@ async function executeDowntimeResolutionPlan(context, params) {
             outcomeId: outcome.id,
             outcomeType: outcome.type,
             parameters: outcome.parameters,
-            optional: isOptional
+            optional: isOptional,
+            operationRef: opRef
           },
           execute: async () => {
             let handlerRes;
@@ -28824,14 +29119,15 @@ async function executeDowntimeResolutionPlan(context, params) {
         }
       } else if (outcome.type === "narrative:event") {
         const stepId = `downtime-resolution:narrative:${outcome.id}`;
+        const opRef = `${session.transactionId}:${stepId}`;
         const narrativeRes = await session.runChildStep({
           stepId,
           subsystem: "custom",
           operation: outcome.type,
           targetRef: outcome.id ?? cleanDomainUuid,
           idempotencyKey: `${session.transactionId}:${stepId}`,
-          operationRef: stepId,
-          intent: { outcomeId: outcome.id, parameters: outcome.parameters },
+          operationRef: opRef,
+          intent: { outcomeId: outcome.id, parameters: outcome.parameters, operationRef: opRef },
           execute: async () => ok({
             childReceiptId: createOpaqueId("rep"),
             subsystem: "custom",
@@ -28928,6 +29224,7 @@ var DowntimeService = class {
   #transactionStore;
   #recoveryService;
   #outcomeHandlers;
+  #childHandlerRegistry;
   constructor(options) {
     this.#domains = options.domains;
     this.#downtimeRegistry = options.downtimeRegistry ?? createDefaultDowntimeRegistry();
@@ -28936,9 +29233,13 @@ var DowntimeService = class {
     this.#transactionStore = options.transactionStore;
     this.#recoveryService = options.recoveryService;
     this.#outcomeHandlers = options.outcomeHandlers;
+    this.#childHandlerRegistry = options.childHandlerRegistry;
     if (this.#recoveryService) {
       this.registerRecoveryCompensators(this.#recoveryService);
     }
+  }
+  get childHandlerRegistry() {
+    return this.#childHandlerRegistry;
   }
   #cleanId(idOrUuid) {
     return normalizeJournalEntryId(idOrUuid);
@@ -29121,7 +29422,8 @@ var DowntimeService = class {
         {
           domains: this.#domains,
           economyService: this.#economyService,
-          transactionStore: this.#transactionStore
+          transactionStore: this.#transactionStore,
+          childHandlerRegistry: this.#childHandlerRegistry
         }
       );
     });
@@ -29784,6 +30086,23 @@ function registerDowntimeCommands(options) {
     permissionValidator: validatePerms
   });
 }
+
+// src/mutations/child-handler-contract.ts
+var DefaultTransactionalChildHandlerRegistry = class {
+  #handlers = /* @__PURE__ */ new Map();
+  register(handlerKey, handler) {
+    this.#handlers.set(handlerKey, handler);
+  }
+  get(handlerKey) {
+    return this.#handlers.get(handlerKey);
+  }
+  has(handlerKey) {
+    return this.#handlers.has(handlerKey);
+  }
+  clear() {
+    this.#handlers.clear();
+  }
+};
 
 // src/economy/math/minor-units.ts
 function assertSafeInteger(value, fieldName = "amount") {
@@ -33592,6 +33911,7 @@ function composeDomainManagerRuntime(options = {}) {
   const projectRegistry = options.projectRegistry ?? createDefaultProjectRegistry();
   const facilityRegistry = options.facilityRegistry ?? createDefaultFacilityRegistry();
   const downtimeRegistry = options.downtimeRegistry ?? createDefaultDowntimeRegistry();
+  const childHandlerRegistry = options.childHandlerRegistry ?? new DefaultTransactionalChildHandlerRegistry();
   const facilitiesService = new FacilitiesService({
     domains: mutableDomainRepo,
     facilityRegistry,
@@ -33606,7 +33926,8 @@ function composeDomainManagerRuntime(options = {}) {
     facilitiesService,
     peopleService: people,
     transactionStore,
-    recoveryService: recovery
+    recoveryService: recovery,
+    childHandlerRegistry
   });
   const downtimeService = new DowntimeService({
     domains: mutableDomainRepo,
@@ -33614,8 +33935,42 @@ function composeDomainManagerRuntime(options = {}) {
     economyService,
     facilitiesService,
     transactionStore,
-    recoveryService: recovery
+    recoveryService: recovery,
+    childHandlerRegistry
   });
+  let authorityTransitionLock = Promise.resolve();
+  const handleAuthorityTransition = async () => {
+    const previousLock = authorityTransitionLock;
+    let releaseLock = () => {
+    };
+    authorityTransitionLock = new Promise((resolve) => {
+      releaseLock = resolve;
+    });
+    commandBus.setMutationsEnabled(false);
+    try {
+      await previousLock;
+      if (authority && typeof authority.reconcile === "function") {
+        try {
+          await authority.reconcile();
+        } catch {
+        }
+      }
+      if (authority.service.isCurrentUser()) {
+        const currentEpoch = authority.service.getStatus().authorityEpoch;
+        try {
+          await recovery.scanOnStartup(currentEpoch);
+          await recovery.recoverAll(currentEpoch);
+          commandBus.setMutationsEnabled(true);
+        } catch {
+          commandBus.setMutationsEnabled(false);
+        }
+      } else {
+        commandBus.setMutationsEnabled(true);
+      }
+    } finally {
+      releaseLock();
+    }
+  };
   const registry = new CommandRegistry();
   registerDomainCommandHandlers(registry, coordinator, mutableDomainRepo);
   registerPopulationCommandHandlers(registry, coordinator, mutableDomainRepo);
@@ -33753,6 +34108,8 @@ function composeDomainManagerRuntime(options = {}) {
     projectRegistry,
     facilityRegistry,
     downtimeRegistry,
+    childHandlerRegistry,
+    handleAuthorityTransition,
     initialize: async () => {
       try {
         await transactionStore.rehydrate();
@@ -33768,6 +34125,11 @@ function composeDomainManagerRuntime(options = {}) {
         const manualCurrency = providerRegistry.get(MANUAL_CURRENCY_PROVIDER_ID);
         if (manualCurrency && "rehydrate" in manualCurrency && typeof manualCurrency.rehydrate === "function") {
           await manualCurrency.rehydrate();
+        }
+        if (authority && authority.service && typeof authority.service.onChanged === "function") {
+          authority.service.onChanged(() => {
+            void handleAuthorityTransition();
+          });
         }
       } catch (initErr) {
         commandBus.setMutationsEnabled(false);
@@ -33829,25 +34191,15 @@ function publishModuleApi(rt) {
     module.api = rt.publicApi;
   }
 }
-async function reconcileAuthority() {
-  const authority = runtime?.authority;
-  if (authority === void 0) return;
-  try {
-    await authority.reconcile();
-  } catch (error) {
-    logger.error("Primary Authority reconciliation failed", {
-      error: error instanceof Error ? error.message : String(error)
-    });
-  }
-}
 Hooks.once("init", () => {
   registerFoundryPrimaryAuthoritySettings({
     onPreferredChanged: () => {
-      void reconcileAuthority();
+      void runtime?.handleAuthorityTransition();
     },
     onAuthorityStateChanged: (value) => {
       try {
         runtime?.authority.synchronizePersistedState(value);
+        void runtime?.handleAuthorityTransition();
       } catch (error) {
         logger.error("Primary Authority state synchronization failed", {
           error: error instanceof Error ? error.message : String(error)
@@ -33869,31 +34221,10 @@ Hooks.once("ready", async () => {
     publishModuleApi(runtime);
     return;
   }
-  await reconcileAuthority();
-  if (runtime.authority.service.isCurrentUser()) {
-    const currentEpoch = runtime.authority.service.getStatus().authorityEpoch;
-    try {
-      await runtime.recovery.scanOnStartup(currentEpoch);
-      const results = await runtime.recovery.recoverAll(currentEpoch);
-      if (results.length > 0) {
-        logger.info(
-          `Startup recovery processed ${results.length} transactions`,
-          { processedCount: results.length }
-        );
-      }
-      runtime.commandBus.setMutationsEnabled(true);
-    } catch (error) {
-      logger.error("Startup recovery scan or auto-recovery failed, entering safe mode", {
-        error: error instanceof Error ? error.message : String(error)
-      });
-      runtime.commandBus.setMutationsEnabled(false);
-    }
-  } else {
-    runtime.commandBus.setMutationsEnabled(true);
-  }
+  await runtime.handleAuthorityTransition();
   publishModuleApi(runtime);
   Hooks.on("userConnected", () => {
-    void reconcileAuthority();
+    void runtime?.handleAuthorityTransition();
   });
   logger.info("ready", BUILD_METADATA);
   logger.info("build diagnostics", getBuildDiagnostics());

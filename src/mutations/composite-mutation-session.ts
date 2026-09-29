@@ -264,7 +264,8 @@ export class CompositeMutationSession {
   async runChildStep<TIntent = unknown, TReceipt = unknown>(
     stepDef: ChildStepDefinition<TIntent, TReceipt>
   ): Promise<Result<TReceipt, PublicError>> {
-    const operationRef = stepDef.operationRef ?? stepDef.stepId;
+    const operationRef =
+      stepDef.operationRef ?? `${this.transactionId}:${stepDef.stepId}`;
     const idempotencyKey =
       stepDef.idempotencyKey ?? `${this.transactionId}:${stepDef.stepId}`;
 

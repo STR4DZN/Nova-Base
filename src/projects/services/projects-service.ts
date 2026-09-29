@@ -60,6 +60,7 @@ import {
   compensateProjectCancel,
   compensateProjectStart
 } from "./project-recovery-compensators.js";
+import type { TransactionalChildHandlerRegistry } from "../../mutations/child-handler-contract.js";
 
 export interface ProjectsServiceOptions {
   readonly domains: DomainRepositoryContract;
@@ -69,6 +70,7 @@ export interface ProjectsServiceOptions {
   readonly peopleService?: PublicPeopleApi;
   readonly transactionStore?: TransactionStore;
   readonly recoveryService?: RecoveryService;
+  readonly childHandlerRegistry?: TransactionalChildHandlerRegistry;
 }
 
 export interface StartProjectParams {
@@ -134,6 +136,7 @@ export class ProjectsService {
   readonly #peopleService?: PublicPeopleApi;
   readonly #transactionStore?: TransactionStore;
   readonly #recoveryService?: RecoveryService;
+  readonly #childHandlerRegistry?: TransactionalChildHandlerRegistry;
 
   constructor(options: ProjectsServiceOptions) {
     this.#domains = options.domains;
@@ -143,9 +146,14 @@ export class ProjectsService {
     this.#peopleService = options.peopleService ?? new PeopleService(this.#domains);
     this.#transactionStore = options.transactionStore;
     this.#recoveryService = options.recoveryService;
+    this.#childHandlerRegistry = options.childHandlerRegistry;
     if (this.#recoveryService) {
       this.registerRecoveryCompensators(this.#recoveryService);
     }
+  }
+
+  get childHandlerRegistry(): TransactionalChildHandlerRegistry | undefined {
+    return this.#childHandlerRegistry;
   }
 
   get registry(): ProjectDefinitionRegistry {
@@ -373,7 +381,8 @@ export class ProjectsService {
           economyService: this.#economyService,
           facilitiesService: this.#facilitiesService,
           peopleService: this.#peopleService,
-          transactionStore: this.#transactionStore
+          transactionStore: this.#transactionStore,
+          childHandlerRegistry: this.#childHandlerRegistry
         }
       );
     });
