@@ -3,8 +3,8 @@
 ## Identidade
 
 - Module version: `0.0.6`
-- Gate de código atual: `G6.1 — Relation definitions/instances (modelo e validadores concluídos)`
-- Estado local: `GATE_G5_ACCEPTED_GATE_G6_1_COMPLETED`
+- Gate de código atual: `G6.3 — Relations/history e Reputation (modelos puros concluídos)`
+- Estado local: `GATE_G5_ACCEPTED_GATE_G6_IN_PROGRESS`
 - Estado externo: `GATE_G5_ACCEPTED_GATE_G6_IN_PROGRESS`
 - Schema Domain: `1`
 - Data de conclusão do Gate G5: `2026-09-21`
@@ -17,7 +17,7 @@
 - **Gate G3**: Concluído, auditado, homologado e aceito soberanamente pelo usuário (`GATE_G3_HOMOLOGATED_AND_ACCEPTED`).
 - **Gate G4**: Concluído, auditado, homologado e aceito pelo usuário. Implementação completa de todos os 10 microbuilds (G4.1 a G4.10) de acordo com o Master Specification (§14, §11–12, §42, DEC-1416–2305) e `Documentos/GATES/14_G4_ECONOMY_RESOURCES.md`.
 - **Gate G5**: Concluído (G5.1 a G5.10 e remediações) e aceito pelo usuário em 2026-09-29 após declarar “rodei o .js que voce me mandou e todos os testes passaram” e autorizar a continuidade. Estado: `GATE_G5_ACCEPTED`. Evidência de smoke é reportada pelo usuário; logs separados de Player/F5/failover não foram fornecidos nem são inventados neste registro.
-- **Gate G6**: Em execução. Apenas **G6.1** concluído: tipos, validadores puros e registry versionado de relações. Sem serviço de escrita, persistência, UI ou integração pública nesta etapa.
+- **Gate G6**: Em execução. **G6.1–G6.3** concluídos como modelos puros: relações, histórico/modificadores e reputação. Integração vertical ainda pendente. Autorização contínua do usuário até finalizar G6; registro em `docs/G6_EXECUTION_LOG.md`.
   - **G5.1 (Project model / lifecycle — definition / instance / revision)**: Concluído. Separação formal de `ProjectDefinition` (reutilizável, versionada, catalogada em `ProjectDefinitionRegistry`) e `ProjectInstance` (execução concreta por domínio com `revision`, `workRequired`, `workCompleted`, `lifecycle`, `clampProgress`), cálculo puro de progresso inteiro derivado (`calculateProjectProgress` com clamp de goal por DEC-086, DEC-087, DEC-090), máquina de estados de ciclo de vida (`validateProjectLifecycleTransition` cobrindo os 11 estados canônicos de Master §15.4 e reabertura auditada via `allowReopen`), definições canônicas iniciais (`CANONICAL_PROJECT_DEFINITIONS`), e modelo de capacidade em domínio `domain-manager:projects` (`DomainProjectsData`, `tryGetDomainProjectsData`, `withDomainProjectsData`, `getDomainProjectsData`) validado e registrado no `CapabilityRegistry`.
   - **G5.2 (Progress / resolver / history)**: Concluído. Implementação do modelo de histórico append-oriented (`ProjectEntry`), validação estrita de fontes e metadados (`PROJECT_ENTRY_SOURCE_KINDS`), transição de estado pura (`applyProjectEntry`) com suporte a setbacks negativos (DEC-088) e clamp no objetivo por padrão (DEC-090), regras de compensação/reversão auditada (bloqueio de reversão dupla com `DM_PROJECT_REVERSAL_ALREADY_EXISTS` e proibição de reversão de reversão), contrato extensível de resolução pura de progresso (`ProgressResolver`), implementação padrão (`StandardProgressResolver` / `domain-manager:standard`) sem mutação da instância, e catálogo `ProgressResolverRegistry` com factory e suporte a congelamento (`freeze`).
   - **G5.3 (Start plan)**: Concluído. Implementação do modelo de plano pré-execução (`ProjectStartPlan`), avaliação desacoplada de pré-condições (`evaluateProjectStartPlan`) sem mutação direta de Domain/People/Economy, mapeamento de intenção de reservas econômicas (`ProjectEconomicReservationIntent`) para custos upfront e reserved, avaliação de workforce (`ProjectWorkforceIntent`) e requisitos estruturados (`ProjectRequirementEvaluation` com status satisfied/unsatisfied/unavailable/error), detecção e diagnóstico de blockers (`ProjectBlocker`: capacidade ausente, fundos insuficientes, requisitos insatisfeitos, ciclo de vida inválido e `DM_PROJECT_REVISION_MISMATCH`), e commit atômico (`commitProjectStartPlan`) com suporte aos estados `active` e `initializing`, incremento de revisão e geração de `ProjectEntry` inicial.
@@ -47,7 +47,7 @@
 - Validação estrita de referências, timestamps, cardinalidade, scores, visibilidade, versão e duplicatas. Stance derivada não é persistida como base.
 - Registry guarda versões exatas e snapshots imutáveis; não sobrescreve instâncias com conteúdo novo.
 - **754/754 testes PASS**, sendo 61 novos de G6.1; TypeScript PASS; fixtures pequenas, inválidas, multi-party, round-trip e escala de 1000 relações.
-- Relatório: `docs/G6_1_RELATION_MODEL_REPORT.md`. Próxima microbuild: **G6.2 — modificadores temporários e histórico relacional**. Parar antes de executá-la.
+- Relatório: `docs/G6_1_RELATION_MODEL_REPORT.md`. G6.2 e G6.3 foram executados após autorização contínua do usuário; 10 e 9 testes alvo PASS, TypeScript PASS.
 - Release instalável permanece no G5 corrigido `v0.0.6`; esta etapa entrega checkpoint de código, sem disponibilizar comportamento diplomático incompleto ao usuário do Foundry.
 
 ## Evidência local Gate G5
@@ -554,8 +554,8 @@
 
 ## Próxima ação canônica
 
-- **G6.2 — Relation modifiers/history (base vs temporary)**, conforme Master §18 e DEC-3351–3500 §2.1.
-- G6.1 concluído e testado; execução encerrada antes de iniciar G6.2.
+- **G6.4 — Agreement parties/terms/proposals/lifecycle**, conforme Master §20 e Rodada 08.
+- G6.1–G6.3 concluídos e testados; continuar até G6.10 conforme autorização do usuário.
 - Gates G0–G5 aceitos pelo usuário; G6 inteiro ainda não está concluído.
 - Relatório desta etapa: `docs/G6_1_RELATION_MODEL_REPORT.md`.
 
