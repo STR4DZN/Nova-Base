@@ -74,10 +74,22 @@ export function canonicalizeLockKeys(keys: readonly string[]): readonly string[]
 export class LockManager {
   readonly #locks = new Map<string, SingleKeyLockState>();
   readonly #defaultTimeoutMs: number;
+  readonly #lockReleasedListeners = new Set<(keys: readonly string[]) => void>();
   #nextHandleSeq = 1;
 
   constructor(options?: { defaultTimeoutMs?: number }) {
     this.#defaultTimeoutMs = options?.defaultTimeoutMs ?? 10000;
+  }
+
+  /**
+   * Registers a callback invoked whenever locks are fully released (reentrantDepth drops to 0).
+   * Returns an unsubscribe function.
+   */
+  onLockReleased(listener: (keys: readonly string[]) => void): () => void {
+    this.#lockReleasedListeners.add(listener);
+    return () => {
+      this.#lockReleasedListeners.delete(listener);
+    };
   }
 
   /**
@@ -294,6 +306,7 @@ export class LockManager {
   }
 
   #releaseKeys(ownerId: string, keys: readonly string[]): void {
+    const releasedKeys: string[] = [];
     for (const key of keys) {
       const state = this.#locks.get(key);
       if (!state || state.currentOwnerId !== ownerId) {
@@ -305,11 +318,23 @@ export class LockManager {
         state.currentOwnerId = null;
         state.reentrantDepth = 0;
         state.acquiredAt = undefined;
+        releasedKeys.push(key);
       }
     }
 
     // Process queues across all affected keys
     this.#processQueues();
+
+    if (releasedKeys.length > 0 && this.#lockReleasedListeners.size > 0) {
+      const frozenKeys = Object.freeze([...releasedKeys]);
+      for (const listener of this.#lockReleasedListeners) {
+        try {
+          listener(frozenKeys);
+        } catch {
+          // Ignore listener exceptions
+        }
+      }
+    }
   }
 
   #enqueue(request: QueuedLockRequest): void {

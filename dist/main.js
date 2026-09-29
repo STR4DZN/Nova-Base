@@ -1775,6 +1775,7 @@ function validateReservation(candidate, options = {}) {
     visibility: raw.visibility === "secret" ? "secret" : "public",
     expiresAtReal,
     expiresAtWorld,
+    operationRef: typeof raw.operationRef === "string" ? raw.operationRef.trim() : void 0,
     notes: typeof raw.notes === "string" ? raw.notes.trim() : void 0
   });
 }
@@ -2360,7 +2361,8 @@ function createDefaultDomainEconomyData() {
   return {
     schemaVersion: ECONOMY_SCHEMA_VERSION,
     accounts: Object.freeze([]),
-    appliedIdempotencyKeys: Object.freeze([])
+    appliedIdempotencyKeys: Object.freeze([]),
+    operationReceipts: Object.freeze([])
   };
 }
 function validateDomainEconomyData(raw) {
@@ -2413,10 +2415,12 @@ function validateDomainEconomyData(raw) {
     validatedAccounts.push(acc);
   }
   const appliedKeys = Array.isArray(candidate.appliedIdempotencyKeys) ? Object.freeze([...candidate.appliedIdempotencyKeys]) : Object.freeze([]);
+  const operationReceipts = Array.isArray(candidate.operationReceipts) ? Object.freeze([...candidate.operationReceipts]) : Object.freeze([]);
   return ok({
     schemaVersion: ECONOMY_SCHEMA_VERSION,
     accounts: Object.freeze(validatedAccounts),
-    appliedIdempotencyKeys: appliedKeys
+    appliedIdempotencyKeys: appliedKeys,
+    operationReceipts
   });
 }
 function tryGetDomainEconomyData(domain) {
@@ -6634,6 +6638,7 @@ var CommandBus = class {
   #commandQueue;
   #transportCleanups = /* @__PURE__ */ new Set();
   #transport = null;
+  #mutationsEnabled = true;
   constructor(options) {
     this.#registry = options.registry;
     this.#authorityService = options.authorityService;
@@ -6644,6 +6649,12 @@ var CommandBus = class {
     if (options.transport) {
       this.attachTransport(options.transport);
     }
+  }
+  get mutationsEnabled() {
+    return this.#mutationsEnabled;
+  }
+  setMutationsEnabled(enabled) {
+    this.#mutationsEnabled = enabled;
   }
   attachTransport(transport) {
     this.#transport = transport;
@@ -6819,6 +6830,19 @@ var CommandBus = class {
           code: "DM_COMMAND_HANDLER_NOT_FOUND",
           category: "not-found",
           message: `No handler registered for command type '${command.type}'`
+        }),
+        transportTimestamp: now
+      });
+    }
+    const isMutating = registration.transactional || !!registration.mutationDefinition;
+    if (!this.#mutationsEnabled && isMutating) {
+      return ok({
+        commandId: command.commandId,
+        status: "rejected",
+        error: createPublicError({
+          code: "DM_COMMAND_EXECUTION_FAILED",
+          category: "busy",
+          message: "Command bus is in safe mode: mutations are currently disabled"
         }),
         transportTimestamp: now
       });
@@ -7528,9 +7552,20 @@ function canonicalizeLockKeys(keys) {
 var LockManager = class {
   #locks = /* @__PURE__ */ new Map();
   #defaultTimeoutMs;
+  #lockReleasedListeners = /* @__PURE__ */ new Set();
   #nextHandleSeq = 1;
   constructor(options) {
     this.#defaultTimeoutMs = options?.defaultTimeoutMs ?? 1e4;
+  }
+  /**
+   * Registers a callback invoked whenever locks are fully released (reentrantDepth drops to 0).
+   * Returns an unsubscribe function.
+   */
+  onLockReleased(listener) {
+    this.#lockReleasedListeners.add(listener);
+    return () => {
+      this.#lockReleasedListeners.delete(listener);
+    };
   }
   /**
    * Acquires all specified keys in deterministic order.
@@ -7720,6 +7755,7 @@ var LockManager = class {
     }
   }
   #releaseKeys(ownerId, keys) {
+    const releasedKeys = [];
     for (const key of keys) {
       const state = this.#locks.get(key);
       if (!state || state.currentOwnerId !== ownerId) {
@@ -7730,9 +7766,19 @@ var LockManager = class {
         state.currentOwnerId = null;
         state.reentrantDepth = 0;
         state.acquiredAt = void 0;
+        releasedKeys.push(key);
       }
     }
     this.#processQueues();
+    if (releasedKeys.length > 0 && this.#lockReleasedListeners.size > 0) {
+      const frozenKeys = Object.freeze([...releasedKeys]);
+      for (const listener of this.#lockReleasedListeners) {
+        try {
+          listener(frozenKeys);
+        } catch {
+        }
+      }
+    }
   }
   #enqueue(request) {
     for (const key of request.keys) {
@@ -8625,6 +8671,7 @@ var RecoveryService = class {
   #compensators = /* @__PURE__ */ new Map();
   #pendingLockAcquisitions = /* @__PURE__ */ new Set();
   #lockSetDivergences = [];
+  #lockReleaseUnsubscribe;
   #lastRecoveryError;
   constructor(options, lockManager, fenceRegistry) {
     if ("transactionStore" in options) {
@@ -8635,6 +8682,11 @@ var RecoveryService = class {
       this.#transactionStore = options;
       this.#lockManager = lockManager;
       this.#fenceRegistry = fenceRegistry ?? new RecoveryFenceRegistry();
+    }
+    if (this.#lockManager && "onLockReleased" in this.#lockManager && typeof this.#lockManager.onLockReleased === "function") {
+      this.#lockReleaseUnsubscribe = this.#lockManager.onLockReleased(() => {
+        void this.retryPendingLockAcquisitions();
+      });
     }
   }
   get fenceRegistry() {
@@ -8946,6 +8998,7 @@ var RecoveryService = class {
       handle.release();
       this.#heldRecoveryLocks.delete(transactionId);
     }
+    void this.retryPendingLockAcquisitions();
   }
   /**
    * Recovers unresolved transactions using registered compensators.
@@ -9028,6 +9081,9 @@ var RecoveryService = class {
     });
   }
   clear() {
+    if (this.#lockReleaseUnsubscribe) {
+      this.#lockReleaseUnsubscribe();
+    }
     for (const handle of this.#heldRecoveryLocks.values()) {
       handle.release();
     }
@@ -12966,7 +13022,13 @@ var PeopleRepository = class {
     const peopleDataRes = tryGetDomainPeopleData(domainRes.value.record);
     if (!peopleDataRes.ok) return peopleDataRes;
     const peopleData = peopleDataRes.value;
-    const resvId = createOpaqueId("resv");
+    const resvId = params.reservationId ?? createOpaqueId("resv");
+    const existing = peopleData.reservations.find(
+      (r) => r.id === resvId || params.operationRef && r.operationRef === params.operationRef
+    );
+    if (existing && existing.status === "active") {
+      return ok({ reservationId: existing.id });
+    }
     const reservation = {
       id: resvId,
       sourceRef: params.sourceRef ?? `domain:${id}`,
@@ -12974,7 +13036,8 @@ var PeopleRepository = class {
       workforceTypeId: params.workforceTypeId ?? "general",
       amount: params.amount,
       status: "active",
-      visibility: params.visibility ?? "public"
+      visibility: params.visibility ?? "public",
+      ...params.operationRef ? { operationRef: params.operationRef } : {}
     };
     const updatedRecord = withDomainPeopleData(domainRes.value.record, {
       ...peopleData,
@@ -14623,7 +14686,9 @@ var PeopleService = class {
       domainUuid: params.domainUuid,
       targetRef: `project:${params.projectId}`,
       amount: params.amount,
-      workforceTypeId: params.workforceTypeId
+      workforceTypeId: params.workforceTypeId,
+      reservationId: params.reservationId,
+      operationRef: params.operationRef
     });
   }
   async releaseWorkforceReservation(params) {
@@ -15585,6 +15650,7 @@ function validateReservation2(raw) {
     ...typeof candidate.createdAtWorld === "number" ? { createdAtWorld: candidate.createdAtWorld } : {},
     ...typeof candidate.expiresAtWorld === "number" ? { expiresAtWorld: candidate.expiresAtWorld } : {},
     ...typeof candidate.expiresAtReal === "number" ? { expiresAtReal: candidate.expiresAtReal } : {},
+    ...typeof candidate.operationRef === "string" ? { operationRef: candidate.operationRef } : {},
     revision
   });
 }
@@ -15689,7 +15755,17 @@ var ReservationStore = class {
     }
   }
   create(input) {
-    const id = createOpaqueId("resv");
+    const id = input.reservationId ?? input.id ?? createOpaqueId("resv");
+    if (this.#reservations.has(id)) {
+      return ok(this.#reservations.get(id));
+    }
+    if (input.operationRef) {
+      for (const r of this.#reservations.values()) {
+        if (r.operationRef === input.operationRef) {
+          return ok(r);
+        }
+      }
+    }
     const raw = {
       id,
       domainUuid: input.domainUuid,
@@ -15702,6 +15778,7 @@ var ReservationStore = class {
       ...input.createdAtWorld !== void 0 ? { createdAtWorld: input.createdAtWorld } : {},
       ...input.expiresAtWorld !== void 0 ? { expiresAtWorld: input.expiresAtWorld } : {},
       ...input.expiresAtReal !== void 0 ? { expiresAtReal: input.expiresAtReal } : {},
+      ...input.operationRef !== void 0 ? { operationRef: input.operationRef } : {},
       revision: 0
     };
     const valRes = validateReservation2(raw);
@@ -15726,6 +15803,14 @@ var ReservationStore = class {
   }
   get(id) {
     return this.#reservations.get(id);
+  }
+  getByOperationRef(operationRef) {
+    for (const r of this.#reservations.values()) {
+      if (r.operationRef === operationRef) {
+        return r;
+      }
+    }
+    return void 0;
   }
   list(filter) {
     let all = Array.from(this.#reservations.values());
@@ -16684,6 +16769,9 @@ var EconomyService = class {
   getReservation(id) {
     return this.#reservationStore.get(id);
   }
+  getReservationByOperationRef(operationRef) {
+    return this.#reservationStore.getByOperationRef(operationRef);
+  }
   async getAccount(domainUuid, resourceId) {
     const docRes = await this.#domains.read(this.#cleanUuid(domainUuid));
     if (!docRes.ok) {
@@ -17071,14 +17159,42 @@ var EconomyService = class {
       }
       const existingAccount = econData.accounts[accIndex];
       if (params.idempotencyKey) {
-        if (econData.appliedIdempotencyKeys?.includes(params.idempotencyKey)) {
+        const existingReceipt = econData.operationReceipts?.find(
+          (r) => r.operationRef === params.idempotencyKey
+        );
+        const isKeyApplied = econData.appliedIdempotencyKeys?.includes(params.idempotencyKey);
+        if (existingReceipt || isKeyApplied) {
           const existingEntries2 = this.#ledgerStore.query({
             domainUuid: params.domainUuid,
             sourceRef: params.idempotencyKey
           });
+          if (existingEntries2.length > 0) {
+            return ok({
+              account: existingAccount,
+              entry: existingEntries2[0],
+              isNoop: true
+            });
+          }
+          const delta = existingReceipt ? existingReceipt.deltaMinor : params.deltaMinor ?? 0;
+          const kind = existingReceipt?.kind ?? "adjustment";
+          const reason = existingReceipt?.reason ?? params.reason ?? "Reconciled ledger entry";
+          const recRes = this.#ledgerStore.append({
+            domainUuid: params.domainUuid,
+            resourceId: existingReceipt ? existingReceipt.resourceId : params.resourceId,
+            deltaMinor: delta,
+            kind,
+            source: {
+              type: "manual",
+              ref: params.idempotencyKey,
+              reason
+            }
+          });
+          if (recRes.ok) {
+            await this.#ledgerStore.flush();
+          }
           return ok({
             account: existingAccount,
-            entry: existingEntries2[0],
+            entry: recRes.ok ? recRes.value : void 0,
             isNoop: true
           });
         }
@@ -17370,10 +17486,23 @@ var EconomyService = class {
       const updatedAccounts = [...econData.accounts];
       updatedAccounts[accIndex] = updatedAccount;
       const appliedKeys = params.idempotencyKey ? [...econData.appliedIdempotencyKeys ?? [], params.idempotencyKey] : econData.appliedIdempotencyKeys;
+      const newReceipt = {
+        operationRef: params.idempotencyKey ?? `op_${Date.now()}`,
+        resourceId: params.resourceId,
+        deltaMinor: intent.deltaMinor,
+        kind: intent.kind,
+        reason: intent.source.reason,
+        state: "balance-applied"
+      };
+      const updatedReceipts = params.idempotencyKey ? [
+        ...(econData.operationReceipts ?? []).filter((r) => r.operationRef !== params.idempotencyKey),
+        newReceipt
+      ] : econData.operationReceipts;
       const updatedRecord = withDomainEconomyData(doc.record, {
         ...econData,
         accounts: Object.freeze(updatedAccounts),
-        appliedIdempotencyKeys: appliedKeys ? Object.freeze(appliedKeys) : void 0
+        appliedIdempotencyKeys: appliedKeys ? Object.freeze(appliedKeys) : void 0,
+        operationReceipts: updatedReceipts ? Object.freeze(updatedReceipts) : void 0
       });
       const updateDocRes = await this.#domains.update({ ...doc, record: updatedRecord });
       if (!updateDocRes.ok) return updateDocRes;
@@ -17967,7 +18096,9 @@ var EconomyService = class {
         originalAmountMinor: params.amountMinor,
         source: params.source,
         expiresAtWorld: params.expiresAtWorld,
-        expiresAtReal: params.expiresAtReal
+        expiresAtReal: params.expiresAtReal,
+        reservationId: params.reservationId,
+        operationRef: params.operationRef
       });
       if (res.ok) {
         await this.#reservationStore.flush();
@@ -21979,7 +22110,7 @@ async function compensateProjectStart(recordOrId, context, options) {
   if (context.economyService) {
     if (Array.isArray(data.steps) && data.steps.length > 0) {
       for (const step of data.steps) {
-        if (step.subsystem === "economy" && step.operation === "adjust" && (step.state === "applied" || step.state === "unknown" || step.state === "compensating")) {
+        if (step.subsystem === "economy" && step.operation === "adjust" && (step.state === "applied" || step.state === "unknown" || step.state === "compensating" || step.state === "executing")) {
           const stepId = step.stepId;
           if (!isCompensationStepCompleted(record, stepId, context.transactionStore)) {
             const intent = step.intent;
@@ -22022,11 +22153,11 @@ async function compensateProjectStart(recordOrId, context, options) {
   if (context.economyService) {
     if (Array.isArray(data.steps) && data.steps.length > 0) {
       for (const step of data.steps) {
-        if (step.subsystem === "economy" && step.operation === "reserve" && (step.state === "applied" || step.state === "unknown" || step.state === "compensating")) {
+        if (step.subsystem === "economy" && step.operation === "reserve" && (step.state === "applied" || step.state === "unknown" || step.state === "compensating" || step.state === "executing")) {
           const stepId = step.stepId;
           if (!isCompensationStepCompleted(record, stepId, context.transactionStore)) {
             const receipt = step.receipt;
-            const resId = receipt?.id ?? receipt?.reservationId ?? (typeof receipt === "string" ? receipt : void 0);
+            const resId = receipt?.id ?? receipt?.reservationId ?? (typeof receipt === "string" ? receipt : void 0) ?? step.intent?.reservationId;
             if (resId) {
               const resObj = context.economyService.getReservation(resId);
               if (resObj && (resObj.status === "active" || resObj.status === "partially-consumed")) {
@@ -22064,11 +22195,11 @@ async function compensateProjectStart(recordOrId, context, options) {
   }
   if (Array.isArray(data.steps) && data.steps.length > 0) {
     for (const step of data.steps) {
-      if (step.subsystem === "people" && (step.operation === "allocateWorkforceReservation" || step.operation === "reserve-workforce") && (step.state === "applied" || step.state === "unknown" || step.state === "compensating")) {
+      if (step.subsystem === "people" && (step.operation === "allocateWorkforceReservation" || step.operation === "reserve-workforce") && (step.state === "applied" || step.state === "unknown" || step.state === "compensating" || step.state === "executing")) {
         const stepId = step.stepId;
         if (!isCompensationStepCompleted(record, stepId, context.transactionStore)) {
           const receipt = step.receipt;
-          const resId = receipt?.reservationId ?? receipt?.id ?? (typeof receipt === "string" ? receipt : void 0) ?? data.allocatedWorkforceReservationId;
+          const resId = receipt?.reservationId ?? receipt?.id ?? (typeof receipt === "string" ? receipt : void 0) ?? step.intent?.reservationId ?? data.allocatedWorkforceReservationId;
           if (resId) {
             const relWf = await peopleService.releaseWorkforceReservation({
               domainUuid: data.domainUuid,
@@ -22303,7 +22434,7 @@ async function compensateProjectCompletion(recordOrId, context, options) {
   if (Array.isArray(data.steps) && data.steps.length > 0) {
     const steps = [...data.steps].reverse();
     for (const step of steps) {
-      if (step.state !== "applied" && step.state !== "unknown" && step.state !== "compensating") {
+      if (step.state !== "applied" && step.state !== "unknown" && step.state !== "compensating" && step.state !== "executing") {
         continue;
       }
       const stepId = step.stepId;
@@ -22325,6 +22456,35 @@ async function compensateProjectCompletion(recordOrId, context, options) {
             });
             if (!refRes.ok) return refRes;
           }
+        }
+      }
+      if ((step.subsystem === "facility" || step.subsystem === "facilities") && context.domains) {
+        const receipt = step.receipt;
+        const facId = receipt?.facility?.id ?? receipt?.id ?? step.intent?.facilityId;
+        if (facId) {
+          const docRes = await context.domains.read(cleanDomainUuid);
+          if (docRes.ok) {
+            const facData = getDomainFacilitiesData(docRes.value.record);
+            const remaining = facData.facilities.filter((f) => f.id !== facId);
+            if (remaining.length !== facData.facilities.length) {
+              const updatedRecord = withDomainFacilitiesData(docRes.value.record, {
+                ...facData,
+                facilities: Object.freeze(remaining)
+              });
+              const saveRes = await context.domains.save({
+                ...docRes.value,
+                record: updatedRecord
+              });
+              if (!saveRes.ok) return saveRes;
+            }
+          }
+        }
+      }
+      if (step.subsystem === "custom" && context.sideEffectHandlers) {
+        const handler = context.sideEffectHandlers[step.operation];
+        if (handler && typeof handler === "object" && typeof handler.compensate === "function") {
+          const compRes = await handler.compensate(step.operationRef ?? step.stepId, step.receipt);
+          if (compRes && !compRes.ok) return compRes;
         }
       }
       await markCompensationStepCompleted(context.transactionStore, record, stepId);
@@ -22498,7 +22658,7 @@ var CompositeMutationSession = class _CompositeMutationSession {
     }
     const authorityEpoch = options.transactionContext?.authorityEpoch ?? options.authorityEpoch ?? 1;
     const rawLockKeys = options.transactionContext?.lockKeys ?? options.lockKeys ?? [];
-    const rawPlanLockKeys = options.planLockKeys ?? options.transactionContext?.lockKeys;
+    const rawPlanLockKeys = options.expectedLockKeys ?? options.planLockKeys;
     const forbiddenCheck = assertNoForbiddenLockKeys(rawLockKeys);
     if (!forbiddenCheck.ok) {
       return forbiddenCheck;
@@ -22602,85 +22762,132 @@ var CompositeMutationSession = class _CompositeMutationSession {
     });
   }
   /**
-   * Executes a child side-effect with pre-intent and post-receipt durable checkpoints
+   * Executes a child side-effect with write-ahead intent/executing phase and post-receipt durable checkpoints
    * (INV-03, INV-04, INV-05).
+   * Intent persistence and flush before execute() are mandatory across all flows.
    */
   async runChildStep(stepDef) {
+    const operationRef = stepDef.operationRef ?? stepDef.stepId;
     const idempotencyKey = stepDef.idempotencyKey ?? `${this.transactionId}:${stepDef.stepId}`;
-    const plannedStep = {
+    const executingStep = {
       stepId: stepDef.stepId,
       subsystem: stepDef.subsystem,
       operation: stepDef.operation,
       targetRef: stepDef.targetRef,
       idempotencyKey,
-      state: "planned",
+      operationRef,
+      state: "executing",
       intent: stepDef.intent
     };
     const existingIdx = this.#steps.findIndex((s) => s.stepId === stepDef.stepId);
     if (existingIdx !== -1) {
-      this.#steps[existingIdx] = plannedStep;
+      this.#steps[existingIdx] = executingStep;
     } else {
-      this.#steps.push(plannedStep);
+      this.#steps.push(executingStep);
     }
-    if (this.#transactionStore && stepDef.flushIntent) {
+    if (this.#transactionStore) {
       const intentPersist = await this.#persistSteps();
       if (!intentPersist.ok) {
+        const stepIdx2 = this.#steps.findIndex((s) => s.stepId === stepDef.stepId);
+        if (stepIdx2 !== -1) {
+          this.#steps[stepIdx2] = { ...executingStep, state: "planned" };
+        }
         return intentPersist;
       }
     }
     let execRes;
+    let threwException = false;
     try {
       execRes = await stepDef.execute();
     } catch (thrown) {
+      threwException = true;
       execRes = err(
         createPublicError({
           code: "DM_COMMAND_EXECUTION_FAILED",
           category: "internal",
           message: thrown instanceof Error ? thrown.message : String(thrown),
-          details: thrown
+          details: { outcome: "unknown", error: thrown }
         })
       );
     }
-    if (!execRes.ok) {
+    if (execRes.ok) {
+      const appliedStep = {
+        ...executingStep,
+        state: "applied",
+        receipt: execRes.value
+      };
+      const stepIdx2 = this.#steps.findIndex((s) => s.stepId === stepDef.stepId);
+      if (stepIdx2 !== -1) {
+        this.#steps[stepIdx2] = appliedStep;
+      } else {
+        this.#steps.push(appliedStep);
+      }
+      if (this.#transactionStore) {
+        const receiptPersist = await this.#persistSteps();
+        if (!receiptPersist.ok) {
+          const unknownStep = {
+            ...executingStep,
+            state: "unknown",
+            receipt: void 0
+          };
+          this.#steps[stepIdx2 !== -1 ? stepIdx2 : this.#steps.length - 1] = unknownStep;
+          await this.markNeedsRecovery(
+            `Child step '${stepDef.stepId}' receipt flush failed: ${receiptPersist.error.message}`
+          );
+          return err(
+            createPublicError({
+              code: "DM_DOMAIN_STORAGE_ERROR",
+              category: "internal",
+              message: `Child step applied but receipt checkpoint failed to flush: ${receiptPersist.error.message}`,
+              details: {
+                outcome: "unknown",
+                stepId: stepDef.stepId,
+                originalError: receiptPersist.error
+              }
+            })
+          );
+        }
+      }
       return execRes;
     }
-    const appliedStep = {
-      ...plannedStep,
-      state: "applied",
-      receipt: execRes.value
-    };
+    const errDetails = execRes.error.details;
+    const isExplicitUnknown = threwException || errDetails?.outcome === "unknown" || execRes.error.outcome === "unknown" || execRes.error.category === "timeout" || execRes.error.code === "DM_TIMEOUT" || execRes.error.code === "DM_ECON_PROVIDER_TIMEOUT";
     const stepIdx = this.#steps.findIndex((s) => s.stepId === stepDef.stepId);
-    if (stepIdx !== -1) {
-      this.#steps[stepIdx] = appliedStep;
-    } else {
-      this.#steps.push(appliedStep);
-    }
-    if (this.#transactionStore) {
-      const receiptPersist = await this.#persistSteps();
-      if (!receiptPersist.ok) {
-        const unknownStep = {
-          ...appliedStep,
-          state: "unknown"
-        };
-        this.#steps[stepIdx !== -1 ? stepIdx : this.#steps.length - 1] = unknownStep;
-        await this.markNeedsRecovery(
-          `Child step '${stepDef.stepId}' receipt flush failed: ${receiptPersist.error.message}`
-        );
-        return err(
-          createPublicError({
-            code: "DM_DOMAIN_STORAGE_ERROR",
-            category: "internal",
-            message: `Child step applied but receipt checkpoint failed to flush: ${receiptPersist.error.message}`,
-            details: {
-              outcome: "unknown",
-              stepId: stepDef.stepId,
-              originalError: receiptPersist.error
-            }
-          })
-        );
+    if (isExplicitUnknown) {
+      const unknownStep = {
+        ...executingStep,
+        state: "unknown"
+      };
+      if (stepIdx !== -1) {
+        this.#steps[stepIdx] = unknownStep;
       }
+      await this.markNeedsRecovery(
+        `Child step '${stepDef.stepId}' execution outcome is unknown: ${execRes.error.message}`
+      );
+      return err(
+        createPublicError({
+          code: execRes.error.code,
+          category: execRes.error.category,
+          message: execRes.error.message,
+          details: {
+            ...typeof execRes.error.details === "object" && execRes.error.details !== null ? execRes.error.details : {},
+            outcome: "unknown"
+          }
+        })
+      );
+    } else {
+      const notAppliedStep = {
+        ...executingStep,
+        state: "planned"
+      };
+      if (stepIdx !== -1) {
+        this.#steps[stepIdx] = notAppliedStep;
+      }
+      if (this.#transactionStore) {
+        await this.#persistSteps();
+      }
+      return execRes;
     }
-    return execRes;
   }
   /**
    * Transitions transaction to committing before writing parent state (INV-02, INV-09).
@@ -22762,10 +22969,11 @@ var CompositeMutationSession = class _CompositeMutationSession {
    * that transaction transitions durably to failed (if safe) or needs-recovery (if uncertain).
    */
   async failAndCompensate(primaryError, compensatorFn) {
+    const isUnknownOutcome = primaryError?.outcome === "unknown" || primaryError.details?.outcome === "unknown" || this.#steps.some((s) => s.state === "unknown" || s.state === "executing");
     const hasAppliedEffects = this.#steps.some(
-      (s) => s.state === "applied" || s.state === "unknown"
+      (s) => s.state === "applied" || s.state === "unknown" || s.state === "executing"
     );
-    if (!hasAppliedEffects) {
+    if (!hasAppliedEffects && !isUnknownOutcome) {
       this.#currentPhase = "failed";
       if (this.#transactionStore) {
         await this.#transactionStore.transitionDurable(
@@ -22776,6 +22984,12 @@ var CompositeMutationSession = class _CompositeMutationSession {
         );
       }
       this.#removeFence();
+      return err(primaryError);
+    }
+    if (isUnknownOutcome) {
+      await this.markNeedsRecovery(
+        `Transaction outcome is unknown, requires reconciliation: ${primaryError.message}`
+      );
       return err(primaryError);
     }
     this.#currentPhase = "needs-recovery";
@@ -22862,6 +23076,21 @@ var CompositeMutationSession = class _CompositeMutationSession {
     this.#currentPhase = "needs-recovery";
     this.#installFence(reason);
     if (this.#transactionStore) {
+      await this.#transactionStore.patchDurable(this.transactionId, (current) => {
+        const currentData = current.recoveryData ?? {};
+        return {
+          ...current,
+          state: "needs-recovery",
+          recoveryData: {
+            ...currentData,
+            ...this.#legacyData,
+            steps: Object.freeze([...this.#steps]),
+            phase: "needs-recovery",
+            lastError: reason
+          },
+          updatedAt: Date.now()
+        };
+      });
       this.#transactionStore.transition(
         this.transactionId,
         "needs-recovery",
@@ -23022,10 +23251,12 @@ async function executeProjectStartDomainOperationPlan(context, params) {
   const sessionRes = await CompositeMutationSession.prepare({
     transactionContext: params.transactionContext,
     transactionStore: context.transactionStore,
+    recoveryFenceRegistry: context.recoveryFenceRegistry,
     commandId: cmdId,
     authorityEpoch: epoch,
     lockKeys: sessionLockKeys,
-    planLockKeys: params.transactionContext?.lockKeys ?? params.lockKeys ?? [canonicalStartLock],
+    expectedLockKeys: [canonicalStartLock],
+    planLockKeys: [canonicalStartLock],
     recoveryType: "projects:start",
     parentRef: `domain:${cleanDomainUuid}`,
     initialRecoveryData: {
@@ -23142,20 +23373,29 @@ async function executeProjectStartDomainOperationPlan(context, params) {
         }
       } else if (cost.timing === "reserved") {
         const stepId = `project-start:reservation:${cost.resourceId}:${costIdx++}`;
+        const anticipatedReservationId = createOpaqueId("resv");
         const stepRes = await session.runChildStep({
           stepId,
           subsystem: "economy",
           operation: "reserve",
           targetRef: cleanDomainUuid,
           idempotencyKey: `${session.transactionId}:${stepId}`,
-          intent: { resourceId: cost.resourceId, amountMinor: cost.amountMinor },
+          operationRef: stepId,
+          intent: {
+            resourceId: cost.resourceId,
+            amountMinor: cost.amountMinor,
+            reservationId: anticipatedReservationId,
+            operationRef: stepId
+          },
           execute: async () => {
             return context.economyService.reserve({
               domainUuid: cleanDomainUuid,
               resourceId: cost.resourceId,
               amountMinor: cost.amountMinor,
               source: { type: "project", ref: projectId },
-              lockOwner: params.commandId
+              lockOwner: params.commandId,
+              reservationId: anticipatedReservationId,
+              operationRef: stepId
             });
           }
         });
@@ -23182,19 +23422,28 @@ async function executeProjectStartDomainOperationPlan(context, params) {
   const wfRequired = params.workforceRequired ?? (params.workforceAllocations?.reduce((sum, a) => sum + a.count, 0) ?? 0);
   if (wfRequired > 0) {
     const stepId = `project-start:workforce:${params.workforceAllocations?.[0]?.workforceTypeId ?? "general"}`;
+    const anticipatedWfReservationId = createOpaqueId("resv");
     const wfStepRes = await session.runChildStep({
       stepId,
       subsystem: "people",
       operation: "allocateWorkforceReservation",
       targetRef: cleanDomainUuid,
       idempotencyKey: `${session.transactionId}:${stepId}`,
-      intent: { amount: wfRequired, projectId: draftProject.id },
+      operationRef: stepId,
+      intent: {
+        amount: wfRequired,
+        projectId: draftProject.id,
+        reservationId: anticipatedWfReservationId,
+        operationRef: stepId
+      },
       execute: async () => peopleService.allocateWorkforceReservation({
         domainUuid: cleanDomainUuid,
         projectId: draftProject.id,
         amount: wfRequired,
         workforceTypeId: params.workforceAllocations?.[0]?.workforceTypeId ?? "general",
-        userId: params.userId
+        userId: params.userId,
+        reservationId: anticipatedWfReservationId,
+        operationRef: stepId
       })
     });
     if (!wfStepRes.ok) {
@@ -23640,7 +23889,8 @@ async function executeProjectCompletionDomainOperationPlan(context, params) {
     commandId: cmdId,
     authorityEpoch: epoch,
     lockKeys: sessionLockKeys,
-    planLockKeys: params.transactionContext?.lockKeys ?? params.lockKeys ?? canonicalCompletionLocks,
+    expectedLockKeys: canonicalCompletionLocks,
+    planLockKeys: canonicalCompletionLocks,
     recoveryType: "projects:completion",
     parentRef: `project:${project.id}`,
     initialRecoveryData: {
@@ -23667,9 +23917,9 @@ async function executeProjectCompletionDomainOperationPlan(context, params) {
   const runCompensator = async (s, _error) => {
     const effectiveFacilityIds = [...createdFacilityIds];
     for (const step of s.steps) {
-      if (step.subsystem === "facility" && (step.state === "applied" || step.state === "unknown")) {
+      if ((step.subsystem === "facility" || step.subsystem === "facilities") && (step.state === "applied" || step.state === "unknown")) {
         const receipt = step.receipt;
-        const id = receipt?.facility?.id ?? (typeof receipt === "string" ? receipt : void 0);
+        const id = receipt?.facility?.id ?? receipt?.id ?? (typeof receipt === "string" ? receipt : void 0) ?? step.intent?.facilityId;
         if (id && !effectiveFacilityIds.includes(id)) {
           effectiveFacilityIds.push(id);
         }
@@ -23707,6 +23957,7 @@ async function executeProjectCompletionDomainOperationPlan(context, params) {
       planId: plan.planId,
       domainUuid: cleanDomainUuid,
       projectSnapshot: project,
+      steps: Object.freeze([...s.steps]),
       createdFacilityIds: Object.freeze([...effectiveFacilityIds]),
       debitedCostRefs: Object.freeze([...effectiveDebited]),
       creditedResourceRefs: Object.freeze([...effectiveCredited]),
@@ -23926,6 +24177,7 @@ async function executeProjectCompletionDomainOperationPlan(context, params) {
       };
       continue;
     }
+    const anticipatedFacilityId = `fac-${createOpaqueId("prj").slice("prj_".length)}`;
     const stepId = `project-complete:facility:${effect.id}`;
     const facStepRes = await session.runChildStep({
       stepId,
@@ -23933,12 +24185,18 @@ async function executeProjectCompletionDomainOperationPlan(context, params) {
       operation: "createFacility",
       targetRef: effect.targetRef,
       idempotencyKey: `${session.transactionId}:${stepId}`,
-      intent: { definitionId: effect.targetRef, name: effect.description },
+      intent: {
+        definitionId: effect.targetRef,
+        name: effect.description,
+        facilityId: anticipatedFacilityId
+      },
       execute: async () => {
         return context.facilitiesService.createFacility({
           domainUuid: cleanDomainUuid,
           definitionId: effect.targetRef,
-          name: effect.description
+          name: effect.description,
+          facilityId: anticipatedFacilityId,
+          operationRef: stepId
         });
       }
     });
@@ -24050,35 +24308,71 @@ async function executeProjectCompletionDomainOperationPlan(context, params) {
   }
   for (const effect of plan.sideEffects.filter((e) => e.type !== "facility" && e.type !== "facility:create" && e.type !== "resource" && e.type !== "resource:credit")) {
     if (params.sideEffectHandlers && params.sideEffectHandlers[effect.type]) {
-      try {
-        const handlerRes = await params.sideEffectHandlers[effect.type](effect, {
-          domain: record,
-          project
-        });
-        if (typeof handlerRes === "object" && handlerRes !== null && "ok" in handlerRes) {
-          if (handlerRes.ok) {
-            executedReceipts[effect.id] = handlerRes.value;
+      const stepId = `project-complete:custom:${effect.id}`;
+      const opRef = stepId;
+      const rawHandler = params.sideEffectHandlers[effect.type];
+      const customStepRes = await session.runChildStep({
+        stepId,
+        subsystem: "custom",
+        operation: effect.type,
+        targetRef: effect.targetRef ?? effect.id,
+        idempotencyKey: `${session.transactionId}:${stepId}`,
+        operationRef: opRef,
+        intent: {
+          effectId: effect.id,
+          effectType: effect.type,
+          targetRef: effect.targetRef,
+          value: effect.value,
+          description: effect.description
+        },
+        execute: async () => {
+          let handlerRes;
+          if (typeof rawHandler === "object" && rawHandler !== null && "execute" in rawHandler) {
+            handlerRes = await rawHandler.execute(
+              { effect, domain: record, project },
+              opRef
+            );
+          } else if (typeof rawHandler === "function") {
+            handlerRes = await rawHandler(effect, {
+              domain: record,
+              project
+            });
           } else {
-            partialFailure = true;
-            executedReceipts[effect.id] = {
-              childReceiptId: createOpaqueId("rep"),
-              subsystem: "custom",
-              action: "custom_side_effect",
-              targetRef: effect.targetRef ?? effect.id,
-              payload: effect.value,
-              success: false,
-              error: handlerRes.error.message,
-              appliedAt: Date.now()
-            };
+            return err(
+              createPublicError({
+                code: "DM_HANDLER_NOT_FOUND",
+                category: "internal",
+                message: `Invalid handler for side effect type '${effect.type}'`
+              })
+            );
           }
-        } else {
+          if (typeof handlerRes === "object" && handlerRes !== null && "ok" in handlerRes) {
+            if (handlerRes.ok) {
+              return ok(handlerRes.value);
+            }
+            return err(handlerRes.error);
+          }
           const rec = handlerRes;
-          executedReceipts[effect.id] = rec;
           if (!rec.success) {
-            partialFailure = true;
+            return err(
+              createPublicError({
+                code: "DM_COMMAND_EXECUTION_FAILED",
+                category: "internal",
+                message: rec.error ?? "Custom side effect failed",
+                details: rec
+              })
+            );
           }
+          return ok(rec);
         }
-      } catch (err3) {
+      });
+      if (customStepRes.ok) {
+        executedReceipts[effect.id] = customStepRes.value;
+      } else {
+        const isUnknown = customStepRes.error.details?.outcome === "unknown" || customStepRes.error.outcome === "unknown" || customStepRes.error.code === "DM_DOMAIN_STORAGE_ERROR";
+        if (isUnknown) {
+          return session.failAndCompensate(customStepRes.error, runCompensator);
+        }
         partialFailure = true;
         executedReceipts[effect.id] = {
           childReceiptId: createOpaqueId("rep"),
@@ -24087,7 +24381,7 @@ async function executeProjectCompletionDomainOperationPlan(context, params) {
           targetRef: effect.targetRef ?? effect.id,
           payload: effect.value,
           success: false,
-          error: err3 instanceof Error ? err3.message : "Side effect handler threw",
+          error: customStepRes.error.message,
           appliedAt: Date.now()
         };
       }
@@ -24296,7 +24590,8 @@ async function executeProjectAdvanceDomainOperationPlan(context, params) {
     commandId: cmdId,
     authorityEpoch: epoch,
     lockKeys: sessionLockKeys,
-    planLockKeys: params.transactionContext?.lockKeys ?? params.lockKeys ?? canonicalAdvanceLocks,
+    expectedLockKeys: canonicalAdvanceLocks,
+    planLockKeys: canonicalAdvanceLocks,
     recoveryType: "projects:advance",
     parentRef: `project:${project.id}`,
     initialRecoveryData: {
@@ -24518,7 +24813,8 @@ async function executeProjectCancelDomainOperationPlan(context, params) {
     commandId: cmdId,
     authorityEpoch: epoch,
     lockKeys: sessionLockKeys,
-    planLockKeys: params.transactionContext?.lockKeys ?? params.lockKeys ?? canonicalCancelLocks,
+    expectedLockKeys: canonicalCancelLocks,
+    planLockKeys: canonicalCancelLocks,
     recoveryType: "projects:cancel",
     parentRef: `project:${project.id}`,
     initialRecoveryData: {
@@ -26328,7 +26624,13 @@ var FacilitiesService = class {
       );
     }
     const currentFacilitiesData = getDomainFacilitiesData(record);
-    const facilityId = `fac-${createOpaqueId("prj").slice("prj_".length)}`;
+    const facilityId = params.facilityId ?? `fac-${createOpaqueId("prj").slice("prj_".length)}`;
+    const existing = currentFacilitiesData.facilities.find(
+      (f) => f.id === facilityId || params.operationRef && f.operationRef === params.operationRef
+    );
+    if (existing) {
+      return ok({ facility: existing });
+    }
     const now = Date.now();
     const newFacility = {
       id: facilityId,
@@ -26351,7 +26653,8 @@ var FacilitiesService = class {
       },
       tags: Object.freeze([...definition.tags ?? []]),
       createdAt: now,
-      updatedAt: now
+      updatedAt: now,
+      ...params.operationRef ? { operationRef: params.operationRef } : {}
     };
     const updatedFacilities = Object.freeze([...currentFacilitiesData.facilities, newFacility]);
     const updatedRecord = withDomainFacilitiesData(record, {
@@ -26439,7 +26742,8 @@ var FacilitiesService = class {
       commandId: cmdId,
       authorityEpoch: epoch,
       lockKeys: sessionLockKeys,
-      planLockKeys: params.transactionContext?.lockKeys ?? params.lockKeys ?? canonicalLocks,
+      expectedLockKeys: canonicalLocks,
+      planLockKeys: canonicalLocks,
       recoveryType: "facilities:maintenance",
       parentRef: `facility:${facility.id}`,
       initialRecoveryData: {
@@ -26535,10 +26839,13 @@ var FacilitiesService = class {
           return session.failAndCompensate(stepRes.error, runCompensator);
         }
         debitedCosts.push({ resourceId: cost.resourceId, amount: cost.amount });
-        await session.checkpointRecoveryData({
+        const checkRes = await session.checkpointRecoveryData({
           debitedCosts: Object.freeze([...debitedCosts]),
           status: "executing"
         });
+        if (!checkRes.ok) {
+          return session.failAndCompensate(checkRes.error, runCompensator);
+        }
       }
     }
     const commitRes = commitFacilityMaintenance({
@@ -26640,7 +26947,8 @@ var FacilitiesService = class {
       commandId: cmdId,
       authorityEpoch: epoch,
       lockKeys: sessionLockKeys,
-      planLockKeys: params.transactionContext?.lockKeys ?? params.lockKeys ?? canonicalLocks,
+      expectedLockKeys: canonicalLocks,
+      planLockKeys: canonicalLocks,
       recoveryType: "facilities:repair",
       parentRef: `facility:${facility.id}`,
       initialRecoveryData: {
@@ -26736,10 +27044,13 @@ var FacilitiesService = class {
           return session.failAndCompensate(stepRes.error, runCompensator);
         }
         debitedCosts.push({ resourceId: cost.resourceId, amount: cost.amount });
-        await session.checkpointRecoveryData({
+        const checkRes = await session.checkpointRecoveryData({
           debitedCosts: Object.freeze([...debitedCosts]),
           status: "executing"
         });
+        if (!checkRes.ok) {
+          return session.failAndCompensate(checkRes.error, runCompensator);
+        }
       }
     }
     const commitRes = commitFacilityRepair({
@@ -27870,7 +28181,7 @@ async function compensateDowntimeResolution(recordOrId, context, options) {
   if (Array.isArray(data.steps) && data.steps.length > 0) {
     const steps = [...data.steps].reverse();
     for (const step of steps) {
-      if (step.state !== "applied" && step.state !== "unknown" && step.state !== "compensating") {
+      if (step.state !== "applied" && step.state !== "unknown" && step.state !== "compensating" && step.state !== "executing") {
         continue;
       }
       const stepId = step.stepId;
@@ -27890,6 +28201,13 @@ async function compensateDowntimeResolution(recordOrId, context, options) {
             idempotencyKey
           });
           if (!revRes.ok) return revRes;
+        }
+      }
+      if (step.subsystem === "custom" && context.outcomeHandlers) {
+        const handler = context.outcomeHandlers[step.operation];
+        if (handler && typeof handler === "object" && typeof handler.compensate === "function") {
+          const compRes = await handler.compensate(step.operationRef ?? step.stepId, step.receipt);
+          if (compRes && !compRes.ok) return compRes;
         }
       }
       await markCompensationStepCompleted(context.transactionStore, record, stepId);
@@ -28103,7 +28421,8 @@ async function executeDowntimeStartPlan(context, params) {
     commandId: cmdId,
     authorityEpoch: epoch,
     lockKeys: sessionLockKeys,
-    planLockKeys: params.transactionContext?.lockKeys ?? params.lockKeys ?? [canonicalLock],
+    expectedLockKeys: [canonicalLock],
+    planLockKeys: [canonicalLock],
     recoveryType: "downtime:start",
     parentRef: `domain:${cleanDomainUuid}`,
     initialRecoveryData: {
@@ -28289,7 +28608,8 @@ async function executeDowntimeResolutionPlan(context, params) {
     commandId: cmdId,
     authorityEpoch: epoch,
     lockKeys: sessionLockKeys,
-    planLockKeys: params.transactionContext?.lockKeys ?? params.lockKeys ?? canonicalLocks,
+    expectedLockKeys: canonicalLocks,
+    planLockKeys: canonicalLocks,
     recoveryType: "downtime:resolution",
     parentRef: `downtime:${activity.id}`,
     initialRecoveryData: {
@@ -28423,28 +28743,70 @@ async function executeDowntimeResolutionPlan(context, params) {
       };
       const handler = handlers[outcome.type];
       if (handler) {
-        try {
-          const res = await handler(outcome);
-          outcomesApplied.push(res);
-          if (!res.success && !isOptional) {
-            return session.failAndCompensate(
-              createPublicError({
-                code: "DM_DOWNTIME_MANDATORY_OUTCOME_FAILED",
-                category: "conflict",
-                message: `Mandatory outcome '${outcome.label}' failed: ${res.error ?? "handler failed"}`,
-                details: res
-              }),
-              runCompensator
-            );
+        const stepId = `downtime-resolution:custom:${outcome.id}`;
+        const opRef = stepId;
+        const stepRes = await session.runChildStep({
+          stepId,
+          subsystem: "custom",
+          operation: outcome.type,
+          targetRef: cleanDomainUuid,
+          idempotencyKey: `${session.transactionId}:${stepId}`,
+          operationRef: opRef,
+          intent: {
+            outcomeId: outcome.id,
+            outcomeType: outcome.type,
+            parameters: outcome.parameters,
+            optional: isOptional
+          },
+          execute: async () => {
+            let handlerRes;
+            if (typeof handler === "object" && handler !== null && "execute" in handler) {
+              handlerRes = await handler.execute(outcome, opRef);
+            } else if (typeof handler === "function") {
+              handlerRes = await handler(outcome, opRef);
+            } else {
+              return err(
+                createPublicError({
+                  code: "DM_HANDLER_NOT_FOUND",
+                  category: "internal",
+                  message: `Invalid handler for outcome type '${outcome.type}'`
+                })
+              );
+            }
+            if (typeof handlerRes === "object" && handlerRes !== null && "ok" in handlerRes) {
+              if (handlerRes.ok) {
+                return ok(handlerRes.value);
+              }
+              return err(handlerRes.error);
+            }
+            const rec = handlerRes;
+            if (!rec.success && !isOptional) {
+              return err(
+                createPublicError({
+                  code: "DM_DOWNTIME_MANDATORY_OUTCOME_FAILED",
+                  category: "conflict",
+                  message: `Mandatory outcome '${outcome.label}' failed: ${rec.error ?? "handler failed"}`,
+                  details: rec
+                })
+              );
+            }
+            return ok(rec);
           }
-        } catch (handlerErr) {
+        });
+        if (stepRes.ok) {
+          outcomesApplied.push(stepRes.value);
+        } else {
+          const isUnknown = stepRes.error.details?.outcome === "unknown" || stepRes.error.outcome === "unknown" || stepRes.error.code === "DM_DOMAIN_STORAGE_ERROR";
+          if (isUnknown) {
+            return session.failAndCompensate(stepRes.error, runCompensator);
+          }
           if (!isOptional) {
             return session.failAndCompensate(
               createPublicError({
                 code: "DM_DOWNTIME_MANDATORY_OUTCOME_FAILED",
-                category: "internal",
-                message: `Mandatory outcome handler for '${outcome.label}' threw: ${handlerErr instanceof Error ? handlerErr.message : String(handlerErr)}`,
-                details: handlerErr
+                category: "conflict",
+                message: `Mandatory outcome '${outcome.label}' failed: ${stepRes.error.message}`,
+                details: stepRes.error
               }),
               runCompensator
             );
@@ -28456,20 +28818,33 @@ async function executeDowntimeResolutionPlan(context, params) {
             targetRef: cleanDomainUuid,
             payload: outcome.parameters,
             success: false,
-            error: handlerErr instanceof Error ? handlerErr.message : String(handlerErr),
+            error: stepRes.error.message,
             appliedAt: Date.now()
           });
         }
       } else if (outcome.type === "narrative:event") {
-        outcomesApplied.push({
-          childReceiptId: createOpaqueId("rep"),
+        const stepId = `downtime-resolution:narrative:${outcome.id}`;
+        const narrativeRes = await session.runChildStep({
+          stepId,
           subsystem: "custom",
-          action: outcome.type,
+          operation: outcome.type,
           targetRef: outcome.id ?? cleanDomainUuid,
-          payload: outcome.parameters,
-          success: true,
-          appliedAt: Date.now()
+          idempotencyKey: `${session.transactionId}:${stepId}`,
+          operationRef: stepId,
+          intent: { outcomeId: outcome.id, parameters: outcome.parameters },
+          execute: async () => ok({
+            childReceiptId: createOpaqueId("rep"),
+            subsystem: "custom",
+            action: outcome.type,
+            targetRef: outcome.id ?? cleanDomainUuid,
+            payload: outcome.parameters,
+            success: true,
+            appliedAt: Date.now()
+          })
         });
+        if (narrativeRes.ok) {
+          outcomesApplied.push(narrativeRes.value);
+        }
       } else {
         if (!isOptional) {
           return session.failAndCompensate(
@@ -33184,7 +33559,7 @@ function composeDomainManagerRuntime(options = {}) {
   const authority = options.authority ?? new FoundryPrimaryAuthorityAdapter();
   const lockManager = options.lockManager ?? new LockManager();
   const transactionStore = options.transactionStore ?? new TransactionStore({
-    storageAdapter: options.transactionStorageAdapter ?? new FoundryJournalTransactionStorageAdapter()
+    storageAdapter: options.transactionStorageAdapter ?? options.transactionStoreAdapter ?? new FoundryJournalTransactionStorageAdapter()
   });
   const recovery = new RecoveryService({ transactionStore, lockManager });
   const coordinator = new MutationCoordinator({ lockManager, recoveryService: recovery, transactionStore });
@@ -33358,6 +33733,8 @@ function composeDomainManagerRuntime(options = {}) {
     lockManager,
     coordinator,
     recovery,
+    recoveryService: recovery,
+    recoveryFenceRegistry: recovery.fenceRegistry,
     transactionStore,
     diagnostics,
     people,
@@ -33377,19 +33754,24 @@ function composeDomainManagerRuntime(options = {}) {
     facilityRegistry,
     downtimeRegistry,
     initialize: async () => {
-      await transactionStore.rehydrate();
-      await ledgerStore.rehydrate();
-      await reservationStore.rehydrate();
-      await thresholdService.rehydrate();
-      const customDefs = await customResourceStore.rehydrate();
-      for (const def of customDefs) {
-        if (!resourceRegistry.get(def.id)) {
-          resourceRegistry.register(def);
+      try {
+        await transactionStore.rehydrate();
+        await ledgerStore.rehydrate();
+        await reservationStore.rehydrate();
+        await thresholdService.rehydrate();
+        const customDefs = await customResourceStore.rehydrate();
+        for (const def of customDefs) {
+          if (!resourceRegistry.get(def.id)) {
+            resourceRegistry.register(def);
+          }
         }
-      }
-      const manualCurrency = providerRegistry.get(MANUAL_CURRENCY_PROVIDER_ID);
-      if (manualCurrency && "rehydrate" in manualCurrency && typeof manualCurrency.rehydrate === "function") {
-        await manualCurrency.rehydrate();
+        const manualCurrency = providerRegistry.get(MANUAL_CURRENCY_PROVIDER_ID);
+        if (manualCurrency && "rehydrate" in manualCurrency && typeof manualCurrency.rehydrate === "function") {
+          await manualCurrency.rehydrate();
+        }
+      } catch (initErr) {
+        commandBus.setMutationsEnabled(false);
+        throw initErr;
       }
     },
     destroy: () => {
@@ -33441,18 +33823,28 @@ var Logger = class {
 // src/main.ts
 var logger = new Logger("Domain Manager");
 var runtime = null;
-function reconcileAuthority() {
+function publishModuleApi(rt) {
+  const module = globalThis.game?.modules?.get?.("domain-manager");
+  if (module) {
+    module.api = rt.publicApi;
+  }
+}
+async function reconcileAuthority() {
   const authority = runtime?.authority;
   if (authority === void 0) return;
-  void authority.reconcile().catch((error) => {
+  try {
+    await authority.reconcile();
+  } catch (error) {
     logger.error("Primary Authority reconciliation failed", {
       error: error instanceof Error ? error.message : String(error)
     });
-  });
+  }
 }
 Hooks.once("init", () => {
   registerFoundryPrimaryAuthoritySettings({
-    onPreferredChanged: reconcileAuthority,
+    onPreferredChanged: () => {
+      void reconcileAuthority();
+    },
     onAuthorityStateChanged: (value) => {
       try {
         runtime?.authority.synchronizePersistedState(value);
@@ -33467,29 +33859,41 @@ Hooks.once("init", () => {
 });
 Hooks.once("ready", async () => {
   runtime = composeDomainManagerRuntime();
-  await runtime.initialize();
-  const module = globalThis.game?.modules?.get?.("domain-manager");
-  if (module) {
-    module.api = runtime.publicApi;
+  runtime.commandBus.setMutationsEnabled(false);
+  try {
+    await runtime.initialize();
+  } catch (initErr) {
+    logger.error("Runtime initialization failed, entering safe mode", {
+      error: initErr instanceof Error ? initErr.message : String(initErr)
+    });
+    publishModuleApi(runtime);
+    return;
   }
-  reconcileAuthority();
+  await reconcileAuthority();
   if (runtime.authority.service.isCurrentUser()) {
     const currentEpoch = runtime.authority.service.getStatus().authorityEpoch;
-    void runtime.recovery.recoverAll(currentEpoch).then((results) => {
+    try {
+      await runtime.recovery.scanOnStartup(currentEpoch);
+      const results = await runtime.recovery.recoverAll(currentEpoch);
       if (results.length > 0) {
         logger.info(
           `Startup recovery processed ${results.length} transactions`,
           { processedCount: results.length }
         );
       }
-    }).catch((error) => {
-      logger.error("Startup recovery scan failed", {
+      runtime.commandBus.setMutationsEnabled(true);
+    } catch (error) {
+      logger.error("Startup recovery scan or auto-recovery failed, entering safe mode", {
         error: error instanceof Error ? error.message : String(error)
       });
-    });
+      runtime.commandBus.setMutationsEnabled(false);
+    }
+  } else {
+    runtime.commandBus.setMutationsEnabled(true);
   }
+  publishModuleApi(runtime);
   Hooks.on("userConnected", () => {
-    reconcileAuthority();
+    void reconcileAuthority();
   });
   logger.info("ready", BUILD_METADATA);
   logger.info("build diagnostics", getBuildDiagnostics());

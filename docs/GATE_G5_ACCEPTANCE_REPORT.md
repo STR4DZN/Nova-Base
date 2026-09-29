@@ -5,7 +5,7 @@
 **Normative Authorities:** `Documentos/99_DOMAIN_MANAGER_MASTER_SPECIFICATION_V1.md` (§15, §16, §17, DEC-083 to DEC-097, Anexo 07 DEC-2306 to DEC-3200), `Documentos/GATES/15_G5_PROJECTS_FACILITIES_DOWNTIME.md`  
 **Status:** **GATE_G5_COMPLETED_PENDING_USER_ACCEPTANCE (Aguardando Aceitação Soberana do Usuário — Nunca aceito sem confirmação explícita)**  
 **Date:** 2026-09-28  
-**Test Suite:** 645/645 passing (0 failures, 0 regressions against G4 baseline of 444; +201 dedicated G5 tests, including 66 adversarial revalidation tests + 34 master remediation tests)  
+**Test Suite:** 657/657 passing (0 failures, 0 regressions against G4 baseline of 444; +213 dedicated G5 tests, including 66 adversarial revalidation tests + 34 master remediation tests + 12 kernel hardening tests)  
 **TypeScript Conformance:** Strict, 0 errors via `npx tsc --noEmit`  
 **Package & Artifact Validation:** PASS (`dist/domain-manager-v0.0.5.zip`, validation scripts verified)
 
@@ -80,7 +80,7 @@ The G5 test suite validates the system against high-scale multi-domain operation
 
 ## 5. Test Suite & Validation Summary
 
-- **Total Test Count**: 645 tests passing (0 failures, 0 regressions across G0–G4 baseline of 444; +201 dedicated G5 tests).
+- **Total Test Count**: 657 tests passing (0 failures, 0 regressions across G0–G4 baseline of 444; +213 dedicated G5 tests).
 - **TypeScript Compilation**: Strict conformance, 0 errors via `node node_modules/typescript/bin/tsc --noEmit`.
 - **Production Build**: `node build.mjs` built cleanly with zero warnings (`dist/main.js`).
 - **Distribution Package**: `node scripts/package.mjs` created `dist/domain-manager-v0.0.5.zip`.
@@ -217,9 +217,22 @@ The G5 test suite validates the system against high-scale multi-domain operation
 
 ---
 
-## 14. Canonical Next Gate Designation
+## 14. Acceptance Audit Hardening Matrix (Patches A through F)
 
-Per the Master Specification roadmap, Gate G5 is now complete, fully remediated against initial audit (G5-AUD-001 to G5-AUD-010), first revalidation (G5-REVAL-001 to G5-REVAL-012), second revalidation (G5-REVAL2-001 to G5-REVAL2-010), third revalidation (G5-REVAL3-001 to G5-REVAL3-007), fourth revalidation (G5-REVAL4-001 to G5-REVAL4-012), fifth revalidation (G5-REVAL5-001 to G5-REVAL5-009), sixth revalidation (G5-REVAL6-001 to G5-REVAL6-005), and the Master Remediation (DOMAIN_MANAGER_G5_MASTER_REMEDIACAO_FINAL), and strictly pending user acceptance:
+| Patch | Category | Architectural Directive & Root Cause | Implementation Details | Verification Evidence |
+|---|---|---|---|---|
+| **Patch A** | Kernel & Contract | Child effect protocol contract and execution tracking: need formal contract for subsystem child step execution and clear distinction between intent recording and receipt checkpointing. | Created `TransactionalChildHandler` in `src/mutations/child-handler-contract.ts` with `execute()`, `reconcile()`, `compensate()`. Added `"executing"` step state and `operationRef?: string` in `RecoveryStep`. `CompositeMutationSession.runChildStep` writes intent to memory ahead of execution, transitions to `"unknown"` with `receipt: undefined` and installs fence if receipt flush fails. | `tests/runtime/g5-kernel-hardening.test.ts` (T2, T3, T4, T12 passing). |
+| **Patch B** | Subsystems | Subsystem intent idempotency and pre-allocation: child mutations must support pre-allocated entity identifiers and operation references to allow idempotent re-execution and deduplication across crashes. | `EconomyService`: Idempotent adjustment via `operationRef` and `OperationReceiptRecord`, reconstructing ledger on retry without double debiting. `PeopleService`: `reservationId` and `operationRef` in `allocateWorkforceReservation`. `FacilitiesService`: `facilityId` and `operationRef` in `createFacility`. `ProjectsService`: Pre-allocation of anticipated IDs. | `tests/runtime/g5-kernel-hardening.test.ts` (T1, T10 passing). |
+| **Patch C** | Compensators | Compensator fallback to write-ahead intent: when receipt checkpoints fail or are interrupted (G2 crash point), compensators lacked access to created resource/facility identifiers. | Compensators (`compensateProjectStart`, `compensateProjectCompletion`, etc.) fall back to `(step.intent as any)?.reservationId` and `(step.intent as any)?.facilityId` when receipts are undefined. `project-completion-domain-operation-plan.ts` pre-allocates `anticipatedFacilityId` in intent. | `tests/runtime/g5-kernel-hardening.test.ts` (T5, T6 passing), `tests/runtime/g5-revalidation-adversarial.test.ts` (Scenario 10 passing). |
+| **Patch D** | Recovery Bootstrap | Startup lock acquisition pipeline and async retry: locked resources during startup deferred recovery, but needed automatic notification when locks are released. | `LockManager.onLockReleased` dispatches automatic `recoveryService.retryPendingLockAcquisitions()` to re-attempt recovery as soon as locks become available. Removed duplicate `clear()` in `RecoveryService`. | `tests/runtime/g5-kernel-hardening.test.ts` (T7 passing). |
+| **Patch E** | Safe Mode | Safe-mode enforcement on unrecoverable startup failure: if startup recovery scan encounters unresolvable transactions or storage failures, runtime must prevent further mutations. | Added safe mode (`setMutationsEnabled(false)`) to `CommandBus` and `DomainManagerRuntime`. Mutating commands fail closed with `DM_RUNTIME_SAFE_MODE` while read-only queries remain operational. | `tests/runtime/g5-kernel-hardening.test.ts` (T8, T9 passing). |
+| **Patch F** | Test Hardening | Crash-point test coverage (G1/G2/G3) and comprehensive hardening suite T1–T12. | Upgraded `tests/runtime/g5-transaction-kernel.test.ts` (G5-GROUP-G) to assert G1 (planned), G2 (applied-no-receipt), and G3 (applied-with-receipt) crash states. Created `tests/runtime/g5-kernel-hardening.test.ts` with 12 end-to-end scenarios covering all hardening facets. | 19/19 passing in `g5-transaction-kernel.test.ts`, 12/12 passing in `g5-kernel-hardening.test.ts`, 657/657 passing overall. |
+
+---
+
+## 15. Canonical Next Gate Designation
+
+Per the Master Specification roadmap, Gate G5 is now complete, fully remediated against initial audit (G5-AUD-001 to G5-AUD-010), first revalidation (G5-REVAL-001 to G5-REVAL-012), second revalidation (G5-REVAL2-001 to G5-REVAL2-010), third revalidation (G5-REVAL3-001 to G5-REVAL3-007), fourth revalidation (G5-REVAL4-001 to G5-REVAL4-012), fifth revalidation (G5-REVAL5-001 to G5-REVAL5-009), sixth revalidation (G5-REVAL6-001 to G5-REVAL6-005), the Master Remediation (DOMAIN_MANAGER_G5_MASTER_REMEDIACAO_FINAL), and the Master Acceptance Audit Hardening (Patches A–F), and strictly pending user acceptance:
 - **Current Gate Status**: `GATE_G5_COMPLETED_PENDING_USER_ACCEPTANCE`
 - **Canonical Next Gate**: **Gate G6 — Relations / Reputation / Agreements / Territory** (`Documentos/GATES/16_G6_RELATIONS_REPUTATION_AGREEMENTS_TERRITORY.md`).
 

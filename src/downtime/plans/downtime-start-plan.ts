@@ -294,7 +294,8 @@ export async function executeDowntimeStartPlan(
     commandId: cmdId,
     authorityEpoch: epoch,
     lockKeys: sessionLockKeys,
-    planLockKeys: params.transactionContext?.lockKeys ?? params.lockKeys ?? [canonicalLock],
+    expectedLockKeys: [canonicalLock],
+    planLockKeys: [canonicalLock],
     recoveryType: "downtime:start",
     parentRef: `domain:${cleanDomainUuid}`,
     initialRecoveryData: {

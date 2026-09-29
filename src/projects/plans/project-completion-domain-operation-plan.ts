@@ -21,6 +21,7 @@ import type { TransactionStore } from "../../mutations/transaction-store.js";
 import { createTransactionRecord } from "../../mutations/transaction-record.js";
 import { compensateProjectCompletion } from "../services/project-recovery-compensators.js";
 import { lockKey } from "../../mutations/lock-keys.js";
+import type { TransactionalChildHandler } from "../../mutations/child-handler-contract.js";
 import {
   CompositeMutationSession,
   type TransactionExecutionContext
@@ -35,7 +36,7 @@ export interface ProjectCompletionDomainOperationParams {
   readonly authorityEpoch?: number;
   readonly correlationId?: string;
   readonly causationId?: string;
-  readonly sideEffectHandlers?: Readonly<Record<string, SideEffectHandler>>;
+  readonly sideEffectHandlers?: Readonly<Record<string, SideEffectHandler | TransactionalChildHandler>>;
   readonly lockKeys?: readonly string[];
   readonly transactionContext?: TransactionExecutionContext;
 }
@@ -157,7 +158,8 @@ export async function executeProjectCompletionDomainOperationPlan(
     commandId: cmdId,
     authorityEpoch: epoch,
     lockKeys: sessionLockKeys,
-    planLockKeys: params.transactionContext?.lockKeys ?? params.lockKeys ?? canonicalCompletionLocks,
+    expectedLockKeys: canonicalCompletionLocks,
+    planLockKeys: canonicalCompletionLocks,
     recoveryType: "projects:completion",
     parentRef: `project:${project.id}`,
     initialRecoveryData: {
@@ -188,9 +190,13 @@ export async function executeProjectCompletionDomainOperationPlan(
   const runCompensator = async (s: CompositeMutationSession, _error: PublicError) => {
     const effectiveFacilityIds = [...createdFacilityIds];
     for (const step of s.steps) {
-      if (step.subsystem === "facility" && (step.state === "applied" || step.state === "unknown")) {
+      if (((step.subsystem as string) === "facility" || (step.subsystem as string) === "facilities") && (step.state === "applied" || step.state === "unknown")) {
         const receipt = step.receipt as any;
-        const id = receipt?.facility?.id ?? (typeof receipt === "string" ? receipt : undefined);
+        const id =
+          receipt?.facility?.id ??
+          receipt?.id ??
+          (typeof receipt === "string" ? receipt : undefined) ??
+          (step.intent as any)?.facilityId;
         if (id && !effectiveFacilityIds.includes(id)) {
           effectiveFacilityIds.push(id);
         }
@@ -231,6 +237,7 @@ export async function executeProjectCompletionDomainOperationPlan(
       planId: plan.planId,
       domainUuid: cleanDomainUuid,
       projectSnapshot: project,
+      steps: Object.freeze([...s.steps]),
       createdFacilityIds: Object.freeze([...effectiveFacilityIds]),
       debitedCostRefs: Object.freeze([...effectiveDebited]),
       creditedResourceRefs: Object.freeze([...effectiveCredited]),
@@ -472,6 +479,7 @@ export async function executeProjectCompletionDomainOperationPlan(
       continue;
     }
 
+    const anticipatedFacilityId = `fac-${createOpaqueId("prj").slice("prj_".length)}`;
     const stepId = `project-complete:facility:${effect.id}`;
     const facStepRes = await session.runChildStep({
       stepId,
@@ -479,12 +487,18 @@ export async function executeProjectCompletionDomainOperationPlan(
       operation: "createFacility",
       targetRef: effect.targetRef,
       idempotencyKey: `${session.transactionId}:${stepId}`,
-      intent: { definitionId: effect.targetRef, name: effect.description },
+      intent: {
+        definitionId: effect.targetRef,
+        name: effect.description,
+        facilityId: anticipatedFacilityId
+      },
       execute: async () => {
         return context.facilitiesService!.createFacility({
           domainUuid: cleanDomainUuid,
           definitionId: effect.targetRef!,
-          name: effect.description
+          name: effect.description,
+          facilityId: anticipatedFacilityId,
+          operationRef: stepId
         });
       }
     });
@@ -599,38 +613,82 @@ export async function executeProjectCompletionDomainOperationPlan(
     }
   }
 
-  // Handle custom side effects
+  // Handle custom side effects via session.runChildStep (Section 7, INV-03 to INV-06)
   for (const effect of plan.sideEffects.filter((e) => e.type !== "facility" && e.type !== "facility:create" && e.type !== "resource" && e.type !== "resource:credit")) {
     if (params.sideEffectHandlers && params.sideEffectHandlers[effect.type]) {
-      try {
-        const handlerRes = await params.sideEffectHandlers[effect.type](effect, {
-          domain: record,
-          project
-        });
-        if (typeof handlerRes === "object" && handlerRes !== null && "ok" in handlerRes) {
-          if ((handlerRes as any).ok) {
-            executedReceipts[effect.id] = (handlerRes as any).value;
+      const stepId = `project-complete:custom:${effect.id}`;
+      const opRef = stepId;
+      const rawHandler = params.sideEffectHandlers[effect.type];
+
+      const customStepRes = await session.runChildStep<Record<string, unknown>, ChildReceipt>({
+        stepId,
+        subsystem: "custom",
+        operation: effect.type,
+        targetRef: effect.targetRef ?? effect.id,
+        idempotencyKey: `${session.transactionId}:${stepId}`,
+        operationRef: opRef,
+        intent: {
+          effectId: effect.id,
+          effectType: effect.type,
+          targetRef: effect.targetRef,
+          value: effect.value,
+          description: effect.description
+        },
+        execute: async () => {
+          let handlerRes: any;
+          if (typeof rawHandler === "object" && rawHandler !== null && "execute" in rawHandler) {
+            handlerRes = await (rawHandler as TransactionalChildHandler).execute(
+              { effect, domain: record, project },
+              opRef
+            );
+          } else if (typeof rawHandler === "function") {
+            handlerRes = await rawHandler(effect, {
+              domain: record,
+              project
+            });
           } else {
-            partialFailure = true;
-            executedReceipts[effect.id] = {
-              childReceiptId: createOpaqueId("rep"),
-              subsystem: "custom",
-              action: "custom_side_effect",
-              targetRef: effect.targetRef ?? effect.id,
-              payload: effect.value,
-              success: false,
-              error: (handlerRes as any).error.message,
-              appliedAt: Date.now()
-            };
+            return err(
+              createPublicError({
+                code: "DM_HANDLER_NOT_FOUND",
+                category: "internal",
+                message: `Invalid handler for side effect type '${effect.type}'`
+              })
+            );
           }
-        } else {
+
+          if (typeof handlerRes === "object" && handlerRes !== null && "ok" in handlerRes) {
+            if (handlerRes.ok) {
+              return ok(handlerRes.value);
+            }
+            return err(handlerRes.error);
+          }
           const rec = handlerRes as ChildReceipt;
-          executedReceipts[effect.id] = rec;
           if (!rec.success) {
-            partialFailure = true;
+            return err(
+              createPublicError({
+                code: "DM_COMMAND_EXECUTION_FAILED",
+                category: "internal",
+                message: rec.error ?? "Custom side effect failed",
+                details: rec
+              })
+            );
           }
+          return ok(rec);
         }
-      } catch (err) {
+      });
+
+      if (customStepRes.ok) {
+        executedReceipts[effect.id] = customStepRes.value;
+      } else {
+        const isUnknown =
+          (customStepRes.error.details as any)?.outcome === "unknown" ||
+          (customStepRes.error as any).outcome === "unknown" ||
+          customStepRes.error.code === "DM_DOMAIN_STORAGE_ERROR";
+
+        if (isUnknown) {
+          return session.failAndCompensate(customStepRes.error, runCompensator);
+        }
+
         partialFailure = true;
         executedReceipts[effect.id] = {
           childReceiptId: createOpaqueId("rep"),
@@ -639,7 +697,7 @@ export async function executeProjectCompletionDomainOperationPlan(
           targetRef: effect.targetRef ?? effect.id,
           payload: effect.value,
           success: false,
-          error: err instanceof Error ? err.message : "Side effect handler threw",
+          error: customStepRes.error.message,
           appliedAt: Date.now()
         };
       }
@@ -660,7 +718,7 @@ export async function executeProjectCompletionDomainOperationPlan(
 
   // Build side effect handlers delivering executed real receipts
   const sideEffectHandlers: Record<string, SideEffectHandler> = {
-    ...(params.sideEffectHandlers ?? {})
+    ...((params.sideEffectHandlers as any) ?? {})
   };
 
   if (!sideEffectHandlers.facility) {

@@ -158,7 +158,8 @@ export async function executeProjectCancelDomainOperationPlan(
     commandId: cmdId,
     authorityEpoch: epoch,
     lockKeys: sessionLockKeys,
-    planLockKeys: params.transactionContext?.lockKeys ?? params.lockKeys ?? canonicalCancelLocks,
+    expectedLockKeys: canonicalCancelLocks,
+    planLockKeys: canonicalCancelLocks,
     recoveryType: "projects:cancel",
     parentRef: `project:${project.id}`,
     initialRecoveryData: {

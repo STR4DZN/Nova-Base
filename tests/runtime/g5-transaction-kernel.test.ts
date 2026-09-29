@@ -221,7 +221,6 @@ test("G5-KERNEL-INV-05: runChildStep marks step unknown and enters needs-recover
   const session = sessionRes.value;
 
   // Effect will run, but receipt flush will fail
-  adapter.failOnReceipt = true;
   let effectExecuted = false;
 
   const stepRes = await session.runChildStep({
@@ -231,6 +230,7 @@ test("G5-KERNEL-INV-05: runChildStep marks step unknown and enters needs-recover
     intent: { amount: 100 },
     execute: async () => {
       effectExecuted = true;
+      adapter.failOnReceipt = true;
       return ok({ reservationId: "res-1" });
     }
   });
@@ -1017,7 +1017,17 @@ test("G5-GROUP-F-8: facilities:repair parent reconciliation", async () => {
 // ---------------------------------------------------------------------------
 
 test("G5-GROUP-G: Child intent crash points (G1 planned, G2 applied-no-receipt, G3 applied-with-receipt)", async () => {
-  const txStore = new TransactionStore(new InMemoryTransactionStorageAdapter());
+  const adapter = new InMemoryTransactionStorageAdapter();
+  let failReceipt = false;
+  const origSaveSnapshot = adapter.saveSnapshot.bind(adapter);
+  adapter.saveSnapshot = async (snapshot: any) => {
+    if (failReceipt) {
+      failReceipt = false;
+      throw new Error("Disk error flushing receipt for step-g2");
+    }
+    return origSaveSnapshot(snapshot);
+  };
+  const txStore = new TransactionStore(adapter);
   const fenceRegistry = new RecoveryFenceRegistry();
   const domainKey = lockKey.domain("dom-group-g");
 
@@ -1058,6 +1068,71 @@ test("G5-GROUP-G: Child intent crash points (G1 planned, G2 applied-no-receipt, 
   assert.equal(stepsAfterG1[0].state, "planned");
   assert.equal(stepsAfterG1[0].receipt, undefined);
 
+  // G2: applied-no-receipt (effect executed, but receipt checkpoint failed to flush)
+  let g2Executed = false;
+  const g2Res = await session.runChildStep({
+    stepId: "step-g2",
+    subsystem: "economy",
+    operation: "adjust",
+    intent: { amount: 20 },
+    execute: async () => {
+      g2Executed = true;
+      failReceipt = true;
+      return ok({ adjusted: true });
+    }
+  });
+  failReceipt = false;
+
+  assert.equal(g2Executed, true);
+  assert.equal(g2Res.ok, false);
+  assert.equal(g2Res.error.code, "DM_DOMAIN_STORAGE_ERROR");
+  assert.equal((g2Res.error.details as any)?.outcome, "unknown");
+
+  const stepsAfterG2 = session.steps;
+  assert.equal(stepsAfterG2.length, 2);
+  const step2 = stepsAfterG2.find((s) => s.stepId === "step-g2")!;
+  assert.equal(step2.state, "unknown");
+  assert.equal(step2.receipt, undefined);
+
+  // Section 13: True G2 crash verification:
+  // effect applied -> receipt not persisted -> runtime destroyed -> stores rehydrated -> recovery
+  const snapshotData = await adapter.loadSnapshot();
+  const rehydratedAdapter = new InMemoryTransactionStorageAdapter({ snapshot: snapshotData });
+  const rehydratedTxStore = new TransactionStore(rehydratedAdapter);
+  await rehydratedTxStore.rehydrate();
+
+  const crashedTx = rehydratedTxStore.get(session.transactionId);
+  assert.ok(crashedTx, "Transaction must exist in rehydrated store after crash");
+  assert.equal(crashedTx.state, "needs-recovery", "Transaction must be in needs-recovery state");
+
+  const rehydratedFenceRegistry = new RecoveryFenceRegistry();
+  const rehydratedLockManager = new LockManager();
+  const rehydratedRecovery = new RecoveryService({
+    lockManager: rehydratedLockManager,
+    transactionStore: rehydratedTxStore,
+    fenceRegistry: rehydratedFenceRegistry
+  });
+
+  let g2ReconciledOrCompensated = false;
+  rehydratedRecovery.registerCompensator("test:intent-points", async (txRecord) => {
+    const data = txRecord.recoveryData as any;
+    const g2 = data?.steps?.find((s: any) => s.stepId === "step-g2");
+    if (g2 && (g2.state === "unknown" || g2.state === "executing" || g2.state === "applied")) {
+      assert.equal(g2.intent?.amount, 20, "Compensator must receive intent with amount 20");
+      g2ReconciledOrCompensated = true;
+      await markCompensationStepCompleted(rehydratedTxStore, txRecord, "step-g2");
+    }
+    return ok(undefined);
+  });
+
+  await rehydratedRecovery.scanOnStartup(1);
+  const recRes = await rehydratedRecovery.recoverTransaction(session.transactionId, 1);
+  assert.equal(recRes.ok, true, "Transaction must recover cleanly after crash");
+  assert.equal(g2ReconciledOrCompensated, true, "G2 applied side effect must be compensated using preserved intent");
+
+  const finalTx = rehydratedTxStore.get(session.transactionId);
+  assert.equal(finalTx?.state, "compensated", "Transaction must reach compensated after compensation");
+
   // G3: applied step with receipt
   await session.runChildStep({
     stepId: "step-g3",
@@ -1068,7 +1143,7 @@ test("G5-GROUP-G: Child intent crash points (G1 planned, G2 applied-no-receipt, 
   });
 
   const stepsAfterG3 = session.steps;
-  assert.equal(stepsAfterG3.length, 2);
+  assert.equal(stepsAfterG3.length, 3);
   const step3 = stepsAfterG3.find((s) => s.stepId === "step-g3")!;
   assert.equal(step3.state, "applied");
   assert.deepEqual(step3.receipt, { reservationId: "rf-1" });

@@ -99,6 +99,7 @@ export interface Reservation {
   readonly visibility?: "public" | "secret";
   readonly expiresAtReal?: number;
   readonly expiresAtWorld?: number;
+  readonly operationRef?: string;
   readonly notes?: string;
 }
 
@@ -436,6 +437,7 @@ export function validateReservation(
     visibility: raw.visibility === "secret" ? "secret" : "public",
     expiresAtReal,
     expiresAtWorld,
+    operationRef: typeof raw.operationRef === "string" ? raw.operationRef.trim() : undefined,
     notes: typeof raw.notes === "string" ? raw.notes.trim() : undefined
   });
 }

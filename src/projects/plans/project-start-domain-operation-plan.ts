@@ -15,6 +15,7 @@ import type { TransactionStore } from "../../mutations/transaction-store.js";
 import { createTransactionRecord, type TransactionRecord } from "../../mutations/transaction-record.js";
 import { compensateProjectStart } from "../services/project-recovery-compensators.js";
 import { lockKey } from "../../mutations/lock-keys.js";
+import type { RecoveryFenceRegistry } from "../../mutations/recovery-fence-registry.js";
 import {
   CompositeMutationSession,
   type TransactionExecutionContext
@@ -46,6 +47,7 @@ export interface ProjectStartDomainOperationContext {
   readonly economyService?: EconomyService;
   readonly peopleService?: PublicPeopleApi;
   readonly transactionStore?: TransactionStore;
+  readonly recoveryFenceRegistry?: RecoveryFenceRegistry;
 }
 
 /**
@@ -181,10 +183,12 @@ export async function executeProjectStartDomainOperationPlan(
   const sessionRes = await CompositeMutationSession.prepare({
     transactionContext: params.transactionContext,
     transactionStore: context.transactionStore,
+    recoveryFenceRegistry: context.recoveryFenceRegistry,
     commandId: cmdId,
     authorityEpoch: epoch,
     lockKeys: sessionLockKeys,
-    planLockKeys: params.transactionContext?.lockKeys ?? params.lockKeys ?? [canonicalStartLock],
+    expectedLockKeys: [canonicalStartLock],
+    planLockKeys: [canonicalStartLock],
     recoveryType: "projects:start",
     parentRef: `domain:${cleanDomainUuid}`,
     initialRecoveryData: {
@@ -314,20 +318,29 @@ export async function executeProjectStartDomainOperationPlan(
         }
       } else if (cost.timing === "reserved") {
         const stepId = `project-start:reservation:${cost.resourceId}:${costIdx++}`;
+        const anticipatedReservationId = createOpaqueId("resv");
         const stepRes = await session.runChildStep({
           stepId,
           subsystem: "economy",
           operation: "reserve",
           targetRef: cleanDomainUuid,
           idempotencyKey: `${session.transactionId}:${stepId}`,
-          intent: { resourceId: cost.resourceId, amountMinor: cost.amountMinor },
+          operationRef: stepId,
+          intent: {
+            resourceId: cost.resourceId,
+            amountMinor: cost.amountMinor,
+            reservationId: anticipatedReservationId,
+            operationRef: stepId
+          },
           execute: async () => {
             return context.economyService!.reserve({
               domainUuid: cleanDomainUuid,
               resourceId: cost.resourceId,
               amountMinor: cost.amountMinor,
               source: { type: "project", ref: projectId },
-              lockOwner: params.commandId
+              lockOwner: params.commandId,
+              reservationId: anticipatedReservationId,
+              operationRef: stepId
             });
           }
         });
@@ -360,20 +373,29 @@ export async function executeProjectStartDomainOperationPlan(
     (params.workforceAllocations?.reduce((sum, a) => sum + a.count, 0) ?? 0);
   if (wfRequired > 0) {
     const stepId = `project-start:workforce:${params.workforceAllocations?.[0]?.workforceTypeId ?? "general"}`;
+    const anticipatedWfReservationId = createOpaqueId("resv");
     const wfStepRes = await session.runChildStep({
       stepId,
       subsystem: "people",
       operation: "allocateWorkforceReservation",
       targetRef: cleanDomainUuid,
       idempotencyKey: `${session.transactionId}:${stepId}`,
-      intent: { amount: wfRequired, projectId: draftProject.id },
+      operationRef: stepId,
+      intent: {
+        amount: wfRequired,
+        projectId: draftProject.id,
+        reservationId: anticipatedWfReservationId,
+        operationRef: stepId
+      },
       execute: async () =>
         peopleService.allocateWorkforceReservation({
           domainUuid: cleanDomainUuid,
           projectId: draftProject.id,
           amount: wfRequired,
           workforceTypeId: params.workforceAllocations?.[0]?.workforceTypeId ?? "general",
-          userId: params.userId
+          userId: params.userId,
+          reservationId: anticipatedWfReservationId,
+          operationRef: stepId
         })
     });
     if (!wfStepRes.ok) {

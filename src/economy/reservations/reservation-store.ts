@@ -16,6 +16,9 @@ import {
 } from "../storage/reservation-storage-adapter.js";
 
 export interface CreateReservationInput {
+  readonly id?: string;
+  readonly reservationId?: string;
+  readonly operationRef?: string;
   readonly domainUuid: string;
   readonly resourceId: string;
   readonly originalAmountMinor: number;
@@ -63,7 +66,18 @@ export class ReservationStore {
   }
 
   create(input: CreateReservationInput): Result<Reservation, PublicError> {
-    const id = createOpaqueId("resv");
+    const id = input.reservationId ?? input.id ?? createOpaqueId("resv");
+    if (this.#reservations.has(id)) {
+      return ok(this.#reservations.get(id)!);
+    }
+    if (input.operationRef) {
+      for (const r of this.#reservations.values()) {
+        if (r.operationRef === input.operationRef) {
+          return ok(r);
+        }
+      }
+    }
+
     const raw: Reservation = {
       id,
       domainUuid: input.domainUuid,
@@ -76,6 +90,7 @@ export class ReservationStore {
       ...(input.createdAtWorld !== undefined ? { createdAtWorld: input.createdAtWorld } : {}),
       ...(input.expiresAtWorld !== undefined ? { expiresAtWorld: input.expiresAtWorld } : {}),
       ...(input.expiresAtReal !== undefined ? { expiresAtReal: input.expiresAtReal } : {}),
+      ...(input.operationRef !== undefined ? { operationRef: input.operationRef } : {}),
       revision: 0
     };
 
@@ -105,6 +120,15 @@ export class ReservationStore {
 
   get(id: string): Reservation | undefined {
     return this.#reservations.get(id);
+  }
+
+  getByOperationRef(operationRef: string): Reservation | undefined {
+    for (const r of this.#reservations.values()) {
+      if (r.operationRef === operationRef) {
+        return r;
+      }
+    }
+    return undefined;
   }
 
   list(filter?: ReservationFilter): readonly Reservation[] {

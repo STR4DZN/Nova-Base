@@ -66,6 +66,7 @@ export class CommandBus {
   readonly #commandQueue: CommandQueue;
   readonly #transportCleanups = new Set<() => void>();
   #transport: CommandTransport | null = null;
+  #mutationsEnabled: boolean = true;
 
   constructor(options: CommandBusOptions) {
     this.#registry = options.registry;
@@ -78,6 +79,14 @@ export class CommandBus {
     if (options.transport) {
       this.attachTransport(options.transport);
     }
+  }
+
+  get mutationsEnabled(): boolean {
+    return this.#mutationsEnabled;
+  }
+
+  setMutationsEnabled(enabled: boolean): void {
+    this.#mutationsEnabled = enabled;
   }
 
   attachTransport(transport: CommandTransport): () => void {
@@ -298,6 +307,21 @@ export class CommandBus {
           code: "DM_COMMAND_HANDLER_NOT_FOUND",
           category: "not-found",
           message: `No handler registered for command type '${command.type}'`
+        }),
+        transportTimestamp: now
+      } as TransportReceipt<TResponse>);
+    }
+
+    // 5.5 Safe Mode Check (Patch D): Reject mutating commands if mutations are disabled
+    const isMutating = registration.transactional || !!registration.mutationDefinition;
+    if (!this.#mutationsEnabled && isMutating) {
+      return ok({
+        commandId: command.commandId,
+        status: "rejected",
+        error: createPublicError({
+          code: "DM_COMMAND_EXECUTION_FAILED",
+          category: "busy",
+          message: "Command bus is in safe mode: mutations are currently disabled"
         }),
         transportTimestamp: now
       } as TransportReceipt<TResponse>);

@@ -112,6 +112,8 @@ export interface PublicPeopleApi {
     amount: number;
     workforceTypeId?: string;
     userId?: string | null;
+    reservationId?: string;
+    operationRef?: string;
   }): Promise<Result<{ readonly reservationId: string }, PublicError>>;
 
   releaseWorkforceReservation(params: {
@@ -408,12 +410,16 @@ export class PeopleService implements PublicPeopleApi {
     amount: number;
     workforceTypeId?: string;
     userId?: string | null;
+    reservationId?: string;
+    operationRef?: string;
   }): Promise<Result<{ readonly reservationId: string }, PublicError>> {
     return this.#repository.allocateReservation({
       domainUuid: params.domainUuid,
       targetRef: `project:${params.projectId}`,
       amount: params.amount,
-      workforceTypeId: params.workforceTypeId
+      workforceTypeId: params.workforceTypeId,
+      reservationId: params.reservationId,
+      operationRef: params.operationRef
     });
   }
 

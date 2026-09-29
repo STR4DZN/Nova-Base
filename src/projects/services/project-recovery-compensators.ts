@@ -89,7 +89,7 @@ export async function compensateProjectStart(
         if (
           step.subsystem === "economy" &&
           step.operation === "adjust" &&
-          (step.state === "applied" || step.state === "unknown" || step.state === "compensating")
+          (step.state === "applied" || step.state === "unknown" || step.state === "compensating" || step.state === "executing")
         ) {
           const stepId = step.stepId;
           if (!isCompensationStepCompleted(record, stepId, context.transactionStore)) {
@@ -138,12 +138,16 @@ export async function compensateProjectStart(
         if (
           step.subsystem === "economy" &&
           step.operation === "reserve" &&
-          (step.state === "applied" || step.state === "unknown" || step.state === "compensating")
+          (step.state === "applied" || step.state === "unknown" || step.state === "compensating" || step.state === "executing")
         ) {
           const stepId = step.stepId;
           if (!isCompensationStepCompleted(record, stepId, context.transactionStore)) {
             const receipt = step.receipt as any;
-            const resId = receipt?.id ?? receipt?.reservationId ?? (typeof receipt === "string" ? receipt : undefined);
+            const resId =
+              receipt?.id ??
+              receipt?.reservationId ??
+              (typeof receipt === "string" ? receipt : undefined) ??
+              (step.intent as any)?.reservationId;
             if (resId) {
               const resObj = context.economyService.getReservation(resId);
               if (resObj && (resObj.status === "active" || resObj.status === "partially-consumed")) {
@@ -186,7 +190,7 @@ export async function compensateProjectStart(
       if (
         step.subsystem === "people" &&
         (step.operation === "allocateWorkforceReservation" || step.operation === "reserve-workforce") &&
-        (step.state === "applied" || step.state === "unknown" || step.state === "compensating")
+        (step.state === "applied" || step.state === "unknown" || step.state === "compensating" || step.state === "executing")
       ) {
         const stepId = step.stepId;
         if (!isCompensationStepCompleted(record, stepId, context.transactionStore)) {
@@ -195,6 +199,7 @@ export async function compensateProjectStart(
             receipt?.reservationId ??
             receipt?.id ??
             (typeof receipt === "string" ? receipt : undefined) ??
+            (step.intent as any)?.reservationId ??
             data.allocatedWorkforceReservationId;
           if (resId) {
             const relWf = await peopleService.releaseWorkforceReservation({
@@ -486,7 +491,7 @@ export async function compensateProjectCompletion(
   if (Array.isArray(data.steps) && data.steps.length > 0) {
     const steps = [...data.steps].reverse();
     for (const step of steps) {
-      if (step.state !== "applied" && step.state !== "unknown" && step.state !== "compensating") {
+      if (step.state !== "applied" && step.state !== "unknown" && step.state !== "compensating" && step.state !== "executing") {
         continue;
       }
       const stepId = step.stepId;
@@ -508,6 +513,35 @@ export async function compensateProjectCompletion(
             });
             if (!refRes.ok) return refRes;
           }
+        }
+      }
+      if ((step.subsystem === "facility" || step.subsystem === "facilities") && context.domains) {
+        const receipt = step.receipt as any;
+        const facId = receipt?.facility?.id ?? receipt?.id ?? (step.intent as any)?.facilityId;
+        if (facId) {
+          const docRes = await context.domains.read(cleanDomainUuid);
+          if (docRes.ok) {
+            const facData = getDomainFacilitiesData(docRes.value.record);
+            const remaining = facData.facilities.filter((f) => f.id !== facId);
+            if (remaining.length !== facData.facilities.length) {
+              const updatedRecord = withDomainFacilitiesData(docRes.value.record, {
+                ...facData,
+                facilities: Object.freeze(remaining)
+              });
+              const saveRes = await context.domains.save({
+                ...docRes.value,
+                record: updatedRecord
+              });
+              if (!saveRes.ok) return saveRes;
+            }
+          }
+        }
+      }
+      if (step.subsystem === "custom" && (context as any).sideEffectHandlers) {
+        const handler = (context as any).sideEffectHandlers[step.operation];
+        if (handler && typeof handler === "object" && typeof handler.compensate === "function") {
+          const compRes = await handler.compensate(step.operationRef ?? step.stepId, step.receipt);
+          if (compRes && !compRes.ok) return compRes;
         }
       }
       await markCompensationStepCompleted(context.transactionStore, record, stepId);

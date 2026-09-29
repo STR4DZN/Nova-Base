@@ -61,6 +61,7 @@ export class RecoveryService {
   readonly #compensators = new Map<string, TransactionCompensator>();
   readonly #pendingLockAcquisitions = new Set<string>();
   readonly #lockSetDivergences: unknown[] = [];
+  readonly #lockReleaseUnsubscribe?: () => void;
   #lastRecoveryError?: PublicError;
 
   constructor(
@@ -76,6 +77,16 @@ export class RecoveryService {
       this.#transactionStore = options;
       this.#lockManager = lockManager!;
       this.#fenceRegistry = fenceRegistry ?? new RecoveryFenceRegistry();
+    }
+
+    if (
+      this.#lockManager &&
+      "onLockReleased" in this.#lockManager &&
+      typeof (this.#lockManager as any).onLockReleased === "function"
+    ) {
+      this.#lockReleaseUnsubscribe = (this.#lockManager as any).onLockReleased(() => {
+        void this.retryPendingLockAcquisitions();
+      });
     }
   }
 
@@ -457,7 +468,9 @@ export class RecoveryService {
       handle.release();
       this.#heldRecoveryLocks.delete(transactionId);
     }
+    void this.retryPendingLockAcquisitions();
   }
+
 
   /**
    * Recovers unresolved transactions using registered compensators.
@@ -548,6 +561,9 @@ export class RecoveryService {
   }
 
   clear(): void {
+    if (this.#lockReleaseUnsubscribe) {
+      this.#lockReleaseUnsubscribe();
+    }
     for (const handle of this.#heldRecoveryLocks.values()) {
       handle.release();
     }

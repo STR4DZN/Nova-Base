@@ -33,10 +33,10 @@
 | Verificação | Resultado |
 |---|---|
 | TypeScript strict (`tsc --noEmit`) | PASS (0 erros) |
-| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 645/645 (0 falhas, 0 regressões) |
+| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 657/657 (0 falhas, 0 regressões) |
 | Relatório de Aceitação G5 | Gerado (`docs/GATE_G5_ACCEPTANCE_REPORT.md`) |
 | Regressões G0/G1/G2/G3/G4 | 0 (todos os 444 testes anteriores preservados e passando) |
-| Testes novos Gate G5 | 201 testes dedicados (G5.1 a G5.10: 101 testes + 66 testes adversários em g5-revalidation-adversarial.test.ts + 10 testes de lock-set em g5-lockset-contract.test.ts + 5 testes de fence em g5-recovery-fence.test.ts + 19 testes de kernel em g5-transaction-kernel.test.ts) |
+| Testes novos Gate G5 | 213 testes dedicados (G5.1 a G5.10: 101 testes + 66 testes adversários em g5-revalidation-adversarial.test.ts + 10 testes de lock-set em g5-lockset-contract.test.ts + 5 testes de fence em g5-recovery-fence.test.ts + 19 testes de kernel em g5-transaction-kernel.test.ts + 12 testes de hardening T1–T12 em g5-kernel-hardening.test.ts) |
 | Remediação de Auditoria G5-AUD-001 a G5-AUD-010 | PASS — 100% remediado, endurecido e verificado |
 | Remediação de Revalidação G5-REVAL-001 a G5-REVAL-012 | PASS — 100% remediado, endurecido e verificado |
 | Remediação de Revalidação 2 G5-REVAL2-001 a G5-REVAL2-010 | PASS — 100% remediado, endurecido e verificado |
@@ -44,7 +44,7 @@
 | Remediação de Revalidação 4 G5-REVAL4-001 a G5-REVAL4-012 | PASS — 100% remediado, endurecido e verificado |
 | Remediação de Revalidação 5 G5-REVAL5-001 a G5-REVAL5-009 | PASS — 100% remediado, endurecido e verificado |
 | Remediação de Revalidação 6 G5-REVAL6-001 a G5-REVAL6-005 | PASS — 100% remediado, endurecido e verificado |
-| Remediação Master G5 (DOMAIN_MANAGER_G5_MASTER_REMEDIACAO_FINAL) | PASS — Camada canônica CompositeMutationSession, lockKey factory, RecoveryFenceRegistry, atomic store methods e matriz de testes completa (Grupos A a I) |
+| Remediação Master G5 (Patches A–F & Kernel Hardening) | PASS — CompositeMutationSession, lockKey factory, RecoveryFenceRegistry, TransactionalChildHandler, pre-allocated entity intents, compensator intent fallback, lock release triggers e safe-mode enforcement |
 | Build do pacote (`node build.mjs`) | PASS (`dist/main.js` gerado) |
 | Empacotamento (`node scripts/package.mjs`) | PASS (`dist/domain-manager-v0.0.5.zip` gerado) |
 | Validação de pacote (`node scripts/validate-package.mjs`) | PASS |
@@ -70,7 +70,7 @@
 5. **Compensadores Compartilhados e Resolvidos Duravelmente (§19)**:
    - Todos os compensadores de Projetos, Downtime e Facilities agora aceitam `TransactionRecord | string`, reidratam o registro mais atualizado a partir do `TransactionStore`, e evitam dados defasados.
 
-6. **Matriz de Testes Abrangente (Grupos A a I, 645/645 PASS)**:
+6. **Matriz de Testes Abrangente (Grupos A a I, T1–T12 Hardening, 657/657 PASS)**:
    - Grupo A (Lock-set identity: A1 a A8): 10 testes em `g5-lockset-contract.test.ts`.
    - Grupo B (Immediate compensation exceptions): testado em `g5-transaction-kernel.test.ts`.
    - Grupo C (Restart idempotency & Section 17): testado em `g5-transaction-kernel.test.ts`.
@@ -80,6 +80,34 @@
    - Grupo G (Child intent crash points G1, G2, G3): testado em `g5-transaction-kernel.test.ts`.
    - Grupo H (Multi-step compensation com skip idempotente): testado em `g5-transaction-kernel.test.ts`.
    - Grupo I (Coordinator isolation failure handling): testado em `g5-recovery-fence.test.ts`.
+
+## Endurecimento da Auditoria de Aceitação Master Gate G5 (Patches A–F)
+
+1. **Patch A — Contrato Formal de Efeitos Filhos Transacionais (`TransactionalChildHandler`)**:
+   - Criado contrato formal em `src/mutations/child-handler-contract.ts` com métodos `execute()`, `reconcile()` e `compensate()`.
+   - Adicionado estado `"executing"` e campo `operationRef?: string` em `RecoveryStep` (`src/mutations/recovery-step.ts`).
+   - `CompositeMutationSession.runChildStep` grava a intenção em memória imediatamente antes da execução, mantendo sincronismo estrito entre a intenção declarada e a execução. Se o flush do recibo falhar após a execução, o passo entra no estado `"unknown"` com `receipt: undefined` e instala a fence imediatamente.
+
+2. **Patch B — Idempotência de Intenção e Pré-Alocação de IDs em Subsistemas**:
+   - `EconomyService`: Suporte completo a idempotência por `operationRef`, gravação de recibos (`OperationReceiptRecord`) e reconstrução do ledger sem re-aplicação de saldos em repetições.
+   - `PeopleService`: Suporte a `reservationId` e `operationRef` pré-alocados em alocações de workforce.
+   - `FacilitiesService`: Suporte a `facilityId` e `operationRef` pré-alocados em criação de instalações.
+   - `ProjectsService`: Pré-alocação antecipada de identificadores de entidades antes do disparo de mutações filhas.
+
+3. **Patch C — Fallback dos Compensadores para Intenção Gravada no Write-Ahead**:
+   - Quando recibos estão ausentes (devido a falha no flush do recibo / crash G2), os compensadores de Projetos (`compensateProjectStart`, `compensateProjectCompletion`, etc.) consultam `(step.intent as any)?.reservationId` e `(step.intent as any)?.facilityId` para garantir que recursos e instalações criadas sejam devidamente desfeitas.
+   - Em `project-completion-domain-operation-plan.ts`, pré-alocação de `anticipatedFacilityId` garante rastreabilidade total no plano e no compensador.
+
+4. **Patch D — Pipeline de Inicialização de Locks e Recovery Assíncrono**:
+   - `LockManager` implementa `onLockReleased` disparando automaticamente `recoveryService.retryPendingLockAcquisitions()` para desbloquear transações pendentes de recuperação sem polling.
+   - Removido `clear()` prematuro em `RecoveryService` para manter integridade dos locks adquiridos.
+
+5. **Patch E — Enforçamento de Safe-Mode em Falha de Recovery no Startup**:
+   - `CommandBus` e `DomainManagerRuntime` implementam modo de segurança (`setMutationsEnabled(false)`): comandos mutantes são sumariamente rejeitados com `DM_RUNTIME_SAFE_MODE` enquanto consultas e leituras permanecem disponíveis.
+
+6. **Patch F — Suíte de Testes de Endurecimento T1–T12 e Matriz de Crash Points G1/G2/G3**:
+   - `tests/runtime/g5-transaction-kernel.test.ts`: Cenário G5-GROUP-G atualizado para testar explicitamente os 3 crash points canônicos: G1 (crash no intent planejado antes da execução), G2 (crash no flush do recibo após execução de efeito filho), G3 (crash no flush com recibo já gravado).
+   - `tests/runtime/g5-kernel-hardening.test.ts`: 12 cenários rigorosos cobrindo sobrevivência de IDs pré-alocados, timeouts de steps, rejeição segura não-aplicada, falha de flush do recibo, fallback de compensadores, retentativa via listener de liberação de locks, bloqueio por safe mode, idempotência de ajustes econômicos e verificação estrita do contrato `TransactionalChildHandler`.
 
 ## Remediação da 6ª Revalidação Gate G5 — G5-REVAL6-001 a G5-REVAL6-005
 

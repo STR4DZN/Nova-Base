@@ -63,6 +63,8 @@ export interface CreateFacilityParams {
   readonly correlationId?: string;
   readonly causationId?: string;
   readonly authorityEpoch?: number;
+  readonly facilityId?: string;
+  readonly operationRef?: string;
 }
 
 export interface MaintainFacilityParams {
@@ -200,7 +202,13 @@ export class FacilitiesService {
     }
 
     const currentFacilitiesData = getDomainFacilitiesData(record);
-    const facilityId = `fac-${createOpaqueId("prj").slice("prj_".length)}`;
+    const facilityId = params.facilityId ?? `fac-${createOpaqueId("prj").slice("prj_".length)}`;
+    const existing = currentFacilitiesData.facilities.find(
+      (f) => f.id === facilityId || (params.operationRef && (f as any).operationRef === params.operationRef)
+    );
+    if (existing) {
+      return ok({ facility: existing });
+    }
     const now = Date.now();
 
     const newFacility: FacilityInstance = {
@@ -224,7 +232,8 @@ export class FacilitiesService {
       },
       tags: Object.freeze([...(definition.tags ?? [])]),
       createdAt: now,
-      updatedAt: now
+      updatedAt: now,
+      ...(params.operationRef ? { operationRef: params.operationRef } : {}) as any
     };
 
     const updatedFacilities = Object.freeze([...currentFacilitiesData.facilities, newFacility]);
@@ -328,7 +337,8 @@ export class FacilitiesService {
       commandId: cmdId,
       authorityEpoch: epoch,
       lockKeys: sessionLockKeys,
-      planLockKeys: params.transactionContext?.lockKeys ?? params.lockKeys ?? canonicalLocks,
+      expectedLockKeys: canonicalLocks,
+      planLockKeys: canonicalLocks,
       recoveryType: "facilities:maintenance",
       parentRef: `facility:${facility.id}`,
       initialRecoveryData: {
@@ -436,10 +446,13 @@ export class FacilitiesService {
           return session.failAndCompensate(stepRes.error, runCompensator);
         }
         debitedCosts.push({ resourceId: cost.resourceId, amount: cost.amount });
-        await session.checkpointRecoveryData({
+        const checkRes = await session.checkpointRecoveryData({
           debitedCosts: Object.freeze([...debitedCosts]),
           status: "executing"
         });
+        if (!checkRes.ok) {
+          return session.failAndCompensate(checkRes.error, runCompensator);
+        }
       }
     }
 
@@ -561,7 +574,8 @@ export class FacilitiesService {
       commandId: cmdId,
       authorityEpoch: epoch,
       lockKeys: sessionLockKeys,
-      planLockKeys: params.transactionContext?.lockKeys ?? params.lockKeys ?? canonicalLocks,
+      expectedLockKeys: canonicalLocks,
+      planLockKeys: canonicalLocks,
       recoveryType: "facilities:repair",
       parentRef: `facility:${facility.id}`,
       initialRecoveryData: {
@@ -669,10 +683,13 @@ export class FacilitiesService {
           return session.failAndCompensate(stepRes.error, runCompensator);
         }
         debitedCosts.push({ resourceId: cost.resourceId, amount: cost.amount });
-        await session.checkpointRecoveryData({
+        const checkRes = await session.checkpointRecoveryData({
           debitedCosts: Object.freeze([...debitedCosts]),
           status: "executing"
         });
+        if (!checkRes.ok) {
+          return session.failAndCompensate(checkRes.error, runCompensator);
+        }
       }
     }
 

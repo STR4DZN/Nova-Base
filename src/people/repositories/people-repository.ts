@@ -350,6 +350,8 @@ export class PeopleRepository {
     workforceTypeId?: string;
     sourceRef?: string;
     visibility?: "public" | "secret";
+    reservationId?: string;
+    operationRef?: string;
   }): Promise<Result<{ readonly reservationId: string }, PublicError>> {
     const id = params.domainUuid.startsWith("JournalEntry.") ? params.domainUuid.slice("JournalEntry.".length) : params.domainUuid;
     const domainRes = await this.#domainRepository.read(id);
@@ -357,7 +359,15 @@ export class PeopleRepository {
     const peopleDataRes = tryGetDomainPeopleData(domainRes.value.record);
     if (!peopleDataRes.ok) return peopleDataRes;
     const peopleData = peopleDataRes.value;
-    const resvId = createOpaqueId("resv");
+
+    const resvId = params.reservationId ?? createOpaqueId("resv");
+    const existing = peopleData.reservations.find(
+      (r) => r.id === resvId || (params.operationRef && r.operationRef === params.operationRef)
+    );
+    if (existing && existing.status === "active") {
+      return ok({ reservationId: existing.id });
+    }
+
     const reservation: Reservation = {
       id: resvId,
       sourceRef: params.sourceRef ?? `domain:${id}`,
@@ -365,7 +375,8 @@ export class PeopleRepository {
       workforceTypeId: params.workforceTypeId ?? "general",
       amount: params.amount,
       status: "active",
-      visibility: params.visibility ?? "public"
+      visibility: params.visibility ?? "public",
+      ...(params.operationRef ? { operationRef: params.operationRef } : {})
     };
     const updatedRecord = withDomainPeopleData(domainRes.value.record, {
       ...peopleData,

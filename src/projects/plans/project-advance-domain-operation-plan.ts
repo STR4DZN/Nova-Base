@@ -156,7 +156,8 @@ export async function executeProjectAdvanceDomainOperationPlan(
     commandId: cmdId,
     authorityEpoch: epoch,
     lockKeys: sessionLockKeys,
-    planLockKeys: params.transactionContext?.lockKeys ?? params.lockKeys ?? canonicalAdvanceLocks,
+    expectedLockKeys: canonicalAdvanceLocks,
+    planLockKeys: canonicalAdvanceLocks,
     recoveryType: "projects:advance",
     parentRef: `project:${project.id}`,
     initialRecoveryData: {

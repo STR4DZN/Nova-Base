@@ -6,12 +6,15 @@ export type RecoveryStepSubsystem =
   | "economy"
   | "people"
   | "facility"
+  | "facilities"
   | "project"
+  | "projects"
   | "downtime"
   | "custom";
 
 export type RecoveryStepState =
   | "planned"
+  | "executing"
   | "applied"
   | "compensating"
   | "compensated"
@@ -23,6 +26,7 @@ export interface RecoveryStep<TIntent = unknown, TReceipt = unknown> {
   readonly operation: string;
   readonly targetRef?: string;
   readonly idempotencyKey: string;
+  readonly operationRef?: string;
   readonly state: RecoveryStepState;
   readonly intent: TIntent;
   readonly receipt?: TReceipt;

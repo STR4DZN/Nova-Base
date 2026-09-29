@@ -10,17 +10,29 @@ export const ECONOMY_CAPABILITY_ID = "domain-manager:economy" as const;
 export const ECONOMY_CAPABILITY_ALIAS = "domain:economy" as const;
 export const ECONOMY_SCHEMA_VERSION = 1 as const;
 
+export interface OperationReceiptRecord {
+  readonly operationRef: string;
+  readonly resourceId: string;
+  readonly deltaMinor: number;
+  readonly kind: string;
+  readonly reason?: string;
+  readonly state: "balance-applied" | "ledger-confirmed";
+  readonly ledgerEntryId?: string;
+}
+
 export interface DomainEconomyData {
   readonly schemaVersion: typeof ECONOMY_SCHEMA_VERSION;
   readonly accounts: readonly ResourceAccount[];
   readonly appliedIdempotencyKeys?: readonly string[];
+  readonly operationReceipts?: readonly OperationReceiptRecord[];
 }
 
 export function createDefaultDomainEconomyData(): DomainEconomyData {
   return {
     schemaVersion: ECONOMY_SCHEMA_VERSION,
     accounts: Object.freeze([]),
-    appliedIdempotencyKeys: Object.freeze([])
+    appliedIdempotencyKeys: Object.freeze([]),
+    operationReceipts: Object.freeze([])
   };
 }
 
@@ -87,10 +99,15 @@ export function validateDomainEconomyData(raw: unknown): Result<DomainEconomyDat
     ? Object.freeze([...(candidate.appliedIdempotencyKeys as string[])])
     : Object.freeze([]);
 
+  const operationReceipts = Array.isArray(candidate.operationReceipts)
+    ? Object.freeze([...(candidate.operationReceipts as OperationReceiptRecord[])])
+    : Object.freeze([]);
+
   return ok({
     schemaVersion: ECONOMY_SCHEMA_VERSION,
     accounts: Object.freeze(validatedAccounts),
-    appliedIdempotencyKeys: appliedKeys
+    appliedIdempotencyKeys: appliedKeys,
+    operationReceipts
   });
 }
 

@@ -21,12 +21,15 @@ import type { TransactionStore } from "../../mutations/transaction-store.js";
 import { createTransactionRecord } from "../../mutations/transaction-record.js";
 import { compensateDowntimeResolution } from "../services/downtime-recovery-compensators.js";
 import { lockKey } from "../../mutations/lock-keys.js";
+import type { TransactionalChildHandler } from "../../mutations/child-handler-contract.js";
 import {
   CompositeMutationSession,
   type TransactionExecutionContext
 } from "../../mutations/composite-mutation-session.js";
 
-export type DowntimeOutcomeHandler = (outcome: any) => Promise<ChildReceipt> | ChildReceipt;
+export type DowntimeOutcomeHandler =
+  | ((outcome: any, operationRef?: string) => Promise<ChildReceipt> | ChildReceipt)
+  | TransactionalChildHandler;
 
 export interface DowntimeResolutionPlanContext {
   readonly domains: DomainRepositoryContract;
@@ -126,7 +129,8 @@ export async function executeDowntimeResolutionPlan(
     commandId: cmdId,
     authorityEpoch: epoch,
     lockKeys: sessionLockKeys,
-    planLockKeys: params.transactionContext?.lockKeys ?? params.lockKeys ?? canonicalLocks,
+    expectedLockKeys: canonicalLocks,
+    planLockKeys: canonicalLocks,
     recoveryType: "downtime:resolution",
     parentRef: `downtime:${activity.id}`,
     initialRecoveryData: {
@@ -277,32 +281,82 @@ export async function executeDowntimeResolutionPlan(
       };
       const handler = handlers[outcome.type];
       if (handler) {
-        try {
-          const res = await handler(outcome);
-          outcomesApplied.push(res);
-          if (!res.success && !isOptional) {
-            return session.failAndCompensate(
-              createPublicError({
-                code: "DM_DOWNTIME_MANDATORY_OUTCOME_FAILED",
-                category: "conflict",
-                message: `Mandatory outcome '${outcome.label}' failed: ${res.error ?? "handler failed"}`,
-                details: res
-              }),
-              runCompensator
-            );
+        const stepId = `downtime-resolution:custom:${outcome.id}`;
+        const opRef = stepId;
+        const stepRes = await session.runChildStep<Record<string, unknown>, ChildReceipt>({
+          stepId,
+          subsystem: "custom",
+          operation: outcome.type,
+          targetRef: cleanDomainUuid,
+          idempotencyKey: `${session.transactionId}:${stepId}`,
+          operationRef: opRef,
+          intent: {
+            outcomeId: outcome.id,
+            outcomeType: outcome.type,
+            parameters: outcome.parameters,
+            optional: isOptional
+          },
+          execute: async () => {
+            let handlerRes: any;
+            if (typeof handler === "object" && handler !== null && "execute" in handler) {
+              handlerRes = await (handler as TransactionalChildHandler).execute(outcome, opRef);
+            } else if (typeof handler === "function") {
+              handlerRes = await handler(outcome, opRef);
+            } else {
+              return err(
+                createPublicError({
+                  code: "DM_HANDLER_NOT_FOUND",
+                  category: "internal",
+                  message: `Invalid handler for outcome type '${outcome.type}'`
+                })
+              );
+            }
+
+            if (typeof handlerRes === "object" && handlerRes !== null && "ok" in handlerRes) {
+              if (handlerRes.ok) {
+                return ok(handlerRes.value);
+              }
+              return err(handlerRes.error);
+            }
+            const rec = handlerRes as ChildReceipt;
+            if (!rec.success && !isOptional) {
+              return err(
+                createPublicError({
+                  code: "DM_DOWNTIME_MANDATORY_OUTCOME_FAILED",
+                  category: "conflict",
+                  message: `Mandatory outcome '${outcome.label}' failed: ${rec.error ?? "handler failed"}`,
+                  details: rec
+                })
+              );
+            }
+            return ok(rec);
           }
-        } catch (handlerErr) {
+        });
+
+        if (stepRes.ok) {
+          outcomesApplied.push(stepRes.value);
+        } else {
+          const isUnknown =
+            (stepRes.error.details as any)?.outcome === "unknown" ||
+            (stepRes.error as any).outcome === "unknown" ||
+            stepRes.error.code === "DM_DOMAIN_STORAGE_ERROR";
+
+          if (isUnknown) {
+            return session.failAndCompensate(stepRes.error, runCompensator);
+          }
+
           if (!isOptional) {
             return session.failAndCompensate(
               createPublicError({
                 code: "DM_DOWNTIME_MANDATORY_OUTCOME_FAILED",
-                category: "internal",
-                message: `Mandatory outcome handler for '${outcome.label}' threw: ${handlerErr instanceof Error ? handlerErr.message : String(handlerErr)}`,
-                details: handlerErr
+                category: "conflict",
+                message: `Mandatory outcome '${outcome.label}' failed: ${stepRes.error.message}`,
+                details: stepRes.error
               }),
               runCompensator
             );
           }
+
           outcomesApplied.push({
             childReceiptId: createOpaqueId("rep"),
             subsystem: "custom",
@@ -310,21 +364,35 @@ export async function executeDowntimeResolutionPlan(
             targetRef: cleanDomainUuid,
             payload: outcome.parameters,
             success: false,
-            error: handlerErr instanceof Error ? handlerErr.message : String(handlerErr),
+            error: stepRes.error.message,
             appliedAt: Date.now()
           });
         }
       } else if (outcome.type === "narrative:event") {
         // Built-in handling for canonical narrative events / logs
-        outcomesApplied.push({
-          childReceiptId: createOpaqueId("rep"),
+        const stepId = `downtime-resolution:narrative:${outcome.id}`;
+        const narrativeRes = await session.runChildStep<Record<string, unknown>, ChildReceipt>({
+          stepId,
           subsystem: "custom",
-          action: outcome.type,
+          operation: outcome.type,
           targetRef: outcome.id ?? cleanDomainUuid,
-          payload: outcome.parameters,
-          success: true,
-          appliedAt: Date.now()
+          idempotencyKey: `${session.transactionId}:${stepId}`,
+          operationRef: stepId,
+          intent: { outcomeId: outcome.id, parameters: outcome.parameters },
+          execute: async () =>
+            ok<ChildReceipt>({
+              childReceiptId: createOpaqueId("rep"),
+              subsystem: "custom",
+              action: outcome.type,
+              targetRef: outcome.id ?? cleanDomainUuid,
+              payload: outcome.parameters,
+              success: true,
+              appliedAt: Date.now()
+            })
         });
+        if (narrativeRes.ok) {
+          outcomesApplied.push(narrativeRes.value);
+        }
       } else {
         if (!isOptional) {
           return session.failAndCompensate(

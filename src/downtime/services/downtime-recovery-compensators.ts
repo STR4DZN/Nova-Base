@@ -188,7 +188,7 @@ export async function compensateDowntimeResolution(
   if (Array.isArray(data.steps) && data.steps.length > 0) {
     const steps = [...data.steps].reverse();
     for (const step of steps) {
-      if (step.state !== "applied" && step.state !== "unknown" && step.state !== "compensating") {
+      if (step.state !== "applied" && step.state !== "unknown" && step.state !== "compensating" && step.state !== "executing") {
         continue;
       }
       const stepId = step.stepId;
@@ -208,6 +208,13 @@ export async function compensateDowntimeResolution(
             idempotencyKey
           });
           if (!revRes.ok) return revRes;
+        }
+      }
+      if (step.subsystem === "custom" && (context as any).outcomeHandlers) {
+        const handler = (context as any).outcomeHandlers[step.operation];
+        if (handler && typeof handler === "object" && typeof handler.compensate === "function") {
+          const compRes = await handler.compensate(step.operationRef ?? step.stepId, step.receipt);
+          if (compRes && !compRes.ok) return compRes;
         }
       }
       await markCompensationStepCompleted(context.transactionStore, record, stepId);

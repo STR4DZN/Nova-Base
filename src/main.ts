@@ -17,20 +17,31 @@ import { Logger } from "./diagnostics/logger.js";
 const logger = new Logger("Domain Manager");
 let runtime: DomainManagerRuntime | null = null;
 
-function reconcileAuthority(): void {
+function publishModuleApi(rt: DomainManagerRuntime): void {
+  const module = (globalThis as any).game?.modules?.get?.("domain-manager");
+  if (module) {
+    module.api = rt.publicApi;
+  }
+}
+
+async function reconcileAuthority(): Promise<void> {
   const authority = runtime?.authority;
   if (authority === undefined) return;
 
-  void authority.reconcile().catch((error: unknown) => {
+  try {
+    await authority.reconcile();
+  } catch (error: unknown) {
     logger.error("Primary Authority reconciliation failed", {
       error: error instanceof Error ? error.message : String(error)
     });
-  });
+  }
 }
 
 Hooks.once("init", () => {
   registerFoundryPrimaryAuthoritySettings({
-    onPreferredChanged: reconcileAuthority,
+    onPreferredChanged: () => {
+      void reconcileAuthority();
+    },
     onAuthorityStateChanged: (value) => {
       try {
         runtime?.authority.synchronizePersistedState(value);
@@ -47,35 +58,50 @@ Hooks.once("init", () => {
 
 Hooks.once("ready", async () => {
   runtime = composeDomainManagerRuntime();
-  await runtime.initialize();
-  const module = (globalThis as any).game?.modules?.get?.("domain-manager");
-  if (module) {
-    module.api = runtime.publicApi;
-  }
-  reconcileAuthority();
+  // Disable mutating commands during startup bootstrap
+  runtime.commandBus.setMutationsEnabled(false);
 
-  // If this host is the elected Primary Authority at startup, run recovery scan and recover
+  try {
+    await runtime.initialize();
+  } catch (initErr) {
+    logger.error("Runtime initialization failed, entering safe mode", {
+      error: initErr instanceof Error ? initErr.message : String(initErr)
+    });
+    publishModuleApi(runtime);
+    return;
+  }
+
+  // Await authority readiness and reconciliation before recovery scan
+  await reconcileAuthority();
+
+  // If this host is the elected Primary Authority at startup, run recovery scan and recover (Patch D)
   if (runtime.authority.service.isCurrentUser()) {
     const currentEpoch = runtime.authority.service.getStatus().authorityEpoch;
-    void runtime.recovery
-      .recoverAll(currentEpoch)
-      .then((results) => {
-        if (results.length > 0) {
-          logger.info(
-            `Startup recovery processed ${results.length} transactions`,
-            { processedCount: results.length }
-          );
-        }
-      })
-      .catch((error: unknown) => {
-        logger.error("Startup recovery scan failed", {
-          error: error instanceof Error ? error.message : String(error)
-        });
+    try {
+      await runtime.recovery.scanOnStartup(currentEpoch);
+      const results = await runtime.recovery.recoverAll(currentEpoch);
+      if (results.length > 0) {
+        logger.info(
+          `Startup recovery processed ${results.length} transactions`,
+          { processedCount: results.length }
+        );
+      }
+      runtime.commandBus.setMutationsEnabled(true);
+    } catch (error: unknown) {
+      logger.error("Startup recovery scan or auto-recovery failed, entering safe mode", {
+        error: error instanceof Error ? error.message : String(error)
       });
+      runtime.commandBus.setMutationsEnabled(false);
+    }
+  } else {
+    runtime.commandBus.setMutationsEnabled(true);
   }
 
+  // Publish module.api AFTER fences and recovery scan are installed
+  publishModuleApi(runtime);
+
   Hooks.on("userConnected", () => {
-    reconcileAuthority();
+    void reconcileAuthority();
   });
 
   logger.info("ready", BUILD_METADATA);

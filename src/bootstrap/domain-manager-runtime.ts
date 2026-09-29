@@ -175,6 +175,7 @@ export interface DomainManagerRuntimeOptions {
   readonly lockManager?: LockManager;
   readonly transactionStore?: TransactionStore;
   readonly transactionStorageAdapter?: TransactionStorageAdapter;
+  readonly transactionStoreAdapter?: TransactionStorageAdapter;
   readonly rateLimiter?: RateLimiter;
   readonly dedupeStore?: CommandDedupeStore;
   readonly commandQueue?: CommandQueue;
@@ -227,7 +228,9 @@ export function composeDomainManagerRuntime(
     options.transactionStore ??
     new TransactionStore({
       storageAdapter:
-        options.transactionStorageAdapter ?? new FoundryJournalTransactionStorageAdapter()
+        options.transactionStorageAdapter ??
+        options.transactionStoreAdapter ??
+        new FoundryJournalTransactionStorageAdapter()
     });
   const recovery = new RecoveryService({ transactionStore, lockManager });
   const coordinator = new MutationCoordinator({ lockManager, recoveryService: recovery, transactionStore });
@@ -437,6 +440,8 @@ export function composeDomainManagerRuntime(
     lockManager,
     coordinator,
     recovery,
+    recoveryService: recovery,
+    recoveryFenceRegistry: recovery.fenceRegistry,
     transactionStore,
     diagnostics,
     people,
@@ -456,19 +461,24 @@ export function composeDomainManagerRuntime(
     facilityRegistry,
     downtimeRegistry,
     initialize: async () => {
-      await transactionStore.rehydrate();
-      await ledgerStore.rehydrate();
-      await reservationStore.rehydrate();
-      await thresholdService.rehydrate();
-      const customDefs = await customResourceStore.rehydrate();
-      for (const def of customDefs) {
-        if (!resourceRegistry.get(def.id)) {
-          resourceRegistry.register(def);
+      try {
+        await transactionStore.rehydrate();
+        await ledgerStore.rehydrate();
+        await reservationStore.rehydrate();
+        await thresholdService.rehydrate();
+        const customDefs = await customResourceStore.rehydrate();
+        for (const def of customDefs) {
+          if (!resourceRegistry.get(def.id)) {
+            resourceRegistry.register(def);
+          }
         }
-      }
-      const manualCurrency = providerRegistry.get(MANUAL_CURRENCY_PROVIDER_ID);
-      if (manualCurrency && "rehydrate" in manualCurrency && typeof (manualCurrency as any).rehydrate === "function") {
-        await (manualCurrency as any).rehydrate();
+        const manualCurrency = providerRegistry.get(MANUAL_CURRENCY_PROVIDER_ID);
+        if (manualCurrency && "rehydrate" in manualCurrency && typeof (manualCurrency as any).rehydrate === "function") {
+          await (manualCurrency as any).rehydrate();
+        }
+      } catch (initErr) {
+        commandBus.setMutationsEnabled(false);
+        throw initErr;
       }
     },
     destroy: () => {

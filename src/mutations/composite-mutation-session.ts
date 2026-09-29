@@ -36,6 +36,7 @@ export interface ChildStepDefinition<TIntent = unknown, TReceipt = unknown> {
   readonly operation: string;
   readonly targetRef?: string;
   readonly idempotencyKey?: string;
+  readonly operationRef?: string;
   readonly intent: TIntent;
   readonly flushIntent?: boolean;
   readonly execute: () => Promise<Result<TReceipt, PublicError>>;
@@ -51,6 +52,7 @@ export interface CompositeSessionPrepareOptions {
   readonly authorityEpoch?: number;
   readonly lockKeys?: readonly string[];
   readonly planLockKeys?: readonly string[];
+  readonly expectedLockKeys?: readonly string[];
   readonly recoveryType: string;
   readonly parentRef: string;
   readonly parentBefore?: unknown;
@@ -129,7 +131,7 @@ export class CompositeMutationSession {
     }
     const authorityEpoch = options.transactionContext?.authorityEpoch ?? options.authorityEpoch ?? 1;
     const rawLockKeys = options.transactionContext?.lockKeys ?? options.lockKeys ?? [];
-    const rawPlanLockKeys = options.planLockKeys ?? options.transactionContext?.lockKeys;
+    const rawPlanLockKeys = options.expectedLockKeys ?? options.planLockKeys;
 
     // 1. Lock key validation: forbidden namespace check (INV-01, Master Remediation §6, §7)
     const forbiddenCheck = assertNoForbiddenLockKeys(rawLockKeys);
@@ -255,103 +257,163 @@ export class CompositeMutationSession {
   }
 
   /**
-   * Executes a child side-effect with pre-intent and post-receipt durable checkpoints
+   * Executes a child side-effect with write-ahead intent/executing phase and post-receipt durable checkpoints
    * (INV-03, INV-04, INV-05).
+   * Intent persistence and flush before execute() are mandatory across all flows.
    */
   async runChildStep<TIntent = unknown, TReceipt = unknown>(
     stepDef: ChildStepDefinition<TIntent, TReceipt>
   ): Promise<Result<TReceipt, PublicError>> {
+    const operationRef = stepDef.operationRef ?? stepDef.stepId;
     const idempotencyKey =
       stepDef.idempotencyKey ?? `${this.transactionId}:${stepDef.stepId}`;
 
-    const plannedStep: RecoveryStep<TIntent, unknown> = {
+    // 1. Mandatory write-ahead: place step in "executing" state with intent before executing effect
+    const executingStep: RecoveryStep<TIntent, unknown> = {
       stepId: stepDef.stepId,
       subsystem: stepDef.subsystem,
       operation: stepDef.operation,
       targetRef: stepDef.targetRef,
       idempotencyKey,
-      state: "planned",
+      operationRef,
+      state: "executing",
       intent: stepDef.intent
     };
 
     // Replace or append step in memory
     const existingIdx = this.#steps.findIndex((s) => s.stepId === stepDef.stepId);
     if (existingIdx !== -1) {
-      this.#steps[existingIdx] = plannedStep;
+      this.#steps[existingIdx] = executingStep;
     } else {
-      this.#steps.push(plannedStep);
+      this.#steps.push(executingStep);
     }
 
-    // INV-04: Persist intent durably BEFORE executing side effect if requested
-    if (this.#transactionStore && stepDef.flushIntent) {
+    // MANDATORY WRITE-AHEAD: Persist intent & executing state durably BEFORE executing side effect (INV-04)
+    if (this.#transactionStore) {
       const intentPersist = await this.#persistSteps();
       if (!intentPersist.ok) {
+        // Effect has NOT started: revert memory state to planned
+        const stepIdx = this.#steps.findIndex((s) => s.stepId === stepDef.stepId);
+        if (stepIdx !== -1) {
+          this.#steps[stepIdx] = { ...executingStep, state: "planned" };
+        }
         return intentPersist;
       }
     }
 
-    // Execute side effect
+    // 2. Execute side effect with outcome classification (INV-05, INV-06, Finding 6)
     let execRes: Result<TReceipt, PublicError>;
+    let threwException = false;
     try {
       execRes = await stepDef.execute();
     } catch (thrown) {
+      threwException = true;
       execRes = err(
         createPublicError({
           code: "DM_COMMAND_EXECUTION_FAILED",
           category: "internal",
           message: thrown instanceof Error ? thrown.message : String(thrown),
-          details: thrown
+          details: { outcome: "unknown", error: thrown }
         })
       );
     }
 
-    if (!execRes.ok) {
+    if (execRes.ok) {
+      // INV-05: Persist receipt durably AFTER executing side effect
+      const appliedStep: RecoveryStep<TIntent, TReceipt> = {
+        ...executingStep,
+        state: "applied",
+        receipt: execRes.value
+      };
+
+      const stepIdx = this.#steps.findIndex((s) => s.stepId === stepDef.stepId);
+      if (stepIdx !== -1) {
+        this.#steps[stepIdx] = appliedStep;
+      } else {
+        this.#steps.push(appliedStep);
+      }
+
+      if (this.#transactionStore) {
+        const receiptPersist = await this.#persistSteps();
+        if (!receiptPersist.ok) {
+          // INV-05: If receipt checkpoint flush fails, outcome is unknown, mark needs-recovery
+          const unknownStep: RecoveryStep<TIntent, unknown> = {
+            ...executingStep,
+            state: "unknown",
+            receipt: undefined
+          };
+          this.#steps[stepIdx !== -1 ? stepIdx : this.#steps.length - 1] = unknownStep;
+          await this.markNeedsRecovery(
+            `Child step '${stepDef.stepId}' receipt flush failed: ${receiptPersist.error.message}`
+          );
+
+          return err(
+            createPublicError({
+              code: "DM_DOMAIN_STORAGE_ERROR",
+              category: "internal",
+              message: `Child step applied but receipt checkpoint failed to flush: ${receiptPersist.error.message}`,
+              details: {
+                outcome: "unknown",
+                stepId: stepDef.stepId,
+                originalError: receiptPersist.error
+              }
+            })
+          );
+        }
+      }
+
       return execRes;
     }
 
-    // INV-05: Persist receipt durably AFTER executing side effect
-    const appliedStep: RecoveryStep<TIntent, TReceipt> = {
-      ...plannedStep,
-      state: "applied",
-      receipt: execRes.value
-    };
+    // 3. Child effect failed: classify outcome as "not-applied" vs "unknown" (Finding 6)
+    const errDetails = execRes.error.details as any;
+    const isExplicitUnknown =
+      threwException ||
+      errDetails?.outcome === "unknown" ||
+      (execRes.error as any).outcome === "unknown" ||
+      execRes.error.category === "timeout" ||
+      execRes.error.code === "DM_TIMEOUT" ||
+      execRes.error.code === "DM_ECON_PROVIDER_TIMEOUT";
 
     const stepIdx = this.#steps.findIndex((s) => s.stepId === stepDef.stepId);
-    if (stepIdx !== -1) {
-      this.#steps[stepIdx] = appliedStep;
-    } else {
-      this.#steps.push(appliedStep);
-    }
-
-    if (this.#transactionStore) {
-      const receiptPersist = await this.#persistSteps();
-      if (!receiptPersist.ok) {
-        // INV-05: If receipt checkpoint flush fails, outcome is unknown, mark needs-recovery
-        const unknownStep: RecoveryStep<TIntent, TReceipt> = {
-          ...appliedStep,
-          state: "unknown"
-        };
-        this.#steps[stepIdx !== -1 ? stepIdx : this.#steps.length - 1] = unknownStep;
-        await this.markNeedsRecovery(
-          `Child step '${stepDef.stepId}' receipt flush failed: ${receiptPersist.error.message}`
-        );
-
-        return err(
-          createPublicError({
-            code: "DM_DOMAIN_STORAGE_ERROR",
-            category: "internal",
-            message: `Child step applied but receipt checkpoint failed to flush: ${receiptPersist.error.message}`,
-            details: {
-              outcome: "unknown",
-              stepId: stepDef.stepId,
-              originalError: receiptPersist.error
-            }
-          })
-        );
+    if (isExplicitUnknown) {
+      const unknownStep: RecoveryStep<TIntent, unknown> = {
+        ...executingStep,
+        state: "unknown"
+      };
+      if (stepIdx !== -1) {
+        this.#steps[stepIdx] = unknownStep;
       }
+      await this.markNeedsRecovery(
+        `Child step '${stepDef.stepId}' execution outcome is unknown: ${execRes.error.message}`
+      );
+      return err(
+        createPublicError({
+          code: execRes.error.code,
+          category: execRes.error.category,
+          message: execRes.error.message,
+          details: {
+            ...(typeof execRes.error.details === "object" && execRes.error.details !== null
+              ? execRes.error.details
+              : {}),
+            outcome: "unknown"
+          }
+        })
+      );
+    } else {
+      // "not-applied": effect definitely did not execute (validation, insufficient funds, etc.)
+      const notAppliedStep: RecoveryStep<TIntent, unknown> = {
+        ...executingStep,
+        state: "planned"
+      };
+      if (stepIdx !== -1) {
+        this.#steps[stepIdx] = notAppliedStep;
+      }
+      if (this.#transactionStore) {
+        await this.#persistSteps();
+      }
+      return execRes;
     }
-
-    return execRes;
   }
 
   /**
@@ -454,12 +516,17 @@ export class CompositeMutationSession {
     primaryError: PublicError,
     compensatorFn?: (session: CompositeMutationSession, error: PublicError) => Promise<Result<void, PublicError>>
   ): Promise<Result<TResult, PublicError>> {
+    const isUnknownOutcome =
+      (primaryError as any)?.outcome === "unknown" ||
+      (primaryError.details as any)?.outcome === "unknown" ||
+      this.#steps.some((s) => s.state === "unknown" || s.state === "executing");
+
     const hasAppliedEffects = this.#steps.some(
-      (s) => s.state === "applied" || s.state === "unknown"
+      (s) => s.state === "applied" || s.state === "unknown" || s.state === "executing"
     );
 
-    // If no child side effects were applied, we can safely mark failed
-    if (!hasAppliedEffects) {
+    // If no child side effects were applied and outcome is not unknown, we can safely mark failed
+    if (!hasAppliedEffects && !isUnknownOutcome) {
       this.#currentPhase = "failed";
       if (this.#transactionStore) {
         await this.#transactionStore.transitionDurable(
@@ -470,6 +537,15 @@ export class CompositeMutationSession {
         );
       }
       this.#removeFence();
+      return err(primaryError);
+    }
+
+    // Section 6 & 17: If outcome is unknown, do NOT run blind compensation!
+    // Transition to needs-recovery, install fence, and wait for reconciliation.
+    if (isUnknownOutcome) {
+      await this.markNeedsRecovery(
+        `Transaction outcome is unknown, requires reconciliation: ${primaryError.message}`
+      );
       return err(primaryError);
     }
 
@@ -574,6 +650,21 @@ export class CompositeMutationSession {
     this.#installFence(reason);
 
     if (this.#transactionStore) {
+      await this.#transactionStore.patchDurable(this.transactionId, (current) => {
+        const currentData = (current.recoveryData as Record<string, unknown>) ?? {};
+        return {
+          ...current,
+          state: "needs-recovery",
+          recoveryData: {
+            ...currentData,
+            ...this.#legacyData,
+            steps: Object.freeze([...this.#steps]),
+            phase: "needs-recovery",
+            lastError: reason
+          },
+          updatedAt: Date.now()
+        };
+      });
       this.#transactionStore.transition(
         this.transactionId,
         "needs-recovery",

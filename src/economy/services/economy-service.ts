@@ -31,6 +31,7 @@ import {
 } from "../accounts/account-types.js";
 import {
   type DomainEconomyData,
+  type OperationReceiptRecord,
   getDomainEconomyData,
   tryGetDomainEconomyData,
   withDomainEconomyData
@@ -136,6 +137,8 @@ export interface ReserveParams {
   readonly expiresAtWorld?: number | null;
   readonly expiresAtReal?: number | null;
   readonly lockOwner?: string;
+  readonly reservationId?: string;
+  readonly operationRef?: string;
 }
 
 export interface ConsumeReservationParams {
@@ -234,6 +237,10 @@ export class EconomyService {
 
   getReservation(id: string): Reservation | undefined {
     return this.#reservationStore.get(id);
+  }
+
+  getReservationByOperationRef(operationRef: string): Reservation | undefined {
+    return this.#reservationStore.getByOperationRef(operationRef);
   }
 
   async getAccount(
@@ -711,19 +718,56 @@ export class EconomyService {
 
       const existingAccount = econData.accounts[accIndex];
 
-      // G5-REVAL6-002 & Master Remediation §17: Check idempotency key against domain economy data and ledger store
+      // G5-REVAL6-002 & Master Remediation §17, Patch F: Check idempotency key against domain economy data and ledger store
       if (params.idempotencyKey) {
-        if (econData.appliedIdempotencyKeys?.includes(params.idempotencyKey)) {
+        const existingReceipt = econData.operationReceipts?.find(
+          (r) => r.operationRef === params.idempotencyKey
+        );
+        const isKeyApplied = econData.appliedIdempotencyKeys?.includes(params.idempotencyKey);
+
+        if (existingReceipt || isKeyApplied) {
           const existingEntries = this.#ledgerStore.query({
             domainUuid: params.domainUuid,
             sourceRef: params.idempotencyKey
           });
+
+          if (existingEntries.length > 0) {
+            return ok({
+              account: existingAccount,
+              entry: existingEntries[0],
+              isNoop: true
+            });
+          }
+
+          // Balance was applied but LedgerStore has no entry (e.g. crash after domain balance save, before ledger flush).
+          // Reconcile/reconstruct ledger entry without re-applying balance!
+          const delta = existingReceipt ? existingReceipt.deltaMinor : (params.deltaMinor ?? 0);
+          const kind = (existingReceipt?.kind as LedgerEntryKind) ?? "adjustment";
+          const reason = existingReceipt?.reason ?? params.reason ?? "Reconciled ledger entry";
+
+          const recRes = this.#ledgerStore.append({
+            domainUuid: params.domainUuid,
+            resourceId: existingReceipt ? existingReceipt.resourceId : params.resourceId,
+            deltaMinor: delta,
+            kind,
+            source: {
+              type: "manual",
+              ref: params.idempotencyKey,
+              reason
+            }
+          });
+
+          if (recRes.ok) {
+            await this.#ledgerStore.flush();
+          }
+
           return ok({
             account: existingAccount,
-            entry: existingEntries[0],
+            entry: recRes.ok ? recRes.value : undefined,
             isNoop: true
           });
         }
+
         const existingEntries = this.#ledgerStore.query({
           domainUuid: params.domainUuid,
           sourceRef: params.idempotencyKey
@@ -1051,10 +1095,27 @@ export class EconomyService {
         ? [...(econData.appliedIdempotencyKeys ?? []), params.idempotencyKey]
         : econData.appliedIdempotencyKeys;
 
+      const newReceipt: OperationReceiptRecord = {
+        operationRef: params.idempotencyKey ?? `op_${Date.now()}`,
+        resourceId: params.resourceId,
+        deltaMinor: intent.deltaMinor,
+        kind: intent.kind,
+        reason: intent.source.reason,
+        state: "balance-applied"
+      };
+
+      const updatedReceipts = params.idempotencyKey
+        ? [
+            ...(econData.operationReceipts ?? []).filter((r) => r.operationRef !== params.idempotencyKey),
+            newReceipt
+          ]
+        : econData.operationReceipts;
+
       const updatedRecord = withDomainEconomyData(doc.record, {
         ...econData,
         accounts: Object.freeze(updatedAccounts),
-        appliedIdempotencyKeys: appliedKeys ? Object.freeze(appliedKeys) : undefined
+        appliedIdempotencyKeys: appliedKeys ? Object.freeze(appliedKeys) : undefined,
+        operationReceipts: updatedReceipts ? Object.freeze(updatedReceipts) : undefined
       });
 
       const updateDocRes = await this.#domains.update({ ...doc, record: updatedRecord });
@@ -1759,7 +1820,9 @@ export class EconomyService {
         originalAmountMinor: params.amountMinor,
         source: params.source,
         expiresAtWorld: params.expiresAtWorld,
-        expiresAtReal: params.expiresAtReal
+        expiresAtReal: params.expiresAtReal,
+        reservationId: params.reservationId,
+        operationRef: params.operationRef
       });
       if (res.ok) {
         await this.#reservationStore.flush();

@@ -66,6 +66,7 @@ export interface Reservation {
   readonly createdAtWorld?: number | null;
   readonly expiresAtWorld?: number | null;
   readonly expiresAtReal?: number | null;
+  readonly operationRef?: string;
   readonly revision: number;
 }
 
@@ -210,6 +211,7 @@ export function validateReservation(raw: unknown): Result<Reservation, PublicErr
     ...(typeof candidate.createdAtWorld === "number" ? { createdAtWorld: candidate.createdAtWorld } : {}),
     ...(typeof candidate.expiresAtWorld === "number" ? { expiresAtWorld: candidate.expiresAtWorld } : {}),
     ...(typeof candidate.expiresAtReal === "number" ? { expiresAtReal: candidate.expiresAtReal } : {}),
+    ...(typeof candidate.operationRef === "string" ? { operationRef: candidate.operationRef } : {}),
     revision
   });
 }
