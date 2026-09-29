@@ -126,7 +126,9 @@ export async function compensateDowntimeStart(
             deltaMinor: Math.abs(intent.deltaMinor),
             reason: `Compensation: refund upfront cost for downtime activity ${data.definitionId}`,
             lockOwner: effectiveLockOwner,
-            idempotencyKey
+            idempotencyKey,
+            parentTransactionId: record.transactionId,
+            recoveryOwner: "parent"
           });
           if (!refRes.ok) return refRes;
         }
@@ -147,7 +149,9 @@ export async function compensateDowntimeStart(
             deltaMinor: cost.amount,
             reason: `Compensation: refund upfront cost for downtime activity ${data.definitionId}`,
             lockOwner: effectiveLockOwner,
-            idempotencyKey
+            idempotencyKey,
+            parentTransactionId: record.transactionId,
+            recoveryOwner: "parent"
           });
           if (!refRes.ok) return refRes;
           await markCompensationStepCompleted(context.transactionStore, record, stepId);
@@ -255,7 +259,9 @@ export async function compensateDowntimeResolution(
             deltaMinor: -intent.deltaMinor,
             reason: `Compensation: reverse reward for downtime activity ${data.activityId}`,
             lockOwner: effectiveLockOwner,
-            idempotencyKey
+            idempotencyKey,
+            parentTransactionId: record.transactionId,
+            recoveryOwner: "parent"
           });
           if (!revRes.ok) return revRes;
         }
@@ -344,7 +350,9 @@ export async function compensateDowntimeResolution(
             deltaMinor: -reward.amount,
             reason: `Compensation: reverse reward for downtime activity ${data.activityId}`,
             lockOwner: effectiveLockOwner,
-            idempotencyKey
+            idempotencyKey,
+            parentTransactionId: record.transactionId,
+            recoveryOwner: "parent"
           });
           if (!revRes.ok) return revRes;
           await markCompensationStepCompleted(context.transactionStore, record, stepId);

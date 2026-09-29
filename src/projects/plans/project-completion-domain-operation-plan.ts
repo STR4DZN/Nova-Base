@@ -298,7 +298,9 @@ export async function executeProjectCompletionDomainOperationPlan(
               deltaMinor: -cost.amountMinor,
               reason: `OnCompletion cost for project ${project.name}`,
               lockOwner: params.commandId,
-              idempotencyKey: `${session.transactionId}:${stepId}`
+              idempotencyKey: `${session.transactionId}:${stepId}`,
+              parentTransactionId: session.transactionId,
+              recoveryOwner: "parent"
             });
           }
         });
@@ -576,7 +578,9 @@ export async function executeProjectCompletionDomainOperationPlan(
           deltaMinor,
           reason: `Project completion reward: ${effect.description ?? project.name}`,
           lockOwner: params.commandId,
-          idempotencyKey: `${session.transactionId}:${stepId}`
+          idempotencyKey: `${session.transactionId}:${stepId}`,
+          parentTransactionId: session.transactionId,
+          recoveryOwner: "parent"
         });
       }
     });

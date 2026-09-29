@@ -438,7 +438,9 @@ export class FacilitiesService {
               deltaMinor: -cost.amount,
               reason: `Maintenance cost for facility '${facility.name}'`,
               lockOwner: params.commandId,
-              idempotencyKey: `${session.transactionId}:${stepId}`
+              idempotencyKey: `${session.transactionId}:${stepId}`,
+              parentTransactionId: session.transactionId,
+              recoveryOwner: "parent"
             });
           }
         });
@@ -675,7 +677,9 @@ export class FacilitiesService {
               deltaMinor: -cost.amount,
               reason: `Repair cost for facility '${facility.name}'`,
               lockOwner: params.commandId,
-              idempotencyKey: `${session.transactionId}:${stepId}`
+              idempotencyKey: `${session.transactionId}:${stepId}`,
+              parentTransactionId: session.transactionId,
+              recoveryOwner: "parent"
             });
           }
         });

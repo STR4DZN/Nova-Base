@@ -113,6 +113,16 @@ export async function executeProjectStartDomainOperationPlan(
 
   const targetLifecycle = params.initialState === "initializing" ? "initializing" : "active";
 
+  const availableResources: Record<string, number> = {};
+  if (context.economyService && typeof (context.economyService as any).getAccountAvailability === "function") {
+    for (const cost of definition.costs) {
+      const availRes = await (context.economyService as any).getAccountAvailability(cleanDomainUuid, cost.resourceId);
+      if (availRes && availRes.ok && availRes.value) {
+        availableResources[cost.resourceId] = availRes.value.availableMinor;
+      }
+    }
+  }
+
   // Evaluate pure start plan
   const plan = evaluateProjectStartPlan({
     project: draftProject,
@@ -120,7 +130,8 @@ export async function executeProjectStartDomainOperationPlan(
     domain: record,
     targetLifecycle,
     expectedRevision: params.expectedRevision,
-    parameters: params.workforceRequired !== undefined ? { workforceRequired: params.workforceRequired } : undefined
+    parameters: params.workforceRequired !== undefined ? { workforceRequired: params.workforceRequired } : undefined,
+    availableResources: Object.keys(availableResources).length > 0 ? availableResources : undefined
   });
 
   if (!plan.isSatisfied) {
@@ -293,7 +304,9 @@ export async function executeProjectStartDomainOperationPlan(
               deltaMinor: -cost.amountMinor,
               reason: `Upfront cost for project ${draftProject.name}`,
               lockOwner: params.commandId,
-              idempotencyKey: `${session.transactionId}:${stepId}`
+              idempotencyKey: `${session.transactionId}:${stepId}`,
+              parentTransactionId: session.transactionId,
+              recoveryOwner: "parent"
             });
           }
         });

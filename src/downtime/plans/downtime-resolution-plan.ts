@@ -228,7 +228,9 @@ export async function executeDowntimeResolutionPlan(
               deltaMinor: amount,
               reason: `Outcome of downtime activity '${activity.name}': ${outcome.label}`,
               lockOwner: params.commandId,
-              idempotencyKey: `${session.transactionId}:${stepId}`
+              idempotencyKey: `${session.transactionId}:${stepId}`,
+              parentTransactionId: session.transactionId,
+              recoveryOwner: "parent"
             });
           }
         });

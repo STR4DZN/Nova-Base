@@ -2403,10 +2403,10 @@ test("T17: Provider operationRef in commitAdjust (passed to mutateBalance, store
   const recoverRes = await recoveryService.recoverTransaction("tx-provider-rollback-t17", 1);
   assert.equal(recoverRes.ok, true);
 
-  // Compensation must have invoked provider.mutateBalance with delta -100 and operationRef testIdempotencyKey
+  // Compensation must have invoked provider.mutateBalance with delta -100 and operationRef ${testIdempotencyKey}:compensation
   assert.equal(mutateCalls.length, 2);
   assert.equal(mutateCalls[1].delta, -100);
-  assert.equal(mutateCalls[1].options?.operationRef, testIdempotencyKey);
+  assert.equal(mutateCalls[1].options?.operationRef, `${testIdempotencyKey}:compensation`);
 });
 
 // ---------------------------------------------------------------------------
@@ -2879,3 +2879,390 @@ test("T19: commitAdjust with ledger-confirmed persistence failure (fails closed 
   assert.equal(confirmedReceipt.state, "ledger-confirmed");
   assert.equal(confirmedReceipt.ledgerEntryId, entriesAfterRetry[0].id);
 });
+
+// ---------------------------------------------------------------------------
+// T20-A: Standalone provider compensation crash-idempotency (provider compensation crash -> recovery runs again -> compensation executed once, net 0)
+// ---------------------------------------------------------------------------
+test("T20-A: Standalone provider compensation crash-idempotency (provider compensation crash -> recovery runs again -> compensation executed once, net 0)", async () => {
+  const { domains, getDoc } = createMockDomainDoc("dom-t20a", 0);
+  const resourceRegistry = createDefaultResourceRegistry();
+  const lockManager = new LockManager();
+  const ledgerStore = new LedgerStore(new InMemoryLedgerStorageAdapter());
+  const reservationStore = new ReservationStore(new InMemoryReservationStorageAdapter());
+  const txStore = new TransactionStore(new InMemoryTransactionStorageAdapter());
+  const recoveryService = new RecoveryService({ lockManager, transactionStore: txStore });
+
+  resourceRegistry.register({
+    id: "provider:gems",
+    version: 1,
+    label: "Gems",
+    tags: [],
+    precision: 0,
+    allowNegative: false,
+    defaultCapacityPolicy: "provider",
+    lifecycle: "active"
+  });
+
+  const mutateDeltas: number[] = [];
+  const provider = new ManualCurrencyProvider();
+  provider.setBalance("account-gems-t20a", 500);
+
+  const origMutate = provider.mutateBalance.bind(provider);
+  provider.mutateBalance = async (dUuid, rId, pRef, delta, reason, opts) => {
+    mutateDeltas.push(delta);
+    return origMutate(dUuid, rId, pRef, delta, reason, opts);
+  };
+
+  const providerRegistry = new ProviderRegistry();
+  providerRegistry.register(provider);
+
+  const doc = getDoc();
+  const econ = (doc.record.definition.capabilities.config as any)["domain-manager:economy"];
+  econ.accounts = [
+    {
+      domainUuid: "dom-t20a",
+      resourceId: "provider:gems",
+      mode: "provider",
+      providerId: MANUAL_CURRENCY_PROVIDER_ID,
+      providerRef: "account-gems-t20a",
+      balanceMinor: 500,
+      baseCapacityMinor: null
+    }
+  ];
+  await domains.save(doc);
+
+  const economyService = new EconomyService({
+    domains,
+    resourceRegistry,
+    ledgerStore,
+    reservationStore,
+    lockManager,
+    transactionStore: txStore,
+    recoveryService,
+    providerRegistry
+  });
+
+  const testOpRef = "op-ref-t20a";
+  // Simulate an aborted provider adjustment: provider already applied +100 (balance is 600)
+  await provider.mutateCurrency("account-gems-t20a", 100, "Initial debit", { operationRef: testOpRef });
+  assert.equal((await provider.getCurrencyBalance("account-gems-t20a")).value, 600);
+  mutateDeltas.length = 0;
+
+  const orphanTx = {
+    ...createTransactionRecord({
+      transactionId: "tx-t20a",
+      commandId: createCommandId(),
+      authorityEpoch: 1,
+      lockKeys: [lockKey.domain("dom-t20a")],
+      safeAutoRecovery: true,
+      recoveryData: {
+        type: "economy:provider-adjust",
+        domainUuid: "dom-t20a",
+        resourceId: "provider:gems",
+        providerId: MANUAL_CURRENCY_PROVIDER_ID,
+        providerRef: "account-gems-t20a",
+        providerOperationRef: testOpRef,
+        deltaMinor: 100
+      }
+    }),
+    state: "needs-recovery" as const
+  };
+  txStore.save(orphanTx);
+
+  // 1. Run recovery first time
+  const rec1 = await recoveryService.recoverTransaction("tx-t20a", 1);
+  assert.equal(rec1.ok, true);
+  // Provider balance was reversed by -100 to 500
+  assert.equal((await provider.getCurrencyBalance("account-gems-t20a")).value, 500);
+  assert.equal(mutateDeltas.length, 1);
+  assert.equal(mutateDeltas[0], -100);
+
+  // 2. Simulate crash right after provider compensation before transaction record could be deleted / updated:
+  // Re-save the transaction as needs-recovery and run recovery again
+  txStore.save({
+    ...orphanTx,
+    state: "needs-recovery" as const
+  });
+
+  const rec2 = await recoveryService.recoverTransaction("tx-t20a", 1);
+  assert.equal(rec2.ok, true);
+
+  // Provider balance must NOT be debited again; it MUST remain 500
+  assert.equal((await provider.getCurrencyBalance("account-gems-t20a")).value, 500);
+  // mutateDeltas must still have length 1 because the second recovery call skipped mutateBalance via reconcile
+  assert.equal(mutateDeltas.length, 1, "Second recovery must not re-call mutateBalance");
+});
+
+// ---------------------------------------------------------------------------
+// T20-B: G5 child provider operation times out with outcome unknown (single recovery owner, returns net 0)
+// ---------------------------------------------------------------------------
+test("T20-B: G5 child provider operation times out with outcome unknown (single recovery owner, returns net 0)", async () => {
+  const { domains, getDoc } = createMockDomainDoc("dom-t20b", 0);
+  const resourceRegistry = createDefaultResourceRegistry();
+  const lockManager = new LockManager();
+  const ledgerStore = new LedgerStore(new InMemoryLedgerStorageAdapter());
+  const reservationStore = new ReservationStore(new InMemoryReservationStorageAdapter());
+  const txStore = new TransactionStore(new InMemoryTransactionStorageAdapter());
+  const recoveryService = new RecoveryService({ lockManager, transactionStore: txStore });
+  const projectRegistry = createDefaultProjectRegistry();
+  const peopleService = new PeopleService(domains);
+
+  resourceRegistry.register({
+    id: "provider:gems",
+    version: 1,
+    label: "Gems",
+    tags: [],
+    precision: 0,
+    allowNegative: false,
+    defaultCapacityPolicy: "provider",
+    lifecycle: "active"
+  });
+
+  const provider = new ManualCurrencyProvider();
+  provider.setBalance("account-gems-t20b", 500);
+
+  // Intercept mutateBalance: apply write to currency, then throw timeout
+  let threwTimeout = false;
+  provider.mutateBalance = async (dUuid, rId, pRef, delta, reason, opts) => {
+    if (!threwTimeout) {
+      threwTimeout = true;
+      // Remote write actually succeeds before connection drop
+      await provider.mutateCurrency(pRef, delta, reason, opts);
+      throw new Error("ETIMEDOUT: Provider connection timed out");
+    }
+    return provider.mutateCurrency(pRef, delta, reason, opts);
+  };
+
+  const providerRegistry = new ProviderRegistry();
+  providerRegistry.register(provider);
+
+  const doc = getDoc();
+  const econ = (doc.record.definition.capabilities.config as any)["domain-manager:economy"];
+  econ.accounts = [
+    {
+      domainUuid: "dom-t20b",
+      resourceId: "provider:gems",
+      mode: "provider",
+      providerId: MANUAL_CURRENCY_PROVIDER_ID,
+      providerRef: "account-gems-t20b",
+      balanceMinor: 500,
+      baseCapacityMinor: null
+    }
+  ];
+  await domains.save(doc);
+
+  const economyService = new EconomyService({
+    domains,
+    resourceRegistry,
+    ledgerStore,
+    reservationStore,
+    lockManager,
+    transactionStore: txStore,
+    recoveryService,
+    providerRegistry
+  });
+
+  recoveryService.registerCompensator("projects:start", async (record) => {
+    return compensateProjectStart(record, {
+      domains,
+      economyService,
+      peopleService,
+      transactionStore: txStore
+    });
+  });
+
+  projectRegistry.register({
+    id: "test:proj-def-t20b",
+    version: 1,
+    label: "Gems Quarry",
+    category: "construction",
+    progressResolverId: "domain-manager:standard",
+    costs: [{ resourceId: "provider:gems", amountMinor: 100, timing: "upfront" }],
+    defaultWorkRequired: 100,
+    tags: ["test"],
+    requirements: [],
+    rewards: []
+  });
+
+  // Execute project start plan
+  const planRes = await executeProjectStartDomainOperationPlan(
+    {
+      domains,
+      projectRegistry,
+      economyService,
+      peopleService,
+      transactionStore: txStore,
+      recoveryService
+    },
+    {
+      domainUuid: "dom-t20b",
+      definitionId: "test:proj-def-t20b",
+      commandId: createCommandId(),
+      authorityEpoch: 1
+    }
+  );
+
+  // Plan must fail due to provider timeout
+  assert.equal(planRes.ok, false);
+
+  // CRITICAL: Exactly 1 transaction in txStore (projects:start), ZERO economy:provider-adjust
+  const allTxs = txStore.listAll();
+  const providerTxs = allTxs.filter((tx) => tx.recoveryData?.type === "economy:provider-adjust");
+  assert.equal(providerTxs.length, 0, "No nested economy:provider-adjust transaction record must exist");
+
+  const projectTxs = allTxs.filter((tx) => tx.recoveryData?.type === "projects:start");
+  assert.equal(projectTxs.length, 1, "Exactly one parent projects:start transaction must exist");
+  assert.equal(projectTxs[0].state, "needs-recovery");
+
+  // Remote balance was debited by 100 to 400 before timeout
+  assert.equal((await provider.getCurrencyBalance("account-gems-t20b")).value, 400);
+
+  // Run parent recovery
+  const recRes = await recoveryService.recoverTransaction(projectTxs[0].transactionId, 1);
+  assert.equal(recRes.ok, true);
+
+  // Provider balance must be restored to initial 500 (net 0)
+  assert.equal((await provider.getCurrencyBalance("account-gems-t20b")).value, 500);
+});
+
+// ---------------------------------------------------------------------------
+// T20-C: Inverted / concurrent recovery order idempotency (outer recovery and inner recovery run -> idempotent, net 0)
+// ---------------------------------------------------------------------------
+test("T20-C: Inverted / concurrent recovery order idempotency (outer recovery and inner recovery run -> idempotent, net 0)", async () => {
+  const { domains, getDoc } = createMockDomainDoc("dom-t20c", 0);
+  const resourceRegistry = createDefaultResourceRegistry();
+  const lockManager = new LockManager();
+  const ledgerStore = new LedgerStore(new InMemoryLedgerStorageAdapter());
+  const reservationStore = new ReservationStore(new InMemoryReservationStorageAdapter());
+  const txStore = new TransactionStore(new InMemoryTransactionStorageAdapter());
+  const recoveryService = new RecoveryService({ lockManager, transactionStore: txStore });
+
+  resourceRegistry.register({
+    id: "provider:gems",
+    version: 1,
+    label: "Gems",
+    tags: [],
+    precision: 0,
+    allowNegative: false,
+    defaultCapacityPolicy: "provider",
+    lifecycle: "active"
+  });
+
+  const provider = new ManualCurrencyProvider();
+  provider.setBalance("account-gems-t20c", 500);
+
+  const providerRegistry = new ProviderRegistry();
+  providerRegistry.register(provider);
+
+  const doc = getDoc();
+  const econ = (doc.record.definition.capabilities.config as any)["domain-manager:economy"];
+  econ.accounts = [
+    {
+      domainUuid: "dom-t20c",
+      resourceId: "provider:gems",
+      mode: "provider",
+      providerId: MANUAL_CURRENCY_PROVIDER_ID,
+      providerRef: "account-gems-t20c",
+      balanceMinor: 500,
+      baseCapacityMinor: null
+    }
+  ];
+  await domains.save(doc);
+
+  const economyService = new EconomyService({
+    domains,
+    resourceRegistry,
+    ledgerStore,
+    reservationStore,
+    lockManager,
+    transactionStore: txStore,
+    recoveryService,
+    providerRegistry
+  });
+
+  const opRef = "tx-parent-t20c:step_debit";
+  // Provider balance is debited by 100 to 400
+  const debitRes = await provider.mutateCurrency("account-gems-t20c", -100, "Debit gems", { operationRef: opRef });
+  assert.equal(debitRes.ok, true);
+  assert.equal((await provider.getCurrencyBalance("account-gems-t20c")).value, 400);
+
+  // Outer recovery: parent recovery calls commitAdjust with compensation key
+  const compKey = `${opRef}:compensation`;
+  const comp1 = await economyService.commitAdjust({
+    domainUuid: "dom-t20c",
+    resourceId: "provider:gems",
+    deltaMinor: 100,
+    reason: "Compensation refund from outer recovery",
+    idempotencyKey: compKey,
+    parentTransactionId: "tx-parent-t20c",
+    recoveryOwner: "parent"
+  });
+  assert.equal(comp1.ok, true);
+  assert.equal((await provider.getCurrencyBalance("account-gems-t20c")).value, 500);
+
+  // Inner recovery: simulate inner recovery attempt for the same step
+  const comp2 = await economyService.commitAdjust({
+    domainUuid: "dom-t20c",
+    resourceId: "provider:gems",
+    deltaMinor: 100,
+    reason: "Compensation refund from inner recovery",
+    idempotencyKey: compKey,
+    parentTransactionId: "tx-parent-t20c",
+    recoveryOwner: "parent"
+  });
+  assert.equal(comp2.ok, true);
+
+  // Balance must STILL be 500 (no double refund)
+  assert.equal((await provider.getCurrencyBalance("account-gems-t20c")).value, 500);
+
+  // Now test inverted order: inner recovery executes first, then outer recovery executes second
+  const opRef2 = "tx-parent-t20c-inv:step_debit";
+  const debitRes2 = await provider.mutateCurrency("account-gems-t20c", -100, "Debit gems 2", { operationRef: opRef2 });
+  assert.equal(debitRes2.ok, true);
+  assert.equal((await provider.getCurrencyBalance("account-gems-t20c")).value, 400);
+
+  const compKey2 = `${opRef2}:compensation`;
+
+  // Create standalone transaction record representing inner recovery trying to compensate
+  const innerTx = {
+    ...createTransactionRecord({
+      transactionId: "tx-inner-inv",
+      commandId: createCommandId(),
+      authorityEpoch: 1,
+      lockKeys: [lockKey.domain("dom-t20c")],
+      safeAutoRecovery: true,
+      recoveryData: {
+        type: "economy:provider-adjust",
+        domainUuid: "dom-t20c",
+        resourceId: "provider:gems",
+        providerId: MANUAL_CURRENCY_PROVIDER_ID,
+        providerRef: "account-gems-t20c",
+        providerOperationRef: opRef2,
+        deltaMinor: -100
+      }
+    }),
+    state: "needs-recovery" as const
+  };
+  txStore.save(innerTx);
+
+  // Inner recovery runs first
+  const innerRec = await recoveryService.recoverTransaction("tx-inner-inv", 1);
+  assert.equal(innerRec.ok, true);
+  assert.equal((await provider.getCurrencyBalance("account-gems-t20c")).value, 500);
+
+  // Outer recovery runs second with same compKey2
+  const outerComp = await economyService.commitAdjust({
+    domainUuid: "dom-t20c",
+    resourceId: "provider:gems",
+    deltaMinor: 100,
+    reason: "Compensation refund from outer recovery second",
+    idempotencyKey: compKey2,
+    parentTransactionId: "tx-parent-t20c-inv",
+    recoveryOwner: "parent"
+  });
+  assert.equal(outerComp.ok, true);
+
+  // Balance must remain 500 (idempotent, no double compensation)
+  assert.equal((await provider.getCurrencyBalance("account-gems-t20c")).value, 500);
+});
+

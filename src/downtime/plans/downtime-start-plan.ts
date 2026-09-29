@@ -387,7 +387,9 @@ export async function executeDowntimeStartPlan(
             deltaMinor: -cost.amount,
             reason: `Cost for starting downtime activity '${params.label ?? definition.label}'`,
             lockOwner: params.commandId,
-            idempotencyKey: `${session.transactionId}:${stepId}`
+            idempotencyKey: `${session.transactionId}:${stepId}`,
+            parentTransactionId: session.transactionId,
+            recoveryOwner: "parent"
           });
         }
       });

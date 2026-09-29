@@ -13,7 +13,7 @@ import type { Reservation, ReservationSource } from "../reservations/reservation
 import { LockManager } from "../../mutations/lock-manager.js";
 import type { TransactionStore } from "../../mutations/transaction-store.js";
 import type { RecoveryService } from "../../mutations/recovery-service.js";
-import { createTransactionRecord } from "../../mutations/transaction-record.js";
+import { createTransactionRecord, type TransactionRecord } from "../../mutations/transaction-record.js";
 import type { ProviderRegistry } from "../providers/provider-registry.js";
 import {
   assertProviderHealthy,
@@ -100,6 +100,8 @@ export interface AdjustParams {
   readonly authorityEpoch?: number;
   readonly lockOwner?: string;
   readonly idempotencyKey?: string;
+  readonly parentTransactionId?: string;
+  readonly recoveryOwner?: "economy" | "parent";
 }
 
 export interface TransferParams {
@@ -979,36 +981,42 @@ export class EconomyService {
           }
         }
 
-        const transactionId = createOpaqueId("tx");
+        const isChildStep = params.recoveryOwner === "parent";
+        const transactionId = isChildStep
+          ? (params.parentTransactionId ?? params.idempotencyKey ?? createOpaqueId("tx"))
+          : createOpaqueId("tx");
         const providerOperationRef = params.idempotencyKey ?? transactionId;
         const cmdId = params.commandId ?? (createOpaqueId("cmd") as any);
         const epoch = params.authorityEpoch ?? 1;
 
-        const txRecord = createTransactionRecord({
-          transactionId,
-          commandId: cmdId,
-          authorityEpoch: epoch,
-          lockKeys: [lockKey],
-          safeAutoRecovery: true,
-          recoveryData: {
-            type: "economy:provider-adjust",
-            domainUuid: params.domainUuid,
-            resourceId: params.resourceId,
-            providerId: providerAccount.providerId,
-            providerRef: providerAccount.providerRef,
-            providerOperationRef,
-            deltaMinor: delta,
-            reason: params.reason,
-            userId: params.userId,
-            providerWriteConfirmed: false
-          }
-        });
+        let txRecord: TransactionRecord | undefined;
+        if (!isChildStep) {
+          txRecord = createTransactionRecord({
+            transactionId,
+            commandId: cmdId,
+            authorityEpoch: epoch,
+            lockKeys: [lockKey],
+            safeAutoRecovery: true,
+            recoveryData: {
+              type: "economy:provider-adjust",
+              domainUuid: params.domainUuid,
+              resourceId: params.resourceId,
+              providerId: providerAccount.providerId,
+              providerRef: providerAccount.providerRef,
+              providerOperationRef,
+              deltaMinor: delta,
+              reason: params.reason,
+              userId: params.userId,
+              providerWriteConfirmed: false
+            }
+          });
 
-        this.#transactionStore?.save(txRecord);
-        this.#transactionStore?.transition(transactionId, "claimed", epoch);
-        this.#transactionStore?.transition(transactionId, "prepared", epoch);
-        this.#transactionStore?.transition(transactionId, "committing", epoch);
-        await this.#transactionStore?.flush();
+          this.#transactionStore?.save(txRecord);
+          this.#transactionStore?.transition(transactionId, "claimed", epoch);
+          this.#transactionStore?.transition(transactionId, "prepared", epoch);
+          this.#transactionStore?.transition(transactionId, "committing", epoch);
+          await this.#transactionStore?.flush();
+        }
 
         let mutRes: any;
         let unknownOutcome = false;
@@ -1041,30 +1049,36 @@ export class EconomyService {
             mutRes.error.retryable === true;
 
           if (isUnknown) {
-            this.#transactionStore?.transition(
-              transactionId,
-              "needs-recovery",
-              epoch,
-              `Provider mutation outcome unknown: ${mutRes.error.message}`
-            );
-            await this.#transactionStore?.flush();
+            if (!isChildStep) {
+              this.#transactionStore?.transition(
+                transactionId,
+                "needs-recovery",
+                epoch,
+                `Provider mutation outcome unknown: ${mutRes.error.message}`
+              );
+              await this.#transactionStore?.flush();
+            }
             return mutRes;
           }
 
-          this.#transactionStore?.transition(transactionId, "failed", epoch, mutRes.error.message);
-          await this.#transactionStore?.flush();
+          if (!isChildStep) {
+            this.#transactionStore?.transition(transactionId, "failed", epoch, mutRes.error.message);
+            await this.#transactionStore?.flush();
+          }
           return mutRes;
         }
 
         const valueOutcome = mutRes.value?.outcome;
         if (valueOutcome === "unknown") {
-          this.#transactionStore?.transition(
-            transactionId,
-            "needs-recovery",
-            epoch,
-            "Provider mutation outcome is unknown despite successful call"
-          );
-          await this.#transactionStore?.flush();
+          if (!isChildStep) {
+            this.#transactionStore?.transition(
+              transactionId,
+              "needs-recovery",
+              epoch,
+              "Provider mutation outcome is unknown despite successful call"
+            );
+            await this.#transactionStore?.flush();
+          }
           return err(
             createPublicError({
               code: "DM_ECON_PROVIDER_TIMEOUT",
@@ -1076,13 +1090,15 @@ export class EconomyService {
         }
 
         if (valueOutcome === "failed-before-write") {
-          this.#transactionStore?.transition(
-            transactionId,
-            "failed",
-            epoch,
-            "Provider mutation failed before write"
-          );
-          await this.#transactionStore?.flush();
+          if (!isChildStep) {
+            this.#transactionStore?.transition(
+              transactionId,
+              "failed",
+              epoch,
+              "Provider mutation failed before write"
+            );
+            await this.#transactionStore?.flush();
+          }
           return err(
             createPublicError({
               code: "DM_ECON_PROVIDER_MUTATION_FAILED",
@@ -1093,9 +1109,11 @@ export class EconomyService {
           );
         }
 
-        (txRecord.recoveryData as any).providerWriteConfirmed = true;
-        if (mutRes.value?.providerTransactionRef) {
-          (txRecord.recoveryData as any).providerTransactionRef = mutRes.value.providerTransactionRef;
+        if (txRecord) {
+          (txRecord.recoveryData as any).providerWriteConfirmed = true;
+          if (mutRes.value?.providerTransactionRef) {
+            (txRecord.recoveryData as any).providerTransactionRef = mutRes.value.providerTransactionRef;
+          }
         }
 
         const entryRes = this.#ledgerStore.append({
@@ -1113,13 +1131,15 @@ export class EconomyService {
         });
 
         if (!entryRes.ok) {
-          this.#transactionStore?.transition(
-            transactionId,
-            "needs-recovery",
-            epoch,
-            "Failed to append ledger entry after provider mutation"
-          );
-          await this.#transactionStore?.flush();
+          if (!isChildStep) {
+            this.#transactionStore?.transition(
+              transactionId,
+              "needs-recovery",
+              epoch,
+              "Failed to append ledger entry after provider mutation"
+            );
+            await this.#transactionStore?.flush();
+          }
           return entryRes;
         }
 
@@ -1129,13 +1149,15 @@ export class EconomyService {
           try {
             await (provider as any).flush();
           } catch (flushErr: unknown) {
-            this.#transactionStore?.transition(
-              transactionId,
-              "needs-recovery",
-              epoch,
-              `Provider persistence flush failed: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`
-            );
-            await this.#transactionStore?.flush();
+            if (!isChildStep) {
+              this.#transactionStore?.transition(
+                transactionId,
+                "needs-recovery",
+                epoch,
+                `Provider persistence flush failed: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`
+              );
+              await this.#transactionStore?.flush();
+            }
             return err(
               createPublicError({
                 code: "DM_ECON_PROVIDER_STORAGE_ERROR",
@@ -1146,13 +1168,15 @@ export class EconomyService {
           }
         }
 
-        this.#transactionStore?.transition(
-          transactionId,
-          "committed",
-          epoch,
-          "Provider adjust completed cleanly"
-        );
-        await this.#transactionStore?.flush();
+        if (!isChildStep) {
+          this.#transactionStore?.transition(
+            transactionId,
+            "committed",
+            epoch,
+            "Provider adjust completed cleanly"
+          );
+          await this.#transactionStore?.flush();
+        }
 
         this.#evaluateThresholds(
           params.domainUuid,
@@ -2809,19 +2833,47 @@ export class EconomyService {
       // Case 3: ledger absent + provider says written -> revert provider mutation and compensate
       if (!hasLedgerEntry && providerOutcome === "written") {
         if (typeof (provider as any).mutateBalance === "function") {
-          const compRes = await (provider as any).mutateBalance(
-            data.domainUuid,
-            data.resourceId,
-            data.providerRef ?? "",
-            -data.deltaMinor,
-            `Recovery compensation for aborted adjustment ${record.transactionId}`,
-            { operationRef: opRef }
-          );
-          if (!compRes.ok) {
-            return compRes;
+          const compensationRef = `${data.providerOperationRef ?? record.transactionId}:compensation`;
+
+          let compState: "written" | "not-written" | "unknown" = "not-written";
+          if (typeof (provider as any).reconcile === "function") {
+            const compRecRes = await (provider as any).reconcile(
+              data.domainUuid,
+              data.resourceId,
+              data.providerRef ?? "",
+              compensationRef
+            );
+            if (!compRecRes.ok) {
+              return compRecRes;
+            }
+            compState = compRecRes.value.outcome;
           }
-          if (typeof (provider as any).flush === "function") {
-            await (provider as any).flush();
+
+          if (compState === "unknown") {
+            return err(
+              createPublicError({
+                code: "DM_ECON_RECOVERY_INDETERMINATE",
+                category: "recovery",
+                message: `Provider compensation reconciliation outcome is unknown for '${compensationRef}'`
+              })
+            );
+          }
+
+          if (compState === "not-written") {
+            const compRes = await (provider as any).mutateBalance(
+              data.domainUuid,
+              data.resourceId,
+              data.providerRef ?? "",
+              -data.deltaMinor,
+              `Recovery compensation for aborted adjustment ${record.transactionId}`,
+              { operationRef: compensationRef }
+            );
+            if (!compRes.ok) {
+              return compRes;
+            }
+            if (typeof (provider as any).flush === "function") {
+              await (provider as any).flush();
+            }
           }
         }
 

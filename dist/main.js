@@ -17390,34 +17390,38 @@ var EconomyService = class {
             );
           }
         }
-        const transactionId = createOpaqueId("tx");
+        const isChildStep = params.recoveryOwner === "parent";
+        const transactionId = isChildStep ? params.parentTransactionId ?? params.idempotencyKey ?? createOpaqueId("tx") : createOpaqueId("tx");
         const providerOperationRef = params.idempotencyKey ?? transactionId;
         const cmdId = params.commandId ?? createOpaqueId("cmd");
         const epoch = params.authorityEpoch ?? 1;
-        const txRecord = createTransactionRecord({
-          transactionId,
-          commandId: cmdId,
-          authorityEpoch: epoch,
-          lockKeys: [lockKey2],
-          safeAutoRecovery: true,
-          recoveryData: {
-            type: "economy:provider-adjust",
-            domainUuid: params.domainUuid,
-            resourceId: params.resourceId,
-            providerId: providerAccount.providerId,
-            providerRef: providerAccount.providerRef,
-            providerOperationRef,
-            deltaMinor: delta,
-            reason: params.reason,
-            userId: params.userId,
-            providerWriteConfirmed: false
-          }
-        });
-        this.#transactionStore?.save(txRecord);
-        this.#transactionStore?.transition(transactionId, "claimed", epoch);
-        this.#transactionStore?.transition(transactionId, "prepared", epoch);
-        this.#transactionStore?.transition(transactionId, "committing", epoch);
-        await this.#transactionStore?.flush();
+        let txRecord;
+        if (!isChildStep) {
+          txRecord = createTransactionRecord({
+            transactionId,
+            commandId: cmdId,
+            authorityEpoch: epoch,
+            lockKeys: [lockKey2],
+            safeAutoRecovery: true,
+            recoveryData: {
+              type: "economy:provider-adjust",
+              domainUuid: params.domainUuid,
+              resourceId: params.resourceId,
+              providerId: providerAccount.providerId,
+              providerRef: providerAccount.providerRef,
+              providerOperationRef,
+              deltaMinor: delta,
+              reason: params.reason,
+              userId: params.userId,
+              providerWriteConfirmed: false
+            }
+          });
+          this.#transactionStore?.save(txRecord);
+          this.#transactionStore?.transition(transactionId, "claimed", epoch);
+          this.#transactionStore?.transition(transactionId, "prepared", epoch);
+          this.#transactionStore?.transition(transactionId, "committing", epoch);
+          await this.#transactionStore?.flush();
+        }
         let mutRes;
         let unknownOutcome = false;
         try {
@@ -17443,28 +17447,34 @@ var EconomyService = class {
         if (!mutRes.ok) {
           const isUnknown = unknownOutcome || mutRes.error.code === "DM_ECON_PROVIDER_TIMEOUT" || mutRes.error.details?.outcome === "unknown" || mutRes.error.retryable === true;
           if (isUnknown) {
-            this.#transactionStore?.transition(
-              transactionId,
-              "needs-recovery",
-              epoch,
-              `Provider mutation outcome unknown: ${mutRes.error.message}`
-            );
-            await this.#transactionStore?.flush();
+            if (!isChildStep) {
+              this.#transactionStore?.transition(
+                transactionId,
+                "needs-recovery",
+                epoch,
+                `Provider mutation outcome unknown: ${mutRes.error.message}`
+              );
+              await this.#transactionStore?.flush();
+            }
             return mutRes;
           }
-          this.#transactionStore?.transition(transactionId, "failed", epoch, mutRes.error.message);
-          await this.#transactionStore?.flush();
+          if (!isChildStep) {
+            this.#transactionStore?.transition(transactionId, "failed", epoch, mutRes.error.message);
+            await this.#transactionStore?.flush();
+          }
           return mutRes;
         }
         const valueOutcome = mutRes.value?.outcome;
         if (valueOutcome === "unknown") {
-          this.#transactionStore?.transition(
-            transactionId,
-            "needs-recovery",
-            epoch,
-            "Provider mutation outcome is unknown despite successful call"
-          );
-          await this.#transactionStore?.flush();
+          if (!isChildStep) {
+            this.#transactionStore?.transition(
+              transactionId,
+              "needs-recovery",
+              epoch,
+              "Provider mutation outcome is unknown despite successful call"
+            );
+            await this.#transactionStore?.flush();
+          }
           return err(
             createPublicError({
               code: "DM_ECON_PROVIDER_TIMEOUT",
@@ -17475,13 +17485,15 @@ var EconomyService = class {
           );
         }
         if (valueOutcome === "failed-before-write") {
-          this.#transactionStore?.transition(
-            transactionId,
-            "failed",
-            epoch,
-            "Provider mutation failed before write"
-          );
-          await this.#transactionStore?.flush();
+          if (!isChildStep) {
+            this.#transactionStore?.transition(
+              transactionId,
+              "failed",
+              epoch,
+              "Provider mutation failed before write"
+            );
+            await this.#transactionStore?.flush();
+          }
           return err(
             createPublicError({
               code: "DM_ECON_PROVIDER_MUTATION_FAILED",
@@ -17491,9 +17503,11 @@ var EconomyService = class {
             })
           );
         }
-        txRecord.recoveryData.providerWriteConfirmed = true;
-        if (mutRes.value?.providerTransactionRef) {
-          txRecord.recoveryData.providerTransactionRef = mutRes.value.providerTransactionRef;
+        if (txRecord) {
+          txRecord.recoveryData.providerWriteConfirmed = true;
+          if (mutRes.value?.providerTransactionRef) {
+            txRecord.recoveryData.providerTransactionRef = mutRes.value.providerTransactionRef;
+          }
         }
         const entryRes2 = this.#ledgerStore.append({
           domainUuid: params.domainUuid,
@@ -17509,13 +17523,15 @@ var EconomyService = class {
           }
         });
         if (!entryRes2.ok) {
-          this.#transactionStore?.transition(
-            transactionId,
-            "needs-recovery",
-            epoch,
-            "Failed to append ledger entry after provider mutation"
-          );
-          await this.#transactionStore?.flush();
+          if (!isChildStep) {
+            this.#transactionStore?.transition(
+              transactionId,
+              "needs-recovery",
+              epoch,
+              "Failed to append ledger entry after provider mutation"
+            );
+            await this.#transactionStore?.flush();
+          }
           return entryRes2;
         }
         await this.#ledgerStore.flush();
@@ -17523,13 +17539,15 @@ var EconomyService = class {
           try {
             await provider.flush();
           } catch (flushErr) {
-            this.#transactionStore?.transition(
-              transactionId,
-              "needs-recovery",
-              epoch,
-              `Provider persistence flush failed: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`
-            );
-            await this.#transactionStore?.flush();
+            if (!isChildStep) {
+              this.#transactionStore?.transition(
+                transactionId,
+                "needs-recovery",
+                epoch,
+                `Provider persistence flush failed: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`
+              );
+              await this.#transactionStore?.flush();
+            }
             return err(
               createPublicError({
                 code: "DM_ECON_PROVIDER_STORAGE_ERROR",
@@ -17539,13 +17557,15 @@ var EconomyService = class {
             );
           }
         }
-        this.#transactionStore?.transition(
-          transactionId,
-          "committed",
-          epoch,
-          "Provider adjust completed cleanly"
-        );
-        await this.#transactionStore?.flush();
+        if (!isChildStep) {
+          this.#transactionStore?.transition(
+            transactionId,
+            "committed",
+            epoch,
+            "Provider adjust completed cleanly"
+          );
+          await this.#transactionStore?.flush();
+        }
         this.#evaluateThresholds(
           params.domainUuid,
           params.resourceId,
@@ -18912,19 +18932,44 @@ var EconomyService = class {
       }
       if (!hasLedgerEntry && providerOutcome === "written") {
         if (typeof provider.mutateBalance === "function") {
-          const compRes = await provider.mutateBalance(
-            data.domainUuid,
-            data.resourceId,
-            data.providerRef ?? "",
-            -data.deltaMinor,
-            `Recovery compensation for aborted adjustment ${record.transactionId}`,
-            { operationRef: opRef }
-          );
-          if (!compRes.ok) {
-            return compRes;
+          const compensationRef = `${data.providerOperationRef ?? record.transactionId}:compensation`;
+          let compState = "not-written";
+          if (typeof provider.reconcile === "function") {
+            const compRecRes = await provider.reconcile(
+              data.domainUuid,
+              data.resourceId,
+              data.providerRef ?? "",
+              compensationRef
+            );
+            if (!compRecRes.ok) {
+              return compRecRes;
+            }
+            compState = compRecRes.value.outcome;
           }
-          if (typeof provider.flush === "function") {
-            await provider.flush();
+          if (compState === "unknown") {
+            return err(
+              createPublicError({
+                code: "DM_ECON_RECOVERY_INDETERMINATE",
+                category: "recovery",
+                message: `Provider compensation reconciliation outcome is unknown for '${compensationRef}'`
+              })
+            );
+          }
+          if (compState === "not-written") {
+            const compRes = await provider.mutateBalance(
+              data.domainUuid,
+              data.resourceId,
+              data.providerRef ?? "",
+              -data.deltaMinor,
+              `Recovery compensation for aborted adjustment ${record.transactionId}`,
+              { operationRef: compensationRef }
+            );
+            if (!compRes.ok) {
+              return compRes;
+            }
+            if (typeof provider.flush === "function") {
+              await provider.flush();
+            }
           }
         }
         if (this.#transactionStore) {
@@ -20761,6 +20806,25 @@ var ManualCurrencyProvider = class {
       );
     }
     const current = this.#balances.get(targetRef) ?? 0;
+    if (options?.operationRef) {
+      const prior = this.#operations.get(options.operationRef);
+      if (prior) {
+        if (prior.deltaMinor !== deltaMinor) {
+          return err(
+            createPublicError({
+              code: "DM_ECON_PROVIDER_CONFLICT",
+              category: "conflict",
+              message: `Operation ref '${options.operationRef}' already exists with different deltaMinor (${prior.deltaMinor} vs ${deltaMinor})`
+            })
+          );
+        }
+        return ok({
+          newBalanceMinor: current,
+          outcome: "success",
+          providerTransactionRef: options.operationRef
+        });
+      }
+    }
     const next = current + deltaMinor;
     this.#balances.set(targetRef, next);
     if (options?.operationRef) {
@@ -22286,7 +22350,9 @@ async function compensateProjectStart(recordOrId, context, options) {
                 deltaMinor: Math.abs(intent.deltaMinor),
                 reason: `Compensation: refund upfront cost for project ${data.projectId}`,
                 lockOwner: effectiveLockOwner,
-                idempotencyKey
+                idempotencyKey,
+                parentTransactionId: record.transactionId,
+                recoveryOwner: "parent"
               });
               if (!refRes.ok) return refRes;
               await markCompensationStepCompleted(context.transactionStore, record, stepId);
@@ -22306,7 +22372,9 @@ async function compensateProjectStart(recordOrId, context, options) {
             deltaMinor: cost.amountMinor,
             reason: `Compensation: refund upfront cost for project ${data.projectId}`,
             lockOwner: effectiveLockOwner,
-            idempotencyKey
+            idempotencyKey,
+            parentTransactionId: record.transactionId,
+            recoveryOwner: "parent"
           });
           if (!refRes.ok) return refRes;
           await markCompensationStepCompleted(context.transactionStore, record, stepId);
@@ -22471,7 +22539,9 @@ async function compensateProjectAdvance(recordOrId, context, options) {
             deltaMinor: Math.abs(intent.deltaMinor),
             reason: `Compensation: refund progressive cost for project ${data.projectId}`,
             lockOwner: effectiveLockOwner,
-            idempotencyKey
+            idempotencyKey,
+            parentTransactionId: record.transactionId,
+            recoveryOwner: "parent"
           });
           if (!refRes.ok) return refRes;
         }
@@ -22491,7 +22561,9 @@ async function compensateProjectAdvance(recordOrId, context, options) {
             deltaMinor: cost.amountMinor,
             reason: `Compensation: refund progressive cost for project ${data.projectId}`,
             lockOwner: effectiveLockOwner,
-            idempotencyKey
+            idempotencyKey,
+            parentTransactionId: record.transactionId,
+            recoveryOwner: "parent"
           });
           if (!refRes.ok) return refRes;
           await markCompensationStepCompleted(context.transactionStore, record, stepId);
@@ -22658,7 +22730,9 @@ async function compensateProjectCompletion(recordOrId, context, options) {
               deltaMinor: -intent.deltaMinor,
               reason: `Compensation: reverse completion adjustment for project ${data.projectId}`,
               lockOwner: effectiveLockOwner,
-              idempotencyKey
+              idempotencyKey,
+              parentTransactionId: record.transactionId,
+              recoveryOwner: "parent"
             });
             if (!refRes.ok) return refRes;
           }
@@ -22762,7 +22836,9 @@ async function compensateProjectCompletion(recordOrId, context, options) {
             deltaMinor: -cred.amountMinor,
             reason: `Compensation: reverse completion reward for project ${data.projectId}`,
             lockOwner: effectiveLockOwner,
-            idempotencyKey
+            idempotencyKey,
+            parentTransactionId: record.transactionId,
+            recoveryOwner: "parent"
           });
           if (!adjRes.ok) return adjRes;
           await markCompensationStepCompleted(context.transactionStore, record, stepId);
@@ -22781,7 +22857,9 @@ async function compensateProjectCompletion(recordOrId, context, options) {
             deltaMinor: deb.amountMinor,
             reason: `Compensation: refund completion cost for project ${data.projectId}`,
             lockOwner: effectiveLockOwner,
-            idempotencyKey
+            idempotencyKey,
+            parentTransactionId: record.transactionId,
+            recoveryOwner: "parent"
           });
           if (!refRes.ok) return refRes;
           await markCompensationStepCompleted(context.transactionStore, record, stepId);
@@ -23456,13 +23534,23 @@ async function executeProjectStartDomainOperationPlan(context, params) {
     metadata: params.targetRef ? { targetRef: params.targetRef } : void 0
   };
   const targetLifecycle = params.initialState === "initializing" ? "initializing" : "active";
+  const availableResources = {};
+  if (context.economyService && typeof context.economyService.getAccountAvailability === "function") {
+    for (const cost of definition.costs) {
+      const availRes = await context.economyService.getAccountAvailability(cleanDomainUuid, cost.resourceId);
+      if (availRes && availRes.ok && availRes.value) {
+        availableResources[cost.resourceId] = availRes.value.availableMinor;
+      }
+    }
+  }
   const plan = evaluateProjectStartPlan({
     project: draftProject,
     definition,
     domain: record,
     targetLifecycle,
     expectedRevision: params.expectedRevision,
-    parameters: params.workforceRequired !== void 0 ? { workforceRequired: params.workforceRequired } : void 0
+    parameters: params.workforceRequired !== void 0 ? { workforceRequired: params.workforceRequired } : void 0,
+    availableResources: Object.keys(availableResources).length > 0 ? availableResources : void 0
   });
   if (!plan.isSatisfied) {
     const firstBlocker = plan.blockers[0];
@@ -23610,7 +23698,9 @@ async function executeProjectStartDomainOperationPlan(context, params) {
               deltaMinor: -cost.amountMinor,
               reason: `Upfront cost for project ${draftProject.name}`,
               lockOwner: params.commandId,
-              idempotencyKey: `${session.transactionId}:${stepId}`
+              idempotencyKey: `${session.transactionId}:${stepId}`,
+              parentTransactionId: session.transactionId,
+              recoveryOwner: "parent"
             });
           }
         });
@@ -24272,7 +24362,9 @@ async function executeProjectCompletionDomainOperationPlan(context, params) {
               deltaMinor: -cost.amountMinor,
               reason: `OnCompletion cost for project ${project.name}`,
               lockOwner: params.commandId,
-              idempotencyKey: `${session.transactionId}:${stepId}`
+              idempotencyKey: `${session.transactionId}:${stepId}`,
+              parentTransactionId: session.transactionId,
+              recoveryOwner: "parent"
             });
           }
         });
@@ -24532,7 +24624,9 @@ async function executeProjectCompletionDomainOperationPlan(context, params) {
           deltaMinor,
           reason: `Project completion reward: ${effect.description ?? project.name}`,
           lockOwner: params.commandId,
-          idempotencyKey: `${session.transactionId}:${stepId}`
+          idempotencyKey: `${session.transactionId}:${stepId}`,
+          parentTransactionId: session.transactionId,
+          recoveryOwner: "parent"
         });
       }
     });
@@ -24952,7 +25046,9 @@ async function executeProjectAdvanceDomainOperationPlan(context, params) {
                 deltaMinor: -toDebit,
                 reason: `Progressive cost for project ${project.name}`,
                 lockOwner: params.commandId,
-                idempotencyKey: `${session.transactionId}:${stepId}`
+                idempotencyKey: `${session.transactionId}:${stepId}`,
+                parentTransactionId: session.transactionId,
+                recoveryOwner: "parent"
               });
             }
           });
@@ -26814,7 +26910,9 @@ async function compensateFacilityOperation(recordOrId, context, options) {
             deltaMinor: Math.abs(intent.deltaMinor),
             reason: `Compensation: refund ${data.type} cost for facility ${data.facilityId}`,
             lockOwner: effectiveLockOwner,
-            idempotencyKey
+            idempotencyKey,
+            parentTransactionId: record.transactionId,
+            recoveryOwner: "parent"
           });
           if (!refRes.ok) return refRes;
         }
@@ -26833,7 +26931,9 @@ async function compensateFacilityOperation(recordOrId, context, options) {
           deltaMinor: cost.amount,
           reason: `Compensation: refund ${data.type} cost for facility ${data.facilityId}`,
           lockOwner: effectiveLockOwner,
-          idempotencyKey
+          idempotencyKey,
+          parentTransactionId: record.transactionId,
+          recoveryOwner: "parent"
         });
         if (!refRes.ok) return refRes;
         await markCompensationStepCompleted(context.transactionStore, record, stepId);
@@ -27121,7 +27221,9 @@ var FacilitiesService = class {
               deltaMinor: -cost.amount,
               reason: `Maintenance cost for facility '${facility.name}'`,
               lockOwner: params.commandId,
-              idempotencyKey: `${session.transactionId}:${stepId}`
+              idempotencyKey: `${session.transactionId}:${stepId}`,
+              parentTransactionId: session.transactionId,
+              recoveryOwner: "parent"
             });
           }
         });
@@ -27326,7 +27428,9 @@ var FacilitiesService = class {
               deltaMinor: -cost.amount,
               reason: `Repair cost for facility '${facility.name}'`,
               lockOwner: params.commandId,
-              idempotencyKey: `${session.transactionId}:${stepId}`
+              idempotencyKey: `${session.transactionId}:${stepId}`,
+              parentTransactionId: session.transactionId,
+              recoveryOwner: "parent"
             });
           }
         });
@@ -28419,7 +28523,9 @@ async function compensateDowntimeStart(recordOrId, context, options) {
             deltaMinor: Math.abs(intent.deltaMinor),
             reason: `Compensation: refund upfront cost for downtime activity ${data.definitionId}`,
             lockOwner: effectiveLockOwner,
-            idempotencyKey
+            idempotencyKey,
+            parentTransactionId: record.transactionId,
+            recoveryOwner: "parent"
           });
           if (!refRes.ok) return refRes;
         }
@@ -28439,7 +28545,9 @@ async function compensateDowntimeStart(recordOrId, context, options) {
             deltaMinor: cost.amount,
             reason: `Compensation: refund upfront cost for downtime activity ${data.definitionId}`,
             lockOwner: effectiveLockOwner,
-            idempotencyKey
+            idempotencyKey,
+            parentTransactionId: record.transactionId,
+            recoveryOwner: "parent"
           });
           if (!refRes.ok) return refRes;
           await markCompensationStepCompleted(context.transactionStore, record, stepId);
@@ -28530,7 +28638,9 @@ async function compensateDowntimeResolution(recordOrId, context, options) {
             deltaMinor: -intent.deltaMinor,
             reason: `Compensation: reverse reward for downtime activity ${data.activityId}`,
             lockOwner: effectiveLockOwner,
-            idempotencyKey
+            idempotencyKey,
+            parentTransactionId: record.transactionId,
+            recoveryOwner: "parent"
           });
           if (!revRes.ok) return revRes;
         }
@@ -28611,7 +28721,9 @@ async function compensateDowntimeResolution(recordOrId, context, options) {
             deltaMinor: -reward.amount,
             reason: `Compensation: reverse reward for downtime activity ${data.activityId}`,
             lockOwner: effectiveLockOwner,
-            idempotencyKey
+            idempotencyKey,
+            parentTransactionId: record.transactionId,
+            recoveryOwner: "parent"
           });
           if (!revRes.ok) return revRes;
           await markCompensationStepCompleted(context.transactionStore, record, stepId);
@@ -28889,7 +29001,9 @@ async function executeDowntimeStartPlan(context, params) {
             deltaMinor: -cost.amount,
             reason: `Cost for starting downtime activity '${params.label ?? definition.label}'`,
             lockOwner: params.commandId,
-            idempotencyKey: `${session.transactionId}:${stepId}`
+            idempotencyKey: `${session.transactionId}:${stepId}`,
+            parentTransactionId: session.transactionId,
+            recoveryOwner: "parent"
           });
         }
       });
@@ -29078,7 +29192,9 @@ async function executeDowntimeResolutionPlan(context, params) {
               deltaMinor: amount,
               reason: `Outcome of downtime activity '${activity.name}': ${outcome.label}`,
               lockOwner: params.commandId,
-              idempotencyKey: `${session.transactionId}:${stepId}`
+              idempotencyKey: `${session.transactionId}:${stepId}`,
+              parentTransactionId: session.transactionId,
+              recoveryOwner: "parent"
             });
           }
         });

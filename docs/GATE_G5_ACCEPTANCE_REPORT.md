@@ -5,7 +5,7 @@
 **Normative Authorities:** `Documentos/99_DOMAIN_MANAGER_MASTER_SPECIFICATION_V1.md` (§15, §16, §17, DEC-083 to DEC-097, Anexo 07 DEC-2306 to DEC-3200), `Documentos/GATES/15_G5_PROJECTS_FACILITIES_DOWNTIME.md`  
 **Status:** **GATE_G5_COMPLETED_PENDING_USER_ACCEPTANCE (Aguardando Aceitação Soberana do Usuário — Nunca aceito sem confirmação explícita)**  
 **Date:** 2026-09-29  
-**Test Suite:** 667/667 passing (0 failures, 0 regressions against G4 baseline of 444; +223 dedicated G5 tests, including 66 adversarial revalidation tests + 34 master remediation tests + 22 kernel hardening tests T1–T19)  
+**Test Suite:** 670/670 passing (0 failures, 0 regressions against G4 baseline of 444; +226 dedicated G5 tests, including 66 adversarial revalidation tests + 34 master remediation tests + 25 kernel hardening tests T1–T20)  
 **TypeScript Conformance:** Strict, 0 errors via `npx tsc --noEmit`  
 **Package & Artifact Validation:** PASS (`dist/domain-manager-v0.0.5.zip`, validation scripts verified)
 
@@ -253,9 +253,18 @@ The G5 test suite validates the system against high-scale multi-domain operation
 
 ---
 
-## 17. Canonical Next Gate Designation
+## 17. Final Static Blocker Matrix (Provider Recovery Ownership & Crash Idempotency — Tests T20-A through T20-C)
 
-Per the Master Specification roadmap, Gate G5 is now complete, fully remediated against initial audit (G5-AUD-001 to G5-AUD-010), first revalidation (G5-REVAL-001 to G5-REVAL-012), second revalidation (G5-REVAL2-001 to G5-REVAL2-010), third revalidation (G5-REVAL3-001 to G5-REVAL3-007), fourth revalidation (G5-REVAL4-001 to G5-REVAL4-012), fifth revalidation (G5-REVAL5-001 to G5-REVAL5-009), sixth revalidation (G5-REVAL6-001 to G5-REVAL6-005), the Master Remediation (DOMAIN_MANAGER_G5_MASTER_REMEDIACAO_FINAL), the Master Acceptance Audit Hardening (Patches A–F and Production Blockers 1–5), and Commit 836ee57 Revalidation (Blockers A–D and Tests T16-A to T19), and strictly pending user acceptance:
+| Final Static Blocker | Severity | Description & Root Cause | Architectural Remediation | Verification Evidence |
+|---|---|---|---|---|
+| **Double Recovery Ownership** | CRITICAL | When provider adjustments executed as children of G5 Composite transactions (Projects, Downtime, Facilities), both `CompositeMutationSession` and `EconomyService.commitAdjust` created independent `TransactionRecord`s. On provider timeout (`unknown` outcome), both registered in `needs-recovery`, causing dual competing recovery attempts and duplicate compensation. | Added `parentTransactionId` and `recoveryOwner: "parent"` to `AdjustParams`. In child execution (`recoveryOwner === "parent"`), `EconomyService.commitAdjust` does not create a nested transaction in `TransactionStore`. `CompositeMutationSession` acts as the single authoritative recovery owner. Propagated across all 8 G5 caller plans and compensators. | `tests/runtime/g5-kernel-hardening.test.ts` (T20-B verifies G5 child provider timeout produces exactly 1 transaction in `txStore` [`projects:start`] and 0 [`economy:provider-adjust`], with parent recovery completing with net 0 balance change). |
+| **Non-Idempotent Crash Compensation** | CRITICAL | Standalone `economy:provider-adjust` compensator rolled back provider balance (`mutateBalance(-delta)`) without verifying if compensation had already executed during an earlier interrupted recovery attempt, risking double compensation on recovery retry. | In `economy:provider-adjust` compensator, derived stable `compensationRef = \`${data.providerOperationRef ?? record.transactionId}:compensation\``. Before mutating, queries `provider.reconcile(..., compensationRef)`. If already `written`, skips applying `-deltaMinor`. In `ManualCurrencyProvider.mutateCurrency`, added defense-in-depth: checks `options?.operationRef`, returning success without re-applying delta if identical, or conflict error if mismatched. | `tests/runtime/g5-kernel-hardening.test.ts` (T20-A verifies crash during standalone provider compensation does not double-compensate on retry; T20-C verifies inverted or concurrent recovery order is strictly idempotent). |
+
+---
+
+## 18. Canonical Next Gate Designation
+
+Per the Master Specification roadmap, Gate G5 is now complete, fully remediated against initial audit (G5-AUD-001 to G5-AUD-010), first revalidation (G5-REVAL-001 to G5-REVAL-012), second revalidation (G5-REVAL2-001 to G5-REVAL2-010), third revalidation (G5-REVAL3-001 to G5-REVAL3-007), fourth revalidation (G5-REVAL4-001 to G5-REVAL4-012), fifth revalidation (G5-REVAL5-001 to G5-REVAL5-009), sixth revalidation (G5-REVAL6-001 to G5-REVAL6-005), the Master Remediation (DOMAIN_MANAGER_G5_MASTER_REMEDIACAO_FINAL), the Master Acceptance Audit Hardening (Patches A–F and Production Blockers 1–5), Commit 836ee57 Revalidation (Blockers A–D and Tests T16-A to T19), and the Final Static Blocker (Provider Recovery Single Ownership & Idempotent Compensation — Tests T20-A to T20-C), and strictly pending user acceptance:
 - **Current Gate Status**: `GATE_G5_COMPLETED_PENDING_USER_ACCEPTANCE`
 - **Canonical Next Gate**: **Gate G6 — Relations / Reputation / Agreements / Territory** (`Documentos/GATES/16_G6_RELATIONS_REPUTATION_AGREEMENTS_TERRITORY.md`).
 - **Policy**: Gate G6 must NEVER be started without explicit sovereign confirmation from the user.

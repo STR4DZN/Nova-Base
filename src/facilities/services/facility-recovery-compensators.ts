@@ -133,7 +133,9 @@ export async function compensateFacilityOperation(
             deltaMinor: Math.abs(intent.deltaMinor),
             reason: `Compensation: refund ${data.type} cost for facility ${data.facilityId}`,
             lockOwner: effectiveLockOwner,
-            idempotencyKey
+            idempotencyKey,
+            parentTransactionId: record.transactionId,
+            recoveryOwner: "parent"
           });
           if (!refRes.ok) return refRes;
         }
@@ -152,7 +154,9 @@ export async function compensateFacilityOperation(
           deltaMinor: cost.amount,
           reason: `Compensation: refund ${data.type} cost for facility ${data.facilityId}`,
           lockOwner: effectiveLockOwner,
-          idempotencyKey
+          idempotencyKey,
+          parentTransactionId: record.transactionId,
+          recoveryOwner: "parent"
         });
         if (!refRes.ok) return refRes;
         await markCompensationStepCompleted(context.transactionStore, record, stepId);

@@ -130,7 +130,9 @@ export async function compensateProjectStart(
                 deltaMinor: Math.abs(intent.deltaMinor),
                 reason: `Compensation: refund upfront cost for project ${data.projectId}`,
                 lockOwner: effectiveLockOwner,
-                idempotencyKey
+                idempotencyKey,
+                parentTransactionId: record.transactionId,
+                recoveryOwner: "parent"
               });
               if (!refRes.ok) return refRes;
               await markCompensationStepCompleted(context.transactionStore, record, stepId);
@@ -150,7 +152,9 @@ export async function compensateProjectStart(
             deltaMinor: cost.amountMinor,
             reason: `Compensation: refund upfront cost for project ${data.projectId}`,
             lockOwner: effectiveLockOwner,
-            idempotencyKey
+            idempotencyKey,
+            parentTransactionId: record.transactionId,
+            recoveryOwner: "parent"
           });
           if (!refRes.ok) return refRes;
           await markCompensationStepCompleted(context.transactionStore, record, stepId);
@@ -357,7 +361,9 @@ export async function compensateProjectAdvance(
             deltaMinor: Math.abs(intent.deltaMinor),
             reason: `Compensation: refund progressive cost for project ${data.projectId}`,
             lockOwner: effectiveLockOwner,
-            idempotencyKey
+            idempotencyKey,
+            parentTransactionId: record.transactionId,
+            recoveryOwner: "parent"
           });
           if (!refRes.ok) return refRes;
         }
@@ -378,7 +384,9 @@ export async function compensateProjectAdvance(
             deltaMinor: cost.amountMinor,
             reason: `Compensation: refund progressive cost for project ${data.projectId}`,
             lockOwner: effectiveLockOwner,
-            idempotencyKey
+            idempotencyKey,
+            parentTransactionId: record.transactionId,
+            recoveryOwner: "parent"
           });
           if (!refRes.ok) return refRes;
           await markCompensationStepCompleted(context.transactionStore, record, stepId);
@@ -581,7 +589,9 @@ export async function compensateProjectCompletion(
               deltaMinor: -intent.deltaMinor,
               reason: `Compensation: reverse completion adjustment for project ${data.projectId}`,
               lockOwner: effectiveLockOwner,
-              idempotencyKey
+              idempotencyKey,
+              parentTransactionId: record.transactionId,
+              recoveryOwner: "parent"
             });
             if (!refRes.ok) return refRes;
           }
@@ -693,7 +703,9 @@ export async function compensateProjectCompletion(
             deltaMinor: -cred.amountMinor,
             reason: `Compensation: reverse completion reward for project ${data.projectId}`,
             lockOwner: effectiveLockOwner,
-            idempotencyKey
+            idempotencyKey,
+            parentTransactionId: record.transactionId,
+            recoveryOwner: "parent"
           });
           if (!adjRes.ok) return adjRes;
           await markCompensationStepCompleted(context.transactionStore, record, stepId);
@@ -714,7 +726,9 @@ export async function compensateProjectCompletion(
             deltaMinor: deb.amountMinor,
             reason: `Compensation: refund completion cost for project ${data.projectId}`,
             lockOwner: effectiveLockOwner,
-            idempotencyKey
+            idempotencyKey,
+            parentTransactionId: record.transactionId,
+            recoveryOwner: "parent"
           });
           if (!refRes.ok) return refRes;
           await markCompensationStepCompleted(context.transactionStore, record, stepId);

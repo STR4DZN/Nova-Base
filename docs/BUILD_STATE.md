@@ -33,10 +33,10 @@
 | Verificação | Resultado |
 |---|---|
 | TypeScript strict (`tsc --noEmit`) | PASS (0 erros) |
-| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 667/667 (0 falhas, 0 regressões) |
+| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 670/670 (0 falhas, 0 regressões) |
 | Relatório de Aceitação G5 | Gerado (`docs/GATE_G5_ACCEPTANCE_REPORT.md`) |
 | Regressões G0/G1/G2/G3/G4 | 0 (todos os 444 testes anteriores preservados e passando) |
-| Testes novos Gate G5 | 223 testes dedicados (G5.1 a G5.10: 101 testes + 66 testes adversários em g5-revalidation-adversarial.test.ts + 10 testes de lock-set em g5-lockset-contract.test.ts + 5 testes de fence em g5-recovery-fence.test.ts + 19 testes de kernel em g5-transaction-kernel.test.ts + 22 testes de hardening T1–T19 em g5-kernel-hardening.test.ts) |
+| Testes novos Gate G5 | 226 testes dedicados (G5.1 a G5.10: 101 testes + 66 testes adversários em g5-revalidation-adversarial.test.ts + 10 testes de lock-set em g5-lockset-contract.test.ts + 5 testes de fence em g5-recovery-fence.test.ts + 19 testes de kernel em g5-transaction-kernel.test.ts + 25 testes de hardening T1–T20 em g5-kernel-hardening.test.ts) |
 | Remediação de Auditoria G5-AUD-001 a G5-AUD-010 | PASS — 100% remediado, endurecido e verificado |
 | Remediação de Revalidação G5-REVAL-001 a G5-REVAL-012 | PASS — 100% remediado, endurecido e verificado |
 | Remediação de Revalidação 2 G5-REVAL2-001 a G5-REVAL2-010 | PASS — 100% remediado, endurecido e verificado |
@@ -166,6 +166,23 @@
    - Em `EconomyService.commitAdjust`, validado formalmente o `Result` retornado por `this.#domains.update(...)` tanto no fluxo normal quanto na rota de reconstrução do ledger, retornando o erro caso a persistência falhe sem mascarar o problema.
    - Em retentativas idempotentes onde o ledger entry já existe fisicamente mas o recibo no documento do domínio permaneceu em `balance-applied`, o recibo é atualizado e confirmado com `state: "ledger-confirmed"` e `ledgerEntryId`.
    - Testado e verificado pelo teste **T19**.
+
+## Remediação do Último Blocker Estático — Unificação de Ownership no Recovery de Provedor e Compensação Crash-Idempotente (T20-A a T20-C)
+
+1. **Unificação de Recovery Ownership para Ajustes de Provedor em Transações Compostas G5**:
+   - Quando `EconomyService.commitAdjust` é executado como filho de uma transação composta G5 (`recoveryOwner: "parent"` com `parentTransactionId: session.transactionId`), ele não cria um `TransactionRecord` filho `economy:provider-adjust` no `TransactionStore`. A `CompositeMutationSession` pai é a detentora autoritativa única da recuperação.
+   - Em caso de timeout ou outcome `unknown` do provedor, o erro é propagado para a sessão pai, que classifica o step como `unknown`, transiciona para `needs-recovery` e instala a recovery fence sem gerar transação filha duplicada no store.
+   - Propagado `recoveryOwner: "parent"` e `parentTransactionId` em todos os 8 fluxos e compensadores G5 (`project-start`, `project-advance`, `project-completion`, `downtime-start`, `downtime-resolution`, `facilities-service` maintenance/repair, e respectivos compensadores).
+   - Testado e verificado pelo teste **T20-B** (0 transações `economy:provider-adjust`, exatamente 1 transação `projects:start`, recuperação limpa com saldo net 0).
+
+2. **Compensação Crash-Idempotente em Provedores de Moeda**:
+   - No compensador standalone `economy:provider-adjust`, a chave de compensação é derivada determinística e estavelmente como `compensationRef = ${data.providerOperationRef ?? record.transactionId}:compensation`.
+   - Antes de aplicar `-deltaMinor`, o compensador invoca `provider.reconcile(domainUuid, resourceId, providerRef, compensationRef)`. Se o desfecho já for `written`, a chamada de mutação é pulada, prevenindo dupla compensação caso o processo caia durante a recuperação ou a recuperação seja re-executada.
+   - `ManualCurrencyProvider.mutateCurrency` implementa defesa em profundidade: checa `options?.operationRef`. Se a operação já foi registrada com delta idêntico, retorna sucesso imediato sem aplicar mutação de saldo novamente; se registrada com delta conflitante, rejeita com `DM_ECON_PROVIDER_CONFLICT`.
+   - Testado e verificado pelos testes **T20-A** (crash após compensação standalone -> retry de recovery -> saldo e delta inalterados) e **T20-C** (ordem de recuperação invertida ou concorrente entre outer e inner recovery -> idempotente, saldo líquido correto).
+
+3. **Pré-validação de Recursos de Provedor em Project Start**:
+   - Em `executeProjectStartDomainOperationPlan`, adicionada consulta de disponibilidade via `context.economyService.getAccountAvailability` para popular `availableResources` antes de avaliar `evaluateProjectStartPlan`, permitindo que recursos suportados por provedores externos sejam avaliados com precisão no plano puro sem rejeição espúria de fundos insuficientes.
 
 ## Remediação da 6ª Revalidação Gate G5 — G5-REVAL6-001 a G5-REVAL6-005
 

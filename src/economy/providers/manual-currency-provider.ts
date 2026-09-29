@@ -135,6 +135,27 @@ export class ManualCurrencyProvider implements CurrencyProvider {
       );
     }
     const current = this.#balances.get(targetRef) ?? 0;
+
+    if (options?.operationRef) {
+      const prior = this.#operations.get(options.operationRef);
+      if (prior) {
+        if (prior.deltaMinor !== deltaMinor) {
+          return err(
+            createPublicError({
+              code: "DM_ECON_PROVIDER_CONFLICT",
+              category: "conflict",
+              message: `Operation ref '${options.operationRef}' already exists with different deltaMinor (${prior.deltaMinor} vs ${deltaMinor})`
+            })
+          );
+        }
+        return ok({
+          newBalanceMinor: current,
+          outcome: "success",
+          providerTransactionRef: options.operationRef
+        });
+      }
+    }
+
     const next = current + deltaMinor;
     this.#balances.set(targetRef, next);
     if (options?.operationRef) {

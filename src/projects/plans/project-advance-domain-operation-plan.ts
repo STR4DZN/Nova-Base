@@ -240,7 +240,9 @@ export async function executeProjectAdvanceDomainOperationPlan(
                 deltaMinor: -toDebit,
                 reason: `Progressive cost for project ${project.name}`,
                 lockOwner: params.commandId,
-                idempotencyKey: `${session.transactionId}:${stepId}`
+                idempotencyKey: `${session.transactionId}:${stepId}`,
+                parentTransactionId: session.transactionId,
+                recoveryOwner: "parent"
               });
             }
           });
