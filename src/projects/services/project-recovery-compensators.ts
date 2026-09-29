@@ -10,7 +10,8 @@ import {
 } from "../../mutations/recovery-service.js";
 import type { EconomyService } from "../../economy/services/economy-service.js";
 import type { FacilitiesService } from "../../facilities/services/facilities-service.js";
-import { PeopleService, type PublicPeopleApi } from "../../people/services/people-service.js";
+import { WorkforceReservationService } from "../../people/services/workforce-reservation-service.js";
+import type { WorkforceReservationPort } from "../../people/services/workforce-reservation-port.js";
 import { getDomainProjectsData, withDomainProjectsData } from "../project-data.js";
 import { getDomainFacilitiesData, withDomainFacilitiesData } from "../../facilities/facility-data.js";
 import type {
@@ -22,7 +23,7 @@ export interface ProjectCompensatorContext {
   readonly domains: DomainRepositoryContract;
   readonly economyService?: EconomyService;
   readonly facilitiesService?: FacilitiesService;
-  readonly peopleService?: PublicPeopleApi;
+  readonly workforceReservations?: WorkforceReservationPort;
   readonly transactionStore?: TransactionStore;
   readonly childHandlerRegistry?: TransactionalChildHandlerRegistry;
   readonly sideEffectHandlers?: Record<string, any>;
@@ -61,7 +62,7 @@ export async function compensateProjectStart(
 
   const effectiveLockOwner = options?.lockOwner ?? `recovery_${record.transactionId}`;
   const cleanDomainUuid = normalizeJournalEntryId(data.domainUuid);
-  const peopleService = context.peopleService ?? new PeopleService(context.domains);
+  const workforceReservations = context.workforceReservations ?? new WorkforceReservationService(context.domains);
 
   // 1. Parent State Reconciliation (G5-REVAL5-002)
   if (!options?.skipReconciliation) {
@@ -213,7 +214,7 @@ export async function compensateProjectStart(
             (step.intent as any)?.reservationId ??
             data.allocatedWorkforceReservationId;
           if (resId) {
-            const relWf = await peopleService.releaseWorkforceReservation({
+            const relWf = await workforceReservations.releaseWorkforceReservation({
               domainUuid: data.domainUuid,
               projectId: data.projectId,
               reservationId: resId
@@ -227,7 +228,7 @@ export async function compensateProjectStart(
   } else if (data.allocatedWorkforceReservationId) {
     const stepId = `release_wf_${data.allocatedWorkforceReservationId}`;
     if (!isCompensationStepCompleted(record, stepId, context.transactionStore)) {
-      const relWf = await peopleService.releaseWorkforceReservation({
+      const relWf = await workforceReservations.releaseWorkforceReservation({
         domainUuid: data.domainUuid,
         projectId: data.projectId,
         reservationId: data.allocatedWorkforceReservationId
@@ -431,12 +432,12 @@ export async function compensateProjectCancel(
   }
 
   // 3. Restore released workforce reservations
-  const peopleService = context.peopleService ?? new PeopleService(context.domains);
+  const workforceReservations = context.workforceReservations ?? new WorkforceReservationService(context.domains);
   if (data.releasedWorkforceSnapshots && Array.isArray(data.releasedWorkforceSnapshots)) {
     for (const wf of data.releasedWorkforceSnapshots) {
       const stepId = `restore_cancel_wf_${wf.reservationId}`;
       if (!isCompensationStepCompleted(record, stepId, context.transactionStore)) {
-        const restWf = await peopleService.restoreWorkforceReservation({
+        const restWf = await workforceReservations.restoreWorkforceReservation({
           domainUuid: data.domainUuid,
           projectId: data.projectId,
           reservationId: wf.reservationId
@@ -697,12 +698,12 @@ export async function compensateProjectCompletion(
   }
 
   // 5. Restore released workforce reservations
-  const peopleService = context.peopleService ?? new PeopleService(context.domains);
+  const workforceReservations = context.workforceReservations ?? new WorkforceReservationService(context.domains);
   if (data.releasedWorkforceSnapshots && data.releasedWorkforceSnapshots.length > 0) {
     for (const wf of data.releasedWorkforceSnapshots) {
       const stepId = `restore_wf_${wf.reservationId}`;
       if (!isCompensationStepCompleted(record, stepId, context.transactionStore)) {
-        const restWf = await peopleService.restoreWorkforceReservation({
+        const restWf = await workforceReservations.restoreWorkforceReservation({
           domainUuid: data.domainUuid,
           projectId: data.projectId,
           reservationId: wf.reservationId

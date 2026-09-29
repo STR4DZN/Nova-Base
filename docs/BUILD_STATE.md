@@ -3,7 +3,7 @@
 ## Identidade
 
 - Module version: `0.0.6`
-- Gate de código atual: `G5 — Projects / Facilities / Downtime (Remediação de Revalidação Concluída / Aguardando Aceitação Soberana)`
+- Gate de código atual: `G5 — Projects / Facilities / Downtime (Smoke People/Workforce corrigido / Aguardando reteste real)`
 - Estado local: `GATE_G5_COMPLETED_PENDING_USER_ACCEPTANCE`
 - Estado externo: `GATE_G4_ACCEPTED_GATE_G5_COMPLETED_PENDING_USER_ACCEPTANCE`
 - Schema Domain: `1`
@@ -27,6 +27,16 @@
   - **G5.8 (Downtime model)**: Concluído. Modelo formal de atividades de interlúdio e downtime (Master Spec §17, DEC-2751–2900): `DowntimeDefinition` (catálogo e registry com definições canônicas de treinamento de atributos, patrulha de guarda e forja de armamentos), `DowntimeInstance` (execução concreta por domínio com escopos individual/grupo/domínio/flexível e ciclo de vida de 9 estados), separação estrita de modelo contra projetos (`Downtime ≠ Project`), suporte a atividades de duração indefinida e finita (`durationTicks: null | number`), participantes representados por entidades de domínio (`participant ≠ Foundry User`), e modelo de capacidade em domínio `domain-manager:downtime` (`DomainDowntimeData`) registrado no runtime.
   - **G5.9 (UI + integrations)**: Concluído. Implementação de apresentadores, renderizadores HTML semânticos com proteção estrita contra XSS via `escapeHtml`/`escapeAttribute`, e controllers para ApplicationV2 (com mock isomorfo headless) para os três subsistemas: Projects (`ProjectsApplication`, `ProjectsApplicationController`, `buildProjectsViewModel`, `renderProjectsSubsystemHtml`), Facilities (`FacilitiesApplication`, `FacilitiesApplicationController`, `buildFacilitiesViewModel`, `renderFacilitiesSubsystemHtml`), e Downtime (`DowntimeApplication`, `DowntimeApplicationController`, `buildDowntimeViewModel`, `renderDowntimeSubsystemHtml`).
   - **G5.10 (Cross-system acceptance & scale)**: Concluído. Verificação formal de todos os 8 critérios obrigatórios do checklist de aceitação do Gate G5 (progresso inteiro e % derivado, pureza de resolvers, completion não-checkbox, integridade de fronteiras sem mutação de Economy/People, desacoplamento estrito `lifecycle ≠ readiness`, `Downtime ≠ Project` com participantes de domínio, reporte explícito de falhas parciais, e histórico append-oriented com proteção contra dupla reversão); integração com `DomainIntegrityChecker` para validação de integridade dos domínios G5; suíte de estresse e volume multi-domínio em escala (10 domínios, 25 projetos com 5 lotes sucessivos de avanço totalizando 125 entradas, 30 instalações com condições degradadas/manutenção atrasada, 20 atividades de downtime com durações indefinidas e finitas, e geração em massa de ViewModels); e testes adversários de concorrência otimista (`DM_PROJECT_REVISION_MISMATCH`) e rejeição estrita de transições ilegais de ciclo de vida (`DM_PROJECT_INVALID_TRANSITION`).
+
+## Correção do blocker do smoke People/Workforce — 2026-09-29
+
+- O smoke real abortou em Project Start + workforce 5: `this[#domainRepository].update is not a function`.
+- `PeopleService` público agora usa `PeopleReadRepository` e não expõe allocate/release/restore de workforce.
+- `WorkforceReservationService` interno recebe `DomainRepositoryContract` mutável e é injetado em Projects e recovery pelo `WorkforceReservationPort`.
+- Sete testes de regressão da composição real foram adicionados. O código original reproduziu o erro do Foundry; a correção passou.
+- Validação local final: **686/686 testes PASS**, TypeScript/build/package/artifact PASS.
+- Relatório: `docs/G5_SMOKE_PEOPLE_WORKFORCE_FIX_REPORT.md`.
+- **G5 ainda aguarda o smoke real completo no Foundry v13.351; G6 permanece bloqueado.** Não houve homologação com base apenas nesses testes locais.
 
 ## Evidência local Gate G5
 

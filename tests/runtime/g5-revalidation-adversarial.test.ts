@@ -35,7 +35,7 @@ import {
   withDomainEconomyData
 } from "../../src/economy/economy-data.js";
 import { ProjectsService } from "../../src/projects/services/projects-service.js";
-import { PeopleService } from "../../src/people/services/people-service.js";
+import { WorkforceReservationService } from "../../src/people/services/workforce-reservation-service.js";
 import { registerProjectCommands } from "../../src/projects/commands/project-commands.js";
 import { DefaultPublicProjectsApi } from "../../src/projects/api/public-projects-api.js";
 import { FacilitiesService } from "../../src/facilities/services/facilities-service.js";
@@ -275,14 +275,14 @@ function setupTestEnvironment(record: DomainRecord = createInitialRecord()) {
     recoveryService
   });
 
-  const peopleService = new PeopleService(domains);
+  const workforceReservations = new WorkforceReservationService(domains);
 
   const projectsService = new ProjectsService({
     domains,
     projectRegistry,
     economyService,
     facilitiesService,
-    peopleService,
+    workforceReservations,
     transactionStore,
     recoveryService
   });
@@ -351,7 +351,7 @@ function setupTestEnvironment(record: DomainRecord = createInitialRecord()) {
     projectsService,
     facilitiesService,
     downtimeService,
-    peopleService,
+    workforceReservations,
     recoveryService,
     publicProjects,
     publicFacilities,
@@ -2042,9 +2042,9 @@ test("G5-REVAL3-003 (Fault 6): Project cancel fails closed when workforce releas
   checkOk(startRes, "Labor Project Start");
   const projectId = startRes.value.project.id;
 
-  // Stub peopleService.releaseWorkforceReservation to return failure
-  const originalWfRelease = env.peopleService.releaseWorkforceReservation.bind(env.peopleService);
-  env.peopleService.releaseWorkforceReservation = async () => {
+  // Stub workforceReservations.releaseWorkforceReservation to return failure
+  const originalWfRelease = env.workforceReservations.releaseWorkforceReservation.bind(env.workforceReservations);
+  env.workforceReservations.releaseWorkforceReservation = async () => {
     return err(
       createPublicError({
         code: "DM_PEOPLE_RELEASE_FAILED",
@@ -2061,7 +2061,7 @@ test("G5-REVAL3-003 (Fault 6): Project cancel fails closed when workforce releas
     userId: "gm-user"
   });
 
-  env.peopleService.releaseWorkforceReservation = originalWfRelease;
+  env.workforceReservations.releaseWorkforceReservation = originalWfRelease;
 
   assert.equal(cancelRes.ok, false, "Cancel must fail closed when workforce release fails");
   assert.equal(cancelRes.error.code, "DM_PEOPLE_RELEASE_FAILED");
@@ -2948,8 +2948,8 @@ test("G5-REVAL4-008 Scenario A: Project cancel fails at People stage (Economy re
   });
   assert.ok(resBefore.length > 0, "Economy reservation must exist");
 
-  const origReleaseWf = env.peopleService.releaseWorkforceReservation.bind(env.peopleService);
-  env.peopleService.releaseWorkforceReservation = async () => {
+  const origReleaseWf = env.workforceReservations.releaseWorkforceReservation.bind(env.workforceReservations);
+  env.workforceReservations.releaseWorkforceReservation = async () => {
     return err(createPublicError({
       code: "DM_PEOPLE_RELEASE_FAILED",
       category: "conflict",
@@ -2964,7 +2964,7 @@ test("G5-REVAL4-008 Scenario A: Project cancel fails at People stage (Economy re
   });
   assert.equal(cancelRes.ok, false, "Cancel must fail when People stage fails");
 
-  env.peopleService.releaseWorkforceReservation = origReleaseWf;
+  env.workforceReservations.releaseWorkforceReservation = origReleaseWf;
 
   const restoredRes = env.economyService.listReservations({
     domainUuid: env.rawDoc.id,
@@ -3130,7 +3130,7 @@ test("G5-REVAL4-004 & G5-REVAL4-006 Scenario D: Project start crash after upfron
     reason: `Cost for starting project ${projectId}`
   });
 
-  const wfRes = await env.peopleService.allocateWorkforceReservation({
+  const wfRes = await env.workforceReservations.allocateWorkforceReservation({
     domainUuid: env.rawDoc.uuid,
     projectId,
     amount: 2,
@@ -3548,7 +3548,7 @@ test("G5-REVAL5-009 Scenario 4: Project Cancel crash after release with snapshot
   });
   checkOk(relEconRes, "Release reservation before cancel crash simulation");
 
-  const relWfRes = await env.peopleService.releaseWorkforceReservation({
+  const relWfRes = await env.workforceReservations.releaseWorkforceReservation({
     domainUuid: env.rawDoc.uuid,
     projectId,
     reservationId: wfResvId
@@ -3832,9 +3832,9 @@ test("G5-REVAL5-009 Scenario 7: Workforce release fails during Project Completio
     userId: "gm-user"
   });
 
-  // Inject failure on peopleService.releaseWorkforceReservation
-  const originalWfRelease = env.peopleService.releaseWorkforceReservation.bind(env.peopleService);
-  env.peopleService.releaseWorkforceReservation = async () => {
+  // Inject failure on workforceReservations.releaseWorkforceReservation
+  const originalWfRelease = env.workforceReservations.releaseWorkforceReservation.bind(env.workforceReservations);
+  env.workforceReservations.releaseWorkforceReservation = async () => {
     return err(
       createPublicError({
         code: "DM_PEOPLE_RELEASE_FAULT",
@@ -3852,7 +3852,7 @@ test("G5-REVAL5-009 Scenario 7: Workforce release fails during Project Completio
     userId: "gm-user"
   });
 
-  env.peopleService.releaseWorkforceReservation = originalWfRelease;
+  env.workforceReservations.releaseWorkforceReservation = originalWfRelease;
 
   assert.equal(compRes.ok, false, "Completion must fail closed when workforce release fails");
 
@@ -4573,10 +4573,10 @@ test("G5-REVAL6-005 Scenario 19: Immediate compensation step A reverts, step B f
     rewards: []
   });
 
-  // Inject failure into peopleService.releaseWorkforceReservation during immediate rollback
-  const origRelWf = env.peopleService.releaseWorkforceReservation.bind(env.peopleService);
+  // Inject failure into workforceReservations.releaseWorkforceReservation during immediate rollback
+  const origRelWf = env.workforceReservations.releaseWorkforceReservation.bind(env.workforceReservations);
   let wfFailedOnce = true;
-  env.peopleService.releaseWorkforceReservation = async (params: any) => {
+  env.workforceReservations.releaseWorkforceReservation = async (params: any) => {
     if (wfFailedOnce) {
       wfFailedOnce = false;
       return err(
@@ -4771,8 +4771,8 @@ test("G5-REVAL6-005 Scenario 21: Transaction enters needs-recovery in runtime ->
     rewards: []
   });
 
-  // Inject failure into peopleService.releaseWorkforceReservation so immediate rollback fails and transaction enters needs-recovery
-  env.peopleService.releaseWorkforceReservation = async () => {
+  // Inject failure into workforceReservations.releaseWorkforceReservation so immediate rollback fails and transaction enters needs-recovery
+  env.workforceReservations.releaseWorkforceReservation = async () => {
     return err(
       createPublicError({
         code: "DM_PEOPLE_FAILURE",

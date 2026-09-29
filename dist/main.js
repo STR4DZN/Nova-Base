@@ -12772,7 +12772,7 @@ var PeopleProjectionService = class {
   }
 };
 
-// src/people/repositories/people-repository.ts
+// src/people/repositories/people-read-repository.ts
 function resolveRepoViewer(options) {
   if (options.viewer) return options.viewer;
   return {
@@ -12780,7 +12780,7 @@ function resolveRepoViewer(options) {
     isGm: options.viewerIsGm ?? false
   };
 }
-var PeopleRepository = class {
+var PeopleReadRepository = class {
   #domainRepository;
   constructor(domainRepository) {
     this.#domainRepository = domainRepository;
@@ -13019,6 +13019,15 @@ var PeopleRepository = class {
       return true;
     }));
   }
+};
+
+// src/people/repositories/people-repository.ts
+var PeopleRepository = class extends PeopleReadRepository {
+  #domainRepository;
+  constructor(domainRepository) {
+    super(domainRepository);
+    this.#domainRepository = domainRepository;
+  }
   async allocateReservation(params) {
     const id = params.domainUuid.startsWith("JournalEntry.") ? params.domainUuid.slice("JournalEntry.".length) : params.domainUuid;
     const domainRes = await this.#domainRepository.read(id);
@@ -13099,6 +13108,43 @@ var PeopleRepository = class {
     const updateRes = await this.#domainRepository.update({ ...domainRes.value, record: updatedRecord });
     if (!updateRes.ok) return updateRes;
     return ok(void 0);
+  }
+};
+
+// src/people/services/workforce-reservation-service.ts
+var WorkforceReservationService = class {
+  #repository;
+  constructor(domains) {
+    this.#repository = new PeopleRepository(domains);
+  }
+  async getReservations(domainUuid) {
+    const people = await this.#repository.getPeopleData(domainUuid);
+    if (!people.ok) return people;
+    return ok(people.value.reservations);
+  }
+  async allocateWorkforceReservation(params) {
+    return this.#repository.allocateReservation({
+      domainUuid: params.domainUuid,
+      targetRef: `project:${params.projectId}`,
+      amount: params.amount,
+      workforceTypeId: params.workforceTypeId,
+      reservationId: params.reservationId,
+      operationRef: params.operationRef
+    });
+  }
+  async releaseWorkforceReservation(params) {
+    return this.#repository.releaseReservation({
+      domainUuid: params.domainUuid,
+      targetRef: `project:${params.projectId}`,
+      reservationId: params.reservationId
+    });
+  }
+  async restoreWorkforceReservation(params) {
+    return this.#repository.restoreReservation({
+      domainUuid: params.domainUuid,
+      targetRef: `project:${params.projectId}`,
+      reservationId: params.reservationId
+    });
   }
 };
 
@@ -14544,7 +14590,7 @@ var PeopleService = class {
   constructor(domains, options = {}) {
     this.#domains = domains;
     this.#commandBus = options.commandBus;
-    this.#repository = new PeopleRepository(domains);
+    this.#repository = new PeopleReadRepository(domains);
     this.#projection = new PeopleProjectionService({
       roleDefinitions: options.roleDefinitions,
       groupDefinitions: options.groupDefinitions
@@ -14683,30 +14729,6 @@ var PeopleService = class {
       peopleApi: this,
       domains: this.#domains,
       viewer: options?.viewer
-    });
-  }
-  async allocateWorkforceReservation(params) {
-    return this.#repository.allocateReservation({
-      domainUuid: params.domainUuid,
-      targetRef: `project:${params.projectId}`,
-      amount: params.amount,
-      workforceTypeId: params.workforceTypeId,
-      reservationId: params.reservationId,
-      operationRef: params.operationRef
-    });
-  }
-  async releaseWorkforceReservation(params) {
-    return this.#repository.releaseReservation({
-      domainUuid: params.domainUuid,
-      targetRef: `project:${params.projectId}`,
-      reservationId: params.reservationId
-    });
-  }
-  async restoreWorkforceReservation(params) {
-    return this.#repository.restoreReservation({
-      domainUuid: params.domainUuid,
-      targetRef: `project:${params.projectId}`,
-      reservationId: params.reservationId
     });
   }
 };
@@ -22742,7 +22764,7 @@ async function compensateProjectStart(recordOrId, context, options) {
   }
   const effectiveLockOwner = options?.lockOwner ?? `recovery_${record.transactionId}`;
   const cleanDomainUuid = normalizeJournalEntryId(data.domainUuid);
-  const peopleService = context.peopleService ?? new PeopleService(context.domains);
+  const workforceReservations = context.workforceReservations ?? new WorkforceReservationService(context.domains);
   if (!options?.skipReconciliation) {
     const reachedCommitting = record.history.some(
       (h) => h.toState === "committing" || h.toState === "committed"
@@ -22865,7 +22887,7 @@ async function compensateProjectStart(recordOrId, context, options) {
           const receipt = step.receipt;
           const resId = receipt?.reservationId ?? receipt?.id ?? (typeof receipt === "string" ? receipt : void 0) ?? step.intent?.reservationId ?? data.allocatedWorkforceReservationId;
           if (resId) {
-            const relWf = await peopleService.releaseWorkforceReservation({
+            const relWf = await workforceReservations.releaseWorkforceReservation({
               domainUuid: data.domainUuid,
               projectId: data.projectId,
               reservationId: resId
@@ -22879,7 +22901,7 @@ async function compensateProjectStart(recordOrId, context, options) {
   } else if (data.allocatedWorkforceReservationId) {
     const stepId = `release_wf_${data.allocatedWorkforceReservationId}`;
     if (!isCompensationStepCompleted(record, stepId, context.transactionStore)) {
-      const relWf = await peopleService.releaseWorkforceReservation({
+      const relWf = await workforceReservations.releaseWorkforceReservation({
         domainUuid: data.domainUuid,
         projectId: data.projectId,
         reservationId: data.allocatedWorkforceReservationId
@@ -23043,12 +23065,12 @@ async function compensateProjectCancel(recordOrId, context, options) {
       }
     }
   }
-  const peopleService = context.peopleService ?? new PeopleService(context.domains);
+  const workforceReservations = context.workforceReservations ?? new WorkforceReservationService(context.domains);
   if (data.releasedWorkforceSnapshots && Array.isArray(data.releasedWorkforceSnapshots)) {
     for (const wf of data.releasedWorkforceSnapshots) {
       const stepId = `restore_cancel_wf_${wf.reservationId}`;
       if (!isCompensationStepCompleted(record, stepId, context.transactionStore)) {
-        const restWf = await peopleService.restoreWorkforceReservation({
+        const restWf = await workforceReservations.restoreWorkforceReservation({
           domainUuid: data.domainUuid,
           projectId: data.projectId,
           reservationId: wf.reservationId
@@ -23278,12 +23300,12 @@ async function compensateProjectCompletion(recordOrId, context, options) {
       }
     }
   }
-  const peopleService = context.peopleService ?? new PeopleService(context.domains);
+  const workforceReservations = context.workforceReservations ?? new WorkforceReservationService(context.domains);
   if (data.releasedWorkforceSnapshots && data.releasedWorkforceSnapshots.length > 0) {
     for (const wf of data.releasedWorkforceSnapshots) {
       const stepId = `restore_wf_${wf.reservationId}`;
       if (!isCompensationStepCompleted(record, stepId, context.transactionStore)) {
-        const restWf = await peopleService.restoreWorkforceReservation({
+        const restWf = await workforceReservations.restoreWorkforceReservation({
           domainUuid: data.domainUuid,
           projectId: data.projectId,
           reservationId: wf.reservationId
@@ -23985,7 +24007,7 @@ async function executeProjectStartDomainOperationPlan(context, params) {
   }
   const cmdId = params.commandId ? params.commandId.startsWith("cmd_") ? params.commandId : `cmd_${params.commandId}` : createCommandId();
   const epoch = params.authorityEpoch ?? 1;
-  const peopleService = context.peopleService ?? new PeopleService(context.domains);
+  const workforceReservations = context.workforceReservations ?? new WorkforceReservationService(context.domains);
   const canonicalStartLock = lockKey.domain(cleanDomainUuid);
   const sessionLockKeys = params.transactionContext?.lockKeys ?? params.lockKeys ?? [canonicalStartLock];
   const sessionRes = await CompositeMutationSession.prepare({
@@ -24065,7 +24087,7 @@ async function executeProjectStartDomainOperationPlan(context, params) {
       {
         domains: context.domains,
         economyService: context.economyService,
-        peopleService,
+        workforceReservations,
         transactionStore: context.transactionStore
       },
       { lockOwner: params.commandId, skipReconciliation: true }
@@ -24180,7 +24202,7 @@ async function executeProjectStartDomainOperationPlan(context, params) {
         reservationId: anticipatedWfReservationId,
         operationRef: opRef
       },
-      execute: async () => peopleService.allocateWorkforceReservation({
+      execute: async () => workforceReservations.allocateWorkforceReservation({
         domainUuid: cleanDomainUuid,
         projectId: draftProject.id,
         amount: wfRequired,
@@ -24729,7 +24751,7 @@ async function executeProjectCompletionDomainOperationPlan(context, params) {
         domains: context.domains,
         economyService: context.economyService,
         facilitiesService: context.facilitiesService,
-        peopleService: context.peopleService,
+        workforceReservations: context.workforceReservations,
         transactionStore: context.transactionStore
       },
       { lockOwner: params.commandId, skipReconciliation: true }
@@ -24842,10 +24864,10 @@ async function executeProjectCompletionDomainOperationPlan(context, params) {
       }
     }
   }
-  if (context.peopleService) {
+  if (context.workforceReservations) {
     let hasActiveReservations = false;
-    if ("getReservations" in context.peopleService) {
-      const pRes = await context.peopleService.getReservations(cleanDomainUuid);
+    if ("getReservations" in context.workforceReservations) {
+      const pRes = await context.workforceReservations.getReservations(cleanDomainUuid);
       if (!pRes.ok) {
         return session.failAndCompensate(
           createPublicError({
@@ -24880,7 +24902,7 @@ async function executeProjectCompletionDomainOperationPlan(context, params) {
         idempotencyKey: `${session.transactionId}:${stepId}`,
         intent: { projectId: project.id },
         execute: async () => {
-          return context.peopleService.releaseWorkforceReservation({
+          return context.workforceReservations.releaseWorkforceReservation({
             domainUuid: cleanDomainUuid,
             projectId: project.id,
             userId: params.userId
@@ -25562,8 +25584,8 @@ async function executeProjectCancelDomainOperationPlan(context, params) {
     }
   }
   const releasedWorkforceSnapshots = [];
-  if (context.peopleService && "getReservations" in context.peopleService) {
-    const pRes = await context.peopleService.getReservations(cleanDomainUuid);
+  if (context.workforceReservations && "getReservations" in context.workforceReservations) {
+    const pRes = await context.workforceReservations.getReservations(cleanDomainUuid);
     if (pRes.ok) {
       for (const r of pRes.value) {
         if (r.targetRef === `project:${project.id}` && r.status === "active") {
@@ -25625,7 +25647,7 @@ async function executeProjectCancelDomainOperationPlan(context, params) {
       {
         domains: context.domains,
         economyService: context.economyService,
-        peopleService: context.peopleService,
+        workforceReservations: context.workforceReservations,
         transactionStore: context.transactionStore
       },
       { lockOwner: params.commandId, skipReconciliation: true }
@@ -25655,7 +25677,7 @@ async function executeProjectCancelDomainOperationPlan(context, params) {
       }
     }
   }
-  if (context.peopleService) {
+  if (context.workforceReservations) {
     const stepId = `project-cancel:release-workforce:${project.id}`;
     const wfStepRes = await session.runChildStep({
       stepId,
@@ -25665,7 +25687,7 @@ async function executeProjectCancelDomainOperationPlan(context, params) {
       idempotencyKey: `${session.transactionId}:${stepId}`,
       intent: { projectId: params.projectId },
       execute: async () => {
-        return context.peopleService.releaseWorkforceReservation({
+        return context.workforceReservations.releaseWorkforceReservation({
           domainUuid: cleanDomainUuid,
           projectId: params.projectId,
           userId: params.userId
@@ -25717,7 +25739,7 @@ var ProjectsService = class {
   #projectRegistry;
   #economyService;
   #facilitiesService;
-  #peopleService;
+  #workforceReservations;
   #transactionStore;
   #recoveryService;
   #childHandlerRegistry;
@@ -25726,7 +25748,7 @@ var ProjectsService = class {
     this.#projectRegistry = options.projectRegistry ?? createDefaultProjectRegistry();
     this.#economyService = options.economyService;
     this.#facilitiesService = options.facilitiesService;
-    this.#peopleService = options.peopleService ?? new PeopleService(this.#domains);
+    this.#workforceReservations = options.workforceReservations ?? new WorkforceReservationService(this.#domains);
     this.#transactionStore = options.transactionStore;
     this.#recoveryService = options.recoveryService;
     this.#childHandlerRegistry = options.childHandlerRegistry;
@@ -25771,7 +25793,7 @@ var ProjectsService = class {
         domains: this.#domains,
         projectRegistry: this.#projectRegistry,
         economyService: this.#economyService,
-        peopleService: this.#peopleService,
+        workforceReservations: this.#workforceReservations,
         transactionStore: this.#transactionStore
       },
       params
@@ -25820,7 +25842,7 @@ var ProjectsService = class {
       {
         domains: this.#domains,
         economyService: this.#economyService,
-        peopleService: this.#peopleService,
+        workforceReservations: this.#workforceReservations,
         transactionStore: this.#transactionStore
       },
       params
@@ -25849,7 +25871,7 @@ var ProjectsService = class {
         projectRegistry: this.#projectRegistry,
         economyService: this.#economyService,
         facilitiesService: this.#facilitiesService,
-        peopleService: this.#peopleService,
+        workforceReservations: this.#workforceReservations,
         transactionStore: this.#transactionStore,
         childHandlerRegistry: this.#childHandlerRegistry
       },
@@ -25908,7 +25930,7 @@ var ProjectsService = class {
           domains: this.#domains,
           economyService: this.#economyService,
           facilitiesService: this.#facilitiesService,
-          peopleService: this.#peopleService,
+          workforceReservations: this.#workforceReservations,
           transactionStore: this.#transactionStore,
           childHandlerRegistry: this.#childHandlerRegistry
         }
@@ -25930,7 +25952,7 @@ var ProjectsService = class {
         {
           domains: this.#domains,
           economyService: this.#economyService,
-          peopleService: this.#peopleService,
+          workforceReservations: this.#workforceReservations,
           transactionStore: this.#transactionStore
         }
       );
@@ -25941,7 +25963,7 @@ var ProjectsService = class {
         {
           domains: this.#domains,
           economyService: this.#economyService,
-          peopleService: this.#peopleService,
+          workforceReservations: this.#workforceReservations,
           transactionStore: this.#transactionStore
         }
       );
@@ -34434,6 +34456,7 @@ function composeDomainManagerRuntime(options = {}) {
     }
   });
   const people = new PeopleService(readOnlyDomains);
+  const workforceReservations = new WorkforceReservationService(mutableDomainRepo);
   const authority = options.authority ?? new FoundryPrimaryAuthorityAdapter();
   const lockManager = options.lockManager ?? new LockManager();
   const transactionStore = options.transactionStore ?? new TransactionStore({
@@ -34483,7 +34506,7 @@ function composeDomainManagerRuntime(options = {}) {
     projectRegistry,
     economyService,
     facilitiesService,
-    peopleService: people,
+    workforceReservations,
     transactionStore,
     recoveryService: recovery,
     childHandlerRegistry

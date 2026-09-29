@@ -8,7 +8,7 @@ import { getDomainProjectsData, withDomainProjectsData } from "../project-data.j
 import { cancelProject as planCancelProject } from "./project-advance-plan-service.js";
 import type { EconomyService } from "../../economy/services/economy-service.js";
 import type { Reservation } from "../../economy/reservations/reservation-types.js";
-import type { PublicPeopleApi } from "../../people/services/people-service.js";
+import type { WorkforceReservationPort } from "../../people/services/workforce-reservation-port.js";
 import type { TransactionStore } from "../../mutations/transaction-store.js";
 import { createTransactionRecord } from "../../mutations/transaction-record.js";
 import { compensateProjectCancel } from "../services/project-recovery-compensators.js";
@@ -35,7 +35,7 @@ export interface ProjectCancelDomainOperationParams {
 export interface ProjectCancelDomainOperationContext {
   readonly domains: DomainRepositoryContract;
   readonly economyService?: EconomyService;
-  readonly peopleService?: PublicPeopleApi;
+  readonly workforceReservations?: WorkforceReservationPort;
   readonly transactionStore?: TransactionStore;
 }
 
@@ -134,8 +134,8 @@ export async function executeProjectCancelDomainOperationPlan(
   }
 
   const releasedWorkforceSnapshots: Array<{ reservationId: string; amount: number; workforceTypeId: string }> = [];
-  if (context.peopleService && "getReservations" in context.peopleService) {
-    const pRes = await context.peopleService.getReservations(cleanDomainUuid);
+  if (context.workforceReservations && "getReservations" in context.workforceReservations) {
+    const pRes = await context.workforceReservations.getReservations(cleanDomainUuid);
     if (pRes.ok) {
       for (const r of pRes.value) {
         if (r.targetRef === `project:${project.id}` && r.status === "active") {
@@ -202,7 +202,7 @@ export async function executeProjectCancelDomainOperationPlan(
       {
         domains: context.domains,
         economyService: context.economyService,
-        peopleService: context.peopleService,
+        workforceReservations: context.workforceReservations,
         transactionStore: context.transactionStore
       },
       { lockOwner: params.commandId, skipReconciliation: true }
@@ -235,8 +235,8 @@ export async function executeProjectCancelDomainOperationPlan(
     }
   }
 
-  // 3. Release workforce reservation via public People API
-  if (context.peopleService) {
+  // 3. Release workforce reservation via the internal workforce port
+  if (context.workforceReservations) {
     const stepId = `project-cancel:release-workforce:${project.id}`;
     const wfStepRes = await session.runChildStep({
       stepId,
@@ -246,7 +246,7 @@ export async function executeProjectCancelDomainOperationPlan(
       idempotencyKey: `${session.transactionId}:${stepId}`,
       intent: { projectId: params.projectId },
       execute: async () => {
-        return context.peopleService!.releaseWorkforceReservation({
+        return context.workforceReservations!.releaseWorkforceReservation({
           domainUuid: cleanDomainUuid,
           projectId: params.projectId,
           userId: params.userId

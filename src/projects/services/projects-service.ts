@@ -48,7 +48,8 @@ import {
 } from "../plans/project-completion-domain-operation-plan.js";
 import { executeProjectAdvanceDomainOperationPlan } from "../plans/project-advance-domain-operation-plan.js";
 import { executeProjectCancelDomainOperationPlan } from "../plans/project-cancel-domain-operation-plan.js";
-import { PeopleService, type PublicPeopleApi } from "../../people/services/people-service.js";
+import { WorkforceReservationService } from "../../people/services/workforce-reservation-service.js";
+import type { WorkforceReservationPort } from "../../people/services/workforce-reservation-port.js";
 import {
   type RecoveryService,
   isCompensationStepCompleted,
@@ -67,7 +68,7 @@ export interface ProjectsServiceOptions {
   readonly projectRegistry?: ProjectDefinitionRegistry;
   readonly economyService?: EconomyService;
   readonly facilitiesService?: FacilitiesService;
-  readonly peopleService?: PublicPeopleApi;
+  readonly workforceReservations?: WorkforceReservationPort;
   readonly transactionStore?: TransactionStore;
   readonly recoveryService?: RecoveryService;
   readonly childHandlerRegistry?: TransactionalChildHandlerRegistry;
@@ -133,7 +134,7 @@ export class ProjectsService {
   readonly #projectRegistry: ProjectDefinitionRegistry;
   readonly #economyService?: EconomyService;
   readonly #facilitiesService?: FacilitiesService;
-  readonly #peopleService?: PublicPeopleApi;
+  readonly #workforceReservations?: WorkforceReservationPort;
   readonly #transactionStore?: TransactionStore;
   readonly #recoveryService?: RecoveryService;
   readonly #childHandlerRegistry?: TransactionalChildHandlerRegistry;
@@ -143,7 +144,7 @@ export class ProjectsService {
     this.#projectRegistry = options.projectRegistry ?? createDefaultProjectRegistry();
     this.#economyService = options.economyService;
     this.#facilitiesService = options.facilitiesService;
-    this.#peopleService = options.peopleService ?? new PeopleService(this.#domains);
+    this.#workforceReservations = options.workforceReservations ?? new WorkforceReservationService(this.#domains);
     this.#transactionStore = options.transactionStore;
     this.#recoveryService = options.recoveryService;
     this.#childHandlerRegistry = options.childHandlerRegistry;
@@ -194,7 +195,7 @@ export class ProjectsService {
         domains: this.#domains,
         projectRegistry: this.#projectRegistry,
         economyService: this.#economyService,
-        peopleService: this.#peopleService,
+        workforceReservations: this.#workforceReservations,
         transactionStore: this.#transactionStore
       },
       params
@@ -261,7 +262,7 @@ export class ProjectsService {
       {
         domains: this.#domains,
         economyService: this.#economyService,
-        peopleService: this.#peopleService,
+        workforceReservations: this.#workforceReservations,
         transactionStore: this.#transactionStore
       },
       params
@@ -307,7 +308,7 @@ export class ProjectsService {
         projectRegistry: this.#projectRegistry,
         economyService: this.#economyService,
         facilitiesService: this.#facilitiesService,
-        peopleService: this.#peopleService,
+        workforceReservations: this.#workforceReservations,
         transactionStore: this.#transactionStore,
         childHandlerRegistry: this.#childHandlerRegistry
       },
@@ -381,7 +382,7 @@ export class ProjectsService {
           domains: this.#domains,
           economyService: this.#economyService,
           facilitiesService: this.#facilitiesService,
-          peopleService: this.#peopleService,
+          workforceReservations: this.#workforceReservations,
           transactionStore: this.#transactionStore,
           childHandlerRegistry: this.#childHandlerRegistry
         }
@@ -409,7 +410,7 @@ export class ProjectsService {
         {
           domains: this.#domains,
           economyService: this.#economyService,
-          peopleService: this.#peopleService,
+          workforceReservations: this.#workforceReservations,
           transactionStore: this.#transactionStore
         }
       );
@@ -422,7 +423,7 @@ export class ProjectsService {
         {
           domains: this.#domains,
           economyService: this.#economyService,
-          peopleService: this.#peopleService,
+          workforceReservations: this.#workforceReservations,
           transactionStore: this.#transactionStore
         }
       );

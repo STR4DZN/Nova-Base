@@ -1,5 +1,5 @@
 import type { DomainReadRepository } from "../../storage/repositories/domain-repository.js";
-import { PeopleRepository } from "../repositories/people-repository.js";
+import { PeopleReadRepository } from "../repositories/people-read-repository.js";
 import { PeopleProjectionService, type ViewerPeopleContext, type AdministrativePeopleContext } from "../../projection/people/people-projection-service.js";
 import { PeopleAggregationService, type PeopleAggregationQueryOptions, type PeopleAggregateResult } from "../../aggregation/people-aggregation.js";
 import { resolveCurrentViewer, type ViewerIdentity } from "../../projection/viewer-identity.js";
@@ -17,7 +17,6 @@ import { renderPeopleSubsystemHtml } from "../../ui/domain-patterns/people/peopl
 import { PeopleApplication } from "../../ui/domain-patterns/people/people-app.js";
 import type { CommandBus } from "../../commands/command-bus.js";
 import { ok, type Result } from "../../core/contracts/result.js";
-import type { PublicError } from "../../core/contracts/public-error.js";
 
 export interface PeopleServiceOptions {
   readonly roleDefinitions?: readonly RoleDefinition[];
@@ -106,30 +105,6 @@ export interface PublicPeopleApi {
     options?: { nowReal?: number; nowWorld?: number }
   ): Promise<Result<readonly Reservation[]>>;
 
-  allocateWorkforceReservation(params: {
-    domainUuid: string;
-    projectId: string;
-    amount: number;
-    workforceTypeId?: string;
-    userId?: string | null;
-    reservationId?: string;
-    operationRef?: string;
-  }): Promise<Result<{ readonly reservationId: string }, PublicError>>;
-
-  releaseWorkforceReservation(params: {
-    domainUuid: string;
-    projectId: string;
-    reservationId?: string;
-    userId?: string | null;
-  }): Promise<Result<void, PublicError>>;
-
-  restoreWorkforceReservation(params: {
-    domainUuid: string;
-    projectId: string;
-    reservationId?: string;
-    userId?: string | null;
-  }): Promise<Result<void, PublicError>>;
-
   getAggregate(
     rootDomainUuid: string,
     options?: PeopleAggregationQueryOptions
@@ -162,14 +137,14 @@ export interface PublicPeopleApi {
 export class PeopleService implements PublicPeopleApi {
   readonly #domains: DomainReadRepository;
   #commandBus?: CommandBus;
-  readonly #repository: PeopleRepository;
+  readonly #repository: PeopleReadRepository;
   readonly #projection: PeopleProjectionService;
   readonly #aggregation: PeopleAggregationService;
 
   constructor(domains: DomainReadRepository, options: PeopleServiceOptions = {}) {
     this.#domains = domains;
     this.#commandBus = options.commandBus;
-    this.#repository = new PeopleRepository(domains as any);
+    this.#repository = new PeopleReadRepository(domains);
     this.#projection = new PeopleProjectionService({
       roleDefinitions: options.roleDefinitions,
       groupDefinitions: options.groupDefinitions
@@ -404,48 +379,4 @@ export class PeopleService implements PublicPeopleApi {
     });
   }
 
-  async allocateWorkforceReservation(params: {
-    domainUuid: string;
-    projectId: string;
-    amount: number;
-    workforceTypeId?: string;
-    userId?: string | null;
-    reservationId?: string;
-    operationRef?: string;
-  }): Promise<Result<{ readonly reservationId: string }, PublicError>> {
-    return this.#repository.allocateReservation({
-      domainUuid: params.domainUuid,
-      targetRef: `project:${params.projectId}`,
-      amount: params.amount,
-      workforceTypeId: params.workforceTypeId,
-      reservationId: params.reservationId,
-      operationRef: params.operationRef
-    });
-  }
-
-  async releaseWorkforceReservation(params: {
-    domainUuid: string;
-    projectId: string;
-    reservationId?: string;
-    userId?: string | null;
-  }): Promise<Result<void, PublicError>> {
-    return this.#repository.releaseReservation({
-      domainUuid: params.domainUuid,
-      targetRef: `project:${params.projectId}`,
-      reservationId: params.reservationId
-    });
-  }
-
-  async restoreWorkforceReservation(params: {
-    domainUuid: string;
-    projectId: string;
-    reservationId?: string;
-    userId?: string | null;
-  }): Promise<Result<void, PublicError>> {
-    return this.#repository.restoreReservation({
-      domainUuid: params.domainUuid,
-      targetRef: `project:${params.projectId}`,
-      reservationId: params.reservationId
-    });
-  }
 }

@@ -27,6 +27,7 @@ import { registerRoleCommandHandlers } from "../people/commands/role-commands.js
 import { registerOperationalGroupCommandHandlers } from "../people/commands/operational-group-commands.js";
 import { registerAssignmentCommandHandlers } from "../people/commands/assignment-commands.js";
 import { registerRepairCommandHandlers } from "../people/commands/repair-commands.js";
+import { WorkforceReservationService } from "../people/services/workforce-reservation-service.js";
 import { PeopleService, type PublicPeopleApi } from "../people/services/people-service.js";
 import { PeopleRepairTool } from "../people/services/people-repair-tool.js";
 import { PeopleApplication, PeopleApplicationController } from "../ui/domain-patterns/people/people-app.js";
@@ -228,6 +229,7 @@ export function composeDomainManagerRuntime(
   });
 
   const people = new PeopleService(readOnlyDomains);
+  const workforceReservations = new WorkforceReservationService(mutableDomainRepo);
 
   const authority = options.authority ?? new FoundryPrimaryAuthorityAdapter();
   const lockManager = options.lockManager ?? new LockManager();
@@ -303,7 +305,7 @@ export function composeDomainManagerRuntime(
     projectRegistry,
     economyService,
     facilitiesService,
-    peopleService: people,
+    workforceReservations,
     transactionStore,
     recoveryService: recovery,
     childHandlerRegistry

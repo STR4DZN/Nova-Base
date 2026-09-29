@@ -22,7 +22,7 @@ import { LedgerStore } from "../../src/economy/ledger/ledger-store.js";
 import { InMemoryLedgerStorageAdapter } from "../../src/economy/storage/ledger-storage-adapter.js";
 import { ReservationStore } from "../../src/economy/reservations/reservation-store.js";
 import { InMemoryReservationStorageAdapter } from "../../src/economy/storage/reservation-storage-adapter.js";
-import { PeopleService } from "../../src/people/services/people-service.js";
+import { WorkforceReservationService } from "../../src/people/services/workforce-reservation-service.js";
 import { createDefaultDomainPeopleData } from "../../src/people/people-data.js";
 import {
   compensateProjectStart,
@@ -258,7 +258,7 @@ test("T1: Project Start / Economy debit (real upfront debit effect -> receipt fl
     return res;
   };
 
-  const peopleService = new PeopleService(domains);
+  const workforceReservations = new WorkforceReservationService(domains);
 
   // Execute real project start domain operation plan
   const planRes = await executeProjectStartDomainOperationPlan(
@@ -266,7 +266,7 @@ test("T1: Project Start / Economy debit (real upfront debit effect -> receipt fl
       domains,
       projectRegistry,
       economyService,
-      peopleService,
+      workforceReservations,
       transactionStore: txStore
     },
     {
@@ -310,7 +310,7 @@ test("T1: Project Start / Economy debit (real upfront debit effect -> receipt fl
   const compRes = await compensateProjectStart(rehydratedTx, {
     domains,
     economyService,
-    peopleService,
+    workforceReservations,
     transactionStore: rehydratedTxStore
   });
 
@@ -381,7 +381,7 @@ test("T2: Project Start / Economy reservation (real reservation -> receipt flush
     return res;
   };
 
-  const peopleService = new PeopleService(domains);
+  const workforceReservations = new WorkforceReservationService(domains);
 
   // Execute real project start domain operation plan
   const planRes = await executeProjectStartDomainOperationPlan(
@@ -389,7 +389,7 @@ test("T2: Project Start / Economy reservation (real reservation -> receipt flush
       domains,
       projectRegistry,
       economyService,
-      peopleService,
+      workforceReservations,
       transactionStore: txStore
     },
     {
@@ -430,7 +430,7 @@ test("T2: Project Start / Economy reservation (real reservation -> receipt flush
   const compRes = await compensateProjectStart(rehydratedTx, {
     domains,
     economyService,
-    peopleService,
+    workforceReservations,
     transactionStore: rehydratedTxStore
   });
 
@@ -487,11 +487,11 @@ test("T3: Project Start / Workforce reservation (real workforce allocation -> re
     lockManager
   });
 
-  const peopleService = new PeopleService(domains);
+  const workforceReservations = new WorkforceReservationService(domains);
 
   // Intercept allocateWorkforceReservation: trigger failReceipt after allocation
-  const origAlloc = peopleService.allocateWorkforceReservation.bind(peopleService);
-  peopleService.allocateWorkforceReservation = async (args) => {
+  const origAlloc = workforceReservations.allocateWorkforceReservation.bind(workforceReservations);
+  workforceReservations.allocateWorkforceReservation = async (args) => {
     const res = await origAlloc(args);
     failReceipt = true;
     return res;
@@ -503,7 +503,7 @@ test("T3: Project Start / Workforce reservation (real workforce allocation -> re
       domains,
       projectRegistry,
       economyService,
-      peopleService,
+      workforceReservations,
       transactionStore: txStore
     },
     {
@@ -547,7 +547,7 @@ test("T3: Project Start / Workforce reservation (real workforce allocation -> re
   const compRes = await compensateProjectStart(rehydratedTx, {
     domains,
     economyService,
-    peopleService,
+    workforceReservations,
     transactionStore: rehydratedTxStore
   });
 
@@ -763,14 +763,14 @@ test("T5: Provider child timeout (unknown outcome) -> parent marked needs-recove
     );
   };
 
-  const peopleService = new PeopleService(domains);
+  const workforceReservations = new WorkforceReservationService(domains);
 
   const planRes = await executeProjectStartDomainOperationPlan(
     {
       domains,
       projectRegistry,
       economyService,
-      peopleService,
+      workforceReservations,
       transactionStore: txStore,
       recoveryFenceRegistry: fenceRegistry
     },
@@ -1638,7 +1638,7 @@ test("T13: OperationRef uniqueness across consecutive transactions (different tr
   const reservationStore = new ReservationStore(new InMemoryReservationStorageAdapter());
   const txStore = new TransactionStore(new InMemoryTransactionStorageAdapter());
   const projectRegistry = createDefaultProjectRegistry();
-  const peopleService = new PeopleService(domains);
+  const workforceReservations = new WorkforceReservationService(domains);
 
   projectRegistry.register({
     id: "test:proj-opref-unique",
@@ -1672,7 +1672,7 @@ test("T13: OperationRef uniqueness across consecutive transactions (different tr
       domains,
       projectRegistry,
       economyService,
-      peopleService,
+      workforceReservations,
       transactionStore: txStore
     },
     {
@@ -1690,7 +1690,7 @@ test("T13: OperationRef uniqueness across consecutive transactions (different tr
       domains,
       projectRegistry,
       economyService,
-      peopleService,
+      workforceReservations,
       transactionStore: txStore
     },
     {
@@ -3006,7 +3006,7 @@ test("T20-B: G5 child provider operation times out with outcome unknown (single 
   const txStore = new TransactionStore(new InMemoryTransactionStorageAdapter());
   const recoveryService = new RecoveryService({ lockManager, transactionStore: txStore });
   const projectRegistry = createDefaultProjectRegistry();
-  const peopleService = new PeopleService(domains);
+  const workforceReservations = new WorkforceReservationService(domains);
 
   resourceRegistry.register({
     id: "provider:gems",
@@ -3067,7 +3067,7 @@ test("T20-B: G5 child provider operation times out with outcome unknown (single 
     return compensateProjectStart(record, {
       domains,
       economyService,
-      peopleService,
+      workforceReservations,
       transactionStore: txStore
     });
   });
@@ -3091,7 +3091,7 @@ test("T20-B: G5 child provider operation times out with outcome unknown (single 
       domains,
       projectRegistry,
       economyService,
-      peopleService,
+      workforceReservations,
       transactionStore: txStore,
       recoveryService
     },
