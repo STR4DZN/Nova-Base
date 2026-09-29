@@ -126,16 +126,17 @@ export async function compensateFacilityOperation(
       if (step.subsystem === "economy" && step.operation === "adjust" && context.economyService) {
         const intent = step.intent as { resourceId: string; deltaMinor: number };
         if (intent && intent.deltaMinor < 0) {
+          const opRef = step.operationRef ?? step.stepId;
           const idempotencyKey = `${record.transactionId}:compensation:${stepId}`;
-          const refRes = await context.economyService.commitAdjust({
+          const refRes = await context.economyService.compensateAdjustment({
             domainUuid: data.domainUuid,
             resourceId: intent.resourceId,
-            deltaMinor: Math.abs(intent.deltaMinor),
+            originalOperationRef: opRef,
+            compensationOperationRef: idempotencyKey,
+            originalDeltaMinor: intent.deltaMinor,
             reason: `Compensation: refund ${data.type} cost for facility ${data.facilityId}`,
             lockOwner: effectiveLockOwner,
-            idempotencyKey,
-            parentTransactionId: record.transactionId,
-            recoveryOwner: "parent"
+            parentTransactionId: record.transactionId
           });
           if (!refRes.ok) return refRes;
         }

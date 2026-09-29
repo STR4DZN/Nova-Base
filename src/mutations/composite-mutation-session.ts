@@ -374,7 +374,8 @@ export class CompositeMutationSession {
       (execRes.error as any).outcome === "unknown" ||
       execRes.error.category === "timeout" ||
       execRes.error.code === "DM_TIMEOUT" ||
-      execRes.error.code === "DM_ECON_PROVIDER_TIMEOUT";
+      execRes.error.code === "DM_ECON_PROVIDER_TIMEOUT" ||
+      execRes.error.code === "DM_ECON_PROVIDER_STORAGE_ERROR";
 
     const stepIdx = this.#steps.findIndex((s) => s.stepId === stepDef.stepId);
     if (isExplicitUnknown) {

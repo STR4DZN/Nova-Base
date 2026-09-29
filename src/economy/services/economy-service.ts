@@ -53,6 +53,20 @@ export type DerivedAccountResolver = (
   account: DerivedResourceAccount
 ) => Promise<Result<{ balanceMinor: number; isStale?: boolean }, PublicError>>;
 
+export type ProviderAdjustmentReconcileOutcome =
+  | "fully-applied"
+  | "not-applied"
+  | "provider-only"
+  | "ledger-only"
+  | "unknown";
+
+export interface ReconcileProviderAdjustmentResult {
+  readonly provider: "written" | "not-written" | "unknown";
+  readonly ledger: "present" | "absent";
+  readonly outcome: ProviderAdjustmentReconcileOutcome;
+  readonly ledgerEntries?: readonly LedgerEntry[];
+}
+
 export interface EconomyServiceOptions {
   readonly domains: DomainRepositoryContract;
   readonly resourceRegistry: ResourceDefinitionRegistry;
@@ -247,6 +261,444 @@ export class EconomyService {
   }
 
   /**
+   * Reconciles co-dependent Provider ↔ Ledger state for an operationRef.
+   */
+  async reconcileProviderAdjustment(params: {
+    readonly domainUuid: string;
+    readonly resourceId: string;
+    readonly operationRef: string;
+  }): Promise<Result<ReconcileProviderAdjustmentResult, PublicError>> {
+    const cleanDomain = this.#cleanUuid(params.domainUuid);
+    const accRes = await this.getAccount(cleanDomain, params.resourceId);
+    if (!accRes.ok) {
+      return ok({
+        provider: "unknown",
+        ledger: "absent",
+        outcome: "unknown"
+      });
+    }
+    const account = accRes.value;
+    if (!account || account.mode !== "provider") {
+      return err(
+        createPublicError({
+          code: "DM_ECON_INVALID_ACCOUNT_MODE",
+          category: "validation",
+          message: `Account '${params.resourceId}' on domain '${cleanDomain}' is not a provider account`
+        })
+      );
+    }
+
+    const providerAccount = account as ProviderResourceAccount;
+    let providerState: "written" | "not-written" | "unknown" = "unknown";
+
+    if (this.#providerRegistry) {
+      const provider = this.#providerRegistry.get(providerAccount.providerId);
+      if (provider && "reconcile" in provider && typeof (provider as any).reconcile === "function") {
+        try {
+          const recRes = await (provider as any).reconcile(
+            cleanDomain,
+            params.resourceId,
+            providerAccount.providerRef,
+            params.operationRef
+          );
+          if (recRes && recRes.ok && recRes.value?.outcome) {
+            providerState = recRes.value.outcome;
+          } else {
+            providerState = "unknown";
+          }
+        } catch {
+          providerState = "unknown";
+        }
+      } else {
+        providerState = "unknown";
+      }
+    } else {
+      providerState = "unknown";
+    }
+
+    // Check ledgerStore for matching entries
+    const byRef = this.#ledgerStore.query({
+      domainUuid: cleanDomain,
+      sourceRef: params.operationRef
+    });
+    const byTx = byRef.length === 0
+      ? this.#ledgerStore.query({
+          domainUuid: cleanDomain,
+          transactionId: params.operationRef
+        })
+      : [];
+    const matchingEntries = byRef.length > 0 ? byRef : byTx;
+    const ledgerState: "present" | "absent" = matchingEntries.length > 0 ? "present" : "absent";
+
+    let outcome: ProviderAdjustmentReconcileOutcome = "unknown";
+    if (providerState === "unknown") {
+      outcome = "unknown";
+    } else if (providerState === "written" && ledgerState === "present") {
+      outcome = "fully-applied";
+    } else if (providerState === "not-written" && ledgerState === "absent") {
+      outcome = "not-applied";
+    } else if (providerState === "written" && ledgerState === "absent") {
+      outcome = "provider-only";
+    } else if (providerState === "not-written" && ledgerState === "present") {
+      outcome = "ledger-only";
+    } else {
+      outcome = "unknown";
+    }
+
+    return ok({
+      provider: providerState,
+      ledger: ledgerState,
+      outcome,
+      ledgerEntries: matchingEntries
+    });
+  }
+
+  /**
+   * Compensates a provider adjustment atomically and crash-idempotently,
+   * handling all 4 co-dependent state combinations between Provider and Ledger.
+   */
+  async compensateProviderAdjustment(params: {
+    readonly domainUuid: string;
+    readonly resourceId: string;
+    readonly originalOperationRef: string;
+    readonly compensationOperationRef: string;
+    readonly originalDeltaMinor: number;
+    readonly reason: string;
+    readonly lockOwner?: string;
+    readonly parentTransactionId?: string;
+  }): Promise<Result<void, PublicError>> {
+    const cleanDomain = this.#cleanUuid(params.domainUuid);
+
+    // 1. Reconcile original operation state
+    const origRec = await this.reconcileProviderAdjustment({
+      domainUuid: cleanDomain,
+      resourceId: params.resourceId,
+      operationRef: params.originalOperationRef
+    });
+    if (!origRec.ok) return origRec;
+
+    const { outcome } = origRec.value;
+
+    // Fail closed if state is indeterminate
+    if (outcome === "unknown") {
+      return err(
+        createPublicError({
+          code: "DM_RECOVERY_RECONCILIATION_UNCERTAIN",
+          category: "conflict",
+          message: `Provider adjustment reconciliation uncertain for operationRef '${params.originalOperationRef}'`,
+          details: { outcome: "unknown", operationRef: params.originalOperationRef }
+        })
+      );
+    }
+
+    // If never applied: clean no-op
+    if (outcome === "not-applied") {
+      return ok(undefined);
+    }
+
+    // Retrieve provider instance
+    const accRes = await this.getAccount(cleanDomain, params.resourceId);
+    if (!accRes.ok) return accRes;
+    const account = accRes.value;
+    if (!account || account.mode !== "provider") {
+      return err(
+        createPublicError({
+          code: "DM_ECON_INVALID_ACCOUNT_MODE",
+          category: "validation",
+          message: `Account '${params.resourceId}' is not a provider account`
+        })
+      );
+    }
+    const providerAccount = account as ProviderResourceAccount;
+    const provider = this.#providerRegistry?.get(providerAccount.providerId);
+    if (!provider) {
+      return err(
+        createPublicError({
+          code: "DM_ECON_PROVIDER_UNAVAILABLE",
+          category: "provider",
+          message: `Provider '${providerAccount.providerId}' is unavailable for compensation`
+        })
+      );
+    }
+
+    // Check if compensation mutation was already applied to provider
+    let compProviderWritten = false;
+    if (typeof (provider as any).reconcile === "function") {
+      try {
+        const compRecRes = await (provider as any).reconcile(
+          cleanDomain,
+          params.resourceId,
+          providerAccount.providerRef,
+          params.compensationOperationRef
+        );
+        if (compRecRes && compRecRes.ok && compRecRes.value) {
+          if (compRecRes.value.outcome === "written") {
+            compProviderWritten = true;
+          } else if (compRecRes.value.outcome === "unknown") {
+            return err(
+              createPublicError({
+                code: "DM_RECOVERY_RECONCILIATION_UNCERTAIN",
+                category: "conflict",
+                message: `Provider compensation reconciliation uncertain for '${params.compensationOperationRef}'`,
+                details: { outcome: "unknown", operationRef: params.compensationOperationRef }
+              })
+            );
+          }
+        }
+      } catch {
+        return err(
+          createPublicError({
+            code: "DM_RECOVERY_RECONCILIATION_UNCERTAIN",
+            category: "conflict",
+            message: `Provider compensation reconciliation threw for '${params.compensationOperationRef}'`,
+            details: { outcome: "unknown", operationRef: params.compensationOperationRef }
+          })
+        );
+      }
+    }
+
+    // Check if compensation ledger entry already exists
+    const compEntries = this.#ledgerStore.query({
+      domainUuid: cleanDomain,
+      sourceRef: params.compensationOperationRef
+    });
+    const hasCompLedger = compEntries.length > 0;
+
+    // Apply compensation logic per matrix:
+    if (outcome === "fully-applied") {
+      // Step A: Revert provider balance (-originalDeltaMinor)
+      if (!compProviderWritten && typeof (provider as any).mutateBalance === "function") {
+        const mutRes = await (provider as any).mutateBalance(
+          cleanDomain,
+          params.resourceId,
+          providerAccount.providerRef,
+          -params.originalDeltaMinor,
+          params.reason,
+          { operationRef: params.compensationOperationRef }
+        );
+        if (!mutRes.ok) {
+          return err(
+            createPublicError({
+              code: mutRes.error.code,
+              category: mutRes.error.category,
+              message: mutRes.error.message,
+              details: {
+                ...(typeof mutRes.error.details === "object" && mutRes.error.details !== null
+                  ? mutRes.error.details
+                  : {}),
+                outcome: "unknown",
+                operationRef: params.compensationOperationRef
+              }
+            })
+          );
+        }
+        if (typeof (provider as any).flush === "function") {
+          try {
+            await (provider as any).flush();
+          } catch (flushErr: unknown) {
+            return err(
+              createPublicError({
+                code: "DM_ECON_PROVIDER_STORAGE_ERROR",
+                category: "provider",
+                message: `Provider flush failed during compensation: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+                details: { outcome: "unknown", operationRef: params.compensationOperationRef }
+              })
+            );
+          }
+        }
+      }
+
+      // Step B: Insert compensation ledger entry (-originalDeltaMinor)
+      if (!hasCompLedger) {
+        const entryRes = this.#ledgerStore.append({
+          domainUuid: cleanDomain,
+          resourceId: params.resourceId,
+          deltaMinor: -params.originalDeltaMinor,
+          kind: "adjustment",
+          transactionId: params.parentTransactionId ?? params.compensationOperationRef,
+          source: {
+            type: "recovery-compensation",
+            ref: params.compensationOperationRef,
+            reason: params.reason
+          }
+        });
+        if (!entryRes.ok) return entryRes;
+        await this.#ledgerStore.flush();
+      }
+
+      return ok(undefined);
+    }
+
+    if (outcome === "provider-only") {
+      // Caso A: Reconstruct original ledger entry + revert provider + insert compensation ledger entry.
+      // Net: 0 on provider, 2 entries in ledger (original + compensation = 0), faithful history!
+
+      // Step 1: Reconstruct original ledger entry if not present
+      const origEntries = this.#ledgerStore.query({
+        domainUuid: cleanDomain,
+        sourceRef: params.originalOperationRef
+      });
+      if (origEntries.length === 0) {
+        const reconRes = this.#ledgerStore.append({
+          domainUuid: cleanDomain,
+          resourceId: params.resourceId,
+          deltaMinor: params.originalDeltaMinor,
+          kind: "adjustment",
+          transactionId: params.parentTransactionId ?? params.originalOperationRef,
+          source: {
+            type: "recovery-reconstruct",
+            ref: params.originalOperationRef,
+            reason: `Reconstructed original entry for ${params.originalOperationRef}`
+          }
+        });
+        if (!reconRes.ok) return reconRes;
+        await this.#ledgerStore.flush();
+      }
+
+      // Step 2: Revert provider balance (-originalDeltaMinor)
+      if (!compProviderWritten && typeof (provider as any).mutateBalance === "function") {
+        const mutRes = await (provider as any).mutateBalance(
+          cleanDomain,
+          params.resourceId,
+          providerAccount.providerRef,
+          -params.originalDeltaMinor,
+          params.reason,
+          { operationRef: params.compensationOperationRef }
+        );
+        if (!mutRes.ok) {
+          return err(
+            createPublicError({
+              code: mutRes.error.code,
+              category: mutRes.error.category,
+              message: mutRes.error.message,
+              details: {
+                ...(typeof mutRes.error.details === "object" && mutRes.error.details !== null
+                  ? mutRes.error.details
+                  : {}),
+                outcome: "unknown",
+                operationRef: params.compensationOperationRef
+              }
+            })
+          );
+        }
+        if (typeof (provider as any).flush === "function") {
+          try {
+            await (provider as any).flush();
+          } catch (flushErr: unknown) {
+            return err(
+              createPublicError({
+                code: "DM_ECON_PROVIDER_STORAGE_ERROR",
+                category: "provider",
+                message: `Provider flush failed during compensation: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+                details: { outcome: "unknown", operationRef: params.compensationOperationRef }
+              })
+            );
+          }
+        }
+      }
+
+      // Step 3: Insert compensation ledger entry (-originalDeltaMinor)
+      if (!hasCompLedger) {
+        const entryRes = this.#ledgerStore.append({
+          domainUuid: cleanDomain,
+          resourceId: params.resourceId,
+          deltaMinor: -params.originalDeltaMinor,
+          kind: "adjustment",
+          transactionId: params.parentTransactionId ?? params.compensationOperationRef,
+          source: {
+            type: "recovery-compensation",
+            ref: params.compensationOperationRef,
+            reason: params.reason
+          }
+        });
+        if (!entryRes.ok) return entryRes;
+        await this.#ledgerStore.flush();
+      }
+
+      return ok(undefined);
+    }
+
+    if (outcome === "ledger-only") {
+      // Caso B: Provider was never written. Do NOT mutate provider!
+      // Insert compensation ledger entry to nullify orphan debit. Net 0 on ledger.
+      if (!hasCompLedger) {
+        const entryRes = this.#ledgerStore.append({
+          domainUuid: cleanDomain,
+          resourceId: params.resourceId,
+          deltaMinor: -params.originalDeltaMinor,
+          kind: "adjustment",
+          transactionId: params.parentTransactionId ?? params.compensationOperationRef,
+          source: {
+            type: "recovery-compensation",
+            ref: params.compensationOperationRef,
+            reason: params.reason
+          }
+        });
+        if (!entryRes.ok) return entryRes;
+        await this.#ledgerStore.flush();
+      }
+
+      return ok(undefined);
+    }
+
+    return ok(undefined);
+  }
+
+  /**
+   * Unified helper to compensate an adjustment step, routing provider-backed accounts
+   * through compensateProviderAdjustment and native accounts through native reversal.
+   */
+  async compensateAdjustment(params: {
+    readonly domainUuid: string;
+    readonly resourceId: string;
+    readonly originalOperationRef: string;
+    readonly compensationOperationRef: string;
+    readonly originalDeltaMinor: number;
+    readonly reason: string;
+    readonly lockOwner?: string;
+    readonly parentTransactionId?: string;
+  }): Promise<Result<void, PublicError>> {
+    const cleanDomain = this.#cleanUuid(params.domainUuid);
+    const accRes = await this.getAccount(cleanDomain, params.resourceId);
+    if (!accRes.ok) return accRes;
+    const account = accRes.value;
+    if (account?.mode === "provider") {
+      return this.compensateProviderAdjustment(params);
+    }
+
+    // Native account reconciliation
+    const recRes = await this.reconcileAdjustment({
+      domainUuid: cleanDomain,
+      resourceId: params.resourceId,
+      operationRef: params.originalOperationRef
+    });
+    if (!recRes.ok) return recRes;
+    if (recRes.value === "not-applied") return ok(undefined);
+    if (recRes.value === "unknown") {
+      return err(
+        createPublicError({
+          code: "DM_RECOVERY_RECONCILIATION_UNCERTAIN",
+          category: "conflict",
+          message: `Economy adjustment reconciliation uncertain for operationRef '${params.originalOperationRef}'`
+        })
+      );
+    }
+
+    const refRes = await this.commitAdjust({
+      domainUuid: cleanDomain,
+      resourceId: params.resourceId,
+      deltaMinor: -params.originalDeltaMinor,
+      reason: params.reason,
+      lockOwner: params.lockOwner,
+      idempotencyKey: params.compensationOperationRef,
+      parentTransactionId: params.parentTransactionId,
+      recoveryOwner: "parent"
+    });
+    if (!refRes.ok) return refRes;
+    return ok(undefined);
+  }
+
+  /**
    * Reconciles an uncertain economy adjustment step during recovery (Master Revalidation 7).
    * Returns:
    * - "applied": side-effect was written to domain/ledger/provider; safe to compensate.
@@ -273,28 +725,18 @@ export class EconomyService {
     }
 
     if (account.mode === "provider") {
-      const providerAccount = account as ProviderResourceAccount;
-      if (this.#providerRegistry) {
-        const provider = this.#providerRegistry.get(providerAccount.providerId);
-        if (provider && "reconcile" in provider && typeof (provider as any).reconcile === "function") {
-          try {
-            const recRes = await (provider as any).reconcile(
-              params.domainUuid,
-              params.resourceId,
-              providerAccount.providerRef,
-              params.operationRef
-            );
-            if (recRes && recRes.ok && recRes.value) {
-              if (recRes.value.outcome === "written") return ok("applied");
-              if (recRes.value.outcome === "not-written") return ok("not-applied");
-              return ok("unknown");
-            }
-          } catch {
-            return ok("unknown");
-          }
-        }
+      const rec = await this.reconcileProviderAdjustment({
+        domainUuid: params.domainUuid,
+        resourceId: params.resourceId,
+        operationRef: params.operationRef
+      });
+      if (!rec.ok || rec.value.outcome === "unknown") {
+        return ok("unknown");
       }
-      return ok("unknown");
+      if (rec.value.outcome === "not-applied") {
+        return ok("not-applied");
+      }
+      return ok("applied");
     }
 
     // Native mode: check operationReceipts, appliedIdempotencyKeys and ledgerStore
@@ -1036,7 +1478,7 @@ export class EconomyService {
               code: "DM_ECON_PROVIDER_TIMEOUT",
               category: "provider",
               message: `Provider mutation timed out or threw unknown error: ${caughtErr instanceof Error ? caughtErr.message : String(caughtErr)}`,
-              details: { outcome: "unknown" }
+              details: { outcome: "unknown", operationRef: providerOperationRef }
             })
           );
         }
@@ -1058,7 +1500,20 @@ export class EconomyService {
               );
               await this.#transactionStore?.flush();
             }
-            return mutRes;
+            return err(
+              createPublicError({
+                code: mutRes.error.code,
+                category: mutRes.error.category,
+                message: mutRes.error.message,
+                details: {
+                  ...(typeof mutRes.error.details === "object" && mutRes.error.details !== null
+                    ? mutRes.error.details
+                    : {}),
+                  outcome: "unknown",
+                  operationRef: providerOperationRef
+                }
+              })
+            );
           }
 
           if (!isChildStep) {
@@ -1084,7 +1539,7 @@ export class EconomyService {
               code: "DM_ECON_PROVIDER_TIMEOUT",
               category: "provider",
               message: "Provider mutation outcome is unknown; transaction transitioned to needs-recovery",
-              details: { outcome: "unknown" }
+              details: { outcome: "unknown", operationRef: providerOperationRef }
             })
           );
         }
@@ -1116,19 +1571,43 @@ export class EconomyService {
           }
         }
 
-        const entryRes = this.#ledgerStore.append({
-          domainUuid: params.domainUuid,
-          resourceId: params.resourceId,
-          deltaMinor: delta,
-          kind: "adjustment",
-          transactionId,
-          source: {
-            type: "adjustment",
-            ref: params.idempotencyKey ?? providerAccount.providerRef,
-            reason: params.reason,
-            userId: params.userId
+        let entryRes: Result<LedgerEntry, PublicError>;
+        try {
+          entryRes = this.#ledgerStore.append({
+            domainUuid: params.domainUuid,
+            resourceId: params.resourceId,
+            deltaMinor: delta,
+            kind: "adjustment",
+            transactionId,
+            source: {
+              type: "adjustment",
+              ref: providerOperationRef,
+              reason: params.reason,
+              userId: params.userId
+            }
+          });
+        } catch (appendErr: unknown) {
+          if (!isChildStep) {
+            this.#transactionStore?.transition(
+              transactionId,
+              "needs-recovery",
+              epoch,
+              `Ledger append threw after provider mutation: ${appendErr instanceof Error ? appendErr.message : String(appendErr)}`
+            );
+            await this.#transactionStore?.flush();
           }
-        });
+          return err(
+            createPublicError({
+              code: "DM_ECON_PROVIDER_STORAGE_ERROR",
+              category: "provider",
+              message: `Ledger append threw after provider mutation: ${appendErr instanceof Error ? appendErr.message : String(appendErr)}`,
+              details: {
+                outcome: "unknown",
+                operationRef: providerOperationRef
+              }
+            })
+          );
+        }
 
         if (!entryRes.ok) {
           if (!isChildStep) {
@@ -1140,10 +1619,46 @@ export class EconomyService {
             );
             await this.#transactionStore?.flush();
           }
-          return entryRes;
+          return err(
+            createPublicError({
+              code: entryRes.error.code,
+              category: entryRes.error.category,
+              message: entryRes.error.message,
+              details: {
+                ...(typeof entryRes.error.details === "object" && entryRes.error.details !== null
+                  ? entryRes.error.details
+                  : {}),
+                outcome: "unknown",
+                operationRef: providerOperationRef
+              }
+            })
+          );
         }
 
-        await this.#ledgerStore.flush();
+        try {
+          await this.#ledgerStore.flush();
+        } catch (ledgerFlushErr: unknown) {
+          if (!isChildStep) {
+            this.#transactionStore?.transition(
+              transactionId,
+              "needs-recovery",
+              epoch,
+              `Ledger flush failed after provider mutation: ${ledgerFlushErr instanceof Error ? ledgerFlushErr.message : String(ledgerFlushErr)}`
+            );
+            await this.#transactionStore?.flush();
+          }
+          return err(
+            createPublicError({
+              code: "DM_ECON_PROVIDER_STORAGE_ERROR",
+              category: "provider",
+              message: `Ledger flush failed after provider mutation: ${ledgerFlushErr instanceof Error ? ledgerFlushErr.message : String(ledgerFlushErr)}`,
+              details: {
+                outcome: "unknown",
+                operationRef: providerOperationRef
+              }
+            })
+          );
+        }
 
         if (typeof (provider as any).flush === "function") {
           try {
@@ -1162,7 +1677,11 @@ export class EconomyService {
               createPublicError({
                 code: "DM_ECON_PROVIDER_STORAGE_ERROR",
                 category: "provider",
-                message: `Provider persistence flush failed: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`
+                message: `Provider persistence flush failed: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+                details: {
+                  outcome: "unknown",
+                  operationRef: providerOperationRef
+                }
               })
             );
           }
@@ -2830,8 +3349,21 @@ export class EconomyService {
         return ok(undefined);
       }
 
-      // Case 3: ledger absent + provider says written -> revert provider mutation and compensate
+      // Case 3: ledger absent + provider says written -> reconstruct original ledger entry, revert provider mutation and compensate ledger
       if (!hasLedgerEntry && providerOutcome === "written") {
+        this.#ledgerStore.append({
+          domainUuid: data.domainUuid,
+          resourceId: data.resourceId,
+          deltaMinor: data.deltaMinor,
+          kind: "adjustment",
+          transactionId: record.transactionId,
+          source: {
+            type: "recovery-reconstruct",
+            ref: opRef,
+            reason: `Reconstructed original entry for ${opRef}`
+          }
+        });
+
         if (typeof (provider as any).mutateBalance === "function") {
           const compensationRef = `${data.providerOperationRef ?? record.transactionId}:compensation`;
 
@@ -2877,12 +3409,26 @@ export class EconomyService {
           }
         }
 
+        this.#ledgerStore.append({
+          domainUuid: data.domainUuid,
+          resourceId: data.resourceId,
+          deltaMinor: -data.deltaMinor,
+          kind: "adjustment",
+          transactionId: record.transactionId,
+          source: {
+            type: "recovery-compensation",
+            ref: `${data.providerOperationRef ?? record.transactionId}:compensation`,
+            reason: `Recovery compensation for aborted adjustment ${record.transactionId}`
+          }
+        });
+        await this.#ledgerStore.flush();
+
         if (this.#transactionStore) {
           this.#transactionStore.transition(
             record.transactionId,
             "compensated",
             record.authorityEpoch,
-            "Reconciliation reverted orphan provider mutation because ledger entry was missing"
+            "Reconciliation reconstructed original ledger entry, reverted provider mutation and compensated ledger"
           );
           await this.#transactionStore.flush();
         }

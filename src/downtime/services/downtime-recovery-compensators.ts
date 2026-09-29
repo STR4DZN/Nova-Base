@@ -97,38 +97,17 @@ export async function compensateDowntimeStart(
       if (step.subsystem === "economy" && step.operation === "adjust" && context.economyService) {
         const intent = step.intent as { resourceId: string; deltaMinor: number };
         if (intent && intent.deltaMinor < 0) {
-          if (step.state === "unknown" || step.state === "executing") {
-            const opRef = step.operationRef ?? step.stepId;
-            const recRes = await context.economyService.reconcileAdjustment({
-              domainUuid: cleanDomainUuid,
-              operationRef: opRef,
-              resourceId: intent.resourceId
-            });
-            if (!recRes.ok || recRes.value === "unknown") {
-              return err(
-                createPublicError({
-                  code: "DM_RECOVERY_RECONCILIATION_UNCERTAIN",
-                  category: "conflict",
-                  message: `Economy adjustment reconciliation uncertain for operationRef '${opRef}'`
-                })
-              );
-            }
-            if (recRes.value === "not-applied") {
-              await markCompensationStepCompleted(context.transactionStore, record, stepId);
-              continue;
-            }
-          }
-
+          const opRef = step.operationRef ?? step.stepId;
           const idempotencyKey = `${record.transactionId}:compensation:${stepId}`;
-          const refRes = await context.economyService.commitAdjust({
+          const refRes = await context.economyService.compensateAdjustment({
             domainUuid: data.domainUuid,
             resourceId: intent.resourceId,
-            deltaMinor: Math.abs(intent.deltaMinor),
+            originalOperationRef: opRef,
+            compensationOperationRef: idempotencyKey,
+            originalDeltaMinor: intent.deltaMinor,
             reason: `Compensation: refund upfront cost for downtime activity ${data.definitionId}`,
             lockOwner: effectiveLockOwner,
-            idempotencyKey,
-            parentTransactionId: record.transactionId,
-            recoveryOwner: "parent"
+            parentTransactionId: record.transactionId
           });
           if (!refRes.ok) return refRes;
         }
@@ -230,38 +209,17 @@ export async function compensateDowntimeResolution(
       if (step.subsystem === "economy" && step.operation === "adjust" && context.economyService) {
         const intent = step.intent as { resourceId: string; deltaMinor: number };
         if (intent && intent.deltaMinor > 0) {
-          if (step.state === "unknown" || step.state === "executing") {
-            const opRef = step.operationRef ?? step.stepId;
-            const recRes = await context.economyService.reconcileAdjustment({
-              domainUuid: cleanDomainUuid,
-              operationRef: opRef,
-              resourceId: intent.resourceId
-            });
-            if (!recRes.ok || recRes.value === "unknown") {
-              return err(
-                createPublicError({
-                  code: "DM_RECOVERY_RECONCILIATION_UNCERTAIN",
-                  category: "conflict",
-                  message: `Economy adjustment reconciliation uncertain for operationRef '${opRef}'`
-                })
-              );
-            }
-            if (recRes.value === "not-applied") {
-              await markCompensationStepCompleted(context.transactionStore, record, stepId);
-              continue;
-            }
-          }
-
+          const opRef = step.operationRef ?? step.stepId;
           const idempotencyKey = `${record.transactionId}:compensation:${stepId}`;
-          const revRes = await context.economyService.commitAdjust({
+          const revRes = await context.economyService.compensateAdjustment({
             domainUuid: data.domainUuid,
             resourceId: intent.resourceId,
-            deltaMinor: -intent.deltaMinor,
+            originalOperationRef: opRef,
+            compensationOperationRef: idempotencyKey,
+            originalDeltaMinor: intent.deltaMinor,
             reason: `Compensation: reverse reward for downtime activity ${data.activityId}`,
             lockOwner: effectiveLockOwner,
-            idempotencyKey,
-            parentTransactionId: record.transactionId,
-            recoveryOwner: "parent"
+            parentTransactionId: record.transactionId
           });
           if (!revRes.ok) return revRes;
         }

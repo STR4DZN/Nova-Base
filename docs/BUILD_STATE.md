@@ -33,10 +33,10 @@
 | Verificação | Resultado |
 |---|---|
 | TypeScript strict (`tsc --noEmit`) | PASS (0 erros) |
-| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 670/670 (0 falhas, 0 regressões) |
+| Testes unitários e integração (`node tests/run-tests.mjs`) | PASS — 676/676 (0 falhas, 0 regressões) |
 | Relatório de Aceitação G5 | Gerado (`docs/GATE_G5_ACCEPTANCE_REPORT.md`) |
 | Regressões G0/G1/G2/G3/G4 | 0 (todos os 444 testes anteriores preservados e passando) |
-| Testes novos Gate G5 | 226 testes dedicados (G5.1 a G5.10: 101 testes + 66 testes adversários em g5-revalidation-adversarial.test.ts + 10 testes de lock-set em g5-lockset-contract.test.ts + 5 testes de fence em g5-recovery-fence.test.ts + 19 testes de kernel em g5-transaction-kernel.test.ts + 25 testes de hardening T1–T20 em g5-kernel-hardening.test.ts) |
+| Testes novos Gate G5 | 232 testes dedicados (G5.1 a G5.10: 101 testes + 66 testes adversários em g5-revalidation-adversarial.test.ts + 10 testes de lock-set em g5-lockset-contract.test.ts + 5 testes de fence em g5-recovery-fence.test.ts + 19 testes de kernel em g5-transaction-kernel.test.ts + 31 testes de hardening T1–T21 em g5-kernel-hardening.test.ts) |
 | Remediação de Auditoria G5-AUD-001 a G5-AUD-010 | PASS — 100% remediado, endurecido e verificado |
 | Remediação de Revalidação G5-REVAL-001 a G5-REVAL-012 | PASS — 100% remediado, endurecido e verificado |
 | Remediação de Revalidação 2 G5-REVAL2-001 a G5-REVAL2-010 | PASS — 100% remediado, endurecido e verificado |
@@ -494,10 +494,33 @@
 11. **G5-REVAL-011 (MÉDIO — Preservação de Identidade Transacional e Época de Autoridade)**: Preserva `commandId`, `authorityEpoch !== 1`, `correlationId` e `causationId` sem fabricação de identificadores artificiais.
 12. **G5-REVAL-012 (CRÍTICO — Suíte de Testes Adversários de Revalidação Dedicada)**: Suíte rigorosa `tests/runtime/g5-revalidation-adversarial.test.ts` (9/9 testes passando) cobrindo todos os 12 achados de revalidação.
 
+## Remediação de Blocker Estático Real — Atomicidade Provider ↔ Ledger em Child Operations (T21)
+
+1. **Classificação Explícita de Outcome Desconhecido em Falhas de Provedor**:
+   - `DM_ECON_PROVIDER_STORAGE_ERROR` adicionado à lista explícita de `isExplicitUnknown` em `CompositeMutationSession.runChildStep()`. Erros de armazenamento ou timeout de provedores marcam imediatamente o step como `unknown` e a transação pai como `needs-recovery`, ativando a recovery fence correspondente.
+2. **Reconciliação Co-Dependente Provider ↔ Ledger (`reconcileProviderAdjustment`)**:
+   - Implementada reconciliação formal que avalia tanto o estado no provedor (`written` | `not-written` | `unknown`) quanto no LedgerStore (`present` | `absent`).
+   - Mapeia com precisão para a matriz de desfechos:
+     - `fully-applied`: Provedor e ledger foram ambos gravados com sucesso.
+     - `not-applied`: Falha ocorreu antes de qualquer alteração no provedor ou ledger.
+     - `provider-only` (Caso A): Provedor foi debitado/creditado, mas processo caiu antes do `ledgerStore.flush()`.
+     - `ledger-only` (Caso B): Ledger foi persistido, mas flush ou confirmação do provedor falhou.
+     - `unknown`: Provedor retornou status incerto/timeout ou lançou exceção durante reconcile.
+3. **Matriz de Compensação Atômica e Reconstrução Fiel de Auditoria (`compensateProviderAdjustment`)**:
+     - `fully-applied`: Aplica mutação reversa no provedor (`-deltaMinor`) e adiciona `LedgerEntry` de compensação com `sourceRef: "${operationRef}:compensation"` (saldo líquido zero, histórico íntegro).
+     - `not-applied`: No-op estrito sem geração de entries órfãs ou alterações de saldo.
+     - `provider-only`: Reconstrói a `LedgerEntry` original ausente com `sourceRef: operationRef`, reverte o provedor e adiciona a `LedgerEntry` de compensação correspondente, preservando fidelidade contábil estrita de 2 lançamentos (débito original + compensação) com saldo líquido zero.
+     - `ledger-only`: Adiciona a `LedgerEntry` de compensação anulando a entrada existente no ledger sem mutar o provedor (saldo líquido zero).
+     - `unknown`: Falha fechado com `DM_RECOVERY_RECONCILIATION_UNCERTAIN`, mantendo `needs-recovery` e recovery fence ativa para intervenção manual.
+4. **Roteamento Unificado de Compensadores de Subsistemas G5**:
+   - Todos os compensadores de Projetos, Downtime e Instalações (`compensateProjectStart`, `compensateProjectAdvance`, `compensateProjectCompletion`, `compensateDowntimeStart`, `compensateDowntimeResolution`, `compensateFacilityMaintenance`, `compensateFacilityRepair`) foram unificados através de `EconomyService.compensateAdjustment()`, delegando contas provider-backed para `compensateProviderAdjustment`.
+5. **Suíte de Testes de Hardening T21-A a T21-F**:
+   - 6 novos cenários cobrindo Caso A (provider-only), Caso B (ledger-only), idempotência de retry, falha antes da gravação (not-applied), fail-closed em incerteza (unknown) e captura de falha de flush do provedor em `CompositeMutationSession`.
+
 ## Próxima ação canônica
 
 - **Aguardar Aceitação Soberana do Usuário para o Gate G5 (Projects / Facilities / Downtime)**:
-  - Todas as 10 microbuilds do Gate G5 (G5.1 a G5.10), todos os 10 itens de auditoria inicial (G5-AUD-001 a G5-AUD-010), todos os 12 itens da 1ª revalidação (G5-REVAL-001 a G5-REVAL-012), todos os 10 itens da 2ª revalidação (G5-REVAL2-001 a G5-REVAL2-010) e todos os 7 itens da 3ª revalidação (G5-REVAL3-001 a G5-REVAL3-007) foram integralmente implementados, endurecidos e verificados (571/571 testes passando, 0 erros de compilação TypeScript, validações de pacote e artefato aprovadas).
+  - Todas as 10 microbuilds do Gate G5 (G5.1 a G5.10), todos os 10 itens de auditoria inicial (G5-AUD-001 a G5-AUD-010), todos os 12 itens da 1ª revalidação (G5-REVAL-001 a G5-REVAL-012), todos os 10 itens da 2ª revalidação (G5-REVAL2-001 a G5-REVAL2-010), todos os 7 itens da 3ª revalidação (G5-REVAL3-001 a G5-REVAL3-007), todos os itens das revalidações 4, 5, 6, Master Remediation, e os testes de hardening T1 a T21 foram integralmente implementados, endurecidos e verificados (676/676 testes passando, 0 erros de compilação TypeScript, validações de pacote e artefato aprovadas).
   - Relatório formal de aceitação emitido em `docs/GATE_G5_ACCEPTANCE_REPORT.md`.
   - Próximo gate canônico após a aceitação formal do Gate G5 pelo usuário: **Gate G6 — Relations / Reputation / Agreements / Territory** (`Documentos/GATES/16_G6_RELATIONS_REPUTATION_AGREEMENTS_TERRITORY.md`).
   - Rastreabilidade histórica: Gates G0 a G4 concluídos, auditados e homologados.

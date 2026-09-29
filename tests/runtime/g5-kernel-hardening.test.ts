@@ -3266,3 +3266,732 @@ test("T20-C: Inverted / concurrent recovery order idempotency (outer recovery an
   assert.equal((await provider.getCurrencyBalance("account-gems-t20c")).value, 500);
 });
 
+// ---------------------------------------------------------------------------
+// T21-A: provider-only (Caso A) -> recovery reconstructs original ledger + compensates provider and ledger -> net 0, faithful history (2 ledger entries)
+// ---------------------------------------------------------------------------
+test("T21-A: provider-only (Caso A) -> recovery reconstructs original ledger + compensates provider and ledger -> net 0, faithful history (2 ledger entries)", async () => {
+  const { domains, getDoc } = createMockDomainDoc("dom-t21a", 1000);
+  const resourceRegistry = createDefaultResourceRegistry();
+  const lockManager = new LockManager();
+  const txStore = new TransactionStore(new InMemoryTransactionStorageAdapter());
+  const reservationStore = new ReservationStore(new InMemoryReservationStorageAdapter());
+  const ledgerStore = new LedgerStore(new InMemoryLedgerStorageAdapter());
+  const fenceRegistry = new RecoveryFenceRegistry();
+  const recoveryService = new RecoveryService({
+    lockManager,
+    transactionStore: txStore,
+    recoveryFenceRegistry: fenceRegistry
+  });
+
+  const provider = new ManualCurrencyProvider();
+  provider.setBalance("account-gems-t21a", 1000);
+
+  const providerRegistry = new ProviderRegistry();
+  providerRegistry.register(provider);
+
+  const doc = getDoc();
+  const econ = (doc.record.definition.capabilities.config as any)["domain-manager:economy"];
+  econ.accounts = [
+    {
+      domainUuid: "dom-t21a",
+      resourceId: "provider:gems",
+      mode: "provider",
+      providerId: MANUAL_CURRENCY_PROVIDER_ID,
+      providerRef: "account-gems-t21a",
+      balanceMinor: 1000,
+      baseCapacityMinor: null
+    }
+  ];
+  await domains.save(doc);
+
+  const economyService = new EconomyService({
+    domains,
+    resourceRegistry,
+    ledgerStore,
+    reservationStore,
+    lockManager,
+    transactionStore: txStore,
+    recoveryService,
+    providerRegistry
+  });
+
+  const opRef = "tx-parent-t21a:step_debit";
+  // Simulate Caso A: Provider mutated (-200, new balance 800), but ledger entry was NOT appended/flushed
+  const debitRes = await provider.mutateCurrency("account-gems-t21a", -200, "Debit gems upfront", { operationRef: opRef });
+  assert.equal(debitRes.ok, true);
+  assert.equal((await provider.getCurrencyBalance("account-gems-t21a")).value, 800);
+
+  // Ledger has 0 entries
+  assert.equal(ledgerStore.query({ domainUuid: "dom-t21a" }).length, 0);
+
+  // 1. Reconcile check
+  const recRes = await economyService.reconcileProviderAdjustment({
+    domainUuid: "dom-t21a",
+    resourceId: "provider:gems",
+    operationRef: opRef
+  });
+  assert.equal(recRes.ok, true);
+  assert.equal(recRes.value.provider, "written");
+  assert.equal(recRes.value.ledger, "absent");
+  assert.equal(recRes.value.outcome, "provider-only");
+
+  // 2. Run compensation
+  const compRef = `${opRef}:compensation`;
+  const compRes = await economyService.compensateProviderAdjustment({
+    domainUuid: "dom-t21a",
+    resourceId: "provider:gems",
+    originalOperationRef: opRef,
+    compensationOperationRef: compRef,
+    originalDeltaMinor: -200,
+    reason: "Compensation: refund upfront cost",
+    parentTransactionId: "tx-parent-t21a"
+  });
+  assert.equal(compRes.ok, true);
+
+  // 3. Assertions:
+  // Provider balance is back to 1000 (net 0)
+  assert.equal((await provider.getCurrencyBalance("account-gems-t21a")).value, 1000);
+
+  // Ledger has exactly 2 entries: original reconstructed (-200) + compensation (+200)
+  const ledgerEntries = ledgerStore.query({ domainUuid: "dom-t21a" });
+  assert.equal(ledgerEntries.length, 2, "Ledger must have exactly 2 entries (original + compensation)");
+
+  const origEntry = ledgerEntries.find((e) => e.source.ref === opRef);
+  assert.ok(origEntry, "Original reconstructed entry must exist");
+  assert.equal(origEntry.deltaMinor, -200);
+  assert.equal(origEntry.source.type, "recovery-reconstruct");
+
+  const compEntry = ledgerEntries.find((e) => e.source.ref === compRef);
+  assert.ok(compEntry, "Compensation entry must exist");
+  assert.equal(compEntry.deltaMinor, 200);
+  assert.equal(compEntry.source.type, "recovery-compensation");
+
+  // Net ledger delta is 0
+  const netLedger = ledgerEntries.reduce((sum, e) => sum + e.deltaMinor, 0);
+  assert.equal(netLedger, 0, "Net ledger delta must be 0");
+
+  // 4. Test parent transaction recovery end-to-end for Caso A
+  recoveryService.registerCompensator("projects:start", async (record) => {
+    return compensateProjectStart(record, {
+      domains,
+      economyService,
+      transactionStore: txStore
+    });
+  });
+
+  const opRef2 = "tx-parent-t21a-full:step_debit";
+  await provider.mutateCurrency("account-gems-t21a", -300, "Debit gems 2", { operationRef: opRef2 });
+  assert.equal((await provider.getCurrencyBalance("account-gems-t21a")).value, 700);
+
+  const parentTx = {
+    ...createTransactionRecord({
+      transactionId: "tx-parent-t21a-full",
+      commandId: createCommandId(),
+      authorityEpoch: 1,
+      lockKeys: [lockKey.domain("dom-t21a")],
+      safeAutoRecovery: true,
+      recoveryData: {
+        type: "projects:start",
+        domainUuid: "dom-t21a",
+        projectId: "prj-t21a-full",
+        steps: [
+          {
+            stepId: "step_debit_gems",
+            subsystem: "economy",
+            operation: "adjust",
+            operationRef: opRef2,
+            intent: { resourceId: "provider:gems", deltaMinor: -300 },
+            state: "unknown"
+          }
+        ]
+      }
+    }),
+    state: "needs-recovery" as const
+  };
+  txStore.save(parentTx);
+
+  const parentRecRes = await recoveryService.recoverTransaction("tx-parent-t21a-full", 1);
+  assert.equal(parentRecRes.ok, true);
+
+  // Provider balance restored back to 1000
+  assert.equal((await provider.getCurrencyBalance("account-gems-t21a")).value, 1000);
+
+  // Ledger has reconstructed entry (-300) and compensation entry (+300)
+  const fullLedger = ledgerStore.query({ domainUuid: "dom-t21a" });
+  assert.equal(fullLedger.length, 4, "Total entries must be 4 (2 from first part, 2 from parent recovery)");
+  const netFull = fullLedger.reduce((sum, e) => sum + e.deltaMinor, 0);
+  assert.equal(netFull, 0, "Net ledger delta across both parts must be 0");
+});
+
+// ---------------------------------------------------------------------------
+// T21-B: ledger-only (Caso B) -> recovery compensa apenas ledger -> net 0 no ledger, provider não mutado
+// ---------------------------------------------------------------------------
+test("T21-B: ledger-only (Caso B) -> recovery compensa apenas ledger -> net 0 no ledger, provider não mutado", async () => {
+  const { domains, getDoc } = createMockDomainDoc("dom-t21b", 1000);
+  const resourceRegistry = createDefaultResourceRegistry();
+  const lockManager = new LockManager();
+  const txStore = new TransactionStore(new InMemoryTransactionStorageAdapter());
+  const reservationStore = new ReservationStore(new InMemoryReservationStorageAdapter());
+  const ledgerStore = new LedgerStore(new InMemoryLedgerStorageAdapter());
+  const fenceRegistry = new RecoveryFenceRegistry();
+  const recoveryService = new RecoveryService({
+    lockManager,
+    transactionStore: txStore,
+    recoveryFenceRegistry: fenceRegistry
+  });
+
+  const provider = new ManualCurrencyProvider();
+  provider.setBalance("account-gems-t21b", 1000);
+
+  const providerRegistry = new ProviderRegistry();
+  providerRegistry.register(provider);
+
+  const doc = getDoc();
+  const econ = (doc.record.definition.capabilities.config as any)["domain-manager:economy"];
+  econ.accounts = [
+    {
+      domainUuid: "dom-t21b",
+      resourceId: "provider:gems",
+      mode: "provider",
+      providerId: MANUAL_CURRENCY_PROVIDER_ID,
+      providerRef: "account-gems-t21b",
+      balanceMinor: 1000,
+      baseCapacityMinor: null
+    }
+  ];
+  await domains.save(doc);
+
+  const economyService = new EconomyService({
+    domains,
+    resourceRegistry,
+    ledgerStore,
+    reservationStore,
+    lockManager,
+    transactionStore: txStore,
+    recoveryService,
+    providerRegistry
+  });
+
+  const opRef = "tx-parent-t21b:step_debit";
+  // Simulate Caso B: Ledger has the entry, but provider flush failed / restart occurred so provider has no record of operation
+  const appendRes = ledgerStore.append({
+    domainUuid: "dom-t21b",
+    resourceId: "provider:gems",
+    deltaMinor: -200,
+    kind: "adjustment",
+    transactionId: "tx-parent-t21b",
+    source: {
+      type: "adjustment",
+      ref: opRef,
+      reason: "Upfront debit"
+    }
+  });
+  assert.equal(appendRes.ok, true);
+  await ledgerStore.flush();
+
+  // Provider was never written (or restored to unmutated state on restart)
+  assert.equal((await provider.getCurrencyBalance("account-gems-t21b")).value, 1000);
+
+  // 1. Reconcile check
+  const recRes = await economyService.reconcileProviderAdjustment({
+    domainUuid: "dom-t21b",
+    resourceId: "provider:gems",
+    operationRef: opRef
+  });
+  assert.equal(recRes.ok, true);
+  assert.equal(recRes.value.provider, "not-written");
+  assert.equal(recRes.value.ledger, "present");
+  assert.equal(recRes.value.outcome, "ledger-only");
+
+  // 2. Run compensation
+  const compRef = `${opRef}:compensation`;
+  const compRes = await economyService.compensateProviderAdjustment({
+    domainUuid: "dom-t21b",
+    resourceId: "provider:gems",
+    originalOperationRef: opRef,
+    compensationOperationRef: compRef,
+    originalDeltaMinor: -200,
+    reason: "Compensation: refund upfront cost",
+    parentTransactionId: "tx-parent-t21b"
+  });
+  assert.equal(compRes.ok, true);
+
+  // 3. Assertions:
+  // Provider balance must NOT be touched (remains 1000, NOT 1200!)
+  assert.equal((await provider.getCurrencyBalance("account-gems-t21b")).value, 1000);
+
+  // Ledger has 2 entries (original -200 + compensation +200 = net 0)
+  const ledgerEntries = ledgerStore.query({ domainUuid: "dom-t21b" });
+  assert.equal(ledgerEntries.length, 2);
+  const netLedger = ledgerEntries.reduce((sum, e) => sum + e.deltaMinor, 0);
+  assert.equal(netLedger, 0, "Net ledger delta must be 0");
+
+  // 4. Test parent transaction recovery end-to-end for Caso B
+  recoveryService.registerCompensator("projects:start", async (record) => {
+    return compensateProjectStart(record, {
+      domains,
+      economyService,
+      transactionStore: txStore
+    });
+  });
+
+  const opRef2 = "tx-parent-t21b-full:step_debit";
+  ledgerStore.append({
+    domainUuid: "dom-t21b",
+    resourceId: "provider:gems",
+    deltaMinor: -300,
+    kind: "adjustment",
+    transactionId: "tx-parent-t21b-full",
+    source: { type: "adjustment", ref: opRef2, reason: "Upfront debit 2" }
+  });
+  await ledgerStore.flush();
+
+  // Provider still 1000 (not written)
+  assert.equal((await provider.getCurrencyBalance("account-gems-t21b")).value, 1000);
+
+  const parentTx = {
+    ...createTransactionRecord({
+      transactionId: "tx-parent-t21b-full",
+      commandId: createCommandId(),
+      authorityEpoch: 1,
+      lockKeys: [lockKey.domain("dom-t21b")],
+      safeAutoRecovery: true,
+      recoveryData: {
+        type: "projects:start",
+        domainUuid: "dom-t21b",
+        projectId: "prj-t21b-full",
+        steps: [
+          {
+            stepId: "step_debit_gems",
+            subsystem: "economy",
+            operation: "adjust",
+            operationRef: opRef2,
+            intent: { resourceId: "provider:gems", deltaMinor: -300 },
+            state: "unknown"
+          }
+        ]
+      }
+    }),
+    state: "needs-recovery" as const
+  };
+  txStore.save(parentTx);
+
+  const parentRecRes = await recoveryService.recoverTransaction("tx-parent-t21b-full", 1);
+  assert.equal(parentRecRes.ok, true);
+
+  // Provider balance was NOT touched (remains 1000)
+  assert.equal((await provider.getCurrencyBalance("account-gems-t21b")).value, 1000);
+
+  // Ledger has 4 entries total (2 from part 1, 2 from parent recovery), net delta 0
+  const fullLedger = ledgerStore.query({ domainUuid: "dom-t21b" });
+  assert.equal(fullLedger.length, 4);
+  const netFull = fullLedger.reduce((sum, e) => sum + e.deltaMinor, 0);
+  assert.equal(netFull, 0, "Net ledger delta across both parts must be 0");
+});
+
+// ---------------------------------------------------------------------------
+// T21-C: fully-applied -> recovery reverte ambos exatamente uma vez
+// ---------------------------------------------------------------------------
+test("T21-C: fully-applied -> recovery reverte ambos exatamente uma vez", async () => {
+  const { domains, getDoc } = createMockDomainDoc("dom-t21c", 1000);
+  const resourceRegistry = createDefaultResourceRegistry();
+  const lockManager = new LockManager();
+  const txStore = new TransactionStore(new InMemoryTransactionStorageAdapter());
+  const reservationStore = new ReservationStore(new InMemoryReservationStorageAdapter());
+  const ledgerStore = new LedgerStore(new InMemoryLedgerStorageAdapter());
+  const fenceRegistry = new RecoveryFenceRegistry();
+  const recoveryService = new RecoveryService({
+    lockManager,
+    transactionStore: txStore,
+    recoveryFenceRegistry: fenceRegistry
+  });
+
+  const provider = new ManualCurrencyProvider();
+  provider.setBalance("account-gems-t21c", 1000);
+
+  const providerRegistry = new ProviderRegistry();
+  providerRegistry.register(provider);
+
+  const doc = getDoc();
+  const econ = (doc.record.definition.capabilities.config as any)["domain-manager:economy"];
+  econ.accounts = [
+    {
+      domainUuid: "dom-t21c",
+      resourceId: "provider:gems",
+      mode: "provider",
+      providerId: MANUAL_CURRENCY_PROVIDER_ID,
+      providerRef: "account-gems-t21c",
+      balanceMinor: 1000,
+      baseCapacityMinor: null
+    }
+  ];
+  await domains.save(doc);
+
+  const economyService = new EconomyService({
+    domains,
+    resourceRegistry,
+    ledgerStore,
+    reservationStore,
+    lockManager,
+    transactionStore: txStore,
+    recoveryService,
+    providerRegistry
+  });
+
+  const opRef = "tx-parent-t21c:step_debit";
+  // Both provider and ledger durably written
+  await provider.mutateCurrency("account-gems-t21c", -200, "Debit gems", { operationRef: opRef });
+  assert.equal((await provider.getCurrencyBalance("account-gems-t21c")).value, 800);
+
+  ledgerStore.append({
+    domainUuid: "dom-t21c",
+    resourceId: "provider:gems",
+    deltaMinor: -200,
+    kind: "adjustment",
+    transactionId: "tx-parent-t21c",
+    source: { type: "adjustment", ref: opRef, reason: "Debit gems" }
+  });
+  await ledgerStore.flush();
+
+  // 1. Reconcile check
+  const recRes = await economyService.reconcileProviderAdjustment({
+    domainUuid: "dom-t21c",
+    resourceId: "provider:gems",
+    operationRef: opRef
+  });
+  assert.equal(recRes.ok, true);
+  assert.equal(recRes.value.provider, "written");
+  assert.equal(recRes.value.ledger, "present");
+  assert.equal(recRes.value.outcome, "fully-applied");
+
+  // 2. Recovery execution
+  const compRef = `${opRef}:compensation`;
+  const compRes = await economyService.compensateProviderAdjustment({
+    domainUuid: "dom-t21c",
+    resourceId: "provider:gems",
+    originalOperationRef: opRef,
+    compensationOperationRef: compRef,
+    originalDeltaMinor: -200,
+    reason: "Compensation: refund",
+    parentTransactionId: "tx-parent-t21c"
+  });
+  assert.equal(compRes.ok, true);
+
+  // Both reversed
+  assert.equal((await provider.getCurrencyBalance("account-gems-t21c")).value, 1000);
+  const ledgerEntries = ledgerStore.query({ domainUuid: "dom-t21c" });
+  assert.equal(ledgerEntries.length, 2);
+  assert.equal(ledgerEntries.reduce((s, e) => s + e.deltaMinor, 0), 0);
+
+  // 3. Second recovery execution (idempotency check)
+  const compRes2 = await economyService.compensateProviderAdjustment({
+    domainUuid: "dom-t21c",
+    resourceId: "provider:gems",
+    originalOperationRef: opRef,
+    compensationOperationRef: compRef,
+    originalDeltaMinor: -200,
+    reason: "Compensation: refund retry",
+    parentTransactionId: "tx-parent-t21c"
+  });
+  assert.equal(compRes2.ok, true);
+
+  // Still 1000, still 2 entries, no duplicate reversal
+  assert.equal((await provider.getCurrencyBalance("account-gems-t21c")).value, 1000);
+  assert.equal(ledgerStore.query({ domainUuid: "dom-t21c" }).length, 2);
+});
+
+// ---------------------------------------------------------------------------
+// T21-D: neither -> recovery é no-op
+// ---------------------------------------------------------------------------
+test("T21-D: neither -> recovery é no-op", async () => {
+  const { domains, getDoc } = createMockDomainDoc("dom-t21d", 1000);
+  const resourceRegistry = createDefaultResourceRegistry();
+  const lockManager = new LockManager();
+  const txStore = new TransactionStore(new InMemoryTransactionStorageAdapter());
+  const reservationStore = new ReservationStore(new InMemoryReservationStorageAdapter());
+  const ledgerStore = new LedgerStore(new InMemoryLedgerStorageAdapter());
+  const fenceRegistry = new RecoveryFenceRegistry();
+  const recoveryService = new RecoveryService({
+    lockManager,
+    transactionStore: txStore,
+    recoveryFenceRegistry: fenceRegistry
+  });
+
+  const provider = new ManualCurrencyProvider();
+  provider.setBalance("account-gems-t21d", 1000);
+
+  const providerRegistry = new ProviderRegistry();
+  providerRegistry.register(provider);
+
+  const doc = getDoc();
+  const econ = (doc.record.definition.capabilities.config as any)["domain-manager:economy"];
+  econ.accounts = [
+    {
+      domainUuid: "dom-t21d",
+      resourceId: "provider:gems",
+      mode: "provider",
+      providerId: MANUAL_CURRENCY_PROVIDER_ID,
+      providerRef: "account-gems-t21d",
+      balanceMinor: 1000,
+      baseCapacityMinor: null
+    }
+  ];
+  await domains.save(doc);
+
+  const economyService = new EconomyService({
+    domains,
+    resourceRegistry,
+    ledgerStore,
+    reservationStore,
+    lockManager,
+    transactionStore: txStore,
+    recoveryService,
+    providerRegistry
+  });
+
+  const opRef = "tx-parent-t21d:step_debit";
+  // Neither provider nor ledger written
+  const recRes = await economyService.reconcileProviderAdjustment({
+    domainUuid: "dom-t21d",
+    resourceId: "provider:gems",
+    operationRef: opRef
+  });
+  assert.equal(recRes.ok, true);
+  assert.equal(recRes.value.provider, "not-written");
+  assert.equal(recRes.value.ledger, "absent");
+  assert.equal(recRes.value.outcome, "not-applied");
+
+  // Recovery is clean no-op
+  const compRef = `${opRef}:compensation`;
+  const compRes = await economyService.compensateProviderAdjustment({
+    domainUuid: "dom-t21d",
+    resourceId: "provider:gems",
+    originalOperationRef: opRef,
+    compensationOperationRef: compRef,
+    originalDeltaMinor: -200,
+    reason: "Compensation: refund",
+    parentTransactionId: "tx-parent-t21d"
+  });
+  assert.equal(compRes.ok, true);
+
+  assert.equal((await provider.getCurrencyBalance("account-gems-t21d")).value, 1000);
+  assert.equal(ledgerStore.query({ domainUuid: "dom-t21d" }).length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// T21-E: provider unknown -> recovery falha fechado, transaction permanece needs-recovery com fence
+// ---------------------------------------------------------------------------
+test("T21-E: provider unknown -> recovery falha fechado, transaction permanece needs-recovery com fence", async () => {
+  const { domains, getDoc } = createMockDomainDoc("dom-t21e", 1000);
+  const resourceRegistry = createDefaultResourceRegistry();
+  const lockManager = new LockManager();
+  const txStore = new TransactionStore(new InMemoryTransactionStorageAdapter());
+  const reservationStore = new ReservationStore(new InMemoryReservationStorageAdapter());
+  const ledgerStore = new LedgerStore(new InMemoryLedgerStorageAdapter());
+  const fenceRegistry = new RecoveryFenceRegistry();
+  const recoveryService = new RecoveryService({
+    lockManager,
+    transactionStore: txStore,
+    recoveryFenceRegistry: fenceRegistry
+  });
+
+  const provider = new ManualCurrencyProvider();
+  provider.setBalance("account-gems-t21e", 1000);
+
+  const providerRegistry = new ProviderRegistry();
+  providerRegistry.register(provider);
+
+  const doc = getDoc();
+  const econ = (doc.record.definition.capabilities.config as any)["domain-manager:economy"];
+  econ.accounts = [
+    {
+      domainUuid: "dom-t21e",
+      resourceId: "provider:gems",
+      mode: "provider",
+      providerId: MANUAL_CURRENCY_PROVIDER_ID,
+      providerRef: "account-gems-t21e",
+      balanceMinor: 1000,
+      baseCapacityMinor: null
+    }
+  ];
+  await domains.save(doc);
+
+  const economyService = new EconomyService({
+    domains,
+    resourceRegistry,
+    ledgerStore,
+    reservationStore,
+    lockManager,
+    transactionStore: txStore,
+    recoveryService,
+    providerRegistry
+  });
+
+  const opRef = "tx-parent-t21e:step_debit";
+  // Make provider report unhealthy/unknown
+  provider.setHealthy(false);
+
+  const recRes = await economyService.reconcileProviderAdjustment({
+    domainUuid: "dom-t21e",
+    resourceId: "provider:gems",
+    operationRef: opRef
+  });
+  assert.equal(recRes.ok, true);
+  assert.equal(recRes.value.provider, "unknown");
+  assert.equal(recRes.value.outcome, "unknown");
+
+  // Recovery must fail closed
+  const compRef = `${opRef}:compensation`;
+  const compRes = await economyService.compensateProviderAdjustment({
+    domainUuid: "dom-t21e",
+    resourceId: "provider:gems",
+    originalOperationRef: opRef,
+    compensationOperationRef: compRef,
+    originalDeltaMinor: -200,
+    reason: "Compensation: refund",
+    parentTransactionId: "tx-parent-t21e"
+  });
+  assert.equal(compRes.ok, false);
+  assert.equal(compRes.error.code, "DM_RECOVERY_RECONCILIATION_UNCERTAIN");
+  assert.equal(compRes.error.details?.outcome, "unknown");
+
+  // No mutations applied
+  provider.setHealthy(true);
+  assert.equal((await provider.getCurrencyBalance("account-gems-t21e")).value, 1000);
+  assert.equal(ledgerStore.query({ domainUuid: "dom-t21e" }).length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// T21-F: provider flush falha no commitAdjust -> classificado imediatamente como unknown -> parent vai para needs-recovery com fence, nunca failed direto
+// ---------------------------------------------------------------------------
+test("T21-F: provider flush falha no commitAdjust -> classificado imediatamente como unknown -> parent vai para needs-recovery com fence, nunca failed direto", async () => {
+  const { domains, getDoc } = createMockDomainDoc("dom-t21f", 1000);
+  const resourceRegistry = createDefaultResourceRegistry();
+  resourceRegistry.register({
+    id: "provider:gems",
+    version: 1,
+    label: "Gems",
+    tags: [],
+    precision: 0,
+    allowNegative: false,
+    defaultCapacityPolicy: "provider",
+    lifecycle: "active"
+  });
+  const lockManager = new LockManager();
+  const txStore = new TransactionStore(new InMemoryTransactionStorageAdapter());
+  const reservationStore = new ReservationStore(new InMemoryReservationStorageAdapter());
+  const ledgerStore = new LedgerStore(new InMemoryLedgerStorageAdapter());
+  const fenceRegistry = new RecoveryFenceRegistry();
+  const recoveryService = new RecoveryService({
+    lockManager,
+    transactionStore: txStore,
+    recoveryFenceRegistry: fenceRegistry
+  });
+
+  const provider = new ManualCurrencyProvider();
+  provider.setBalance("account-gems-t21f", 1000);
+
+  // Simulate provider.flush() failure
+  provider.flush = async () => {
+    throw new Error("Disk full: Provider storage error during flush");
+  };
+
+  const providerRegistry = new ProviderRegistry();
+  providerRegistry.register(provider);
+
+  const doc = getDoc();
+  const econ = (doc.record.definition.capabilities.config as any)["domain-manager:economy"];
+  econ.accounts = [
+    {
+      domainUuid: "dom-t21f",
+      resourceId: "provider:gems",
+      mode: "provider",
+      providerId: MANUAL_CURRENCY_PROVIDER_ID,
+      providerRef: "account-gems-t21f",
+      balanceMinor: 1000,
+      baseCapacityMinor: null
+    }
+  ];
+  await domains.save(doc);
+
+  const economyService = new EconomyService({
+    domains,
+    resourceRegistry,
+    ledgerStore,
+    reservationStore,
+    lockManager,
+    transactionStore: txStore,
+    recoveryService,
+    providerRegistry
+  });
+
+  const canonicalDomainLock = lockKey.domain("dom-t21f");
+
+  // Create composite session
+  const sessionRes = await CompositeMutationSession.prepare({
+    transactionStore: txStore,
+    recoveryFenceRegistry: fenceRegistry,
+    lockKeys: [canonicalDomainLock],
+    expectedLockKeys: [canonicalDomainLock],
+    authorityEpoch: 1,
+    commandId: createCommandId(),
+    parentRecoveryData: {
+      type: "projects:start",
+      domainUuid: "dom-t21f",
+      projectId: "prj-t21f"
+    }
+  });
+  assert.equal(sessionRes.ok, true);
+  const session = sessionRes.value;
+
+  // Acquire locks with session.transactionId as owner
+  const lockRes = await lockManager.acquireLocks({
+    ownerId: session.transactionId,
+    keys: [canonicalDomainLock],
+    timeoutMs: 1000
+  });
+  assert.equal(lockRes.ok, true);
+
+  const childOpRef = "tx-parent-t21f:child_debit";
+  // Run child step that calls commitAdjust where provider.flush() throws
+  const childStepRes = await session.runChildStep({
+    stepId: "step_debit_gems",
+    subsystem: "economy",
+    operation: "adjust",
+    operationRef: childOpRef,
+    intent: { resourceId: "provider:gems", deltaMinor: -200 },
+    execute: async () => {
+      return economyService.commitAdjust({
+        domainUuid: "dom-t21f",
+        resourceId: "provider:gems",
+        deltaMinor: -200,
+        reason: "Upfront cost debit",
+        lockOwner: session.transactionId,
+        idempotencyKey: childOpRef,
+        parentTransactionId: session.transactionId,
+        recoveryOwner: "parent"
+      });
+    }
+  });
+
+  // 1. Child step execution failed
+  assert.equal(childStepRes.ok, false);
+  assert.equal(childStepRes.error.code, "DM_ECON_PROVIDER_STORAGE_ERROR");
+  assert.equal(childStepRes.error.details?.outcome, "unknown");
+  assert.equal(childStepRes.error.details?.operationRef, childOpRef);
+
+  // 2. CompositeMutationSession classified the step as "unknown" (NOT "planned")
+  const step = session.steps.find((s) => s.stepId === "step_debit_gems");
+  assert.ok(step);
+  assert.equal(step.state, "unknown", "Step must be classified as 'unknown', never 'planned'");
+
+  // 3. Parent transaction transitioned to "needs-recovery" (NEVER "failed" directly)
+  const tx = txStore.get(session.transactionId);
+  assert.ok(tx);
+  assert.equal(tx.state, "needs-recovery", "Parent transaction must enter needs-recovery, never failed directly");
+
+  // 4. Recovery fence is active on the domain
+  assert.equal(fenceRegistry.isScopeBlocked([canonicalDomainLock]), true, "Recovery fence must be active on domain");
+});
+
+
