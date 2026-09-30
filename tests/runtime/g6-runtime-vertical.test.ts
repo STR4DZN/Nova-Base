@@ -579,7 +579,7 @@ test("G6 reputation configuration vertical: conflicting shared snapshots and fab
       action: { kind: "add-track", definition: { ...definition, label: "Conflicting" }, initialScore: 10 }, reason: "Conflict" });
     assert.equal(rejected.ok, false); if (!rejected.ok) assert.equal(rejected.error.code, "DM_DIPLOMACY_DEFINITION_CONFLICT");
     const untouched: any = unwrap(await gm.diplomacy.reputation.query({ id: b.id })); assert.equal(untouched.revision, 0); assert.equal(untouched.tracks.length, 1);
-    const source: any = unwrap(await f.adapter.read("reputation", a.id)); const forged = structuredClone(source.data);
+    const source = await f.adapter.read("reputation", a.id); assert.ok(source); const forged: any = structuredClone(source.data);
     const id = "rep_00000000-0000-4000-8000-000000000123"; forged.record.id = id; forged.record.revision = 0;
     const invalid = await gm.diplomacy.reputation.create({ id, data: forged, reason: "Fake prior configuration" });
     assert.equal(invalid.ok, false);
