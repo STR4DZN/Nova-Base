@@ -8,6 +8,13 @@ import {
   type WorkforceTypeResolution
 } from "./workforce-types.js";
 
+function safeWorkforceAdd(left: number, right: number): number {
+  if (!Number.isSafeInteger(left) || !Number.isSafeInteger(right)) throw new Error("DM_PEOPLE_WORKFORCE_OVERFLOW");
+  const sum = left + right;
+  if (!Number.isSafeInteger(sum)) throw new Error("DM_PEOPLE_WORKFORCE_OVERFLOW");
+  return sum;
+}
+
 export function resolveOperationalGroupWorkforceType(definitionId: string): string {
   switch (definitionId) {
     case "domain-manager:labor-squad":
@@ -79,7 +86,7 @@ export function calculateWorkforce(
     const typeId = resolveOperationalGroupWorkforceType(og.definitionId);
     const entry = ensureType(typeId);
 
-    entry.capacity += og.size;
+    entry.capacity = safeWorkforceAdd(entry.capacity, og.size);
     entry.contributions.push({
       sourceId: og.id,
       sourceType: "operational-group",
@@ -89,7 +96,7 @@ export function calculateWorkforce(
 
     if (og.populationGroupId) {
       const prev = populationGroupLinkedDeductions.get(og.populationGroupId) ?? 0;
-      populationGroupLinkedDeductions.set(og.populationGroupId, prev + og.size);
+      populationGroupLinkedDeductions.set(og.populationGroupId, safeWorkforceAdd(prev, og.size));
     }
   }
 
@@ -112,7 +119,7 @@ export function calculateWorkforce(
           }
 
           if (netContribution > 0) {
-            entry.capacity += netContribution;
+            entry.capacity = safeWorkforceAdd(entry.capacity, netContribution);
             entry.contributions.push({
               sourceId: pg.id,
               sourceType: "population-group",
@@ -146,7 +153,7 @@ export function calculateWorkforce(
         if (notable && !notableContributedCapacity.has(asg.sourceRef)) {
           notableContributedCapacity.add(asg.sourceRef);
           const capEntry = ensureType(asg.workforceTypeId);
-          capEntry.capacity += 1;
+          capEntry.capacity = safeWorkforceAdd(capEntry.capacity, 1);
           capEntry.contributions.push({
             sourceId: notable.id,
             sourceType: "notable",
@@ -157,7 +164,7 @@ export function calculateWorkforce(
       }
 
       const entry = ensureType(asg.workforceTypeId);
-      entry.committed += asg.amount;
+      entry.committed = safeWorkforceAdd(entry.committed, asg.amount);
     }
   }
 
@@ -180,7 +187,7 @@ export function calculateWorkforce(
         if (notable && !notableContributedCapacity.has(resv.sourceRef)) {
           notableContributedCapacity.add(resv.sourceRef);
           const capEntry = ensureType(resv.workforceTypeId);
-          capEntry.capacity += 1;
+          capEntry.capacity = safeWorkforceAdd(capEntry.capacity, 1);
           capEntry.contributions.push({
             sourceId: notable.id,
             sourceType: "notable",
@@ -191,7 +198,7 @@ export function calculateWorkforce(
       }
 
       const entry = ensureType(resv.workforceTypeId);
-      entry.reserved += resv.amount;
+      entry.reserved = safeWorkforceAdd(entry.reserved, resv.amount);
     }
   }
 
@@ -204,7 +211,7 @@ export function calculateWorkforce(
   let isAnyOvercommitted = false;
 
   for (const [typeId, data] of typeMap.entries()) {
-    const available = data.capacity - data.committed - data.reserved;
+    const available = safeWorkforceAdd(safeWorkforceAdd(data.capacity, -data.committed), -data.reserved);
     const isOvercommitted = available < 0;
 
     if (isOvercommitted) {
@@ -224,10 +231,10 @@ export function calculateWorkforce(
       contributions: Object.freeze([...data.contributions])
     };
 
-    totalCapacity += data.capacity;
-    totalCommitted += data.committed;
-    totalReserved += data.reserved;
-    totalAvailable += available;
+    totalCapacity = safeWorkforceAdd(totalCapacity, data.capacity);
+    totalCommitted = safeWorkforceAdd(totalCommitted, data.committed);
+    totalReserved = safeWorkforceAdd(totalReserved, data.reserved);
+    totalAvailable = safeWorkforceAdd(totalAvailable, available);
   }
 
   return {

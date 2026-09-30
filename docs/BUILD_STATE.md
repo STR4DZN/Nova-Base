@@ -2,12 +2,16 @@
 
 ## Identidade
 
-- Module version: `0.0.7` (candidata G6; smoke aprovado pelo usuário; cobertura do plano parcial)
+- Module version: `0.0.8` (candidata corrigida G0–G6; novo smoke necessário; cobertura G6 parcial)
 - Gate de código atual: `G6 — auditoria do plano: núcleo implementado; cobertura normativa parcial e smoke Foundry PASS reportado pelo usuário`
-- Estado local: `GATE_G6_PARTIAL_SPEC_COVERAGE_AUTOMATED_PASS_FOUNDRY_PASS_USER_REPORTED`
+- Estado local: `GATE_G6_PARTIAL_SPEC_COVERAGE_AUTOMATED_PASS_NEW_FOUNDRY_SMOKE_REQUIRED`
 - Estado externo: `GATE_G5_ACCEPTED_GATE_G6_IN_PROGRESS`
 - Schema Domain: `1`
 - Data de conclusão do Gate G5: `2026-09-21`
+
+## Revisão atual G0–G6
+
+Candidata v0.0.8: 13 defeitos reproduzidos/corrigidos; 878/878 testes locais PASS. Relatório `docs/G0_G6_REVIEW.md`. Novo smoke necessário; a confirmação Foundry da v0.0.7 permanece histórica. Os registros de gates abaixo não equivalem a ausência de bugs. G6 permanece parcial e G7 não iniciado.
 
 ## Estado canônico
 

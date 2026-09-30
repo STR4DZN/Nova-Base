@@ -1,5 +1,7 @@
 # DOMAIN MANAGER — GATE G4 ACCEPTANCE REPORT
 
+> Revisão posterior: candidata v0.0.8 com 13 defeitos corrigidos nos blocos G0–G6 e 878/878 testes locais PASS. Este relatório conserva sua evidência histórica; ver `docs/G0_G6_REVIEW.md`. Novo smoke da build corrigida é necessário.
+
 **Subsystem:** Economy & Resources (`domain-manager:economy`)  
 **Gate:** G4 — Economy & Resources  
 **Normative Authorities:** `Documentos/99_DOMAIN_MANAGER_MASTER_SPECIFICATION_V1.md` (§14, §11–12, §42, DEC-1416 to DEC-2305), `Documentos/GATES/14_G4_ECONOMY_RESOURCES.md`  

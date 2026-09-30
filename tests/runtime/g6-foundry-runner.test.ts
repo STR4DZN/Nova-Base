@@ -9,6 +9,7 @@ import { FoundryJournalTransactionStorageAdapter } from "../../src/mutations/tra
 import { InMemoryLedgerStorageAdapter } from "../../src/economy/storage/ledger-storage-adapter.js";
 import { PrimaryAuthorityService } from "../../src/authority/primary-authority-service.js";
 import { InMemoryCommandTransport, InMemoryTransportHub } from "../../src/commands/in-memory-command-transport.js";
+import { FoundryCommandTransportAdapter } from "../../src/commands/foundry-command-transport-adapter.js";
 
 // Execute the delivered script itself against the composed production owners.
 // Browser rendering/permissions are doubles; this is not real Foundry evidence.
@@ -31,6 +32,7 @@ test("G6 Foundry runner: GM, Player, recovery reload and failover phases use rea
   const previousGame = (globalThis as any).game; (globalThis as any).game = gameBase;
   const hub = new InMemoryTransportHub(), ledger = new InMemoryLedgerStorageAdapter();
   const live: ReturnType<typeof composeDomainManagerRuntime>[] = [];
+  const rpcHandlers = new Map<string, Map<string, Function>>(), rpcAdapters: FoundryCommandTransportAdapter[] = [];
   const make = (userId: string) => {
     const r = composeDomainManagerRuntime({ domainStore: { get: journal.get, list: () => docs, create } as any,
       authority: { service: new PrimaryAuthorityService({ getUsers: () => users, getCurrentUserId: () => userId,
@@ -39,7 +41,12 @@ test("G6 Foundry runner: GM, Player, recovery reload and failover phases use rea
       diplomacyStorageAdapter: new FoundryDiplomacyStorageAdapter({ journal, create }),
       transactionStorageAdapter: new FoundryJournalTransactionStorageAdapter({ journal, createJournalEntry: create }),
       ledgerStorageAdapter: ledger, worldTick: () => 10 });
-    live.push(r); return r;
+    const handlers = new Map<string, Function>(); rpcHandlers.set(userId, handlers);
+    const adapter = new FoundryCommandTransportAdapter({ runtime: { user: users.find(u => u.id === userId)!, users: gameBase.users },
+      authorityService: r.authority.service, socketlib: { register: (name, fn) => { handlers.set(name, fn); }, executeAsUser: async () => { throw Error("unused"); } } });
+    adapter.registerInboundHandler(message => r.commandBus.dispatchInbound(message));
+    adapter.registerStatusQueryHandler((id, requester) => r.commandBus.queryCommandStatus(id, requester));
+    rpcAdapters.push(adapter); live.push(r); return r;
   };
   const browserStorage = new Map<string, string>();
   const context = (r: ReturnType<typeof make>, userId: string, exposePrivate = false) => {
@@ -60,6 +67,10 @@ test("G6 Foundry runner: GM, Player, recovery reload and failover phases use rea
       modules: { get: () => ({ api: { ...bridge(r.publicApi), diplomacy } }) } }, JournalEntry: { create }, crypto: webcrypto,
       console: { table() {}, info() {}, warn() {} }, CONST: { DOCUMENT_OWNERSHIP_LEVELS: { LIMITED: 1 } },
       localStorage: { getItem: (key: string) => browserStorage.get(key) ?? null, setItem: (key: string, value: string) => browserStorage.set(key, value) },
+      socketlib: { modules: { get: () => ({ executeAsUser: async (name: string, target: string, ...args: unknown[]) => {
+        const handler = rpcHandlers.get(target)?.get(name); assert.ok(handler);
+        return handler.call({ socketdata: { userId } }, ...args.map(x => structuredClone(x)));
+      } }) } },
       Date, JSON, Blob, URL, setTimeout, document: { createElement: () => ({ click() {} }) } });
   };
   const run = async (ctx: any, phase?: string) => {
@@ -83,5 +94,5 @@ test("G6 Foundry runner: GM, Player, recovery reload and failover phases use rea
     const leaked: any = await runInContext(source, context(player2, "player", true));
     assert.ok(leaked.rows.some((r: any) => r.status === "FAIL" && r.teste.includes("payload")), "Runner must reject replicated canonical flags");
     assert.equal(leaked.rows.some((r: any) => r.teste.includes("propostas duráveis")), false, "Leak blocks dependent phase");
-  } finally { for (const r of live) r.destroy(); (globalThis as any).game = previousGame; }
+  } finally { for (const adapter of rpcAdapters) adapter.destroy(); for (const r of live) r.destroy(); (globalThis as any).game = previousGame; }
 });

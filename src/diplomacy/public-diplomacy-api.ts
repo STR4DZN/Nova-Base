@@ -1,4 +1,6 @@
-import { createCommandId } from "../commands/command-envelope.js";
+import { createCommandId, type CommandId, type DomainCommand } from "../commands/command-envelope.js";
+import type { TransportReceipt } from "../commands/command-transport.js";
+import { failure, immutable, isJsonData, isRecord } from "../core/validation/value-validation.js";
 import type { CommandBus } from "../commands/command-bus.js";
 import { err, ok, type Result } from "../core/contracts/result.js";
 import { createPublicError } from "../core/contracts/public-error.js";
@@ -13,6 +15,12 @@ export interface PublicDiplomacyOwnerApi {
   modify(input: { readonly id: string; readonly expectedRevision: number; readonly action: unknown; readonly reason: string }): Promise<Result<any>>;
 }
 export interface PublicDiplomacyApi {
+  readonly commands: {
+    prepare(type: string, payload: unknown): Result<DomainCommand<unknown>>;
+    execute(ticket: DomainCommand<unknown>): Promise<Result<TransportReceipt>>;
+    retry(ticket: DomainCommand<unknown>): Promise<Result<TransportReceipt>>;
+    status(commandId: CommandId): Promise<Result<TransportReceipt>>;
+  };
   open(): Promise<DiplomacyApplication>;
   readonly relations: PublicDiplomacyOwnerApi; readonly reputation: PublicDiplomacyOwnerApi;
   readonly agreements: PublicDiplomacyOwnerApi; readonly territory: PublicDiplomacyOwnerApi; readonly disputes: PublicDiplomacyOwnerApi;
@@ -25,6 +33,17 @@ export interface PublicDiplomacyApi {
   capabilities(domainUuid: string, territoryUuid?: string): Promise<Result<any>>;
 }
 export function createPublicDiplomacyApi(bus: CommandBus): PublicDiplomacyApi {
+  const allowedTypes = new Set([...Object.values(DIPLOMACY_NAMESPACES).flatMap(namespace => ["query", "create", "modify"].map(mode => `${namespace}:${mode}`)),
+    "territory:preview", "diplomacy:submit-proposal", "diplomacy:decide-proposal", "diplomacy:query-proposals", "diplomacy:capabilities"]);
+  const execute = async (ticket: DomainCommand<unknown>): Promise<Result<TransportReceipt>> =>
+    isRecord(ticket) && allowedTypes.has(ticket.type as string) ? bus.execute(ticket)
+      : failure("DM_DIPLOMACY_INTENT_INVALID", "Unsupported diplomacy command");
+  const commands: PublicDiplomacyApi["commands"] = Object.freeze({
+    prepare: (type: string, payload: unknown): Result<DomainCommand<unknown>> => allowedTypes.has(type) && isJsonData(payload)
+      ? ok(immutable({ contractVersion: 1 as const, commandId: createCommandId(), type, payload: structuredClone(payload), issuedAtReal: Date.now() }))
+      : failure("DM_DIPLOMACY_INTENT_INVALID", "Diplomacy ticket requires a supported type and JSON payload"),
+    execute, retry: execute, status: (commandId: CommandId) => bus.queryCommandStatus(commandId)
+  });
   const send = async (type: string, payload: unknown): Promise<Result<any>> => {
     const response = await bus.execute({ contractVersion: 1, commandId: createCommandId(), type, payload, issuedAtReal: Date.now() });
     if (!response.ok) return response;
@@ -37,7 +56,7 @@ export function createPublicDiplomacyApi(bus: CommandBus): PublicDiplomacyApi {
       create: (p: Parameters<PublicDiplomacyOwnerApi["create"]>[0]) => send(`${namespace}:create`, p),
       modify: (p: Parameters<PublicDiplomacyOwnerApi["modify"]>[0]) => send(`${namespace}:modify`, p) });
   };
-  const api: PublicDiplomacyApi = Object.freeze({ open: () => new DiplomacyApplication({ api }).render(true),
+  const api: PublicDiplomacyApi = Object.freeze({ commands, open: () => new DiplomacyApplication({ api }).render(true),
     relations: owner("relation"), reputation: owner("reputation"), agreements: owner("agreement"), territory: owner("territory"), disputes: owner("dispute"),
     previewTerritory: (p: { id: string; expectedRevision: number; action: unknown; reason: string }) => send("territory:preview", p),
     proposals: Object.freeze({ query: (p: DiplomacyQuery = {}) => send("diplomacy:query-proposals", p),

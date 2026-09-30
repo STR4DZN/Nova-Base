@@ -1,8 +1,8 @@
 # G6 — roteiro Foundry v13
 
-Use `scripts/g6-foundry-smoke.js` inteiro no console do navegador (F12 → Console), em um **mundo de testes**, com a build candidata G6 e socketlib ativos. Instale a candidata v0.0.7 pelo manifest `https://github.com/STR4DZN/Nova-Base/releases/download/v0.0.7/module.json`; confira se `game.modules.get("domain-manager").api.diplomacy` existe.
+Use `scripts/g6-foundry-smoke.js` inteiro no console do navegador (F12 → Console), em um **mundo de testes**, com a build candidata G6 e socketlib ativos. Instale a candidata v0.0.8 pelo manifest `https://github.com/STR4DZN/Nova-Base/releases/download/v0.0.8/module.json`; confira se `game.modules.get("domain-manager").api.diplomacy` existe.
 
-O roteiro cria um Domain novo, dois tratados, relações, reputação, dois territórios, uma disputa e duas propostas. Todas as mutações de negócio usam a API pública. A fixture de queda usa o intent econômico real de um dos tratados criados pelo roteiro, modifica somente o seu before-image e a sua transação de teste. Os demais registros do mundo são preservados. A janela de injeção exige parar outras ações do módulo até F5.
+O roteiro v2 cria um Domain novo, dois tratados, relações, reputação, três territórios, duas disputas e duas propostas. Inicie outra execução completa: as fixtures v1 são preservadas e não são reutilizadas. Todas as mutações de negócio usam a API pública. A fixture de queda usa o intent econômico real de um dos tratados criados pelo roteiro, modifica somente o seu before-image e a sua transação de teste. Os demais registros do mundo são preservados. A janela de injeção exige parar outras ações do módulo até F5.
 
 ## Execução
 
@@ -34,3 +34,7 @@ Os registros criados permanecem disponíveis para diagnóstico. Para descartá-l
 ## Auditoria de cobertura do plano
 
 Consulte `docs/G6_FULL_SPEC_AUDIT.md` antes de interpretar o resultado como fechamento: a implementação ainda não cobre 100% do plano. O candidato auditado corrige unicidade, herança de rights de tratados, acesso territorial restrito e sanitização de refs/influência. O roteiro cobre fluxos centrais; funcionalidades ausentes não viram PASS.
+
+## Regressões da v0.0.8
+
+Inclui status/replay do recibo secreto do GM a partir do Player, claim restrito através de uma disputa com audiência diferente e rejeição de recibos de efeitos inventados no create de Agreement. As fases de F5/failover continuam obrigatórias. Consulte `G0_G6_REVIEW.md` para os 13 defeitos corrigidos e a evidência dos blocos anteriores. Os scripts `foundry-v13-socketlib-smoke-test.js` e `foundry-v13-g5-full-smoke-test.js` acompanham a release; rode-os também para revalidar a infraestrutura e G5.

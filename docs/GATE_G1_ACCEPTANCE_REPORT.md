@@ -1,5 +1,7 @@
 # GATE G1 — ACCEPTANCE REPORT
 
+> Revisão posterior: candidata v0.0.8 com 13 defeitos corrigidos nos blocos G0–G6 e 878/878 testes locais PASS. Este relatório conserva sua evidência histórica; ver `docs/G0_G6_REVIEW.md`. Novo smoke da build corrigida é necessário.
+
 ## Resultado
 
 `LOCAL_VALIDATED_AFTER_AUDIT`

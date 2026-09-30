@@ -182,6 +182,30 @@ function createTestCmd(type: string, payload: unknown = {}): DomainCommand {
 // Real Upstream Socketlib v1.1.3+ Integration Tests
 // ============================================================================
 
+test("review G2 Socketlib: receipt status authenticates its requester and rejects spoofed extra arguments", async () => {
+  const hub = new UpstreamSocketlibServerHub();
+  const users = new Map(["gm-1", "player-1", "player-2"].map(id => [id, { id, active: true, isGM: id === "gm-1" }]));
+  const authority = createHarnessAuthority();
+  const registry = new CommandRegistry();
+  registry.register({ type: "review:private", visibility: "public", handler: async () => ok({ label: "private-receipt-marker" }) });
+  const gmSocket = new UpstreamSocketlibSocket("domain-manager", "gm-1", true, users, hub);
+  const gmTransport = new FoundryCommandTransportAdapter({ runtime: { user: users.get("gm-1")!, users: { get: id => users.get(id) } }, authorityService: authority, socketlib: gmSocket });
+  const bus = new CommandBus({ registry, authorityService: authority, transport: gmTransport });
+  const socket = new UpstreamSocketlibSocket("domain-manager", "player-1", false, users, hub);
+  const player = new FoundryCommandTransportAdapter({ runtime: { user: users.get("player-1")!, users: { get: id => users.get(id) } }, authorityService: createHarnessAuthority("player-1"), socketlib: socket });
+  try {
+    const gmCommand = createTestCmd("review:private"); await bus.execute(gmCommand);
+    const denied = await socket.executeAsUser("queryCommandStatus", "gm-1", gmCommand.commandId, "gm-1");
+    assert.equal(denied.ok, false); assert.equal(JSON.stringify(denied).includes("private-receipt-marker"), false);
+    const own = createTestCmd("review:private"); assert.equal((await player.send(own)).ok, true);
+    const allowed = await player.getStatus(own.commandId); assert.equal(allowed.ok, true);
+    if (allowed.ok) assert.equal((allowed.value.result as any).label, "private-receipt-marker");
+    const handler = gmSocket.functions.get("queryCommandStatus")!;
+    assert.equal((await handler.call({}, own.commandId)).ok, false);
+    assert.equal((await socket.executeAsUser("queryCommandStatus", "gm-1", "cmd_invalid")).ok, false);
+  } finally { player.destroy(); bus.destroy(); gmTransport.destroy(); }
+});
+
 test("Socketlib Real v1.1.3+: Player sends RPC, GM authority receives, this.socketdata.userId matches player", async () => {
   const hub = new UpstreamSocketlibServerHub();
   const users = new Map<string, { id: string; active: boolean; isGM: boolean }>([

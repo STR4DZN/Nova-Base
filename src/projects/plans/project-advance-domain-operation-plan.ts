@@ -217,12 +217,12 @@ export async function executeProjectAdvanceDomainOperationPlan(
   // 2. Progressive costs consumption with deterministic cumulative delta (G5-REVAL2-003, G5-REVAL4-007)
   if (context.economyService && deltaUnits > 0) {
     const unitsBefore = project.workCompleted;
-    const unitsAfter = Math.min(project.workRequired, unitsBefore + deltaUnits);
+    const unitsAfter = Math.min(project.workRequired, updatedProject.workCompleted);
     let costIdx = 0;
     for (const cost of definition.costs) {
       if (cost.timing === "progressive") {
-        const dueBefore = Math.floor((unitsBefore / project.workRequired) * cost.amountMinor);
-        const dueAfter = Math.floor((unitsAfter / project.workRequired) * cost.amountMinor);
+        const dueBefore = Number(BigInt(unitsBefore) * BigInt(cost.amountMinor) / BigInt(project.workRequired));
+        const dueAfter = Number(BigInt(unitsAfter) * BigInt(cost.amountMinor) / BigInt(project.workRequired));
         const toDebit = dueAfter - dueBefore;
         if (toDebit > 0) {
           const stepId = `project-advance:cost:${cost.resourceId}:${costIdx++}`;

@@ -7,7 +7,7 @@
  * Relatório: DM_G6_SMOKE_REPORT. Download: DM_G6_SMOKE.download().
  */
 (async () => {
-  const NS = "domain-manager", MARK = "domain-manager-g6-smoke-v1";
+  const NS = "domain-manager", MARK = "domain-manager-g6-smoke-v2";
   const ENTITY = "domain-manager-diplomacy", TX = "domain-manager-transactions";
   const rawApi = game.modules.get(NS)?.api, gm = !!game.user?.isGM;
   // Pace the runner below the kernel's 50 requests/second limit.
@@ -34,7 +34,12 @@
   const deny = async (promise, code) => { const r = await promise; assert(r && !r.ok && (!code || r.error.code === code), `Esperada rejeição ${code ?? "sem efeito"}; recebido ${JSON.stringify(r)}`); };
   const clean = () => assert(!rows.some(r => r.status === "FAIL"), "Há FAIL nesta fase; progresso não será avançado.");
   const authority = () => { const raw = game.settings.get(NS, "primaryAuthorityState"); return typeof raw === "string" ? JSON.parse(raw) : raw; };
-  const fixture = () => game.journal.contents.find(j => j.flags?.[MARK]?.runnerVersion === 1);
+  const rpc = (name, ...args) => {
+    const socket = globalThis.socketlib?.modules?.get(NS);
+    assert(socket && typeof socket.executeAsUser === "function", "Socketlib do módulo indisponível");
+    return socket.executeAsUser(name, authority().authorityUserId, ...args);
+  };
+  const fixture = () => game.journal.contents.find(j => j.flags?.[MARK]?.runnerVersion === 2);
   let doc = fixture(), s = doc ? clone(doc.flags[MARK]) : null;
   const save = async () => { await doc.update({ [`flags.${MARK}`]: clone(s) }); };
   const detail = (owner, id, extra = {}) => call(d[owner].query({ id, ...extra }));
@@ -111,10 +116,11 @@
   async function setup() {
     const player = game.users.contents.find(u => u.active && !u.isGM);
     assert(player, "Conecte um Player antes de iniciar");
-    s = { runnerVersion: 1, runId: crypto.randomUUID(), phase: "building", page, creator: game.user.id, playerId: player.id,
+    s = { runnerVersion: 2, runId: crypto.randomUUID(), phase: "building", page, creator: game.user.id, playerId: player.id,
       relation: `rel_${crypto.randomUUID()}`, secretRelation: `rel_${crypto.randomUUID()}`, reputation: `rep_${crypto.randomUUID()}`,
       agreement: crypto.randomUUID(), recoveryAgreement: crypto.randomUUID(), dispute: crypto.randomUUID(),
       root: `JournalEntry.${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`, child: `JournalEntry.${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`,
+      privateClaimTerritory: `JournalEntry.${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`, privateClaimDispute: crypto.randomUUID(),
       proposalApprove: crypto.randomUUID(), proposalReject: crypto.randomUUID(), expectedTrust: 25, expectedRevision: 3 };
     doc = await JournalEntry.create({ name: `[DM G6 SMOKE] ${s.runId}`, ownership: { default: 0, [player.id]: 2 }, flags: { [MARK]: clone(s),
       [NS]: { schemaVersion: 1, revision: 0, definition: { identity: { aliases: [], summary: "G6 disposable fixture", description: "" },
@@ -138,6 +144,13 @@
       assert(score(await detail("relations", s.relation)) === 25, "Fim de modificador não preservou base");
       await deny(d.relations.modify({ id: s.relation, expectedRevision: 0, action: incident(1), reason: "G6 stale" }));
       const history = await detail("relations", s.relation, { historyLimit: 1 }); assert(history.history.length === 1, "Histórico não paginado");
+    });
+    await check("Regressão G2: guardar recibo de consulta secreta do GM", async () => {
+      s.privateReceiptCommand = unwrap(raw.commands.prepare("relations:query", { id: s.secretRelation }));
+      const receipt = unwrap(await raw.commands.execute(s.privateReceiptCommand));
+      assert(receipt.status === "executed" && receipt.result?.id === s.secretRelation, `Consulta secreta do GM não executada: ${JSON.stringify(receipt)}`);
+      const status = unwrap(await raw.commands.status(s.privateReceiptCommand.commandId));
+      assert(status.status === "executed" && status.result?.id === s.secretRelation, "Recibo próprio do GM não encontrado");
     });
     await check("Reputação: ajuste e banda pública independente", async () => {
       const data = { definitions: [{ id: "g6-smoke:standing", version: 1, label: "Standing", minimum: -100, maximum: 100, baseline: 0,
@@ -197,6 +210,19 @@
       await negotiate(s.recoveryAgreement, [term("recovery-pay", "owner-operation", { operations: [payment("recovery-pay")] })]);
       assert(await balance() === 14, "Pagamento da fixture recovery incorreto");
     });
+    await check("Regressão: tratado novo rejeita recibos de efeitos inventados", async () => {
+      const id = crypto.randomUUID();
+      await deny(d.agreements.create({ id, data: { ...treaty(id), executedOperations: ["forged-receipt"] }, reason: "Invalid fixture" }), "DM_AGREEMENT_CREATE_INVALID");
+      await deny(d.agreements.query({ id }), "DM_DIPLOMACY_NOT_FOUND");
+    });
+    await check("Regressão: preparar claim restrito com audiência independente da disputa", async () => {
+      const data = territory(s.privateClaimTerritory, `[G6 SMOKE] claim privacy ${s.runId}`);
+      data.claims = [{ ...claim("G6_RESTRICTED_CLAIM_SENTINEL", parties()[1]), visibility: "restricted" }];
+      await call(d.territory.create({ id: s.privateClaimTerritory, data, reason: "Claim privacy fixture" }));
+      await call(d.disputes.create({ id: s.privateClaimDispute, data: { ...base("Claim privacy dispute", "restricted"), id: s.privateClaimDispute,
+        disputeType: "domain-manager:ownership", territoryUuids: [s.privateClaimTerritory], parties: parties(),
+        claimRefs: [{ territoryUuid: s.privateClaimTerritory, claimId: "G6_RESTRICTED_CLAIM_SENTINEL" }], lifecycle: "latent", events: [] }, reason: "Claim privacy fixture" }));
+    });
     await check("ApplicationV2: seis abas, inspetor e fechamento", ui);
     clean(); s.phase = "await-player"; await save();
   }
@@ -212,9 +238,21 @@
       await deny(d.relations.modify({ id: s.relation, expectedRevision: s.expectedRevision, action: incident(99), reason: "G6 Player direct" }), "DM_SECURITY_PERMISSION_DENIED");
       await deny(d.proposals.decide({ id: s.proposalApprove, expectedRevision: 0, decision: "approve", reason: "G6 Player forged review" }), "DM_SECURITY_PERMISSION_DENIED");
     });
+    await check("Regressão G2 Player: replay e status não revelam recibo do GM", async () => {
+      const status = await rpc("queryCommandStatus", s.privateReceiptCommand.commandId, s.creator);
+      assert(status && !status.ok && !JSON.stringify(status).includes(`[G6 SMOKE] secret`), "Status de outro usuário vazou");
+      const replay = unwrap(await rpc("executeCommand", { protocol: "dm-command-v1", kind: "DM_CMD_REQUEST",
+        correlationId: `corr_${crypto.randomUUID()}`, command: s.privateReceiptCommand, declaredSenderUserId: game.user.id }));
+      assert(replay.status === "rejected" && !JSON.stringify(replay).includes(`[G6 SMOKE] secret`), "Replay devolveu a consulta secreta do GM");
+    });
     await check("Player: reputação publica banda sem score canônico", async () => {
       const rep = await detail("reputation", s.reputation); assert(rep.tracks?.[0]?.band === "High", "Banda pública ausente");
       assert(!JSON.stringify(rep).includes('"score"') && !rep.entries, "Score/histórico de reputação exposto");
+    });
+    await check("Regressão Player: participar da disputa não revela claim territorial restrito", async () => {
+      assert((await detail("territory", s.privateClaimTerritory)).claims.length === 0, "Claim restrito apareceu no território");
+      const dispute = await detail("disputes", s.privateClaimDispute);
+      assert(dispute.claimRefs.length === 0 && !JSON.stringify(dispute).includes("G6_RESTRICTED_CLAIM_SENTINEL"), "Claim vazou pela disputa");
     });
     await check("Player: propostas duráveis sem alteração canônica", async () => {
       if (s.phase === "await-player") for (const id of [s.proposalApprove, s.proposalReject]) {
@@ -305,7 +343,7 @@
   catch (e) { rows.push({ status: "FAIL", teste: "Fase interrompida", detalhe: e?.message ?? String(e) }); }
   const key = `DM_G6_SMOKE:${game.world?.id ?? "world"}:${game.user.id}`;
   let past = []; try { past = JSON.parse(localStorage.getItem(key) ?? "[]"); } catch { /* fresh browser */ }
-  const report = { runnerVersion: 1, runId: s?.runId ?? null, userId: game.user.id, role: gm ? "GM" : "Player", phase: s?.phase ?? "preflight",
+  const report = { runnerVersion: 2, runId: s?.runId ?? null, userId: game.user.id, role: gm ? "GM" : "Player", phase: s?.phase ?? "preflight",
     page, timestamp: new Date().toISOString(), foundry: game.version, module: api?.version, authority: d ? authority() : null, rows };
   past.push(report); try { localStorage.setItem(key, JSON.stringify(past)); } catch { console.warn("Exporte o relatório antes de F5: localStorage indisponível."); }
   globalThis.DM_G6_SMOKE_REPORT = report;

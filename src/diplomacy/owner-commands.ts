@@ -93,6 +93,8 @@ export async function prepareOwnerIntent(intent: OwnerIntent, ctx: Authenticated
     if (identity.id !== intent.id || identity.revision !== 0) return failure("DM_DIPLOMACY_CREATE_INVALID", "New entity must have matching identity and revision zero");
     if (intent.kind === "agreement" && (data as AgreementOwnerData).state.agreement.lifecycle !== "draft")
       return failure("DM_AGREEMENT_CREATE_INVALID", "New agreement must start as a draft");
+    if (intent.kind === "agreement" && (data as AgreementOwnerData).executedOperations?.length)
+      return failure("DM_AGREEMENT_CREATE_INVALID", "New agreement cannot declare previously executed owner operations");
     if (intent.kind === "relation") {
       const candidate = data as RelationOwnerData;
       const unique = validateRelationUniqueness(candidate.state.relation, candidate.definition,

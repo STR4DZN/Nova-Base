@@ -62,8 +62,17 @@ export async function queryDiplomacyOwner(ctx: AuthenticatedCommandContext<Diplo
       }
       if (!isGm && kind === "dispute") {
         const territoryUuids: string[] = []; for (const id of projected.territoryUuids) if (await territoryVisible(id)) territoryUuids.push(id);
-        projected = { ...projected, territoryUuids, claimRefs: projected.claimRefs.filter((r: any) => territoryUuids.includes(r.territoryUuid)
-          && (store.get("territory", r.territoryUuid)?.data as any)?.claims.some((c: any) => c.id === r.claimId && canSee(c.visibility))) };
+        const claimRefs = [];
+        for (const ref of projected.claimRefs) {
+          if (!territoryUuids.includes(ref.territoryUuid)) continue;
+          const territory = store.get("territory", ref.territoryUuid)?.data;
+          if (!territory) continue;
+          const territoryControlled = await diplomacyViewerControls(ctx, territoryOwner.parties(territory), domains, controllers);
+          const detail = territoryOwner.project(territory, { isGm: false, at: ctx.receivedAtReal, worldTick, historyOffset: 0, historyLimit: 0,
+            canSee: visibility => visibility === "public" || visibility === "restricted" && territoryControlled });
+          if (detail.ok && (detail.value as any).claims.some((claim: any) => claim.id === ref.claimId)) claimRefs.push(ref);
+        }
+        projected = { ...projected, territoryUuids, claimRefs };
       }
       visible.push(projected);
     } else visible.push({ id: identity.id, revision: identity.revision, label: identity.label,

@@ -42,6 +42,13 @@ export function diplomacyMutationDefinition(kind: DiplomacyKind, o: DiplomacyMut
     async buildPlan(ctx, fresh) {
       const fingerprint = diplomacyFingerprint(ctx.command.type, ctx.command.payload), prior = fresh.entity?.receipts.find(r => r.commandId === ctx.command.commandId);
       if (prior) {
+        // Legacy proposal submissions have an independently persisted requester. Other
+        // unbound legacy receipts fail closed: replay must not bypass owner permission.
+        const legacyRequester = kind === "proposal" && ctx.command.type === "diplomacy:submit-proposal"
+          && isRecord(fresh.entity?.data) ? fresh.entity.data.requesterUserId : undefined;
+        const requester = prior.requesterUserId ?? legacyRequester;
+        if (!ctx.senderUserId || requester !== ctx.senderUserId)
+          return failure("DM_COMMAND_ID_CONFLICT", "Durable command unavailable to this requester", "conflict");
         if (prior.fingerprint !== fingerprint) return failure("DM_COMMAND_ID_CONFLICT", "Command ID already has a different durable payload", "conflict");
         return ok(createMutationPlan({ commandId: ctx.command.commandId, lockKeys: getLocks(ctx), writeSet: [],
           customData: { writes: [], effects: [], effectsPlan: { operations: [], lockKeys: [] }, result: prior.result ?? { kind, id: fresh.entity!.id, revision: prior.revision, changed: prior.changed }, authorityEpoch: ctx.authorityEpoch, fingerprint } }));
@@ -51,7 +58,7 @@ export function diplomacyMutationDefinition(kind: DiplomacyKind, o: DiplomacyMut
       const locks = getLocks(ctx);
       if (effectsPlan.value.lockKeys.some(k => !locks.includes(k))) return failure("DM_TX_LOCKSET_DIVERGENCE", "Effect targets changed during preparation", "conflict");
       const writes = built.value.writes.map(w => ({ before: w.before, after: { ...w.after,
-        receipts: [...w.after.receipts, { commandId: ctx.command.commandId, fingerprint, revision: w.after.revision,
+        receipts: [...w.after.receipts, { commandId: ctx.command.commandId, fingerprint, requesterUserId: ctx.senderUserId!, revision: w.after.revision,
           changed: w.before === null || w.before.revision !== w.after.revision, result: built.value.result }] } }));
       return ok(createMutationPlan({ commandId: ctx.command.commandId, lockKeys: locks,
         writeSet: writes.map(w => ({ targetRef: lockKey.diplomacy(w.after.kind, w.after.id), operationType: w.before ? "update" : "create", payload: w.after })),

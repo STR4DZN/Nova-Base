@@ -4657,6 +4657,12 @@ var DomainIndex = class _DomainIndex {
 var DOMAIN_SCHEMA_VERSION = 1;
 
 // src/people/workforce/workforce-calculator.ts
+function safeWorkforceAdd(left, right) {
+  if (!Number.isSafeInteger(left) || !Number.isSafeInteger(right)) throw new Error("DM_PEOPLE_WORKFORCE_OVERFLOW");
+  const sum = left + right;
+  if (!Number.isSafeInteger(sum)) throw new Error("DM_PEOPLE_WORKFORCE_OVERFLOW");
+  return sum;
+}
 function resolveOperationalGroupWorkforceType(definitionId) {
   switch (definitionId) {
     case "domain-manager:labor-squad":
@@ -4702,7 +4708,7 @@ function calculateWorkforce(people, timeOrOptions, availableTypes = DEFAULT_WORK
     }
     const typeId = resolveOperationalGroupWorkforceType(og.definitionId);
     const entry = ensureType(typeId);
-    entry.capacity += og.size;
+    entry.capacity = safeWorkforceAdd(entry.capacity, og.size);
     entry.contributions.push({
       sourceId: og.id,
       sourceType: "operational-group",
@@ -4711,7 +4717,7 @@ function calculateWorkforce(people, timeOrOptions, availableTypes = DEFAULT_WORK
     });
     if (og.populationGroupId) {
       const prev = populationGroupLinkedDeductions.get(og.populationGroupId) ?? 0;
-      populationGroupLinkedDeductions.set(og.populationGroupId, prev + og.size);
+      populationGroupLinkedDeductions.set(og.populationGroupId, safeWorkforceAdd(prev, og.size));
     }
   }
   const popGroups = people.populationGroups ?? [];
@@ -4729,7 +4735,7 @@ function calculateWorkforce(people, timeOrOptions, availableTypes = DEFAULT_WORK
             );
           }
           if (netContribution > 0) {
-            entry.capacity += netContribution;
+            entry.capacity = safeWorkforceAdd(entry.capacity, netContribution);
             entry.contributions.push({
               sourceId: pg.id,
               sourceType: "population-group",
@@ -4758,7 +4764,7 @@ function calculateWorkforce(people, timeOrOptions, availableTypes = DEFAULT_WORK
         if (notable && !notableContributedCapacity.has(asg.sourceRef)) {
           notableContributedCapacity.add(asg.sourceRef);
           const capEntry = ensureType(asg.workforceTypeId);
-          capEntry.capacity += 1;
+          capEntry.capacity = safeWorkforceAdd(capEntry.capacity, 1);
           capEntry.contributions.push({
             sourceId: notable.id,
             sourceType: "notable",
@@ -4768,7 +4774,7 @@ function calculateWorkforce(people, timeOrOptions, availableTypes = DEFAULT_WORK
         }
       }
       const entry = ensureType(asg.workforceTypeId);
-      entry.committed += asg.amount;
+      entry.committed = safeWorkforceAdd(entry.committed, asg.amount);
     }
   }
   const reservations = people.reservations ?? [];
@@ -4785,7 +4791,7 @@ function calculateWorkforce(people, timeOrOptions, availableTypes = DEFAULT_WORK
         if (notable && !notableContributedCapacity.has(resv.sourceRef)) {
           notableContributedCapacity.add(resv.sourceRef);
           const capEntry = ensureType(resv.workforceTypeId);
-          capEntry.capacity += 1;
+          capEntry.capacity = safeWorkforceAdd(capEntry.capacity, 1);
           capEntry.contributions.push({
             sourceId: notable.id,
             sourceType: "notable",
@@ -4795,7 +4801,7 @@ function calculateWorkforce(people, timeOrOptions, availableTypes = DEFAULT_WORK
         }
       }
       const entry = ensureType(resv.workforceTypeId);
-      entry.reserved += resv.amount;
+      entry.reserved = safeWorkforceAdd(entry.reserved, resv.amount);
     }
   }
   const typesRecord = {};
@@ -4805,7 +4811,7 @@ function calculateWorkforce(people, timeOrOptions, availableTypes = DEFAULT_WORK
   let totalAvailable = 0;
   let isAnyOvercommitted = false;
   for (const [typeId, data] of typeMap.entries()) {
-    const available = data.capacity - data.committed - data.reserved;
+    const available = safeWorkforceAdd(safeWorkforceAdd(data.capacity, -data.committed), -data.reserved);
     const isOvercommitted = available < 0;
     if (isOvercommitted) {
       isAnyOvercommitted = true;
@@ -4822,10 +4828,10 @@ function calculateWorkforce(people, timeOrOptions, availableTypes = DEFAULT_WORK
       isOvercommitted,
       contributions: Object.freeze([...data.contributions])
     };
-    totalCapacity += data.capacity;
-    totalCommitted += data.committed;
-    totalReserved += data.reserved;
-    totalAvailable += available;
+    totalCapacity = safeWorkforceAdd(totalCapacity, data.capacity);
+    totalCommitted = safeWorkforceAdd(totalCommitted, data.committed);
+    totalReserved = safeWorkforceAdd(totalReserved, data.reserved);
+    totalAvailable = safeWorkforceAdd(totalAvailable, available);
   }
   return {
     types: Object.freeze(typesRecord),
@@ -6254,7 +6260,7 @@ function canonicalizeJson(value) {
   }
   const obj = value;
   const sortedKeys = Object.keys(obj).sort();
-  const result = {};
+  const result = /* @__PURE__ */ Object.create(null);
   for (const key of sortedKeys) {
     result[key] = canonicalizeJson(obj[key]);
   }
@@ -6299,11 +6305,11 @@ var CommandDedupeStore = class {
   get capacity() {
     return this.#maxEntries;
   }
-  claim(commandId, fingerprint, now = Date.now()) {
+  claim(commandId, fingerprint, now = Date.now(), requesterUserId) {
     this.#evictExpired(now);
     const existing = this.#entries.get(commandId);
     if (existing) {
-      if (existing.fingerprint !== fingerprint) {
+      if (existing.fingerprint !== fingerprint || existing.requesterUserId !== requesterUserId) {
         return err(
           createPublicError({
             code: "DM_COMMAND_ID_REUSE_MISMATCH",
@@ -6326,10 +6332,14 @@ var CommandDedupeStore = class {
       });
     }
     if (this.#entries.size >= this.#maxEntries) {
-      const oldestKey = this.#entries.keys().next().value;
-      if (oldestKey) {
-        this.#entries.delete(oldestKey);
-      }
+      const oldestKey = [...this.#entries].find(([, entry]) => entry.state !== "pending")?.[0];
+      if (!oldestKey) return err(createPublicError({
+        code: "DM_COMMAND_DEDUPE_BUSY",
+        category: "busy",
+        message: "Command retention is full of unresolved operations",
+        retryable: true
+      }));
+      this.#entries.delete(oldestKey);
     }
     let resolveInFlight;
     const inFlightPromise = new Promise((resolve) => {
@@ -6338,6 +6348,7 @@ var CommandDedupeStore = class {
     const newEntry = {
       commandId,
       fingerprint,
+      requesterUserId,
       createdAt: now,
       state: "pending",
       inFlightPromise,
@@ -6664,7 +6675,7 @@ var CommandBus = class {
     let unregisterStatus;
     if ("registerStatusQueryHandler" in transport && typeof transport.registerStatusQueryHandler === "function") {
       unregisterStatus = transport.registerStatusQueryHandler(
-        (id) => this.queryCommandStatus(id)
+        (id, requesterUserId) => this.queryCommandStatus(id, requesterUserId)
       );
     }
     const unregister = transport.registerInboundHandler(this.dispatchInbound.bind(this));
@@ -6702,8 +6713,11 @@ var CommandBus = class {
    * If local host is the Primary Authority, reads directly from local DedupeStore.
    * If running on remote client, delegates to transport.getStatus(commandId).
    */
-  async queryCommandStatus(commandId) {
+  async queryCommandStatus(commandId, requesterUserId) {
     if (this.#authorityService.isCurrentUser()) {
+      if (requesterUserId !== void 0 && this.#dedupeStore.get(commandId)?.requesterUserId !== requesterUserId) {
+        return err(createPublicError({ code: "DM_COMMAND_NOT_FOUND", category: "not-found", message: "Command unavailable to this requester" }));
+      }
       const report = this.#dedupeStore.getStatus(commandId);
       if (report.receipt) {
         return ok(report.receipt);
@@ -6921,7 +6935,8 @@ var CommandBus = class {
     const claimResult = this.#dedupeStore.claim(
       command.commandId,
       fingerprint,
-      now
+      now,
+      context.senderUserId
     );
     if (!claimResult.ok) {
       return ok({
@@ -6949,16 +6964,14 @@ var CommandBus = class {
       { priority: internalPriority }
     );
     if (queueEntry.status === "cancelled") {
-      return ok({
+      const cancelled = {
         commandId: command.commandId,
         status: "rejected",
-        error: createPublicError({
-          code: "DM_COMMAND_CANCELLED",
-          category: "busy",
-          message: `Command was cancelled: ${queueEntry.cancelReason ?? "Unknown reason"}`
-        }),
+        error: createPublicError({ code: "DM_COMMAND_CANCELLED", category: "busy", message: `Command was cancelled: ${queueEntry.cancelReason ?? "Unknown reason"}` }),
         transportTimestamp: now
-      });
+      };
+      this.#dedupeStore.recordResult(command.commandId, cancelled);
+      return ok(cancelled);
     }
     try {
       await this.#commandQueue.acquirePermit(command.commandId);
@@ -6966,12 +6979,14 @@ var CommandBus = class {
       if (queueEntry.status !== "cancelled") {
         this.#commandQueue.markFinished(command.commandId, false);
       }
-      return ok({
+      const cancelled = {
         commandId: command.commandId,
         status: "rejected",
         error: queueErr,
         transportTimestamp: Date.now()
-      });
+      };
+      this.#dedupeStore.recordResult(command.commandId, cancelled);
+      return ok(cancelled);
     }
     let finalReceipt = void 0;
     try {
@@ -7388,7 +7403,7 @@ var FoundryCommandTransportAdapter = class {
         })
       );
     }
-    if (trustedSenderUserId === null) {
+    if (!trustedSenderUserId) {
       return err(
         createPublicError({
           code: "DM_AUTH_UNAUTHENTICATED",
@@ -7397,7 +7412,7 @@ var FoundryCommandTransportAdapter = class {
         })
       );
     }
-    if (typeof commandId !== "string" || !commandId.startsWith("cmd_")) {
+    if (!isCommandId(commandId)) {
       return err(
         createPublicError({
           code: "DM_INVALID_COMMAND_ID",
@@ -7415,7 +7430,13 @@ var FoundryCommandTransportAdapter = class {
         })
       );
     }
-    const res = await this.#statusQueryHandler(commandId);
+    const sender = this.#runtime.users?.get(trustedSenderUserId);
+    if (this.#runtime.users && (!sender || sender.active === false)) return err(createPublicError({
+      code: "DM_AUTH_UNAUTHENTICATED",
+      category: "permission",
+      message: "Status requester is unavailable"
+    }));
+    const res = await this.#statusQueryHandler(commandId, trustedSenderUserId);
     return res.ok ? ok(sanitizeTransportReceiptForPublic(res.value)) : res;
   }
   async #processInboundRequest(packet, trustedSenderUserId, ...transportArgs) {
@@ -12389,18 +12410,20 @@ function calculatePopulation(state, groups) {
       }
       let hasNull = false;
       let hasNumber = false;
-      let sum = 0;
+      let exactSum = 0n;
       for (const g of includedGroups) {
         if (g.count === null) {
           hasNull = true;
         } else {
           hasNumber = true;
-          sum += g.count;
-          if (!Number.isSafeInteger(sum)) {
-            warnings.push("DM_POPULATION_SUM_OVERFLOW: Population group sum exceeds maximum safe integer");
-          }
+          exactSum += BigInt(g.count);
         }
       }
+      if (exactSum > BigInt(Number.MAX_SAFE_INTEGER)) {
+        warnings.push("DM_POPULATION_SUM_OVERFLOW: Population group sum exceeds maximum safe integer");
+        return { total: null, precision: "unknown", warnings: Object.freeze(warnings) };
+      }
+      const sum = Number(exactSum);
       if (hasNull && !hasNumber) {
         return {
           total: null,
@@ -12432,19 +12455,19 @@ function calculatePopulation(state, groups) {
     }
     case "hybrid": {
       const includedGroups = groups.filter((g) => g.includedInTotal);
-      let groupsSum = 0;
+      let groupsSum = 0n;
       let hasNullGroup = false;
       for (const g of includedGroups) {
         if (g.count === null) {
           hasNullGroup = true;
         } else {
-          groupsSum += g.count;
+          groupsSum += BigInt(g.count);
         }
       }
       if (hasNullGroup) {
         warnings.push("DM_POPULATION_HYBRID_PARTIAL_UNKNOWN: Some subset groups have unknown counts");
       }
-      if (state.total !== null && groupsSum > state.total) {
+      if (state.total !== null && groupsSum > BigInt(state.total)) {
         warnings.push(
           `DM_POPULATION_GROUPS_EXCEED_TOTAL: Total of included population groups (${groupsSum}) exceeds declared domain population (${state.total})`
         );
@@ -13794,6 +13817,15 @@ function resolveRepoViewer(options) {
     isGm: options.viewerIsGm ?? false
   };
 }
+function readWorkforce(...args) {
+  try {
+    return ok(calculateWorkforce(...args));
+  } catch (error) {
+    if (error instanceof Error && error.message === "DM_PEOPLE_WORKFORCE_OVERFLOW")
+      return err(createPublicError({ code: "DM_PEOPLE_WORKFORCE_OVERFLOW", category: "validation", message: "Workforce totals exceed the supported safe integer range" }));
+    throw error;
+  }
+}
 var PeopleReadRepository = class {
   #domainRepository;
   constructor(domainRepository) {
@@ -13967,7 +13999,7 @@ var PeopleReadRepository = class {
     const optObj = typeof options === "number" ? { nowReal: options } : options;
     const viewer = resolveRepoViewer(optObj);
     if (viewer.isGm) {
-      return ok(calculateWorkforce(peopleRes.value, { nowReal: optObj.nowReal, nowWorld: optObj.nowWorld }));
+      return readWorkforce(peopleRes.value, { nowReal: optObj.nowReal, nowWorld: optObj.nowWorld });
     }
     const visibleGroups = peopleRes.value.populationGroups.filter((g) => isEntityVisible(g, viewer));
     const hiddenNotableIds = new Set(peopleRes.value.notables.filter((n) => !isEntityVisible(n, viewer)).map((n) => n.id));
@@ -13995,7 +14027,7 @@ var PeopleReadRepository = class {
       assignments: Object.freeze(visibleAssignments),
       reservations: Object.freeze(visibleReservations)
     };
-    return ok(calculateWorkforce(projectedPeople, { nowReal: optObj.nowReal, nowWorld: optObj.nowWorld }));
+    return readWorkforce(projectedPeople, { nowReal: optObj.nowReal, nowWorld: optObj.nowWorld });
   }
   async getAssignments(domainUuid, options = {}) {
     const peopleRes = await this.getPeopleData(domainUuid);
@@ -15941,7 +15973,7 @@ var G2DiagnosticsProvider = class {
 
 // src/core/versioning/build-metadata.ts
 var BUILD_METADATA = Object.freeze({
-  moduleVersion: "0.0.7",
+  moduleVersion: "0.0.8",
   buildChannel: "g6-candidate",
   target: "foundry-vtt"
 });
@@ -17327,27 +17359,27 @@ function resolveEffectiveCapacity(baseCapacityMinor, modifiers = [], resourceDef
       `baseCapacityMinor must be a non-negative safe integer or null, got: ${String(baseCapacityMinor)}`
     );
   }
-  let totalCapacity = baseCapacityMinor;
+  let exactCapacity = BigInt(baseCapacityMinor);
   for (const mod of modifiers) {
     if (mod.active) {
-      totalCapacity += mod.deltaMinor;
+      if (!Number.isSafeInteger(mod.deltaMinor)) throw new Error("Capacity modifier must be a safe integer");
+      exactCapacity += BigInt(mod.deltaMinor);
     }
   }
-  if (totalCapacity < 0) {
-    totalCapacity = 0;
-  }
-  if (!Number.isSafeInteger(totalCapacity)) {
-    throw new Error(
-      `Effective capacity overflowed safe integer bounds: ${totalCapacity}`
-    );
+  if (exactCapacity < 0n) {
+    exactCapacity = 0n;
   }
   let hardLimitClamped = false;
   if (resourceDef?.maximumMinor !== null && resourceDef?.maximumMinor !== void 0) {
-    if (totalCapacity > resourceDef.maximumMinor) {
-      totalCapacity = resourceDef.maximumMinor;
+    if (exactCapacity > BigInt(resourceDef.maximumMinor)) {
+      exactCapacity = BigInt(resourceDef.maximumMinor);
       hardLimitClamped = true;
     }
   }
+  if (exactCapacity > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error(`Effective capacity overflowed safe integer bounds: ${exactCapacity}`);
+  }
+  const totalCapacity = Number(exactCapacity);
   return {
     effectiveCapacityMinor: totalCapacity,
     baseCapacityMinor,
@@ -26451,12 +26483,12 @@ async function executeProjectAdvanceDomainOperationPlan(context, params) {
   };
   if (context.economyService && deltaUnits > 0) {
     const unitsBefore = project.workCompleted;
-    const unitsAfter = Math.min(project.workRequired, unitsBefore + deltaUnits);
+    const unitsAfter = Math.min(project.workRequired, updatedProject.workCompleted);
     let costIdx = 0;
     for (const cost of definition.costs) {
       if (cost.timing === "progressive") {
-        const dueBefore = Math.floor(unitsBefore / project.workRequired * cost.amountMinor);
-        const dueAfter = Math.floor(unitsAfter / project.workRequired * cost.amountMinor);
+        const dueBefore = Number(BigInt(unitsBefore) * BigInt(cost.amountMinor) / BigInt(project.workRequired));
+        const dueAfter = Number(BigInt(unitsAfter) * BigInt(cost.amountMinor) / BigInt(project.workRequired));
         const toDebit = dueAfter - dueBefore;
         if (toDebit > 0) {
           const stepId = `project-advance:cost:${cost.resourceId}:${costIdx++}`;
@@ -31739,7 +31771,7 @@ function assertDiplomacyEntity(x) {
   if (!isRecord3(x) || !isJsonData(x) || x.schemaVersion !== 1 || !DIPLOMACY_KINDS.includes(x.kind) || !isText(x.id) || !isTimestamp(x.revision) || !Array.isArray(x.receipts)) throw new Error("DM_DIPLOMACY_STORAGE_CORRUPT");
   const ids = /* @__PURE__ */ new Set();
   for (const r of x.receipts) {
-    if (!isRecord3(r) || !isText(r.commandId) || ids.has(r.commandId) || !isText(r.fingerprint) || !isTimestamp(r.revision) || r.revision > x.revision || typeof r.changed !== "boolean") throw new Error("DM_DIPLOMACY_STORAGE_CORRUPT");
+    if (!isRecord3(r) || !isText(r.commandId) || ids.has(r.commandId) || !isText(r.fingerprint) || !isTimestamp(r.revision) || r.revision > x.revision || typeof r.changed !== "boolean" || r.requesterUserId !== void 0 && !isText(r.requesterUserId)) throw new Error("DM_DIPLOMACY_STORAGE_CORRUPT");
     ids.add(r.commandId);
   }
 }
@@ -31843,7 +31875,8 @@ var DiplomacyEntityStore = class {
       const parent = JSON.stringify([axis, entity.data.territory[axis]]), index = this.#children.get(parent) ?? /* @__PURE__ */ new Set();
       if (add) index.add(key);
       else index.delete(key);
-      this.#children.set(parent, index);
+      if (index.size) this.#children.set(parent, index);
+      else this.#children.delete(parent);
     }
   }
   children(parentUuid, axis) {
@@ -31881,6 +31914,7 @@ var DiplomacyEntityStore = class {
   async remove(kind, id) {
     await this.adapter.remove(kind, id);
     const key = diplomacyKey(kind, id);
+    this.#indexParents(this.#entities.get(key), key, false);
     this.#entities.delete(key);
     this.#byKind.get(kind)?.delete(key);
   }
@@ -32610,6 +32644,10 @@ function diplomacyMutationDefinition(kind, o, getLocks, prepare) {
     async buildPlan(ctx, fresh) {
       const fingerprint = diplomacyFingerprint(ctx.command.type, ctx.command.payload), prior = fresh.entity?.receipts.find((r) => r.commandId === ctx.command.commandId);
       if (prior) {
+        const legacyRequester = kind === "proposal" && ctx.command.type === "diplomacy:submit-proposal" && isRecord3(fresh.entity?.data) ? fresh.entity.data.requesterUserId : void 0;
+        const requester = prior.requesterUserId ?? legacyRequester;
+        if (!ctx.senderUserId || requester !== ctx.senderUserId)
+          return failure("DM_COMMAND_ID_CONFLICT", "Durable command unavailable to this requester", "conflict");
         if (prior.fingerprint !== fingerprint) return failure("DM_COMMAND_ID_CONFLICT", "Command ID already has a different durable payload", "conflict");
         return ok(createMutationPlan({
           commandId: ctx.command.commandId,
@@ -32629,6 +32667,7 @@ function diplomacyMutationDefinition(kind, o, getLocks, prepare) {
         receipts: [...w.after.receipts, {
           commandId: ctx.command.commandId,
           fingerprint,
+          requesterUserId: ctx.senderUserId,
           revision: w.after.revision,
           changed: w.before === null || w.before.revision !== w.after.revision,
           result: built.value.result
@@ -32850,7 +32889,23 @@ async function queryDiplomacyOwner(ctx, kind, owner, store, domains, controllers
       if (!isGm && kind === "dispute") {
         const territoryUuids = [];
         for (const id of projected.territoryUuids) if (await territoryVisible(id)) territoryUuids.push(id);
-        projected = { ...projected, territoryUuids, claimRefs: projected.claimRefs.filter((r) => territoryUuids.includes(r.territoryUuid) && store.get("territory", r.territoryUuid)?.data?.claims.some((c) => c.id === r.claimId && canSee(c.visibility))) };
+        const claimRefs = [];
+        for (const ref of projected.claimRefs) {
+          if (!territoryUuids.includes(ref.territoryUuid)) continue;
+          const territory = store.get("territory", ref.territoryUuid)?.data;
+          if (!territory) continue;
+          const territoryControlled = await diplomacyViewerControls(ctx, territoryOwner.parties(territory), domains, controllers);
+          const detail2 = territoryOwner.project(territory, {
+            isGm: false,
+            at: ctx.receivedAtReal,
+            worldTick,
+            historyOffset: 0,
+            historyLimit: 0,
+            canSee: (visibility) => visibility === "public" || visibility === "restricted" && territoryControlled
+          });
+          if (detail2.ok && detail2.value.claims.some((claim) => claim.id === ref.claimId)) claimRefs.push(ref);
+        }
+        projected = { ...projected, territoryUuids, claimRefs };
       }
       visible.push(projected);
     } else visible.push({
@@ -32944,6 +32999,8 @@ async function prepareOwnerIntent(intent, ctx, o) {
     if (identity.id !== intent.id || identity.revision !== 0) return failure("DM_DIPLOMACY_CREATE_INVALID", "New entity must have matching identity and revision zero");
     if (intent.kind === "agreement" && data.state.agreement.lifecycle !== "draft")
       return failure("DM_AGREEMENT_CREATE_INVALID", "New agreement must start as a draft");
+    if (intent.kind === "agreement" && data.executedOperations?.length)
+      return failure("DM_AGREEMENT_CREATE_INVALID", "New agreement cannot declare previously executed owner operations");
     if (intent.kind === "relation") {
       const candidate = data;
       const unique = validateRelationUniqueness(
@@ -33993,6 +34050,21 @@ var DiplomacyApplication = class extends BaseApp2 {
 
 // src/diplomacy/public-diplomacy-api.ts
 function createPublicDiplomacyApi(bus) {
+  const allowedTypes = /* @__PURE__ */ new Set([
+    ...Object.values(DIPLOMACY_NAMESPACES).flatMap((namespace) => ["query", "create", "modify"].map((mode) => `${namespace}:${mode}`)),
+    "territory:preview",
+    "diplomacy:submit-proposal",
+    "diplomacy:decide-proposal",
+    "diplomacy:query-proposals",
+    "diplomacy:capabilities"
+  ]);
+  const execute = async (ticket) => isRecord3(ticket) && allowedTypes.has(ticket.type) ? bus.execute(ticket) : failure("DM_DIPLOMACY_INTENT_INVALID", "Unsupported diplomacy command");
+  const commands = Object.freeze({
+    prepare: (type, payload) => allowedTypes.has(type) && isJsonData(payload) ? ok(immutable({ contractVersion: 1, commandId: createCommandId(), type, payload: structuredClone(payload), issuedAtReal: Date.now() })) : failure("DM_DIPLOMACY_INTENT_INVALID", "Diplomacy ticket requires a supported type and JSON payload"),
+    execute,
+    retry: execute,
+    status: (commandId) => bus.queryCommandStatus(commandId)
+  });
   const send = async (type, payload) => {
     const response = await bus.execute({ contractVersion: 1, commandId: createCommandId(), type, payload, issuedAtReal: Date.now() });
     if (!response.ok) return response;
@@ -34007,6 +34079,7 @@ function createPublicDiplomacyApi(bus) {
     });
   };
   const api = Object.freeze({
+    commands,
     open: () => new DiplomacyApplication({ api }).render(true),
     relations: owner("relation"),
     reputation: owner("reputation"),
@@ -34126,6 +34199,10 @@ function registerDiplomacyProposals(o) {
     type: "diplomacy:submit-proposal",
     visibility: "public",
     transactional: true,
+    permissionValidator: (ctx) => {
+      const existing = o.store.get("proposal", ctx.command.payload.id)?.data;
+      return !existing || existing.requesterUserId === ctx.senderUserId ? ok(true) : failure("DM_SECURITY_PERMISSION_DENIED", "Proposal unavailable to this requester", "permission");
+    },
     schemaValidator: submitSchema,
     mutationDefinition: submit,
     handler: createTransactionalHandler(o.coordinator, submit)

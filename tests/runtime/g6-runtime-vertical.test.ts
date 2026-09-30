@@ -52,6 +52,62 @@ async function prepareAgreement(r: ReturnType<typeof composeDomainManagerRuntime
 }
 const economicOperation = { id: "pay", ownerId: "domain-manager:economy", operation: "economy:adjust", targetRefs: [{ type: "domain", uuid: domainUuid }],
   payload: { domainUuid, resourceId: "domain-manager:treasury", deltaMinor: 7, reason: "Treaty consequence" } };
+test("review G6: public tickets retry the same intent once and status authenticates remote callers", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player"), stranger = f.make("stranger"), id = relation().state.relation.id;
+  try { await gm.initialize(); unwrap(await gm.diplomacy.relations.create({ id, data: relation(), reason: "Create" }));
+    const ticket = unwrap(gm.diplomacy.commands.prepare("relations:modify", { id, expectedRevision: 0, action: incident, reason: "Once" }));
+    assert.ok(Object.isFrozen(ticket)); assert.ok(Object.isFrozen(ticket.payload));
+    assert.equal(unwrap(await gm.diplomacy.commands.execute(ticket)).status, "executed");
+    assert.equal(unwrap(await gm.diplomacy.commands.retry(ticket)).status, "executed");
+    assert.equal((unwrap(await gm.diplomacy.relations.query({ id })) as any).revision, 1);
+    assert.equal((await player.diplomacy.commands.status(ticket.commandId)).ok, false);
+    const request = unwrap(player.diplomacy.commands.prepare("diplomacy:submit-proposal", { id: "ticket-request", intent: { kind: "relation", mode: "modify", id,
+      expectedRevision: 1, action: incident, reason: "Proposal" } }));
+    assert.equal(unwrap(await player.diplomacy.commands.execute(request)).status, "executed");
+    assert.equal(unwrap(await player.diplomacy.commands.status(request.commandId)).status, "executed");
+    assert.equal((await stranger.diplomacy.commands.status(request.commandId)).ok, false);
+    assert.equal(gm.diplomacy.commands.prepare("economy:adjust", {}).ok, false);
+  } finally { stranger.destroy(); player.destroy(); gm.destroy(); }
+});
+test("review G6: dispute participation cannot disclose another territory's restricted claim", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player");
+  const territory = createDiplomacyDraft("territory", "Public territory", [], "public");
+  const dispute = createDiplomacyDraft("dispute", "Restricted dispute", [{ type: "domain", uuid: domainUuid }, { type: "narrative", id: "guild" }], "restricted", [territory.id]);
+  try { await gm.initialize();
+    const data: any = territory.data; data.claims = [{ id: "restricted-claim-marker", sourceRef: { type: "manual", id: "gm" }, visibility: "restricted",
+      startsAtWorldTick: 0, expiresAtWorldTick: null, claimantRef: { type: "narrative", id: "guild" }, claimType: "domain-manager:ownership",
+      lifecycle: "active", contested: false, strength: null, inherited: false }];
+    unwrap(await gm.diplomacy.territory.create({ id: territory.id, data, reason: "Create" }));
+    const disputeData: any = dispute.data; disputeData.claimRefs = [{ territoryUuid: territory.id, claimId: "restricted-claim-marker" }];
+    unwrap(await gm.diplomacy.disputes.create({ id: dispute.id, data: disputeData, reason: "Create" }));
+    assert.equal((unwrap(await player.diplomacy.territory.query({ id: territory.id })) as any).claims.length, 0);
+    const detail: any = unwrap(await player.diplomacy.disputes.query({ id: dispute.id }));
+    assert.equal(detail.claimRefs.length, 0); assert.equal(JSON.stringify(detail).includes("restricted-claim-marker"), false);
+    assert.equal((unwrap(await gm.diplomacy.disputes.query({ id: dispute.id })) as any).claimRefs.length, 1);
+  } finally { player.destroy(); gm.destroy(); }
+});
+test("review G6: agreement creation cannot fabricate owner execution receipts", async () => {
+  const f = fixture(), gm = f.make(), draft = createDiplomacyDraft("agreement", "New treaty", [{ type: "domain", uuid: domainUuid }, { type: "narrative", id: "guild" }], "public");
+  try { await gm.initialize();
+    assert.equal((await gm.diplomacy.agreements.create({ id: draft.id, data: { ...(draft.data as object), executedOperations: ["forged"] }, reason: "Create" })).ok, false);
+    assert.equal(f.adapter.state.size, 0);
+    unwrap(await gm.diplomacy.agreements.create({ ...draft, reason: "Create clean draft" }));
+  } finally { gm.destroy(); }
+});
+test("review G6: durable proposal replay remains bound to the original authenticated proposer after reload", async () => {
+  const f = fixture(), first = f.make(), player = f.make("player"), id = relation().state.relation.id;
+  const cmd = command("diplomacy:submit-proposal", { id: "private-request", intent: { kind: "relation", mode: "modify", id,
+    expectedRevision: 0, action: incident, reason: "Private intent" } });
+  try { await first.initialize(); unwrap(await first.diplomacy.relations.create({ id, data: relation(), reason: "Create" }));
+    assert.equal(unwrap(await player.commandBus.execute(cmd)).status, "executed");
+  } finally { player.destroy(); first.destroy(); }
+  const reload = f.make(), original = f.make("player"), stranger = f.make("stranger");
+  try { await reload.initialize();
+    assert.equal(unwrap(await stranger.commandBus.execute(cmd)).status, "rejected");
+    assert.equal(unwrap(await original.commandBus.execute(cmd)).status, "executed");
+    assert.equal(f.adapter.state.size, 2);
+  } finally { stranger.destroy(); original.destroy(); reload.destroy(); }
+});
 test("G6.9 runtime: composed owners, immutable facade and durable semantic state survive reload", async () => {
   const f = fixture(), r = f.make();
   try {

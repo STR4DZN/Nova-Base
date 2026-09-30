@@ -1,5 +1,7 @@
 # G6 — relatório da candidata publicada
 
+> Revisão posterior: candidata v0.0.8 com 13 defeitos corrigidos nos blocos G0–G6 e 878/878 testes locais PASS. Este relatório conserva sua evidência histórica; ver `docs/G0_G6_REVIEW.md`. Novo smoke da build corrigida é necessário.
+
 Data: 2026-09-30. Repositório: STR4DZN/Nova-Base, branch `feat/g6-continuous`. Baseline remoto recuperado: `b9fa7fe`. Módulo atual: `0.0.7`.
 
 **Resultado revisado pela auditoria integral: núcleo implementado, cobertura do plano parcial. 859/859 testes automatizados PASS; smoke Foundry PASS reportado pelo usuário em 2026-09-30; cobertura integral do G6 ainda não concluída. G7 não iniciado.** A candidata G6 v0.0.7 está publicada no GitHub como prerelease para testes. A matriz normativa completa e as lacunas estão em `docs/G6_FULL_SPEC_AUDIT.md`; passar os testes do código existente não comprova funcionalidades ausentes.

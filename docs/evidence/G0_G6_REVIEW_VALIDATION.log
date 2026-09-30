@@ -1,0 +1,35 @@
+full-review-typecheck
+npm warn Unknown env config "http-proxy". This will stop working in the next major version of npm.
+
+> domain-manager@0.0.8 typecheck
+> tsc --noEmit
+
+
+
+full-review-build
+npm warn Unknown env config "http-proxy". This will stop working in the next major version of npm.
+
+> domain-manager@0.0.8 build
+> node build.mjs
+
+
+
+full-review-package
+npm warn Unknown env config "http-proxy". This will stop working in the next major version of npm.
+
+> domain-manager@0.0.8 package
+> node scripts/package.mjs
+
+Package created: dist/domain-manager-v0.0.8.zip
+
+
+full-review-release-validation
+npm warn Unknown env config "http-proxy". This will stop working in the next major version of npm.
+
+> domain-manager@0.0.8 validate:release
+> node scripts/validate-release.mjs
+
+Package validation passed
+Artifact validation passed
+Release URLs, versions and ZIP verified: v0.0.8
+

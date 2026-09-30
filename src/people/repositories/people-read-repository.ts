@@ -27,6 +27,15 @@ function resolveRepoViewer(options: PeopleRepositoryViewerOptions): ViewerIdenti
   };
 }
 
+function readWorkforce(...args: Parameters<typeof calculateWorkforce>): Result<WorkforceReport> {
+  try { return ok(calculateWorkforce(...args)); }
+  catch (error) {
+    if (error instanceof Error && error.message === "DM_PEOPLE_WORKFORCE_OVERFLOW")
+      return err(createPublicError({ code: "DM_PEOPLE_WORKFORCE_OVERFLOW", category: "validation", message: "Workforce totals exceed the supported safe integer range" }));
+    throw error;
+  }
+}
+
 export class PeopleReadRepository {
   readonly #domainRepository: DomainReadRepository;
 
@@ -257,7 +266,7 @@ export class PeopleReadRepository {
     const viewer = resolveRepoViewer(optObj);
 
     if (viewer.isGm) {
-      return ok(calculateWorkforce(peopleRes.value, { nowReal: optObj.nowReal, nowWorld: optObj.nowWorld }));
+      return readWorkforce(peopleRes.value, { nowReal: optObj.nowReal, nowWorld: optObj.nowWorld });
     }
 
     const visibleGroups = peopleRes.value.populationGroups.filter((g) => isEntityVisible(g, viewer));
@@ -293,7 +302,7 @@ export class PeopleReadRepository {
       reservations: Object.freeze(visibleReservations)
     };
 
-    return ok(calculateWorkforce(projectedPeople, { nowReal: optObj.nowReal, nowWorld: optObj.nowWorld }));
+    return readWorkforce(projectedPeople, { nowReal: optObj.nowReal, nowWorld: optObj.nowWorld });
   }
 
   async getAssignments(

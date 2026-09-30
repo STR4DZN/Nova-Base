@@ -47,6 +47,11 @@ export function registerDiplomacyProposals(o: OwnerCommandOptions): void {
       effects: [], result: { id: p.id, revision: 0, lifecycle: "pending" } });
   });
   o.registry.register({ type: "diplomacy:submit-proposal", visibility: "public", transactional: true,
+    permissionValidator: ctx => {
+      const existing = o.store.get("proposal", ctx.command.payload.id as string)?.data as DiplomacyProposal | undefined;
+      return !existing || existing.requesterUserId === ctx.senderUserId ? ok(true)
+        : failure("DM_SECURITY_PERMISSION_DENIED", "Proposal unavailable to this requester", "permission");
+    },
     schemaValidator: submitSchema, mutationDefinition: submit, handler: createTransactionalHandler(o.coordinator, submit) });
   const decideSchema = (p: unknown) => isRecord(p) && isText(p.id) && isTimestamp(p.expectedRevision)
     && ["approve", "reject"].includes(p.decision as string) && isText(p.reason)

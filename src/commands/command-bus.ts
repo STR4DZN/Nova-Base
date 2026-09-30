@@ -96,8 +96,8 @@ export class CommandBus {
       "registerStatusQueryHandler" in transport &&
       typeof (transport as any).registerStatusQueryHandler === "function"
     ) {
-      unregisterStatus = (transport as any).registerStatusQueryHandler((id: CommandId) =>
-        this.queryCommandStatus(id)
+      unregisterStatus = (transport as any).registerStatusQueryHandler((id: CommandId, requesterUserId?: string) =>
+        this.queryCommandStatus(id, requesterUserId)
       );
     }
     const unregister = transport.registerInboundHandler(this.dispatchInbound.bind(this));
@@ -139,9 +139,13 @@ export class CommandBus {
    * If running on remote client, delegates to transport.getStatus(commandId).
    */
   async queryCommandStatus<TResult = unknown>(
-    commandId: CommandId
+    commandId: CommandId,
+    requesterUserId?: string
   ): Promise<Result<TransportReceipt<TResult>, PublicError>> {
     if (this.#authorityService.isCurrentUser()) {
+      if (requesterUserId !== undefined && this.#dedupeStore.get(commandId)?.requesterUserId !== requesterUserId) {
+        return err(createPublicError({ code: "DM_COMMAND_NOT_FOUND", category: "not-found", message: "Command unavailable to this requester" }));
+      }
       const report = this.#dedupeStore.getStatus<TResult>(commandId);
       if (report.receipt) {
         return ok(report.receipt);
@@ -410,7 +414,8 @@ export class CommandBus {
     const claimResult = this.#dedupeStore.claim<TResponse>(
       command.commandId,
       fingerprint,
-      now
+      now,
+      context.senderUserId
     );
 
     if (!claimResult.ok) {
@@ -450,16 +455,11 @@ export class CommandBus {
     );
 
     if (queueEntry.status === "cancelled") {
-      return ok({
-        commandId: command.commandId,
-        status: "rejected",
-        error: createPublicError({
-          code: "DM_COMMAND_CANCELLED",
-          category: "busy",
-          message: `Command was cancelled: ${queueEntry.cancelReason ?? "Unknown reason"}`
-        }),
-        transportTimestamp: now
-      } as TransportReceipt<TResponse>);
+      const cancelled: TransportReceipt<TResponse> = { commandId: command.commandId, status: "rejected",
+        error: createPublicError({ code: "DM_COMMAND_CANCELLED", category: "busy", message: `Command was cancelled: ${queueEntry.cancelReason ?? "Unknown reason"}` }),
+        transportTimestamp: now };
+      this.#dedupeStore.recordResult(command.commandId, cancelled);
+      return ok(cancelled);
     }
 
     // 12. Acquire Scheduler Permit (G2-AUD-015: concurrency and FIFO enforcement)
@@ -469,12 +469,10 @@ export class CommandBus {
       if ((queueEntry.status as QueuedCommandStatus) !== "cancelled") {
         this.#commandQueue.markFinished(command.commandId, false);
       }
-      return ok({
-        commandId: command.commandId,
-        status: "rejected",
-        error: queueErr as PublicError,
-        transportTimestamp: Date.now()
-      } as TransportReceipt<TResponse>);
+      const cancelled: TransportReceipt<TResponse> = { commandId: command.commandId, status: "rejected",
+        error: queueErr as PublicError, transportTimestamp: Date.now() };
+      this.#dedupeStore.recordResult(command.commandId, cancelled);
+      return ok(cancelled);
     }
 
     // 13. Execute Handler / Transactional Coordinator (G2-AUD-007, G2-AUD-018)

@@ -1,5 +1,7 @@
 # DOMAIN MANAGER — GATE G5 ACCEPTANCE REPORT
 
+> Revisão posterior: candidata v0.0.8 com 13 defeitos corrigidos nos blocos G0–G6 e 878/878 testes locais PASS. Este relatório conserva sua evidência histórica; ver `docs/G0_G6_REVIEW.md`. Novo smoke da build corrigida é necessário.
+
 **Subsystems:** Projects (`domain-manager:projects`), Facilities (`domain-manager:facilities`), Downtime (`domain-manager:downtime`)  
 **Gate:** G5 — Projects / Facilities / Downtime  
 **Normative Authorities:** `Documentos/99_DOMAIN_MANAGER_MASTER_SPECIFICATION_V1.md` (§15, §16, §17, DEC-083 to DEC-097, Anexo 07 DEC-2306 to DEC-3200), `Documentos/GATES/15_G5_PROJECTS_FACILITIES_DOWNTIME.md`  

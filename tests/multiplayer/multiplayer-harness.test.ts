@@ -273,10 +273,10 @@ test("Multiplayer Cluster: Simultaneous identical commands share in-flight execu
   const cmdA = createTestCommand("domain:expensive-op", { key: "value" }, sharedCommandId);
   const cmdB = createTestCommand("domain:expensive-op", { key: "value" }, sharedCommandId);
 
-  // Both players submit identical command concurrently
+  // Same authenticated sender shares in-flight execution; another sender cannot reuse its ID.
   const [resA, resB] = await Promise.all([
     player1.transport.send(cmdA),
-    player2.transport.send(cmdB)
+    player1.transport.send(cmdB)
   ]);
 
   assert.equal(resA.ok, true);
@@ -287,6 +287,8 @@ test("Multiplayer Cluster: Simultaneous identical commands share in-flight execu
     assert.deepEqual(resA.value.result, resB.value.result);
   }
 
+  const outsider = await player2.transport.send(cmdB);
+  assert.equal(outsider.ok, true); if (outsider.ok) assert.equal(outsider.value.status, "rejected");
   // Handler must have been executed exactly once
   assert.equal(handlerCalls, 1);
 });

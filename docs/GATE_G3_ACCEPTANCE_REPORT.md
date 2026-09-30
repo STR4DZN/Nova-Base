@@ -1,5 +1,7 @@
 # DOMAIN MANAGER — GATE G3 ACCEPTANCE REPORT
 
+> Revisão posterior: candidata v0.0.8 com 13 defeitos corrigidos nos blocos G0–G6 e 878/878 testes locais PASS. Este relatório conserva sua evidência histórica; ver `docs/G0_G6_REVIEW.md`. Novo smoke da build corrigida é necessário.
+
 **Subsystem:** People (`domain-manager:people`)  
 **Gate:** G3 — People Subsystem & Lifecycle  
 **Normative Authorities:** `Documentos/99_DOMAIN_MANAGER_MASTER_SPECIFICATION_V1.md` (§13, DEC-0891 to DEC-1415), `Documentos/GATES/13_G3_PEOPLE.md`  

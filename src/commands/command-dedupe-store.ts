@@ -15,7 +15,7 @@ export function canonicalizeJson(value: unknown): unknown {
   }
   const obj = value as Record<string, unknown>;
   const sortedKeys = Object.keys(obj).sort();
-  const result: Record<string, unknown> = {};
+  const result: Record<string, unknown> = Object.create(null);
   for (const key of sortedKeys) {
     result[key] = canonicalizeJson(obj[key]);
   }
@@ -76,6 +76,7 @@ export interface CommandStatusReport<TResult = unknown> {
 export interface DedupeEntry<TResult = unknown> {
   readonly commandId: CommandId;
   readonly fingerprint: string;
+  readonly requesterUserId?: string | null;
   readonly createdAt: number;
   state: DedupeEntryState;
   receipt?: TransportReceipt<TResult>;
@@ -124,14 +125,15 @@ export class CommandDedupeStore {
   claim<TResult = unknown>(
     commandId: CommandId,
     fingerprint: string,
-    now: number = Date.now()
+    now: number = Date.now(),
+    requesterUserId?: string | null
   ): Result<ClaimResult<TResult>, PublicError> {
     this.#evictExpired(now);
 
     const existing = this.#entries.get(commandId);
     if (existing) {
       // INVARIANT DEC-593–602: mesmo commandId + fingerprint diferente = conflict/security error
-      if (existing.fingerprint !== fingerprint) {
+      if (existing.fingerprint !== fingerprint || existing.requesterUserId !== requesterUserId) {
         return err(
           createPublicError({
             code: "DM_COMMAND_ID_REUSE_MISMATCH",
@@ -161,10 +163,10 @@ export class CommandDedupeStore {
 
     // Capacity check and oldest eviction (LRU)
     if (this.#entries.size >= this.#maxEntries) {
-      const oldestKey = this.#entries.keys().next().value;
-      if (oldestKey) {
-        this.#entries.delete(oldestKey);
-      }
+      const oldestKey = [...this.#entries].find(([, entry]) => entry.state !== "pending")?.[0];
+      if (!oldestKey) return err(createPublicError({ code: "DM_COMMAND_DEDUPE_BUSY", category: "busy",
+        message: "Command retention is full of unresolved operations", retryable: true }));
+      this.#entries.delete(oldestKey);
     }
 
     let resolveInFlight!: (receipt: TransportReceipt<TResult>) => void;
@@ -175,6 +177,7 @@ export class CommandDedupeStore {
     const newEntry: DedupeEntry<TResult> = {
       commandId,
       fingerprint,
+      requesterUserId,
       createdAt: now,
       state: "pending",
       inFlightPromise,

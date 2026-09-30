@@ -2,7 +2,7 @@ import { createPublicError, type PublicError } from "../core/contracts/public-er
 import { err, ok, type Result } from "../core/contracts/result.js";
 import type { AuthorityElectionUser } from "../authority/primary-authority-election.js";
 import type { PrimaryAuthorityService } from "../authority/primary-authority-service.js";
-import type { CommandId, DomainCommand } from "./command-envelope.js";
+import { isCommandId, type CommandId, type DomainCommand } from "./command-envelope.js";
 import {
   type CommandTransport,
   sanitizeTransportReceiptForPublic,
@@ -56,7 +56,7 @@ export type SocketSenderResolver = (
 ) => string | null;
 
 export type CommandStatusQueryHandler = (
-  commandId: CommandId
+  commandId: CommandId, requesterUserId?: string
 ) => Promise<Result<TransportReceipt<unknown>, PublicError>>;
 
 export interface FoundryCommandTransportAdapterOptions {
@@ -492,7 +492,7 @@ export class FoundryCommandTransportAdapter implements CommandTransport {
       );
     }
 
-    if (trustedSenderUserId === null) {
+    if (!trustedSenderUserId) {
       return err(
         createPublicError({
           code: "DM_AUTH_UNAUTHENTICATED",
@@ -502,7 +502,7 @@ export class FoundryCommandTransportAdapter implements CommandTransport {
       );
     }
 
-    if (typeof commandId !== "string" || !commandId.startsWith("cmd_")) {
+    if (!isCommandId(commandId)) {
       return err(
         createPublicError({
           code: "DM_INVALID_COMMAND_ID",
@@ -522,7 +522,10 @@ export class FoundryCommandTransportAdapter implements CommandTransport {
       );
     }
 
-    const res = await this.#statusQueryHandler(commandId as CommandId);
+    const sender = this.#runtime.users?.get(trustedSenderUserId);
+    if (this.#runtime.users && (!sender || sender.active === false)) return err(createPublicError({
+      code: "DM_AUTH_UNAUTHENTICATED", category: "permission", message: "Status requester is unavailable" }));
+    const res = await this.#statusQueryHandler(commandId as CommandId, trustedSenderUserId);
     return res.ok ? ok(sanitizeTransportReceiptForPublic(res.value)) : res;
   }
 

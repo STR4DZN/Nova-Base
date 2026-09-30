@@ -1,6 +1,8 @@
 # RELATÓRIO DE ACEITAÇÃO FORMAL — GATE G2
 ## Authority / Commands / MutationCoordinator (Pós-Resolução da Auditoria Externa)
 
+> Revisão posterior: candidata v0.0.8 com 13 defeitos corrigidos nos blocos G0–G6 e 878/878 testes locais PASS. Este relatório conserva sua evidência histórica; ver `docs/G0_G6_REVIEW.md`. Novo smoke da build corrigida é necessário.
+
 > **Módulo:** `domain-manager`  
 > **Versão:** `0.0.2`  
 > **Data:** `2026-09-17`  

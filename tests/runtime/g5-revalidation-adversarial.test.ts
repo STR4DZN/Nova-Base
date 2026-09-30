@@ -73,6 +73,24 @@ import { withDomainDowntimeData, getDomainDowntimeData } from "../../src/downtim
 import { ok, err } from "../../src/core/contracts/result.js";
 import { createPublicError } from "../../src/core/contracts/public-error.js";
 
+test("review G5: seven tenths of a progressive cost of ninety debits exactly sixty-three", async () => {
+  const env = setupTestEnvironment();
+  env.projectRegistry.register({ id: "review:exact-cost", version: 1, label: "Exact cost", tags: [],
+    progressResolverId: "domain-manager:standard", defaultWorkRequired: 10, requirements: [],
+    costs: [{ resourceId: "domain-manager:materials", amountMinor: 90, timing: "progressive" }], rewards: [] });
+  checkOk(await env.economyService.commitAdjust({ domainUuid: env.rawDoc.uuid, resourceId: "domain-manager:materials", deltaMinor: 90, reason: "Budget" }));
+  const start = await env.projectsService.startProject({ domainUuid: env.rawDoc.uuid, definitionId: "review:exact-cost", name: "Exact cost" });
+  checkOk(start); if (!start.ok) return;
+  checkOk(await env.projectsService.advanceProject({ domainUuid: env.rawDoc.uuid, projectId: start.value.project.id, delta: 7 }));
+  const doc = await env.domains.read(env.rawDoc.uuid); checkOk(doc); if (!doc.ok) return;
+  const economy = tryGetDomainEconomyData(doc.value.record); checkOk(economy); if (!economy.ok) return;
+  assert.equal(economy.value.accounts.find(a => a.resourceId === "domain-manager:materials")!.balanceMinor, 27);
+  checkOk(await env.projectsService.advanceProject({ domainUuid: env.rawDoc.uuid, projectId: start.value.project.id, delta: 3 }));
+  const end = await env.domains.read(env.rawDoc.uuid); checkOk(end); if (!end.ok) return;
+  const finalEconomy = tryGetDomainEconomyData(end.value.record); checkOk(finalEconomy); if (!finalEconomy.ok) return;
+  assert.equal(finalEconomy.value.accounts.find(a => a.resourceId === "domain-manager:materials")!.balanceMinor, 0);
+});
+
 function checkOk(res: { ok: boolean; error?: any }, msg?: string) {
   if (!res.ok) {
     console.error("FAIL in " + (msg ?? "unnamed") + ":", JSON.stringify(res.error, null, 2));
@@ -5101,7 +5119,6 @@ test("G5-REVAL6-005 Scenario 25: Concurrency between needs-recovery and recovery
   assert.equal(concurrentTry.ok, false, "Concurrent command cannot acquire lock during zero-gap isolation");
   assert.equal(concurrentTry.error.code, "DM_LOCK_TIMEOUT");
 });
-
 
 
 

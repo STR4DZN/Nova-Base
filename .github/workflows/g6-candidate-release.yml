@@ -41,13 +41,16 @@ jobs:
         run: |
           set -euo pipefail
           version=$(node -p 'JSON.parse(require("fs").readFileSync("module.json", "utf8")).version')
-          test "$version" = "0.0.7"
+          test "$version" = "0.0.8"
           gh release create "v$version" \
             "module.json" \
             "dist/domain-manager-v$version.zip" \
             "scripts/g6-foundry-smoke.js" \
             "docs/G6_FOUNDRY_SMOKE_GUIDE.md" \
             "docs/G6_FULL_SPEC_AUDIT.md" \
+            "docs/G0_G6_REVIEW.md" \
+            "scripts/foundry-v13-socketlib-smoke-test.js" \
+            "scripts/foundry-v13-g5-full-smoke-test.js" \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "Domain Manager v$version — candidata G6" \

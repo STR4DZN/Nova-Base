@@ -1,6 +1,6 @@
 import { createPublicError, type PublicError } from "../core/contracts/public-error.js";
 import { err, type Result } from "../core/contracts/result.js";
-import type { DomainCommand } from "./command-envelope.js";
+import type { CommandId, DomainCommand } from "./command-envelope.js";
 import type {
   CommandTransport,
   TransportInboundContext,
@@ -55,6 +55,7 @@ export class InMemoryCommandTransport implements CommandTransport {
   #getAuthorityUserId: () => string | null;
   #hub: InMemoryTransportHub | null = null;
   #inboundHandler: TransportInboundHandler | null = null;
+  #statusHandler: ((id: CommandId, requesterUserId?: string) => Promise<Result<TransportReceipt, PublicError>>) | null = null;
   #simulatedLatencyMs: number;
   #dropPackets: boolean;
   #isAvailable = true;
@@ -98,6 +99,19 @@ export class InMemoryCommandTransport implements CommandTransport {
         this.#inboundHandler = null;
       }
     };
+  }
+
+  registerStatusQueryHandler(handler: (id: CommandId, requesterUserId?: string) => Promise<Result<TransportReceipt, PublicError>>): () => void {
+    this.#statusHandler = handler;
+    return () => { if (this.#statusHandler === handler) this.#statusHandler = null; };
+  }
+
+  async getStatus<TResult = unknown>(id: CommandId): Promise<Result<TransportReceipt<TResult>, PublicError>> {
+    if (!this.#currentUserId) return err(createPublicError({ code: "DM_AUTH_UNAUTHENTICATED", category: "permission", message: "Authenticated status requester required" }));
+    if (!this.#isAvailable || this.#dropPackets) return err(createPublicError({ code: "DM_TRANSPORT_UNAVAILABLE", category: "busy", message: "Status transport unavailable" }));
+    const authority = this.#getAuthorityUserId(), peer = authority === this.#currentUserId ? this : authority ? this.#hub?.getPeer(authority) : null;
+    if (!peer?.isAvailable || !peer.#statusHandler) return err(createPublicError({ code: "DM_COMMAND_NOT_FOUND", category: "not-found", message: "Authority status handler unavailable" }));
+    return await peer.#statusHandler(id, this.#currentUserId) as Result<TransportReceipt<TResult>, PublicError>;
   }
 
   async send<TPayload, TResponse = unknown>(

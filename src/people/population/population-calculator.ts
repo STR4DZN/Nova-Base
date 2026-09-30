@@ -28,19 +28,22 @@ export function calculatePopulation(
 
       let hasNull = false;
       let hasNumber = false;
-      let sum = 0;
+      let exactSum = 0n;
 
       for (const g of includedGroups) {
         if (g.count === null) {
           hasNull = true;
         } else {
           hasNumber = true;
-          sum += g.count;
-          if (!Number.isSafeInteger(sum)) {
-            warnings.push("DM_POPULATION_SUM_OVERFLOW: Population group sum exceeds maximum safe integer");
-          }
+          exactSum += BigInt(g.count);
         }
       }
+
+      if (exactSum > BigInt(Number.MAX_SAFE_INTEGER)) {
+        warnings.push("DM_POPULATION_SUM_OVERFLOW: Population group sum exceeds maximum safe integer");
+        return { total: null, precision: "unknown", warnings: Object.freeze(warnings) };
+      }
+      const sum = Number(exactSum);
 
       if (hasNull && !hasNumber) {
         return {
@@ -77,14 +80,14 @@ export function calculatePopulation(
 
     case "hybrid": {
       const includedGroups = groups.filter((g) => g.includedInTotal);
-      let groupsSum = 0;
+      let groupsSum = 0n;
       let hasNullGroup = false;
 
       for (const g of includedGroups) {
         if (g.count === null) {
           hasNullGroup = true;
         } else {
-          groupsSum += g.count;
+          groupsSum += BigInt(g.count);
         }
       }
 
@@ -92,7 +95,7 @@ export function calculatePopulation(
         warnings.push("DM_POPULATION_HYBRID_PARTIAL_UNKNOWN: Some subset groups have unknown counts");
       }
 
-      if (state.total !== null && groupsSum > state.total) {
+      if (state.total !== null && groupsSum > BigInt(state.total)) {
         warnings.push(
           `DM_POPULATION_GROUPS_EXCEED_TOTAL: Total of included population groups (${groupsSum}) exceeds declared domain population (${state.total})`
         );

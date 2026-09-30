@@ -215,7 +215,9 @@ test("CommandDedupeStore respects LRU eviction capacity and TTL retention", () =
   assert.equal(store.has(id2), true);
   assert.equal(store.has(id3), true);
 
-  // Claiming 4th entry evicts oldest (id1)
+  // Only completed entries can be evicted; unresolved operations stay pinned.
+  store.recordResult(id1, { commandId: id1, status: "executed", transportTimestamp: 1000 });
+  // Claiming 4th entry evicts the completed oldest entry (id1)
   store.claim(id4, "fp_4", 1000);
   assert.equal(store.has(id1), false);
   assert.equal(store.has(id4), true);

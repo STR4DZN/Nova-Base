@@ -1,5 +1,7 @@
 # G6 — auditoria completa do plano e da implementação
 
+**Atualização v0.0.8:** revisão G0–G6 corrigiu 13 defeitos, com 878/878 testes locais PASS. Novo smoke necessário; detalhes/evidências em `docs/G0_G6_REVIEW.md`. As lacunas desta matriz continuam explícitas.
+
 Data: 2026-09-30. Projeto: `STR4DZN/Nova-Base`, branch `feat/g6-continuous`. Escopo: Gate G6, sem iniciar G7. Esta auditoria substitui a interpretação anterior de que faltava apenas smoke para fechar todo o plano.
 
 **Veredito: não é possível confirmar 100% de implementação ou de homologação.** O núcleo dos quatro subsistemas existe, mas há funcionalidades previstas ainda ausentes/parciais e verificação real Foundry pendente. Esta revisão encontrou quatro defeitos concretos no núcleo, reproduziu cada um por teste, corrigiu-os e retestou. O candidato corrigido serve para smoke dos fluxos implementados; não é fechamento do Gate.
@@ -128,7 +130,7 @@ Arquivos de produção alterados apenas no cluster G6: `diplomacy/owner-commands
 |---|---|
 | Reutilizar PrimaryAuthority/CommandBus/MutationCoordinator | PASS local; não foi criado runtime/transport paralelo na produção. |
 | Fresh-read, ordered locks e revision | PASS local nos fluxos de mutation; custos de scan/locks globais territoriais ainda são limite de escala. |
-| Retry mesmo commandId e query de status | PARCIAL: kernel e receipts duráveis suportam dedupe; facade G6 cria ID a cada chamada e não fornece fluxo público completo de status/retry para outcome desconhecido. Não recomendar repetir uma mutation incerta como solução. |
+| Retry mesmo commandId e query de status | PARCIAL: facade oferece commands.prepare/execute/retry/status com ticket estável e autorização por sender; status depende do cache da autoridade atual. UI e status durável pós-reload não estão completos. Não criar outro commandId para recuperar outcome desconhecido. |
 | No-op não incrementa revisão | PASS local nos modelos; envelope pode persistir recibo mesmo sem alteração semântica. |
 | Audit append-oriented e recovery | PASS local de events/intents/receipts; diagnostic/repair GUI completos permanecem parciais. |
 | Visibility antes de derive/transport | PASS nos DTOs testados, incluindo regressões; não prova privacidade dos flags distribuídos pelo servidor Foundry. |

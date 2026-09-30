@@ -99,3 +99,7 @@ A revisão automática rejeitou o push também após esta autorização geral: e
 - Após a entrega do manifest da candidata e do roteiro, usuário confirmou: “Todos os testes passaram”.
 - Resultado: `FOUNDRY_SMOKE_PASS_USER_REPORTED`. Não foram anexados relatórios JSON; não inventar logs individuais, versão do servidor ou resultados independentes por sessão.
 - Próxima tarefa permanece no G6: completar lacunas de `docs/G6_FULL_SPEC_AUDIT.md`. Smoke aprovado verifica fluxos implementados; não cria funcionalidades ausentes. Não marcar aceitação integral nem iniciar G7.
+
+## Revisão geral v0.0.8 — 2026-09-30
+
+13 defeitos confirmados/corrigidos em G0/G2/G3/G4/G5/G6; tickets públicos G6 adicionados. 878/878 testes locais PASS; TypeScript/build/package validados. Roteiro G6 v2 inclui regressões de recibos e audiência de claims. Novo smoke Foundry necessário. G6 continua parcial contra toda a Rodada 08; G7 não iniciado. Ver `G0_G6_REVIEW.md`.

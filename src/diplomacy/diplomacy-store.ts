@@ -5,6 +5,7 @@ export const DIPLOMACY_KINDS = ["relation", "reputation", "agreement", "territor
 export type DiplomacyKind = typeof DIPLOMACY_KINDS[number];
 export interface DiplomacyCommandReceipt {
   readonly commandId: string; readonly fingerprint: string; readonly revision: number; readonly changed: boolean;
+  readonly requesterUserId?: string;
   readonly result?: unknown;
 }
 /** The adapter shares persistence mechanics, never the owners' business state. One entity per GM-only journal. */
@@ -25,7 +26,8 @@ export function assertDiplomacyEntity(x: unknown): asserts x is DiplomacyEntity 
   const ids = new Set<string>();
   for (const r of x.receipts) {
     if (!isRecord(r) || !isText(r.commandId) || ids.has(r.commandId) || !isText(r.fingerprint) || !isTimestamp(r.revision)
-      || r.revision > x.revision || typeof r.changed !== "boolean") throw new Error("DM_DIPLOMACY_STORAGE_CORRUPT");
+      || r.revision > x.revision || typeof r.changed !== "boolean"
+      || (r.requesterUserId !== undefined && !isText(r.requesterUserId))) throw new Error("DM_DIPLOMACY_STORAGE_CORRUPT");
     ids.add(r.commandId);
   }
 }
@@ -111,7 +113,8 @@ export class DiplomacyEntityStore {
     if (entity?.kind !== "territory" || !isRecord(entity.data) || !isRecord(entity.data.territory)) return;
     for (const axis of ["locatedInUuid", "administrativeParentUuid"] as const) {
       const parent = JSON.stringify([axis, entity.data.territory[axis]]), index = this.#children.get(parent) ?? new Set<string>();
-      if (add) index.add(key); else index.delete(key); this.#children.set(parent, index);
+      if (add) index.add(key); else index.delete(key);
+      if (index.size) this.#children.set(parent, index); else this.#children.delete(parent);
     }
   }
   children(parentUuid: string | null, axis: "locatedInUuid" | "administrativeParentUuid"): readonly DiplomacyEntity[] {
@@ -128,7 +131,8 @@ export class DiplomacyEntityStore {
   async stage(entity: DiplomacyEntity): Promise<void> { await this.adapter.write(entity); }
   publish(entity: DiplomacyEntity): void { this.#index(entity); }
   async remove(kind: DiplomacyKind, id: string): Promise<void> {
-    await this.adapter.remove(kind, id); const key = diplomacyKey(kind, id); this.#entities.delete(key); this.#byKind.get(kind)?.delete(key);
+    await this.adapter.remove(kind, id); const key = diplomacyKey(kind, id);
+    this.#indexParents(this.#entities.get(key), key, false); this.#entities.delete(key); this.#byKind.get(kind)?.delete(key);
   }
 }
 export const diplomacyFingerprint = (type: string, payload: unknown) => canonicalJsonStringify({ type, payload });

@@ -114,33 +114,32 @@ export function resolveEffectiveCapacity(
     );
   }
 
-  let totalCapacity = baseCapacityMinor;
+  let exactCapacity = BigInt(baseCapacityMinor);
 
   for (const mod of modifiers) {
     // Only active modifiers contribute capacity (DEC-16824: broken source produces no ghost capacity)
     if (mod.active) {
-      totalCapacity += mod.deltaMinor;
+      if (!Number.isSafeInteger(mod.deltaMinor)) throw new Error("Capacity modifier must be a safe integer");
+      exactCapacity += BigInt(mod.deltaMinor);
     }
   }
 
   // Capacity cannot be negative
-  if (totalCapacity < 0) {
-    totalCapacity = 0;
-  }
-
-  if (!Number.isSafeInteger(totalCapacity)) {
-    throw new Error(
-      `Effective capacity overflowed safe integer bounds: ${totalCapacity}`
-    );
+  if (exactCapacity < 0n) {
+    exactCapacity = 0n;
   }
 
   let hardLimitClamped = false;
   if (resourceDef?.maximumMinor !== null && resourceDef?.maximumMinor !== undefined) {
-    if (totalCapacity > resourceDef.maximumMinor) {
-      totalCapacity = resourceDef.maximumMinor;
+    if (exactCapacity > BigInt(resourceDef.maximumMinor)) {
+      exactCapacity = BigInt(resourceDef.maximumMinor);
       hardLimitClamped = true;
     }
   }
+  if (exactCapacity > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error(`Effective capacity overflowed safe integer bounds: ${exactCapacity}`);
+  }
+  const totalCapacity = Number(exactCapacity);
 
   return {
     effectiveCapacityMinor: totalCapacity,
