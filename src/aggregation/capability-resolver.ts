@@ -15,8 +15,10 @@ import type {
   DomainEffectiveCapabilitiesReport,
   EffectiveCapability
 } from "./people-grants.js";
+import { AgreementCapabilityProvider, TerritoryRightCapabilityProvider, type DiplomacyCapabilityContext } from "./diplomacy-capability-providers.js";
 
 export interface CapabilityResolutionContext {
+  readonly diplomacy?: DiplomacyCapabilityContext;
   readonly domainUuid: string;
   readonly domainDoc?: DomainDocument;
   readonly domainRecord?: DomainRecord;
@@ -220,6 +222,8 @@ export function createDefaultCapabilityResolver(): CapabilityResolver {
   return new CapabilityResolver([
     new ExplicitDomainCapabilityProvider(),
     new PeopleRoleCapabilityProvider(),
-    new PeopleOperationalGroupCapabilityProvider()
+    new PeopleOperationalGroupCapabilityProvider(),
+    new AgreementCapabilityProvider(),
+    new TerritoryRightCapabilityProvider()
   ]);
 }

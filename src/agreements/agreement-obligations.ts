@@ -70,7 +70,7 @@ export interface AgreementObligation {
   readonly allegedBreach: boolean; readonly contested: boolean; readonly evidence: readonly ObligationEvidence[]; readonly events: readonly ObligationEvent[];
 }
 export interface AgreementState { readonly agreement: AgreementInstance; readonly obligations: readonly AgreementObligation[]; }
-function obligationTerm(a: AgreementInstance, o: AgreementObligation): AgreementTerm | undefined {
+export function obligationTerm(a: AgreementInstance, o: AgreementObligation): AgreementTerm | undefined {
   const terms = o.termsSource.kind === "amendment" ? a.amendments.find(x => x.id === o.termsSource.id)?.afterTerms
     : a.proposals.find(x => x.id === o.termsSource.id && x.lifecycle === "enacted")?.rounds.at(-1)?.terms;
   return terms?.find(t => t.id === o.termId && t.type === "domain-manager:obligation");

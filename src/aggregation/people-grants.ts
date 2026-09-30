@@ -12,9 +12,11 @@ import {
 
 export interface CapabilityGrantProvenance {
   readonly capabilityId: string;
-  readonly sourceType: "domain-explicit" | "role" | "operational-group";
+  readonly sourceType: "domain-explicit" | "role" | "operational-group" | "agreement" | "territory-right";
   readonly sourceId: string;
   readonly sourceLabel: string;
+  readonly scopeRef?: import("../core/identity/refs.js").TypedRef | null;
+  readonly inherited?: boolean;
 }
 
 export interface EffectiveCapability {

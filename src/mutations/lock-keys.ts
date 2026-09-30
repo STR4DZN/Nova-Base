@@ -8,6 +8,10 @@ import { canonicalizeLockKeys } from "./lock-manager.js";
  * Single source of truth for all lock namespaces across commands, plans, transaction records, and recovery.
  */
 export const lockKey = {
+  diplomacy(kind: string, id: string): string {
+    return `diplomacy:${kind}:${id}`;
+  },
+  territoryGraph(): string { return "territory-graph:world"; },
   domain(domainId: string): string {
     return `domain:${normalizeJournalEntryId(domainId)}`;
   },

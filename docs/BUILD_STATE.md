@@ -2,9 +2,9 @@
 
 ## Identidade
 
-- Module version: `0.0.6`
-- Gate de código atual: `G6.5 — Relations, Reputation e Agreements (modelos/contratos concluídos)`
-- Estado local: `GATE_G5_ACCEPTED_GATE_G6_IN_PROGRESS`
+- Module version: `0.0.7` (candidata G6; não homologada)
+- Gate de código atual: `G6 — auditoria do plano: núcleo implementado; cobertura normativa parcial e smoke Foundry pendente`
+- Estado local: `GATE_G6_PARTIAL_SPEC_COVERAGE_AUTOMATED_PASS`
 - Estado externo: `GATE_G5_ACCEPTED_GATE_G6_IN_PROGRESS`
 - Schema Domain: `1`
 - Data de conclusão do Gate G5: `2026-09-21`
@@ -17,7 +17,7 @@
 - **Gate G3**: Concluído, auditado, homologado e aceito soberanamente pelo usuário (`GATE_G3_HOMOLOGATED_AND_ACCEPTED`).
 - **Gate G4**: Concluído, auditado, homologado e aceito pelo usuário. Implementação completa de todos os 10 microbuilds (G4.1 a G4.10) de acordo com o Master Specification (§14, §11–12, §42, DEC-1416–2305) e `Documentos/GATES/14_G4_ECONOMY_RESOURCES.md`.
 - **Gate G5**: Concluído (G5.1 a G5.10 e remediações) e aceito pelo usuário em 2026-09-29 após declarar “rodei o .js que voce me mandou e todos os testes passaram” e autorizar a continuidade. Estado: `GATE_G5_ACCEPTED`. Evidência de smoke é reportada pelo usuário; logs separados de Player/F5/failover não foram fornecidos nem são inventados neste registro.
-- **Gate G6**: Em execução. **G6.1–G6.5** concluídos como modelos/contratos: relações, histórico/modificadores, reputação, propostas/acordos, obligations/evidence e direitos/grants derivados. Integração vertical ainda pendente. Autorização contínua do usuário até finalizar G6; registro em `docs/G6_EXECUTION_LOG.md`.
+- **Gate G6**: **núcleo dos quatro subsistemas implementado; G6.1–G6.9 não estão 100% completos contra todo o plano**. Auditoria integral: `docs/G6_FULL_SPEC_AUDIT.md`. Quatro bugs de unicidade, herança de right de tratado, acesso territorial restrito e projeção pública foram reproduzidos/corrigidos. **859/859 testes PASS**, TypeScript/build/package PASS. Permanecem lacunas de stance, templates, overview/UI, diagnostics/consumers, retry/status público, escala e dependências posteriores. Foundry/Player/F5/failover e sigilo do payload real pendentes. Não marcar `GATE_ACCEPTED`. G7 não iniciado.
   - **G5.1 (Project model / lifecycle — definition / instance / revision)**: Concluído. Separação formal de `ProjectDefinition` (reutilizável, versionada, catalogada em `ProjectDefinitionRegistry`) e `ProjectInstance` (execução concreta por domínio com `revision`, `workRequired`, `workCompleted`, `lifecycle`, `clampProgress`), cálculo puro de progresso inteiro derivado (`calculateProjectProgress` com clamp de goal por DEC-086, DEC-087, DEC-090), máquina de estados de ciclo de vida (`validateProjectLifecycleTransition` cobrindo os 11 estados canônicos de Master §15.4 e reabertura auditada via `allowReopen`), definições canônicas iniciais (`CANONICAL_PROJECT_DEFINITIONS`), e modelo de capacidade em domínio `domain-manager:projects` (`DomainProjectsData`, `tryGetDomainProjectsData`, `withDomainProjectsData`, `getDomainProjectsData`) validado e registrado no `CapabilityRegistry`.
   - **G5.2 (Progress / resolver / history)**: Concluído. Implementação do modelo de histórico append-oriented (`ProjectEntry`), validação estrita de fontes e metadados (`PROJECT_ENTRY_SOURCE_KINDS`), transição de estado pura (`applyProjectEntry`) com suporte a setbacks negativos (DEC-088) e clamp no objetivo por padrão (DEC-090), regras de compensação/reversão auditada (bloqueio de reversão dupla com `DM_PROJECT_REVERSAL_ALREADY_EXISTS` e proibição de reversão de reversão), contrato extensível de resolução pura de progresso (`ProgressResolver`), implementação padrão (`StandardProgressResolver` / `domain-manager:standard`) sem mutação da instância, e catálogo `ProgressResolverRegistry` com factory e suporte a congelamento (`freeze`).
   - **G5.3 (Start plan)**: Concluído. Implementação do modelo de plano pré-execução (`ProjectStartPlan`), avaliação desacoplada de pré-condições (`evaluateProjectStartPlan`) sem mutação direta de Domain/People/Economy, mapeamento de intenção de reservas econômicas (`ProjectEconomicReservationIntent`) para custos upfront e reserved, avaliação de workforce (`ProjectWorkforceIntent`) e requisitos estruturados (`ProjectRequirementEvaluation` com status satisfied/unsatisfied/unavailable/error), detecção e diagnóstico de blockers (`ProjectBlocker`: capacidade ausente, fundos insuficientes, requisitos insatisfeitos, ciclo de vida inválido e `DM_PROJECT_REVISION_MISMATCH`), e commit atômico (`commitProjectStartPlan`) com suporte aos estados `active` e `initializing`, incremento de revisão e geração de `ProjectEntry` inicial.
@@ -554,10 +554,10 @@
 
 ## Próxima ação canônica
 
-- **Gate G6 — Relations / Reputation / Agreements / Territory** em execução após aceitação do G5. Próxima microbuild: **G6.6 — Territory hierarchy**, conforme Master §21 e Rodada 08.
-- G6.1–G6.5 (modelos/contratos) concluídos e testados; continuar até G6.10 conforme autorização do usuário.
-- Gates G0–G5 aceitos pelo usuário; G6 inteiro ainda não está concluído.
-- Relatório desta etapa: `docs/G6_1_RELATION_MODEL_REPORT.md`.
+- **Gate G6 — Relations / Reputation / Agreements / Territory**, iniciado após a aceitação do G5: revisar a matriz de pendências de `docs/G6_FULL_SPEC_AUDIT.md` e completar a próxima microparte de G6. Em paralelo, testar o núcleo corrigido por `scripts/g6-foundry-smoke.js` e `docs/G6_FOUNDRY_SMOKE_GUIDE.md`. Smoke sem FAIL não fecha funcionalidades ausentes do plano.
+- Usuário autorizou upload em 2026-09-30, mas a revisão automática exige confirmação textual nomeando `STR4DZN/Nova-Base` e `feat/g6-continuous` como destino. Push rejeitado; nenhum commit enviado. Não criar release nem presumir homologação com esse upload.
+- Gates G0–G5 aceitos pelo usuário; G6 aguarda homologação real. **Não iniciar G7**.
+- O pacote G6 é candidato local, mantendo a versão de módulo `0.0.6`; não é uma nova release publicada no GitHub.
 
 
 
@@ -570,5 +570,5 @@
 - Proposals separadas dos termos ativos, rounds/snapshots, aceitações multiparty, amendments com antes/depois, renewal/expiry auditados.
 - Obligations separadas de compliance derivado; evidence/contest/alleged/confirmed; breach não encerra acordo.
 - Rights/capabilities derivadas por source effective/expiry/conditions; contratos de effects via CompositeMutationSession com locks, intenção prévia e recibo real.
-- G6.4: 11 testes PASS. G6.5: 10 testes PASS. TypeScript PASS. Ligação de adapters owners reais e recovery na etapa vertical pendente.
+- G6.4: 11 testes PASS. G6.5: 10 testes PASS. TypeScript PASS. Ligação do owner econômico real, comandos/persistência/recovery e testes verticais concluída em G6.9–G6.10.
 - Validação JSON de entidades duráveis permite histórico acima de 1000 itens e aliases serializáveis, rejeita ciclos; não altera limites de transporte de Commands.

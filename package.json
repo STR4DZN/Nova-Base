@@ -1,6 +1,6 @@
 {
   "name": "domain-manager",
-  "version": "0.0.6",
+  "version": "0.0.7",
   "private": true,
   "type": "module",
   "scripts": {
@@ -15,7 +15,8 @@
     "package:checkpoint": "node scripts/package-checkpoint.mjs",
     "validate:checkpoint": "node scripts/validate-g2-full.mjs",
     "package:g2-full": "node scripts/package-checkpoint.mjs",
-    "validate:g2-full": "node scripts/validate-g2-full.mjs"
+    "validate:g2-full": "node scripts/validate-g2-full.mjs",
+    "validate:release": "node scripts/validate-release.mjs"
   },
   "devDependencies": {
     "esbuild": "0.27.2",

@@ -2598,7 +2598,7 @@ function validateProjectEntry(raw) {
       label: typeof c.label === "string" ? c.label.trim() : void 0
     });
   }
-  const timestamp = typeof candidate.timestamp === "number" ? candidate.timestamp : Date.now();
+  const timestamp2 = typeof candidate.timestamp === "number" ? candidate.timestamp : Date.now();
   const validated = Object.freeze({
     id: candidate.id.trim(),
     projectId: candidate.projectId.trim(),
@@ -2612,7 +2612,7 @@ function validateProjectEntry(raw) {
     requestedByUserId: typeof candidate.requestedByUserId === "string" ? candidate.requestedByUserId.trim() : null,
     contributor,
     worldTime: typeof candidate.worldTime === "number" ? candidate.worldTime : null,
-    timestamp,
+    timestamp: timestamp2,
     reasonCode: candidate.reasonCode.trim(),
     note: typeof candidate.note === "string" ? candidate.note.trim() : void 0,
     reversesEntryId: typeof candidate.reversesEntryId === "string" ? candidate.reversesEntryId.trim() : null,
@@ -5729,6 +5729,9 @@ function checkPayloadJsonSafe(value, depth = 0, seen = /* @__PURE__ */ new WeakS
   }
   return { ok: false, reason: "not_json_safe" };
 }
+function isJsonSafe(value) {
+  return checkPayloadJsonSafe(value).ok;
+}
 function validateCommandEnvelope(input) {
   if (typeof input !== "object" || input === null || Array.isArray(input)) {
     return err(
@@ -8286,6 +8289,7 @@ var FoundryJournalTransactionStorageAdapter = class {
       return null;
     }
     this.#documentId = doc.id;
+    this.#assertPrivate(doc);
     const rawFlag = doc.flags?.[TRANSACTION_FLAG_NAMESPACE];
     if (!rawFlag || typeof rawFlag !== "object") {
       return null;
@@ -8300,6 +8304,7 @@ var FoundryJournalTransactionStorageAdapter = class {
     if (!doc) {
       const created = await this.#runtime.createJournalEntry({
         name: TRANSACTION_DOCUMENT_NAME,
+        ownership: { default: 0 },
         flags: {
           [TRANSACTION_FLAG_NAMESPACE]: snapshot
         }
@@ -8310,7 +8315,9 @@ var FoundryJournalTransactionStorageAdapter = class {
       return;
     }
     this.#documentId = doc.id;
+    this.#assertPrivate(doc);
     await doc.update({
+      ownership: { default: 0 },
       [`flags.${TRANSACTION_FLAG_NAMESPACE}`]: snapshot
     });
   }
@@ -8321,6 +8328,10 @@ var FoundryJournalTransactionStorageAdapter = class {
       if (doc) return doc;
     }
     return this.#runtime.journal.contents.find((d) => d.name === TRANSACTION_DOCUMENT_NAME);
+  }
+  #assertPrivate(doc) {
+    if (Object.entries(doc.ownership ?? {}).some(([id, level]) => Number(level) > 0 && !globalThis.game?.users?.get?.(id)?.isGM))
+      throw new Error("DM_TRANSACTION_STORAGE_NOT_PRIVATE");
   }
 };
 
@@ -8522,6 +8533,12 @@ var TransactionStore = class {
 
 // src/mutations/lock-keys.ts
 var lockKey = {
+  diplomacy(kind, id) {
+    return `diplomacy:${kind}:${id}`;
+  },
+  territoryGraph() {
+    return "territory-graph:world";
+  },
   domain(domainId) {
     return `domain:${normalizeJournalEntryId(domainId)}`;
   },
@@ -12441,6 +12458,1001 @@ function calculatePopulation(state, groups) {
   }
 }
 
+// src/core/validation/value-validation.ts
+var isRecord3 = (x) => !!x && typeof x === "object" && !Array.isArray(x) && [Object.prototype, null].includes(Object.getPrototypeOf(x));
+var isText = (x) => typeof x === "string" && !!x && x.trim() === x;
+var isSafeInteger = (x) => typeof x === "number" && Number.isSafeInteger(x);
+var isTimestamp = (x) => isSafeInteger(x) && x >= 0;
+var isNamespaced = (x) => isText(x) && /^[a-z0-9][a-z0-9._-]*:[a-z0-9][a-z0-9._-]*$/.test(x);
+var isVisibility = (x) => x === "public" || x === "restricted" || x === "secret";
+var isTypedRef = (x) => isRecord3(x) && isText(x.type) && (isText(x.id) && x.uuid === void 0 || isFoundryUuid(x.uuid) && x.id === void 0);
+function isJsonData(value, depth = 0, path = /* @__PURE__ */ new WeakSet()) {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (typeof value !== "object" || depth > 64 || !Array.isArray(value) && !isRecord3(value) || path.has(value)) return false;
+  path.add(value);
+  const valid = Object.values(value).every((x) => isJsonData(x, depth + 1, path));
+  path.delete(value);
+  return valid;
+}
+var failure = (code, message, category = "validation") => err(createPublicError({ code, category, message }));
+function immutable(value) {
+  if (value && typeof value === "object") {
+    Object.values(value).forEach(immutable);
+    Object.freeze(value);
+  }
+  return value;
+}
+function boundedInteger(value, minimum, maximum) {
+  return Number(value < BigInt(minimum) ? BigInt(minimum) : value > BigInt(maximum) ? BigInt(maximum) : value);
+}
+function revisionGuard(revision, expected) {
+  if (!isTimestamp(expected) || revision !== expected) return failure("DM_REVISION_CONFLICT", "Entity revision is stale", "conflict");
+  if (revision === Number.MAX_SAFE_INTEGER) return failure("DM_REVISION_OVERFLOW", "Entity revision cannot be incremented");
+  return null;
+}
+
+// src/relations/types/relation-types.ts
+var RELATION_SCHEMA_VERSION = 1;
+
+// src/relations/types/relation-validation.ts
+var object = (value) => !!value && typeof value === "object" && !Array.isArray(value) && [Object.prototype, null].includes(Object.getPrototypeOf(value));
+var text = (value) => typeof value === "string" && value.length > 0 && value.trim() === value;
+var namespaced = (value) => text(value) && /^[a-z0-9][a-z0-9._-]*:[a-z0-9][a-z0-9._-]*$/.test(value);
+var integer = (value) => typeof value === "number" && Number.isSafeInteger(value);
+var timestamp = (value) => integer(value) && value >= 0;
+var uniqueTexts = (value) => Array.isArray(value) && value.every(text) && new Set(value).size === value.length;
+var builtins = ["domain", "populationGroup", "operationalGroup", "notable", "actor", "narrative"];
+var partyType = (value) => text(value) && (builtins.includes(value) || namespaced(value));
+var invalid6 = (code, message) => err(createPublicError({ code, category: "validation", message }));
+function validateRelationDefinition(raw) {
+  if (!object(raw) || !namespaced(raw.id) || !integer(raw.version) || raw.version < 1 || !text(raw.label))
+    return invalid6("DM_RELATION_DEFINITION_INVALID", "Definition requires a namespaced ID, positive integer version and label");
+  if (raw.symmetry !== "symmetric" && raw.symmetry !== "asymmetric")
+    return invalid6("DM_RELATION_SYMMETRY_INVALID", "Relation symmetry must be symmetric or asymmetric");
+  if (!integer(raw.minParties) || raw.minParties < 2 || raw.maxParties !== null && (!integer(raw.maxParties) || raw.maxParties < raw.minParties))
+    return invalid6("DM_RELATION_PARTY_COUNT_INVALID", "Relation requires at least two parties and a valid optional maximum");
+  if (!uniqueTexts(raw.allowedPartyTypes) || !raw.allowedPartyTypes.length || !raw.allowedPartyTypes.every(partyType) || !uniqueTexts(raw.allowedPartyRoles) || !raw.allowedPartyRoles.length || typeof raw.allowMultiple !== "boolean")
+    return invalid6("DM_RELATION_DEFINITION_INVALID", "Party types/roles must be nonempty unique lists; allowMultiple must be boolean");
+  if (raw.stancePolicy !== "none" && raw.stancePolicy !== "manual" && raw.stancePolicy !== "derived" || !Array.isArray(raw.axes))
+    return invalid6("DM_RELATION_DEFINITION_INVALID", "Definition requires an explicit stance policy and axis list");
+  const axes = [], seen = /* @__PURE__ */ new Set();
+  for (const axis of raw.axes) {
+    if (!object(axis) || !namespaced(axis.id) || !text(axis.label) || !integer(axis.minimum) || !integer(axis.maximum) || axis.maximum < axis.minimum || !integer(axis.defaultValue) || axis.defaultValue < axis.minimum || axis.defaultValue > axis.maximum || seen.has(axis.id))
+      return invalid6("DM_RELATION_AXIS_DEFINITION_INVALID", "Axes require unique namespaced IDs and safe integer ranges/defaults");
+    seen.add(axis.id);
+    axes.push(Object.freeze({ id: axis.id, label: axis.label, minimum: axis.minimum, maximum: axis.maximum, defaultValue: axis.defaultValue }));
+  }
+  return ok(Object.freeze({
+    id: raw.id,
+    version: raw.version,
+    label: raw.label,
+    symmetry: raw.symmetry,
+    minParties: raw.minParties,
+    maxParties: raw.maxParties,
+    allowedPartyTypes: Object.freeze([...raw.allowedPartyTypes]),
+    allowedPartyRoles: Object.freeze([...raw.allowedPartyRoles]),
+    allowMultiple: raw.allowMultiple,
+    axes: Object.freeze(axes),
+    stancePolicy: raw.stancePolicy
+  }));
+}
+function validateScope(raw) {
+  if (raw === null) return ok(null);
+  if (!object(raw) || !text(raw.type) || text(raw.id) === text(raw.uuid) || raw.domainUuid !== void 0 || raw.id !== void 0 && !text(raw.id) || raw.uuid !== void 0 && !isFoundryUuid(raw.uuid))
+    return invalid6("DM_RELATION_SCOPE_INVALID", "Scope must be null or a typed reference with exactly one ID or document UUID");
+  return ok(Object.freeze({ type: raw.type, ...raw.id !== void 0 ? { id: raw.id } : { uuid: raw.uuid } }));
+}
+function validateRelationPartyRef(raw) {
+  if (!object(raw) || !partyType(raw.type))
+    return invalid6("DM_RELATION_PARTY_REF_INVALID", "Party type must be a supported entity type or namespaced integration type");
+  const type = raw.type;
+  const embedded = ["populationGroup", "operationalGroup", "notable"].includes(type);
+  if (embedded) {
+    if (!text(raw.id) || raw.uuid !== void 0 || !isJournalEntryUuid(raw.domainUuid))
+      return invalid6("DM_RELATION_PARTY_REF_INVALID", "People party requires local entity ID and owning Domain UUID");
+    return ok(Object.freeze({ type, id: raw.id, domainUuid: raw.domainUuid }));
+  }
+  if (raw.domainUuid !== void 0 || text(raw.id) === text(raw.uuid) || raw.id !== void 0 && !text(raw.id) || raw.uuid !== void 0 && !isFoundryUuid(raw.uuid))
+    return invalid6("DM_RELATION_PARTY_REF_INVALID", "Party requires exactly one valid ID or document UUID");
+  if (type === "domain" && !isJournalEntryUuid(raw.uuid) || type === "actor" && !isActorUuid(raw.uuid) || type === "narrative" && !text(raw.id) || typeof raw.uuid === "string" && raw.uuid.split(".").includes("User"))
+    return invalid6("DM_RELATION_PARTY_REF_INVALID", "Domain/Actor parties require matching UUIDs; narrative parties require stable IDs; Users are not parties");
+  return ok(Object.freeze({ type, ...raw.id !== void 0 ? { id: raw.id } : { uuid: raw.uuid } }));
+}
+function refKey(ref) {
+  return JSON.stringify([ref.type, ref.id ?? null, ref.uuid ?? null, "domainUuid" in ref ? ref.domainUuid : null]);
+}
+function validateRelationInstance(raw, definition) {
+  const def = validateRelationDefinition(definition);
+  if (!def.ok) return def;
+  if (!object(raw) || raw.schemaVersion !== RELATION_SCHEMA_VERSION || !isOpaqueId(raw.id, "rel") || raw.definitionId !== def.value.id || raw.definitionVersion !== def.value.version || !text(raw.label) || !integer(raw.revision) || raw.revision < 0)
+    return invalid6("DM_RELATION_INSTANCE_INVALID", "Instance requires schema 1, stable rel ID, exact definition version, label and nonnegative revision");
+  if (raw.lifecycle !== "active" && raw.lifecycle !== "ended")
+    return invalid6("DM_RELATION_LIFECYCLE_INVALID", "Relation lifecycle must be active or ended (DEC-104)");
+  if (!timestamp(raw.createdAt) || !timestamp(raw.updatedAt) || raw.updatedAt < raw.createdAt || (raw.lifecycle === "active" ? raw.endedAt !== null : !timestamp(raw.endedAt) || raw.endedAt < raw.createdAt || raw.endedAt > raw.updatedAt))
+    return invalid6("DM_RELATION_TIMESTAMP_INVALID", "Relation timestamps and endedAt must agree with lifecycle");
+  if (!Array.isArray(raw.parties) || raw.parties.length < def.value.minParties || def.value.maxParties !== null && raw.parties.length > def.value.maxParties)
+    return invalid6("DM_RELATION_PARTY_COUNT_INVALID", "Party count is outside this definition's range");
+  const parties = [], ids = /* @__PURE__ */ new Set(), refs = /* @__PURE__ */ new Set();
+  for (const party2 of raw.parties) {
+    if (!object(party2) || !text(party2.id) || ids.has(party2.id) || !text(party2.role) || !def.value.allowedPartyRoles.includes(party2.role))
+      return invalid6("DM_RELATION_PARTY_INVALID", "Parties require unique local IDs and definition-approved roles");
+    const ref = validateRelationPartyRef(party2.ref);
+    if (!ref.ok) return ref;
+    if (!def.value.allowedPartyTypes.includes(ref.value.type) || refs.has(refKey(ref.value)))
+      return invalid6("DM_RELATION_PARTY_INVALID", "Party type is not allowed or the same entity is repeated");
+    ids.add(party2.id);
+    refs.add(refKey(ref.value));
+    parties.push(Object.freeze({ id: party2.id, role: party2.role, ref: ref.value }));
+  }
+  const scope = validateScope(raw.scope);
+  if (!scope.ok) return scope;
+  if (!Array.isArray(raw.baseAxes)) return invalid6("DM_RELATION_AXIS_VALUE_INVALID", "Base axes must be a list");
+  const axes = new Map(def.value.axes.map((axis) => [axis.id, axis]));
+  const keys = /* @__PURE__ */ new Set(), baseAxes = [];
+  for (const score of raw.baseAxes) {
+    if (!object(score) || !text(score.axisId) || !integer(score.value))
+      return invalid6("DM_RELATION_AXIS_VALUE_INVALID", "Axis scores must be safe integers");
+    const axis = axes.get(score.axisId);
+    if (!axis || score.value < axis.minimum || score.value > axis.maximum)
+      return invalid6("DM_RELATION_AXIS_VALUE_INVALID", "Axis is unknown or score is out of definition range");
+    if (def.value.symmetry === "symmetric" ? score.fromPartyId !== null || score.toPartyId !== null : !text(score.fromPartyId) || !text(score.toPartyId) || score.fromPartyId === score.toPartyId || !ids.has(score.fromPartyId) || !ids.has(score.toPartyId))
+      return invalid6("DM_RELATION_AXIS_DIRECTION_INVALID", "Shared scores require null direction; directed scores require distinct existing parties");
+    const key = JSON.stringify([score.axisId, score.fromPartyId, score.toPartyId]);
+    if (keys.has(key)) return invalid6("DM_RELATION_AXIS_VALUE_INVALID", "Duplicate score for the same axis/direction");
+    keys.add(key);
+    baseAxes.push(Object.freeze({
+      axisId: score.axisId,
+      value: score.value,
+      fromPartyId: score.fromPartyId,
+      toPartyId: score.toPartyId
+    }));
+  }
+  if (raw.visibility !== "public" && raw.visibility !== "restricted" && raw.visibility !== "secret")
+    return invalid6("DM_RELATION_VISIBILITY_INVALID", "Relation visibility must be public, restricted or secret");
+  if (raw.stance !== void 0 && (def.value.stancePolicy !== "manual" || !text(raw.stance)))
+    return invalid6("DM_RELATION_STANCE_INVALID", "Only manual stance may be persisted; derived stance belongs to a read model");
+  return ok(Object.freeze({
+    schemaVersion: RELATION_SCHEMA_VERSION,
+    id: raw.id,
+    definitionId: def.value.id,
+    definitionVersion: def.value.version,
+    revision: raw.revision,
+    label: raw.label,
+    lifecycle: raw.lifecycle,
+    parties: Object.freeze(parties),
+    scope: scope.value,
+    baseAxes: Object.freeze(baseAxes),
+    visibility: raw.visibility,
+    ...raw.stance !== void 0 ? { stance: raw.stance } : {},
+    createdAt: raw.createdAt,
+    updatedAt: raw.updatedAt,
+    endedAt: raw.endedAt
+  }));
+}
+function validateRelationUniqueness(candidate, definition, existing) {
+  const validated = validateRelationInstance(candidate, definition);
+  if (!validated.ok) return validated;
+  if (existing.some((item) => item.id === candidate.id))
+    return err(createPublicError({ code: "DM_RELATION_DUPLICATE_ID", category: "conflict", message: "Relation ID already exists" }));
+  if (definition.allowMultiple || candidate.lifecycle === "ended") return ok(void 0);
+  const partyKey = (item) => JSON.stringify(item.parties.map((p) => refKey(p.ref)).sort());
+  if (existing.some((item) => item.lifecycle === "active" && item.definitionId === candidate.definitionId && partyKey(item) === partyKey(candidate) && (item.scope === null ? "" : refKey(item.scope)) === (candidate.scope === null ? "" : refKey(candidate.scope))))
+    return err(createPublicError({ code: "DM_RELATION_DUPLICATE_TYPE", category: "conflict", message: "Same relation type/parties/scope already active" }));
+  return ok(void 0);
+}
+
+// src/agreements/agreement-model.ts
+var AGREEMENT_LIFECYCLES = ["draft", "proposed", "pendingApproval", "active", "suspended", "breached", "expired", "terminated"];
+var AgreementTermRegistry = class {
+  #validators = /* @__PURE__ */ new Map();
+  #frozen = false;
+  constructor() {
+    this.#validators.set("domain-manager:narrative", () => ok(void 0));
+  }
+  register(id, validator) {
+    if (this.#frozen || this.#validators.has(id)) return failure("DM_AGREEMENT_TERM_REGISTRY_CONFLICT", "Term registry frozen or duplicate type", "conflict");
+    if (!isNamespaced(id) || typeof validator !== "function") return failure("DM_AGREEMENT_TERM_TYPE_INVALID", "Invalid term validator");
+    this.#validators.set(id, validator);
+    return ok(void 0);
+  }
+  validate(term) {
+    const validator = this.#validators.get(term.type);
+    return validator ? validator(term.payload, term.partyIds) : failure("DM_AGREEMENT_TERM_PROVIDER_UNAVAILABLE", "Term owner/validator unavailable", "not-found");
+  }
+  freeze() {
+    this.#frozen = true;
+  }
+};
+function validateAgreementDefinition(raw) {
+  if (!isRecord3(raw) || !isJsonData(raw) || !isNamespaced(raw.id) || !isTimestamp(raw.version) || raw.version < 1 || !isText(raw.label) || !isTimestamp(raw.minParties) || raw.minParties < 2 || raw.maxParties !== null && (!isTimestamp(raw.maxParties) || raw.maxParties < raw.minParties) || !Array.isArray(raw.allowedPartyRoles) || !raw.allowedPartyRoles.length || !raw.allowedPartyRoles.every(isText) || new Set(raw.allowedPartyRoles).size !== raw.allowedPartyRoles.length || !Array.isArray(raw.allowedTermTypes) || !raw.allowedTermTypes.length || !raw.allowedTermTypes.every(isNamespaced) || new Set(raw.allowedTermTypes).size !== raw.allowedTermTypes.length || typeof raw.amendmentRequiresApproval !== "boolean" || typeof raw.automaticRenewalAllowed !== "boolean" || !Array.isArray(raw.effectiveLifecycles) || !raw.effectiveLifecycles.includes("active") || raw.effectiveLifecycles.some((x) => x !== "active" && x !== "breached") || new Set(raw.effectiveLifecycles).size !== raw.effectiveLifecycles.length)
+    return failure("DM_AGREEMENT_DEFINITION_INVALID", "Invalid agreement definition, parties, term types or effectiveness policy");
+  return ok(immutable(structuredClone(raw)));
+}
+var validDuration = (x) => isRecord3(x) && (x.startsAtWorldTick === null || isTimestamp(x.startsAtWorldTick)) && (x.expiresAtWorldTick === null || isTimestamp(x.expiresAtWorldTick)) && (x.startsAtWorldTick === null || x.expiresAtWorldTick === null || x.expiresAtWorldTick > x.startsAtWorldTick);
+function validateTerms(raw, d, partyIds, registry) {
+  if (!Array.isArray(raw)) return failure("DM_AGREEMENT_TERMS_INVALID", "Terms must be an array");
+  const ids = /* @__PURE__ */ new Set();
+  for (const t of raw) {
+    if (!isRecord3(t) || !isText(t.id) || ids.has(t.id) || !d.allowedTermTypes.includes(t.type) || !isText(t.title) || t.text !== null && typeof t.text !== "string" || !isVisibility(t.visibility) || !isRecord3(t.payload) || !Array.isArray(t.partyIds) || t.partyIds.some((x) => !partyIds.includes(x)) || new Set(t.partyIds).size !== t.partyIds.length)
+      return failure("DM_AGREEMENT_TERM_INVALID", "Invalid term identity/type, party or payload");
+    const checked = registry.validate(t);
+    if (!checked.ok) return checked;
+    ids.add(t.id);
+  }
+  return ok(raw);
+}
+function validateAgreementInstance(raw, d, registry) {
+  const definition = validateAgreementDefinition(d);
+  if (!definition.ok) return definition;
+  if (!isRecord3(raw) || !isJsonData(raw) || raw.schemaVersion !== 1 || !isText(raw.id) || raw.definitionId !== d.id || raw.definitionVersion !== d.version || !isTimestamp(raw.revision) || !isText(raw.label) || !isVisibility(raw.visibility) || !AGREEMENT_LIFECYCLES.includes(raw.lifecycle) || !isTimestamp(raw.createdAt) || !isTimestamp(raw.updatedAt) || raw.updatedAt < raw.createdAt || !validDuration(raw.duration) || !Array.isArray(raw.parties) || raw.parties.length < d.minParties || d.maxParties !== null && raw.parties.length > d.maxParties || !Array.isArray(raw.proposals) || !Array.isArray(raw.amendments) || !Array.isArray(raw.events) || raw.supersedesId !== null && (!isText(raw.supersedesId) || raw.supersedesId === raw.id))
+    return failure("DM_AGREEMENT_INSTANCE_INVALID", "Invalid agreement identity, duration, parties, history or lifecycle");
+  const parties = /* @__PURE__ */ new Set(), refs = /* @__PURE__ */ new Set();
+  for (const p of raw.parties) {
+    if (!isRecord3(p) || !isText(p.id) || parties.has(p.id) || !d.allowedPartyRoles.includes(p.role))
+      return failure("DM_AGREEMENT_PARTY_INVALID", "Invalid or duplicate agreement party");
+    const ref = validateRelationPartyRef(p.ref);
+    if (!ref.ok) return ref;
+    const key = JSON.stringify([ref.value.type, ref.value.uuid ?? ref.value.id, ref.value.domainUuid ?? null]);
+    if (refs.has(key)) return failure("DM_AGREEMENT_PARTY_INVALID", "Party reference duplicated");
+    parties.add(p.id);
+    refs.add(key);
+  }
+  const ids = [...parties], terms = validateTerms(raw.terms, d, ids, registry);
+  if (!terms.ok) return terms;
+  const proposalIds = /* @__PURE__ */ new Set();
+  let open = 0;
+  for (const p of raw.proposals) {
+    if (!isRecord3(p) || !isText(p.id) || proposalIds.has(p.id) || !isTimestamp(p.revision) || p.purpose !== "initial" && p.purpose !== "amendment" || !["open", "accepted", "rejected", "expired", "enacted"].includes(p.lifecycle) || p.expiresAtWorldTick !== null && !isTimestamp(p.expiresAtWorldTick) || !Array.isArray(p.rounds) || !p.rounds.length)
+      return failure("DM_AGREEMENT_PROPOSAL_INVALID", "Invalid proposal identity/revision/lifecycle");
+    proposalIds.add(p.id);
+    if (p.lifecycle === "open" || p.lifecycle === "accepted") open++;
+    let lastAt2 = raw.createdAt;
+    for (let i = 0; i < p.rounds.length; i++) {
+      const r = p.rounds[i];
+      if (!isRecord3(r) || r.round !== i + 1 || !parties.has(r.offeredByPartyId) || !isTimestamp(r.at) || r.at < lastAt2 || r.at > raw.updatedAt || !validDuration(r.duration) || !Array.isArray(r.acceptedPartyIds) || !Array.isArray(r.rejectedPartyIds) || r.acceptedPartyIds.some((x) => !parties.has(x)) || r.rejectedPartyIds.some((x) => !parties.has(x)) || (/* @__PURE__ */ new Set([...r.acceptedPartyIds, ...r.rejectedPartyIds])).size !== r.acceptedPartyIds.length + r.rejectedPartyIds.length)
+        return failure("DM_AGREEMENT_ROUND_INVALID", "Invalid proposal snapshot, votes or chronology");
+      const checked = validateTerms(r.terms, d, ids, registry);
+      if (!checked.ok) return checked;
+      lastAt2 = r.at;
+    }
+    const final = p.rounds.at(-1);
+    if ((p.lifecycle === "accepted" || p.lifecycle === "enacted") && (final.acceptedPartyIds.length !== ids.length || final.rejectedPartyIds.length))
+      return failure("DM_AGREEMENT_PROPOSAL_INVALID", "Accepted proposal lacks unanimous acceptance");
+  }
+  if (open > 1) return failure("DM_AGREEMENT_PROPOSAL_CONFLICT", "Only one open amendment/proposal at a time");
+  const amendmentIds = /* @__PURE__ */ new Set();
+  for (const a of raw.amendments) {
+    if (!isRecord3(a) || !isText(a.id) || amendmentIds.has(a.id) || a.proposalId !== null && !proposalIds.has(a.proposalId) || !isTimestamp(a.appliedAt) || a.appliedAt < raw.createdAt || a.appliedAt > raw.updatedAt || !validDuration(a.beforeDuration) || !validDuration(a.afterDuration))
+      return failure("DM_AGREEMENT_AMENDMENT_INVALID", "Invalid amendment snapshot");
+    const before = validateTerms(a.beforeTerms, d, ids, registry), after = validateTerms(a.afterTerms, d, ids, registry);
+    if (!before.ok) return before;
+    if (!after.ok) return after;
+    amendmentIds.add(a.id);
+  }
+  const eventIds = /* @__PURE__ */ new Set();
+  let lastAt = raw.createdAt;
+  for (const e of raw.events) {
+    if (!isRecord3(e) || !isText(e.id) || eventIds.has(e.id) || !ACTION_KINDS.includes(e.kind) || !isText(e.reason) || !isTimestamp(e.at) || e.at < lastAt || e.at > raw.updatedAt || !isTimestamp(e.worldTick) || !Array.isArray(e.sourceRefs) || !e.sourceRefs.length || !e.sourceRefs.every(isTypedRef) || e.proposalId !== null && !proposalIds.has(e.proposalId) || e.proposalRound !== null && (!isTimestamp(e.proposalRound) || e.proposalRound < 1))
+      return failure("DM_AGREEMENT_EVENT_INVALID", "Invalid append-oriented agreement event");
+    eventIds.add(e.id);
+    lastAt = e.at;
+  }
+  return ok(immutable(structuredClone(raw)));
+}
+var ACTION_KINDS = ["propose", "amend", "counter", "accept", "reject", "activate", "suspend", "resume", "breach", "expire", "terminate", "expire-proposal", "renew"];
+function agreementIsEffective(a, d, worldTick) {
+  return isTimestamp(worldTick) && d.effectiveLifecycles.includes(a.lifecycle) && (a.duration.startsAtWorldTick === null || worldTick >= a.duration.startsAtWorldTick) && (a.duration.expiresAtWorldTick === null || worldTick < a.duration.expiresAtWorldTick);
+}
+function changeAgreement(a, d, registry, c, action) {
+  const valid = validateAgreementInstance(a, d, registry);
+  if (!valid.ok) return valid;
+  const stale = revisionGuard(a.revision, c.expectedRevision);
+  if (stale) return stale;
+  if (!isJsonSafe(action) || !isText(c.eventId) || a.events.some((e) => e.id === c.eventId) || !isTimestamp(c.at) || c.at < a.updatedAt || !isTimestamp(c.worldTick) || !isText(c.reason) || !c.sourceRefs.length || !c.sourceRefs.every(isTypedRef))
+    return failure("DM_AGREEMENT_CHANGE_INVALID", "Invalid command context or duplicate event");
+  let next = structuredClone(a), proposal;
+  if ("proposalId" in action && action.kind !== "propose" && action.kind !== "amend") {
+    proposal = a.proposals.find((p) => p.id === action.proposalId);
+    if (!proposal) return failure("DM_AGREEMENT_PROPOSAL_NOT_FOUND", "Proposal unavailable", "not-found");
+    const conflict = revisionGuard(proposal.revision, "expectedProposalRevision" in action ? action.expectedProposalRevision : -1);
+    if (conflict) return conflict;
+    if (action.kind !== "expire-proposal" && proposal.expiresAtWorldTick !== null && c.worldTick >= proposal.expiresAtWorldTick)
+      return failure("DM_AGREEMENT_PROPOSAL_EXPIRED", "Proposal is past its acceptance deadline", "conflict");
+  }
+  const setProposal = (p) => {
+    next = { ...next, proposals: next.proposals.map((x) => x.id === p.id ? p : x) };
+  };
+  if (action.kind === "propose" || action.kind === "amend") {
+    if (action.kind === "propose" && a.lifecycle !== "draft" || action.kind === "amend" && !["active", "breached", "suspended"].includes(a.lifecycle) || !isText(action.proposalId) || a.proposals.some((p) => p.id === action.proposalId || p.lifecycle === "open" || p.lifecycle === "accepted") || !a.parties.some((p) => p.id === action.partyId) || !validDuration(action.duration) || action.proposalExpiresAtWorldTick !== null && (!isTimestamp(action.proposalExpiresAtWorldTick) || action.proposalExpiresAtWorldTick <= c.worldTick))
+      return failure("DM_AGREEMENT_PROPOSAL_CONFLICT", "Invalid proposal, source lifecycle, party or deadline", "conflict");
+    const terms = validateTerms(action.terms, d, a.parties.map((p) => p.id), registry);
+    if (!terms.ok) return terms;
+    if (action.kind === "amend" && !d.amendmentRequiresApproval) {
+      if (!isText(action.amendmentId) || a.amendments.some((x) => x.id === action.amendmentId)) return failure("DM_AGREEMENT_AMENDMENT_INVALID", "Amendment requires unique audit ID");
+      next = { ...next, terms: action.terms, duration: action.duration, amendments: [...a.amendments, {
+        id: action.amendmentId,
+        proposalId: null,
+        beforeTerms: a.terms,
+        afterTerms: action.terms,
+        beforeDuration: a.duration,
+        afterDuration: action.duration,
+        appliedAt: c.at
+      }] };
+    } else next = { ...next, lifecycle: action.kind === "propose" ? "proposed" : a.lifecycle, proposals: [...a.proposals, {
+      id: action.proposalId,
+      revision: 0,
+      purpose: action.kind === "propose" ? "initial" : "amendment",
+      lifecycle: "open",
+      expiresAtWorldTick: action.proposalExpiresAtWorldTick,
+      rounds: [{
+        round: 1,
+        offeredByPartyId: action.partyId,
+        at: c.at,
+        terms: action.terms,
+        duration: action.duration,
+        acceptedPartyIds: [],
+        rejectedPartyIds: []
+      }]
+    }] };
+  } else if (action.kind === "counter") {
+    if (proposal.lifecycle !== "open" || !a.parties.some((p) => p.id === action.partyId) || !validDuration(action.duration))
+      return failure("DM_AGREEMENT_COUNTER_INVALID", "Counter requires an open proposal and valid party/duration");
+    const terms = validateTerms(action.terms, d, a.parties.map((p) => p.id), registry);
+    if (!terms.ok) return terms;
+    if (proposal.rounds.length === Number.MAX_SAFE_INTEGER) return failure("DM_AGREEMENT_ROUND_OVERFLOW", "Too many proposal rounds");
+    setProposal({ ...proposal, revision: proposal.revision + 1, rounds: [...proposal.rounds, {
+      round: proposal.rounds.length + 1,
+      terms: action.terms,
+      duration: action.duration,
+      offeredByPartyId: action.partyId,
+      at: c.at,
+      acceptedPartyIds: [],
+      rejectedPartyIds: []
+    }] });
+    if (proposal.purpose === "initial") next = { ...next, lifecycle: "proposed" };
+  } else if (action.kind === "accept" || action.kind === "reject") {
+    if (proposal.lifecycle !== "open" || !a.parties.some((p) => p.id === action.partyId)) return failure("DM_AGREEMENT_VOTE_INVALID", "Vote requires an open proposal and valid party");
+    const round = proposal.rounds.at(-1);
+    if (round.acceptedPartyIds.includes(action.partyId) || round.rejectedPartyIds.includes(action.partyId)) return ok(a);
+    const voted = {
+      ...round,
+      acceptedPartyIds: action.kind === "accept" ? [...round.acceptedPartyIds, action.partyId] : round.acceptedPartyIds,
+      rejectedPartyIds: action.kind === "reject" ? [...round.rejectedPartyIds, action.partyId] : round.rejectedPartyIds
+    };
+    setProposal({ ...proposal, revision: proposal.revision + 1, lifecycle: action.kind === "reject" ? "rejected" : voted.acceptedPartyIds.length === a.parties.length ? "accepted" : "open", rounds: [...proposal.rounds.slice(0, -1), voted] });
+    if (proposal.purpose === "initial") next = { ...next, lifecycle: action.kind === "reject" ? "draft" : "pendingApproval" };
+  } else if (action.kind === "activate") {
+    if (proposal.lifecycle !== "accepted" || (proposal.purpose === "initial" ? a.lifecycle !== "pendingApproval" : !["active", "breached", "suspended"].includes(a.lifecycle)))
+      return failure("DM_AGREEMENT_ACTIVATION_INVALID", "Agreement activation requires accepted current terms");
+    const round = proposal.rounds.at(-1), duration = { ...round.duration, startsAtWorldTick: round.duration.startsAtWorldTick ?? c.worldTick };
+    if (!validDuration(duration) || duration.expiresAtWorldTick !== null && duration.expiresAtWorldTick <= c.worldTick)
+      return failure("DM_AGREEMENT_ACTIVATION_INVALID", "Agreement duration has already expired");
+    if (proposal.purpose === "amendment") {
+      if (!isText(action.amendmentId) || a.amendments.some((x) => x.id === action.amendmentId)) return failure("DM_AGREEMENT_AMENDMENT_INVALID", "Amendment requires unique audit ID");
+      next = { ...next, amendments: [...a.amendments, {
+        id: action.amendmentId,
+        proposalId: proposal.id,
+        beforeTerms: a.terms,
+        afterTerms: round.terms,
+        beforeDuration: a.duration,
+        afterDuration: duration,
+        appliedAt: c.at
+      }] };
+    }
+    setProposal({ ...proposal, revision: proposal.revision + 1, lifecycle: "enacted" });
+    next = { ...next, lifecycle: proposal.purpose === "initial" ? "active" : a.lifecycle, terms: round.terms, duration };
+  } else if (action.kind === "expire-proposal") {
+    if (proposal.lifecycle === "expired") return ok(a);
+    if (!["open", "accepted"].includes(proposal.lifecycle) || proposal.expiresAtWorldTick === null || c.worldTick < proposal.expiresAtWorldTick)
+      return failure("DM_AGREEMENT_PROPOSAL_EXPIRY_INVALID", "Proposal expiry deadline not reached");
+    setProposal({ ...proposal, revision: proposal.revision + 1, lifecycle: "expired" });
+    if (proposal.purpose === "initial") next = { ...next, lifecycle: "draft" };
+  } else if (action.kind === "renew") {
+    if (!["active", "breached"].includes(a.lifecycle) || !isTimestamp(action.expiresAtWorldTick) || action.expiresAtWorldTick <= c.worldTick || a.duration.expiresAtWorldTick === null || action.expiresAtWorldTick <= a.duration.expiresAtWorldTick || action.automatic && !d.automaticRenewalAllowed) return failure("DM_AGREEMENT_RENEWAL_INVALID", "Renewal must extend a finite agreement under its policy");
+    next = { ...next, duration: { ...a.duration, expiresAtWorldTick: action.expiresAtWorldTick } };
+  } else {
+    const target = { suspend: "suspended", resume: "active", breach: "breached", expire: "expired", terminate: "terminated" }[action.kind];
+    if (!target) return failure("DM_AGREEMENT_ACTION_INVALID", "Unknown agreement operation");
+    if (a.lifecycle === target) return ok(a);
+    const allowed = {
+      suspend: ["active", "breached"],
+      resume: ["suspended", "breached"],
+      breach: ["active", "suspended"],
+      expire: ["active", "suspended", "breached"],
+      terminate: ["draft", "proposed", "pendingApproval", "active", "suspended", "breached"]
+    };
+    if (!allowed[action.kind]?.includes(a.lifecycle) || action.kind === "expire" && (a.duration.expiresAtWorldTick === null || c.worldTick < a.duration.expiresAtWorldTick))
+      return failure("DM_AGREEMENT_LIFECYCLE_INVALID", "Illegal lifecycle transition or expiry not due");
+    next = { ...next, lifecycle: target, proposals: ["expired", "terminated"].includes(target) ? next.proposals.map((p) => ["open", "accepted"].includes(p.lifecycle) ? { ...p, revision: p.revision + 1, lifecycle: "expired" } : p) : next.proposals };
+  }
+  const event2 = {
+    id: c.eventId,
+    kind: action.kind,
+    reason: c.reason,
+    at: c.at,
+    worldTick: c.worldTick,
+    sourceRefs: c.sourceRefs,
+    proposalId: "proposalId" in action && next.proposals.some((p) => p.id === action.proposalId) ? action.proposalId : null,
+    proposalRound: "proposalId" in action ? next.proposals.find((p) => p.id === action.proposalId)?.rounds.length ?? null : null
+  };
+  return validateAgreementInstance({ ...next, revision: a.revision + 1, updatedAt: c.at, events: [...a.events, event2] }, d, registry);
+}
+
+// src/agreements/agreement-obligations.ts
+var validOperations = (x) => Array.isArray(x) && new Set(x.map((o) => isRecord3(o) ? o.id : null)).size === x.length && x.every((o) => isRecord3(o) && isText(o.id) && isNamespaced(o.ownerId) && isNamespaced(o.operation) && Array.isArray(o.targetRefs) && o.targetRefs.length > 0 && o.targetRefs.every(isTypedRef) && isRecord3(o.payload) && isJsonData(o.payload));
+var conditionsValid = (x) => Array.isArray(x) && x.every(isTypedRef);
+var namespacedList = (x, allowEmpty = true) => Array.isArray(x) && (allowEmpty || x.length > 0) && x.every(isNamespaced) && new Set(x).size === x.length;
+function registerAgreementTermOwners(registry) {
+  const entries = [
+    ["domain-manager:obligation", (p, ids) => isNamespaced(p.kind) && ids.includes(p.obligatedPartyId) && (p.beneficiaryPartyId === null || ids.includes(p.beneficiaryPartyId)) && (p.dueAtWorldTick === null || isTimestamp(p.dueAtWorldTick)) && isTimestamp(p.graceTicks) && (p.overduePolicy === "report" || p.overduePolicy === "allege-breach") && isTypedRef(p.requirementRef) && validOperations(p.consequences)],
+    ["domain-manager:right", (p, ids) => ids.includes(p.beneficiaryPartyId) && isJournalEntryUuid(p.territoryUuid) && isNamespaced(p.rightType) && (p.startsAtWorldTick === null || isTimestamp(p.startsAtWorldTick)) && (p.expiresAtWorldTick === null || isTimestamp(p.expiresAtWorldTick)) && (p.startsAtWorldTick === null || p.expiresAtWorldTick === null || p.expiresAtWorldTick > p.startsAtWorldTick) && typeof p.inherited === "boolean" && typeof p.revocable === "boolean" && conditionsValid(p.conditionRefs) && namespacedList(p.grants)],
+    ["domain-manager:capability", (p, ids) => ids.includes(p.beneficiaryPartyId) && namespacedList(p.capabilityIds, false) && (p.scopeRef === null || isTypedRef(p.scopeRef)) && conditionsValid(p.conditionRefs)],
+    ["domain-manager:owner-operation", (p) => validOperations(p.operations)]
+  ];
+  for (const [id, validate] of entries) {
+    const r = registry.register(id, (p, ids) => validate(p, ids) ? ok(void 0) : failure("DM_AGREEMENT_TERM_PAYLOAD_INVALID", "Invalid structured term owner payload"));
+    if (!r.ok) return r;
+  }
+  return ok(void 0);
+}
+var OBLIGATION_LIFECYCLES = ["pending", "due", "satisfied", "waived", "breached", "expired", "cancelled"];
+function obligationTerm(a, o) {
+  const terms = o.termsSource.kind === "amendment" ? a.amendments.find((x) => x.id === o.termsSource.id)?.afterTerms : a.proposals.find((x) => x.id === o.termsSource.id && x.lifecycle === "enacted")?.rounds.at(-1)?.terms;
+  return terms?.find((t) => t.id === o.termId && t.type === "domain-manager:obligation");
+}
+var sameTerm = (a, b) => a !== void 0 && b !== void 0 && canonicalJsonStringify(a) === canonicalJsonStringify(b);
+function validateAgreementState(raw, d, registry) {
+  if (!isRecord3(raw) || !isJsonData(raw) || !Array.isArray(raw.obligations)) return failure("DM_AGREEMENT_STATE_INVALID", "Invalid agreement state envelope");
+  const a = validateAgreementInstance(raw.agreement, d, registry);
+  if (!a.ok) return a;
+  const ids = /* @__PURE__ */ new Set(), terms = /* @__PURE__ */ new Set();
+  for (const o of raw.obligations) {
+    if (!isRecord3(o) || !isText(o.id) || ids.has(o.id) || !isText(o.termId) || !isRecord3(o.termsSource) || o.termsSource.kind !== "proposal" && o.termsSource.kind !== "amendment" || !isText(o.termsSource.id) || terms.has(JSON.stringify([o.termId, o.termsSource])) || !obligationTerm(a.value, o) || !isTimestamp(o.revision) || !OBLIGATION_LIFECYCLES.includes(o.lifecycle) || typeof o.allegedBreach !== "boolean" || typeof o.contested !== "boolean" || !Array.isArray(o.evidence) || !Array.isArray(o.events)) return failure("DM_AGREEMENT_OBLIGATION_INVALID", "Invalid or orphan obligation");
+    const evidenceIds = /* @__PURE__ */ new Set();
+    for (const e of o.evidence) {
+      if (!isRecord3(e) || !isText(e.id) || evidenceIds.has(e.id) || !isTypedRef(e.ref) || !isText(e.statement) || !isVisibility(e.visibility) || e.position !== "support" && e.position !== "contest" || !isTimestamp(e.at) || e.at < a.value.createdAt || e.at > a.value.updatedAt)
+        return failure("DM_AGREEMENT_EVIDENCE_INVALID", "Invalid evidence source, identity, visibility or chronology");
+      evidenceIds.add(e.id);
+    }
+    const eventIds = /* @__PURE__ */ new Set();
+    let lifecycle = "pending", at = a.value.createdAt;
+    for (const e of o.events) {
+      if (!isRecord3(e) || !isText(e.id) || eventIds.has(e.id) || !["evidence", "allege", "contest", "decide"].includes(e.kind) || !isTimestamp(e.at) || e.at < at || e.at > a.value.updatedAt || !isTimestamp(e.worldTick) || !isText(e.reason) || !Array.isArray(e.sourceRefs) || !e.sourceRefs.length || !e.sourceRefs.every(isTypedRef) || e.before !== lifecycle || !OBLIGATION_LIFECYCLES.includes(e.after) || e.kind !== "decide" && e.before !== e.after || (e.kind === "evidence" ? !evidenceIds.has(e.evidenceId) : e.evidenceId !== null))
+        return failure("DM_AGREEMENT_OBLIGATION_HISTORY_INVALID", "Broken obligation event history");
+      eventIds.add(e.id);
+      lifecycle = e.after;
+      at = e.at;
+    }
+    if (lifecycle !== o.lifecycle || o.revision !== o.events.length) return failure("DM_AGREEMENT_OBLIGATION_HISTORY_INVALID", "Obligation state diverges from events");
+    ids.add(o.id);
+    terms.add(JSON.stringify([o.termId, o.termsSource]));
+  }
+  return ok(immutable(structuredClone(raw)));
+}
+function initializeAgreementObligations(a, existing = []) {
+  const amendment = a.amendments.at(-1), initial = a.proposals.find((p) => p.purpose === "initial" && p.lifecycle === "enacted");
+  const termsSource = amendment ? { kind: "amendment", id: amendment.id } : initial ? { kind: "proposal", id: initial.id } : null;
+  if (!termsSource) return existing;
+  const created = a.terms.filter((t) => t.type === "domain-manager:obligation" && !existing.some((o) => sameTerm(obligationTerm(a, o), t))).map((t) => ({
+    id: `${a.id}:${termsSource.id}:${t.id}`,
+    termId: t.id,
+    termsSource,
+    revision: 0,
+    lifecycle: "pending",
+    allegedBreach: false,
+    contested: false,
+    evidence: [],
+    events: []
+  }));
+  return immutable(structuredClone([...existing, ...created]));
+}
+function changeObligation(state, d, registry, obligationId, expectedObligationRevision, c, action) {
+  const valid = validateAgreementState(state, d, registry);
+  if (!valid.ok) return valid;
+  const a = state.agreement, stale = revisionGuard(a.revision, c.expectedRevision);
+  if (stale) return stale;
+  const o = state.obligations.find((x) => x.id === obligationId);
+  if (!o) return failure("DM_AGREEMENT_OBLIGATION_NOT_FOUND", "Obligation unavailable", "not-found");
+  const conflict = revisionGuard(o.revision, expectedObligationRevision);
+  if (conflict) return conflict;
+  if (!isText(c.eventId) || o.events.some((e) => e.id === c.eventId) || !isTimestamp(c.at) || c.at < a.updatedAt || !isTimestamp(c.worldTick) || !isText(c.reason) || !c.sourceRefs.length || !c.sourceRefs.every(isTypedRef) || !isJsonData(action))
+    return failure("DM_AGREEMENT_OBLIGATION_CHANGE_INVALID", "Invalid obligation mutation context");
+  let next = structuredClone(o);
+  if (action.kind === "evidence") {
+    if (o.evidence.some((e) => e.id === action.evidence.id) || action.evidence.at !== c.at) return failure("DM_AGREEMENT_EVIDENCE_INVALID", "Duplicate or mismatched evidence time");
+    next = { ...next, evidence: [...o.evidence, action.evidence], contested: o.contested || action.evidence.position === "contest" };
+  } else if (action.kind === "allege" || action.kind === "contest") {
+    if (action.kind === "allege" ? o.allegedBreach : o.contested) return ok(state);
+    next = { ...next, allegedBreach: o.allegedBreach || action.kind === "allege", contested: o.contested || action.kind === "contest" };
+  } else if (action.kind === "decide") {
+    if (!OBLIGATION_LIFECYCLES.includes(action.lifecycle)) return failure("DM_AGREEMENT_OBLIGATION_LIFECYCLE_INVALID", "Unknown obligation state");
+    if (o.lifecycle === action.lifecycle) return ok(state);
+    if (["satisfied", "waived", "expired", "cancelled"].includes(o.lifecycle)) return failure("DM_AGREEMENT_OBLIGATION_LIFECYCLE_INVALID", "Terminal obligation cannot be silently reopened");
+    next = { ...next, lifecycle: action.lifecycle, allegedBreach: action.lifecycle === "breached" ? true : o.allegedBreach, contested: false };
+  } else return failure("DM_AGREEMENT_OBLIGATION_CHANGE_INVALID", "Unknown obligation operation");
+  const event2 = {
+    id: c.eventId,
+    kind: action.kind,
+    at: c.at,
+    worldTick: c.worldTick,
+    reason: c.reason,
+    sourceRefs: c.sourceRefs,
+    before: o.lifecycle,
+    after: next.lifecycle,
+    evidenceId: action.kind === "evidence" ? action.evidence.id : null
+  };
+  next = { ...next, revision: o.revision + 1, events: [...o.events, event2] };
+  return validateAgreementState({
+    agreement: { ...a, revision: a.revision + 1, updatedAt: c.at },
+    obligations: state.obligations.map((x) => x.id === o.id ? next : x)
+  }, d, registry);
+}
+function resolveAgreementCompliance(state, worldTick) {
+  if (!isTimestamp(worldTick)) return failure("DM_AGREEMENT_COMPLIANCE_TIME_INVALID", "Compliance requires explicit world tick");
+  return ok(state.obligations.map((o) => {
+    const term = obligationTerm(state.agreement, o);
+    const applicable = state.agreement.terms.some((t) => sameTerm(t, term));
+    const p = applicable ? term?.payload : void 0;
+    const due = p?.dueAtWorldTick !== null && p?.dueAtWorldTick !== void 0 && worldTick >= p.dueAtWorldTick;
+    const pastGrace = !!due && BigInt(worldTick) > BigInt(p.dueAtWorldTick) + BigInt(p.graceTicks);
+    const pending = o.lifecycle === "pending" || o.lifecycle === "due";
+    return {
+      obligationId: o.id,
+      applicable,
+      lifecycle: pending && due ? "due" : o.lifecycle,
+      pastGrace,
+      allegedBreach: o.allegedBreach || pending && pastGrace && p?.overduePolicy === "allege-breach",
+      confirmedBreach: o.lifecycle === "breached",
+      contested: o.contested
+    };
+  }));
+}
+function resolveAgreementGrants(a, d, worldTick, conditionSatisfied, canSee) {
+  const rights = [], capabilities = [];
+  if (!canSee(a.visibility) || !agreementIsEffective(a, d, worldTick)) return { rights, capabilities };
+  for (const t of a.terms) {
+    if (!canSee(t.visibility)) continue;
+    if (t.type === "domain-manager:right") {
+      const p = t.payload, beneficiaryRef = a.parties.find((x) => x.id === p.beneficiaryPartyId)?.ref;
+      if (!beneficiaryRef || p.startsAtWorldTick !== null && worldTick < p.startsAtWorldTick || p.expiresAtWorldTick !== null && worldTick >= p.expiresAtWorldTick || !p.conditionRefs.every(conditionSatisfied)) continue;
+      rights.push({ id: `${a.id}:${t.id}`, agreementId: a.id, termId: t.id, beneficiaryRef, sourceVisibility: t.visibility, payload: p });
+      for (const capabilityId of p.grants) capabilities.push({
+        capabilityId,
+        agreementId: a.id,
+        termId: t.id,
+        beneficiaryRef,
+        scopeRef: { type: "territory", uuid: p.territoryUuid },
+        sourceVisibility: t.visibility
+      });
+    } else if (t.type === "domain-manager:capability") {
+      const p = t.payload, beneficiaryRef = a.parties.find((x) => x.id === p.beneficiaryPartyId)?.ref;
+      if (!beneficiaryRef || !p.conditionRefs.every(conditionSatisfied)) continue;
+      for (const capabilityId of p.capabilityIds) capabilities.push({
+        capabilityId,
+        agreementId: a.id,
+        termId: t.id,
+        beneficiaryRef,
+        scopeRef: p.scopeRef,
+        sourceVisibility: t.visibility
+      });
+    }
+  }
+  return { rights: immutable(structuredClone(rights)), capabilities: immutable(structuredClone(capabilities)) };
+}
+function collectAgreementOwnerOperations(a, d, worldTick) {
+  if (!agreementIsEffective(a, d, worldTick)) return [];
+  return immutable(structuredClone(a.terms.filter((t) => t.type === "domain-manager:owner-operation").flatMap((t) => t.payload.operations ?? [])));
+}
+
+// src/territory/territory-hierarchy.ts
+var parentsValid = (p) => isRecord3(p) && (p.locatedInUuid === null || isJournalEntryUuid(p.locatedInUuid)) && (p.administrativeParentUuid === null || isJournalEntryUuid(p.administrativeParentUuid));
+var sameParents = (a, b) => a.locatedInUuid === b.locatedInUuid && a.administrativeParentUuid === b.administrativeParentUuid;
+var parentsOf = (t) => ({ locatedInUuid: t.locatedInUuid, administrativeParentUuid: t.administrativeParentUuid });
+function validateTerritory(raw) {
+  if (!isRecord3(raw) || !isJsonData(raw) || raw.schemaVersion !== 1 || !isJournalEntryUuid(raw.uuid) || !isTimestamp(raw.revision) || !isText(raw.label) || !isNamespaced(raw.kind) || !isText(raw.scale) || !isVisibility(raw.visibility) || !parentsValid(raw) || raw.locatedInUuid === raw.uuid || raw.administrativeParentUuid === raw.uuid || !isTimestamp(raw.createdAt) || !isTimestamp(raw.updatedAt) || raw.updatedAt < raw.createdAt || !isRecord3(raw.geography) || !Array.isArray(raw.hierarchyHistory))
+    return failure("DM_TERRITORY_INVALID", "Invalid territory identity, hierarchy or metadata");
+  let before = null, at = raw.createdAt;
+  const ids = /* @__PURE__ */ new Set();
+  for (const e of raw.hierarchyHistory) {
+    if (!isRecord3(e) || !isText(e.id) || ids.has(e.id) || !isTimestamp(e.at) || e.at < at || e.at > raw.updatedAt || !isTimestamp(e.worldTick) || !isText(e.reason) || !Array.isArray(e.sourceRefs) || !e.sourceRefs.length || !e.sourceRefs.every(isTypedRef) || !parentsValid(e.before) || !parentsValid(e.after) || sameParents(e.before, e.after) || before !== null && !sameParents(before, e.before) || e.after.locatedInUuid === raw.uuid || e.after.administrativeParentUuid === raw.uuid)
+      return failure("DM_TERRITORY_HISTORY_INVALID", "Invalid hierarchy audit chain");
+    before = e.after;
+    at = e.at;
+    ids.add(e.id);
+  }
+  if (before !== null && !sameParents(before, raw)) return failure("DM_TERRITORY_HISTORY_INVALID", "Hierarchy differs from latest audited change");
+  if (raw.revision < raw.hierarchyHistory.length) return failure("DM_TERRITORY_HISTORY_INVALID", "Revision precedes hierarchy events");
+  return ok(immutable(structuredClone(raw)));
+}
+function validateTerritoryGraph(input) {
+  const nodes = /* @__PURE__ */ new Map();
+  for (const t of input) {
+    const valid = validateTerritory(t);
+    if (!valid.ok) return valid;
+    if (nodes.has(t.uuid)) return failure("DM_TERRITORY_DUPLICATE", "Duplicate spatial entity");
+    nodes.set(t.uuid, valid.value);
+  }
+  for (const axis of ["locatedInUuid", "administrativeParentUuid"]) {
+    const done = /* @__PURE__ */ new Set();
+    for (const t of nodes.values()) {
+      const path = /* @__PURE__ */ new Set();
+      let current = t;
+      while (current && !done.has(current.uuid)) {
+        if (path.has(current.uuid)) return failure("DM_TERRITORY_CYCLE", "Spatial or administrative hierarchy contains a cycle");
+        path.add(current.uuid);
+        const parent = current[axis];
+        if (parent !== null && !nodes.has(parent)) return failure("DM_TERRITORY_PARENT_MISSING", "Referenced parent is unavailable", "not-found");
+        current = parent === null ? void 0 : nodes.get(parent);
+      }
+      for (const uuid of path) done.add(uuid);
+    }
+  }
+  return ok(immutable([...nodes.values()]));
+}
+function territoryAncestors(graph, uuid, axis) {
+  const nodes = new Map(graph.map((t) => [t.uuid, t])), result = [], seen = /* @__PURE__ */ new Set([uuid]);
+  let node = nodes.get(uuid);
+  if (!node) return failure("DM_TERRITORY_NOT_FOUND", "Territory unavailable", "not-found");
+  while (node[axis] !== null) {
+    const parent = node[axis];
+    if (seen.has(parent)) return failure("DM_TERRITORY_CYCLE", "Hierarchy contains a cycle");
+    seen.add(parent);
+    result.push(parent);
+    node = nodes.get(parent);
+    if (!node) return failure("DM_TERRITORY_PARENT_MISSING", "Parent unavailable", "not-found");
+  }
+  return ok(result);
+}
+function previewTerritoryReparent(graph, uuid, after, c) {
+  const valid = validateTerritoryGraph(graph);
+  if (!valid.ok) return valid;
+  const t = graph.find((x) => x.uuid === uuid);
+  if (!t) return failure("DM_TERRITORY_NOT_FOUND", "Territory unavailable", "not-found");
+  const stale = revisionGuard(t.revision, c.expectedRevision);
+  if (stale) return stale;
+  if (!parentsValid(after) || !isText(c.eventId) || t.hierarchyHistory.some((e) => e.id === c.eventId) || !isTimestamp(c.at) || c.at < t.updatedAt || !isTimestamp(c.worldTick) || !isText(c.reason) || !Array.isArray(c.sourceRefs) || !c.sourceRefs.length || !c.sourceRefs.every(isTypedRef))
+    return failure("DM_TERRITORY_REPARENT_INVALID", "Reparent requires valid parents, revision and audit context");
+  const before = parentsOf(t), changed = !sameParents(before, after);
+  const next = changed ? {
+    ...t,
+    ...after,
+    revision: t.revision + 1,
+    updatedAt: c.at,
+    hierarchyHistory: [...t.hierarchyHistory, { id: c.eventId, at: c.at, worldTick: c.worldTick, reason: c.reason, sourceRefs: c.sourceRefs, before, after }]
+  } : t;
+  const check = validateTerritoryGraph(graph.map((x) => x.uuid === uuid ? next : x));
+  if (!check.ok) return check;
+  const descendants = (axis) => {
+    const children = /* @__PURE__ */ new Map();
+    for (const x of graph) if (x[axis] !== null) {
+      const siblings = children.get(x[axis]) ?? [];
+      siblings.push(x.uuid);
+      children.set(x[axis], siblings);
+    }
+    const found = [], queue = [...children.get(uuid) ?? []];
+    for (let i = 0; i < queue.length; i++) {
+      const child = queue[i];
+      found.push(child);
+      queue.push(...children.get(child) ?? []);
+    }
+    return found;
+  };
+  return ok(immutable(structuredClone({
+    territoryUuid: uuid,
+    before,
+    after,
+    context: c,
+    expectedRevisions: Object.fromEntries(graph.map((x) => [x.uuid, x.revision])),
+    affectedPhysicalDescendants: descendants("locatedInUuid"),
+    affectedAdministrativeDescendants: descendants("administrativeParentUuid"),
+    inheritedStateRequiresRecalculation: changed
+  })));
+}
+function commitTerritoryReparent(graph, plan) {
+  if (graph.length !== Object.keys(plan.expectedRevisions).length || graph.some((t2) => plan.expectedRevisions[t2.uuid] !== t2.revision))
+    return failure("DM_REVISION_CONFLICT", "Hierarchy changed after preview", "conflict");
+  const fresh = previewTerritoryReparent(graph, plan.territoryUuid, plan.after, plan.context);
+  if (!fresh.ok) return fresh;
+  const t = graph.find((x) => x.uuid === plan.territoryUuid);
+  if (sameParents(fresh.value.before, fresh.value.after)) return ok(graph);
+  const next = {
+    ...t,
+    ...plan.after,
+    revision: t.revision + 1,
+    updatedAt: plan.context.at,
+    hierarchyHistory: [...t.hierarchyHistory, {
+      id: plan.context.eventId,
+      at: plan.context.at,
+      worldTick: plan.context.worldTick,
+      reason: plan.context.reason,
+      sourceRefs: plan.context.sourceRefs,
+      before: fresh.value.before,
+      after: plan.after
+    }]
+  };
+  return validateTerritoryGraph(graph.map((x) => x.uuid === t.uuid ? next : x));
+}
+
+// src/territory/territory-state.ts
+var emptyTerritoryState = (territory) => ({ territory, claims: [], recognitions: [], presence: [], influence: [], rights: [], links: [], occupations: [], events: [] });
+function temporalSourceIsEffective(s, tick) {
+  return isTimestamp(tick) && tick >= s.startsAtWorldTick && (s.expiresAtWorldTick === null || tick < s.expiresAtWorldTick);
+}
+var sourceValid = (s) => isRecord3(s) && isText(s.id) && isTypedRef(s.sourceRef) && isVisibility(s.visibility) && isTimestamp(s.startsAtWorldTick) && (s.expiresAtWorldTick === null || isTimestamp(s.expiresAtWorldTick) && s.expiresAtWorldTick > s.startsAtWorldTick);
+var partyValid = (p) => validateRelationPartyRef(p).ok;
+var refList = (x) => Array.isArray(x) && x.every(isTypedRef);
+var textList = (x) => Array.isArray(x) && x.every(isText) && new Set(x).size === x.length;
+var nonnegativeOrNull = (x) => x === null || isTimestamp(x);
+var validators = {
+  claims: (x) => partyValid(x.claimantRef) && isNamespaced(x.claimType) && ["active", "ended", "superseded"].includes(x.lifecycle) && typeof x.contested === "boolean" && nonnegativeOrNull(x.strength) && typeof x.inherited === "boolean",
+  recognitions: (x) => isText(x.claimId) && partyValid(x.recognizingRef) && ["positive", "negative", "unknown"].includes(x.position),
+  presence: (x) => partyValid(x.partyRef) && isNamespaced(x.presenceType) && nonnegativeOrNull(x.amount) && typeof x.active === "boolean",
+  rights: (x) => partyValid(x.beneficiaryRef) && isNamespaced(x.rightType) && typeof x.inherited === "boolean" && typeof x.revocable === "boolean" && typeof x.active === "boolean" && refList(x.conditionRefs) && textList(x.grants) && x.grants.every(isNamespaced),
+  links: (x) => isJournalEntryUuid(x.targetTerritoryUuid) && isNamespaced(x.linkType) && ["both", "outbound", "inbound"].includes(x.direction) && ["operational", "limited", "closed", "destroyed"].includes(x.status) && nonnegativeOrNull(x.cost) && nonnegativeOrNull(x.capacity) && refList(x.dependencyRefs),
+  occupations: (x) => partyValid(x.occupierRef) && ["established", "contested", "stable", "withdrawing", "ended"].includes(x.lifecycle) && textList(x.presenceIds) && textList(x.controlClaimIds),
+  influence: (x) => {
+    if (!partyValid(x.partyRef) || typeof x.active !== "boolean" || !Array.isArray(x.axes) || !x.axes.length || !Array.isArray(x.modifiers)) return false;
+    const axes = /* @__PURE__ */ new Set();
+    for (const a of x.axes) {
+      if (!isRecord3(a) || !isNamespaced(a.axisId) || axes.has(a.axisId) || !isSafeInteger(a.minimum) || !isSafeInteger(a.maximum) || a.maximum < a.minimum || !isSafeInteger(a.base) || a.base < a.minimum || a.base > a.maximum) return false;
+      if (a.decay !== null && (!isRecord3(a.decay) || !isTimestamp(a.decay.amount) || !isTimestamp(a.decay.periodTicks) || a.decay.periodTicks < 1 || !isTimestamp(a.decay.fromWorldTick) || !isSafeInteger(a.decay.baseline) || a.decay.baseline < a.minimum || a.decay.baseline > a.maximum)) return false;
+      axes.add(a.axisId);
+    }
+    const ids = /* @__PURE__ */ new Set();
+    for (const m of x.modifiers) {
+      if (!sourceValid(m) || !isRecord3(m) || ids.has(m.id) || !axes.has(m.axisId) || !isSafeInteger(m.delta) || typeof m.active !== "boolean") return false;
+      ids.add(m.id);
+    }
+    return true;
+  }
+};
+function validateTerritoryState(raw) {
+  if (!isRecord3(raw) || !isJsonData(raw)) return failure("DM_TERRITORY_STATE_INVALID", "Territory state must be JSON data");
+  const t = validateTerritory(raw.territory);
+  if (!t.ok) return t;
+  for (const [key, validator] of Object.entries(validators)) {
+    const list = raw[key];
+    if (!Array.isArray(list)) return failure("DM_TERRITORY_STATE_INVALID", "Missing territorial source collection");
+    const ids2 = /* @__PURE__ */ new Set();
+    for (const value of list) {
+      if (!sourceValid(value) || !isRecord3(value) || ids2.has(value.id) || !validator(value))
+        return failure("DM_TERRITORY_SOURCE_INVALID", "Invalid territorial source or duplicate identity");
+      ids2.add(value.id);
+    }
+  }
+  const state = raw;
+  for (const r of state.recognitions) if (!state.claims.some((c) => c.id === r.claimId)) return failure("DM_TERRITORY_RECOGNITION_ORPHAN", "Recognition refers to an unavailable claim");
+  for (const o of state.occupations) if (o.presenceIds.some((id) => !state.presence.some((p) => p.id === id)) || o.controlClaimIds.some((id) => !state.claims.some((c) => c.id === id && c.claimType === "domain-manager:control")))
+    return failure("DM_TERRITORY_OCCUPATION_ORPHAN", "Occupation requires existing presence and control claims");
+  if (state.links.some((l) => l.targetTerritoryUuid === t.value.uuid)) return failure("DM_TERRITORY_LINK_INVALID", "A territory cannot link to itself");
+  if (!Array.isArray(raw.events)) return failure("DM_TERRITORY_HISTORY_INVALID", "Territory history must be a list");
+  const ids = /* @__PURE__ */ new Set();
+  let at = t.value.createdAt;
+  for (const e of state.events) {
+    if (!isRecord3(e) || !isText(e.id) || ids.has(e.id) || !isNamespaced(e.kind) || !isText(e.reason) || !isTimestamp(e.at) || e.at < at || e.at > t.value.updatedAt || !isTimestamp(e.worldTick) || !refList(e.sourceRefs) || !e.sourceRefs.length || !textList(e.targetIds) || !e.targetIds.length || e.before === void 0 || e.after === void 0)
+      return failure("DM_TERRITORY_HISTORY_INVALID", "Invalid territorial event audit");
+    at = e.at;
+    ids.add(e.id);
+  }
+  if (state.events.length + t.value.hierarchyHistory.length > t.value.revision) return failure("DM_TERRITORY_HISTORY_INVALID", "Territory revision precedes audited changes");
+  return ok(immutable(structuredClone(raw)));
+}
+var collectionFor = { claim: "claims", recognition: "recognitions", presence: "presence", influence: "influence", right: "rights", link: "links", occupation: "occupations" };
+function changeTerritoryState(s, c, action) {
+  const valid = validateTerritoryState(s);
+  if (!valid.ok) return valid;
+  const stale = revisionGuard(s.territory.revision, c.expectedRevision);
+  if (stale) return stale;
+  if (!isJsonData(action) || !isText(c.eventId) || s.events.some((e) => e.id === c.eventId) || s.territory.hierarchyHistory.some((e) => e.id === c.eventId) || !isTimestamp(c.at) || c.at < s.territory.updatedAt || !isTimestamp(c.worldTick) || !isText(c.reason) || !refList(c.sourceRefs) || !c.sourceRefs.length)
+    return failure("DM_TERRITORY_CHANGE_INVALID", "Invalid territorial audit context");
+  let next = structuredClone(s), before = null, after = null, id;
+  if ("value" in action) {
+    const collection = collectionFor[action.kind];
+    const list = s[collection];
+    if (!collection || !sourceValid(action.value) || list.some((x) => x.id === action.value.id)) return failure("DM_TERRITORY_SOURCE_INVALID", "Source ID already exists or malformed source");
+    id = action.value.id;
+    after = action.value;
+    next = { ...next, [collection]: [...list, action.value] };
+  } else {
+    id = action.id;
+    const collection = action.kind === "end-claim" || action.kind === "contest-claim" ? "claims" : action.kind === "revoke-right" ? "rights" : action.kind === "end-presence" ? "presence" : action.kind === "end-occupation" ? "occupations" : action.kind === "update-link" ? "links" : null;
+    if (!collection) return failure("DM_TERRITORY_CHANGE_INVALID", "Unknown territorial action");
+    const list = s[collection], target = list.find((x) => x.id === id);
+    if (!target) return failure("DM_TERRITORY_SOURCE_NOT_FOUND", "Territorial source unavailable", "not-found");
+    before = target;
+    if (action.kind === "end-claim") {
+      if (target.lifecycle === "superseded") return failure("DM_TERRITORY_CLAIM_TERMINAL", "Superseded claim history cannot be rewritten");
+      after = { ...target, lifecycle: "ended" };
+    } else if (action.kind === "contest-claim") {
+      if (target.lifecycle !== "active") return failure("DM_TERRITORY_CLAIM_TERMINAL", "Ended claim cannot be contested again");
+      after = { ...target, contested: true };
+    } else if (action.kind === "revoke-right") {
+      if (!target.revocable) return failure("DM_TERRITORY_RIGHT_NOT_REVOCABLE", "Right policy forbids revocation", "permission");
+      after = { ...target, active: false };
+    } else if (action.kind === "end-presence") after = { ...target, active: false };
+    else if (action.kind === "end-occupation") after = { ...target, lifecycle: "ended" };
+    else if (action.kind === "update-link") after = { ...target, status: action.status };
+    else return failure("DM_TERRITORY_CHANGE_INVALID", "Unknown territorial action");
+    if (JSON.stringify(before) === JSON.stringify(after)) return ok(s);
+    next = { ...next, [collection]: list.map((x) => x.id === id ? after : x) };
+  }
+  const event2 = {
+    id: c.eventId,
+    at: c.at,
+    worldTick: c.worldTick,
+    kind: `domain-manager:${action.kind}`,
+    reason: c.reason,
+    sourceRefs: c.sourceRefs,
+    targetIds: [id],
+    before,
+    after
+  };
+  return validateTerritoryState({ ...next, territory: { ...next.territory, revision: next.territory.revision + 1, updatedAt: c.at }, events: [...next.events, event2] });
+}
+function resolveTerritoryInfluence(s, tick, canSee) {
+  if (!isTimestamp(tick) || !canSee(s.territory.visibility)) return [];
+  return s.influence.filter((i) => i.active && temporalSourceIsEffective(i, tick) && canSee(i.visibility)).flatMap((i) => i.axes.map((a) => {
+    let base = BigInt(a.base);
+    if (a.decay !== null && tick >= a.decay.fromWorldTick) {
+      const n = (BigInt(tick) - BigInt(a.decay.fromWorldTick)) / BigInt(a.decay.periodTicks), amount = n * BigInt(a.decay.amount), baseline = BigInt(a.decay.baseline);
+      base = base > baseline ? base - amount < baseline ? baseline : base - amount : base + amount > baseline ? baseline : base + amount;
+    }
+    const modifiers = i.modifiers.filter((m) => m.active && m.axisId === a.axisId && temporalSourceIsEffective(m, tick) && canSee(m.visibility)).reduce((n, m) => n + BigInt(m.delta), 0n);
+    return {
+      influenceId: i.id,
+      partyRef: i.partyRef,
+      axisId: a.axisId,
+      base: a.base,
+      decay: boundedInteger(base - BigInt(a.base), Number.MIN_SAFE_INTEGER, Number.MAX_SAFE_INTEGER),
+      modifiers: boundedInteger(modifiers, Number.MIN_SAFE_INTEGER, Number.MAX_SAFE_INTEGER),
+      value: boundedInteger(base + modifiers, a.minimum, a.maximum)
+    };
+  }));
+}
+function projectTerritoryState(s, canSee) {
+  if (!canSee(s.territory.visibility)) return null;
+  const fields = {
+    claims: ["claimantRef", "claimType", "lifecycle", "contested", "strength", "inherited"],
+    recognitions: ["claimId", "recognizingRef", "position"],
+    presence: ["partyRef", "presenceType", "amount", "active"],
+    influence: ["partyRef", "active", "axes", "modifiers"],
+    rights: ["beneficiaryRef", "rightType", "inherited", "revocable", "active", "conditionRefs", "grants"],
+    links: ["targetTerritoryUuid", "linkType", "direction", "status", "cost", "capacity", "dependencyRefs"],
+    occupations: ["occupierRef", "lifecycle", "presenceIds", "controlClaimIds"],
+    modifiers: ["axisId", "delta", "active"]
+  };
+  const ref = (r) => ({ type: r.type, ...r.id !== void 0 ? { id: r.id } : {}, ...r.uuid !== void 0 ? { uuid: r.uuid } : {}, ...r.domainUuid !== void 0 ? { domainUuid: r.domainUuid } : {} });
+  const projectSource = (value, collection) => {
+    const row = value, projected = Object.fromEntries(["id", "sourceRef", "visibility", "startsAtWorldTick", "expiresAtWorldTick", ...fields[collection]].map((k) => [k, row[k]]));
+    for (const key of ["sourceRef", "claimantRef", "recognizingRef", "partyRef", "beneficiaryRef", "occupierRef"]) if (projected[key]) projected[key] = ref(projected[key]);
+    for (const key of ["conditionRefs", "dependencyRefs"]) if (Array.isArray(projected[key])) projected[key] = projected[key].map(ref);
+    return projected;
+  };
+  const claims = s.claims.filter((x) => canSee(x.visibility)).map((x) => projectSource(x, "claims")), claimIds = new Set(claims.map((c) => c.id));
+  const presence = s.presence.filter((x) => canSee(x.visibility)).map((x) => projectSource(x, "presence")), presenceIds = new Set(presence.map((p) => p.id));
+  const publicOnly = !canSee("secret") || !canSee("restricted");
+  return immutable(structuredClone({
+    territory: {
+      schemaVersion: s.territory.schemaVersion,
+      uuid: s.territory.uuid,
+      revision: s.territory.revision,
+      label: s.territory.label,
+      kind: s.territory.kind,
+      scale: s.territory.scale,
+      visibility: s.territory.visibility,
+      createdAt: s.territory.createdAt,
+      updatedAt: s.territory.updatedAt,
+      locatedInUuid: s.territory.locatedInUuid,
+      administrativeParentUuid: s.territory.administrativeParentUuid,
+      geography: publicOnly ? {} : s.territory.geography,
+      hierarchyHistory: publicOnly ? [] : s.territory.hierarchyHistory
+    },
+    claims,
+    recognitions: s.recognitions.filter((x) => claimIds.has(x.claimId) && canSee(x.visibility)).map((x) => projectSource(x, "recognitions")),
+    presence,
+    influence: s.influence.filter((x) => canSee(x.visibility)).map((x) => ({
+      ...projectSource(x, "influence"),
+      axes: x.axes.map((a) => ({
+        axisId: a.axisId,
+        base: a.base,
+        minimum: a.minimum,
+        maximum: a.maximum,
+        decay: a.decay === null ? null : { amount: a.decay.amount, periodTicks: a.decay.periodTicks, fromWorldTick: a.decay.fromWorldTick, baseline: a.decay.baseline }
+      })),
+      modifiers: x.modifiers.filter((m) => canSee(m.visibility)).map((m) => projectSource(m, "modifiers"))
+    })),
+    rights: s.rights.filter((x) => canSee(x.visibility)).map((x) => projectSource(x, "rights")),
+    links: s.links.filter((x) => canSee(x.visibility)).map((x) => projectSource(x, "links")),
+    occupations: s.occupations.filter((x) => canSee(x.visibility) && x.presenceIds.every((id) => presenceIds.has(id)) && x.controlClaimIds.every((id) => claimIds.has(id))).map((x) => projectSource(x, "occupations")),
+    events: publicOnly ? [] : s.events
+  }));
+}
+
+// src/territory/territory-rights.ts
+var samePartyRef = (a, b) => canonicalJsonStringify(a) === canonicalJsonStringify(b);
+function resolveTerritoryRights(states, territoryUuid, beneficiary, c) {
+  if (!isTimestamp(c.worldTick)) return failure("DM_TERRITORY_RIGHTS_TIME_INVALID", "Rights require an explicit world tick");
+  const target = states.find((s) => s.territory.uuid === territoryUuid);
+  if (!target) return failure("DM_TERRITORY_NOT_FOUND", "Right target unavailable", "not-found");
+  if (!c.canSee(target.territory.visibility)) return ok([]);
+  const ancestors = territoryAncestors(states.map((s) => s.territory), territoryUuid, c.inheritanceAxis);
+  if (!ancestors.ok) return ancestors;
+  const sources = [territoryUuid, ...ancestors.value], rights = [];
+  for (const uuid of sources) {
+    const state = states.find((s) => s.territory.uuid === uuid);
+    if (!c.canSee(state.territory.visibility)) continue;
+    for (const r of state.rights) {
+      if (!r.active || !temporalSourceIsEffective(r, c.worldTick) || !c.canSee(r.visibility) || !samePartyRef(r.beneficiaryRef, beneficiary) || uuid !== territoryUuid && !r.inherited || !r.conditionRefs.every(c.conditionSatisfied) || c.accessAllowed && !c.accessAllowed(r, territoryUuid)) continue;
+      rights.push({
+        sourceTerritoryUuid: uuid,
+        territoryUuid,
+        rightId: r.id,
+        beneficiaryRef: r.beneficiaryRef,
+        rightType: r.rightType,
+        inherited: uuid !== territoryUuid,
+        grants: r.grants
+      });
+    }
+  }
+  return ok(immutable(structuredClone(rights)));
+}
+
+// src/aggregation/diplomacy-capability-providers.ts
+var AgreementCapabilityProvider = class {
+  id = "agreement";
+  resolveGrants(context) {
+    const c = context.diplomacy;
+    if (!c || !isTimestamp(c.worldTick)) return [];
+    const ancestry = c.territoryUuid ? territoryAncestors(
+      c.territories.map((s) => s.territory),
+      c.territoryUuid,
+      c.inheritanceAxis ?? "locatedInUuid"
+    ) : null;
+    return c.agreements.flatMap(({ agreement, definition }) => {
+      const derived = resolveAgreementGrants(agreement, definition, c.worldTick, c.conditionSatisfied, c.canSee);
+      return derived.capabilities.flatMap((g) => {
+        if (!samePartyRef(g.beneficiaryRef, { type: "domain", uuid: context.domainUuid })) return [];
+        const right = derived.rights.find((r) => r.termId === g.termId), source = right ? c.territories.find((s) => s.territory.uuid === right.payload.territoryUuid) : null;
+        if (right && (!source || !c.canSee(source.territory.visibility))) return [];
+        const inherited = !!(right?.payload.inherited && ancestry?.ok && ancestry.value.includes(right.payload.territoryUuid));
+        const inScope = g.scopeRef === null || g.scopeRef.type === "territory" && (g.scopeRef.uuid === c.territoryUuid || inherited) || g.scopeRef.type === "domain" && g.scopeRef.uuid === context.domainUuid;
+        if (!inScope) return [];
+        return [{
+          capabilityId: g.capabilityId,
+          sourceType: "agreement",
+          sourceId: `${g.agreementId}:${g.termId}`,
+          sourceLabel: agreement.label,
+          scopeRef: inherited ? { type: "territory", uuid: c.territoryUuid } : g.scopeRef,
+          ...right ? { inherited } : {}
+        }];
+      });
+    });
+  }
+};
+var TerritoryRightCapabilityProvider = class {
+  id = "territory-right";
+  resolveGrants(context) {
+    const c = context.diplomacy;
+    if (!c || !c.territoryUuid || !isTimestamp(c.worldTick)) return [];
+    const result = resolveTerritoryRights(c.territories, c.territoryUuid, { type: "domain", uuid: context.domainUuid }, {
+      worldTick: c.worldTick,
+      canSee: c.canSee,
+      conditionSatisfied: c.conditionSatisfied,
+      inheritanceAxis: c.inheritanceAxis ?? "locatedInUuid"
+    });
+    if (!result.ok) return [];
+    return result.value.flatMap((r) => r.grants.map((capabilityId) => ({
+      capabilityId,
+      sourceType: "territory-right",
+      sourceId: `${r.sourceTerritoryUuid}:${r.rightId}`,
+      sourceLabel: r.rightType,
+      scopeRef: { type: "territory", uuid: r.territoryUuid },
+      inherited: r.inherited
+    })));
+  }
+};
+
 // src/aggregation/capability-resolver.ts
 var ExplicitDomainCapabilityProvider = class {
   id = "domain-explicit";
@@ -12597,7 +13609,9 @@ function createDefaultCapabilityResolver() {
   return new CapabilityResolver([
     new ExplicitDomainCapabilityProvider(),
     new PeopleRoleCapabilityProvider(),
-    new PeopleOperationalGroupCapabilityProvider()
+    new PeopleOperationalGroupCapabilityProvider(),
+    new AgreementCapabilityProvider(),
+    new TerritoryRightCapabilityProvider()
   ]);
 }
 
@@ -14196,23 +15210,23 @@ function createMockElement(tagName, props = {}) {
       listeners[type] = listeners[type] ?? [];
       listeners[type].push(listener);
     },
-    dispatchEvent(event) {
-      event.target = element;
+    dispatchEvent(event2) {
+      event2.target = element;
       let defaultPrevented = false;
-      if (!event.preventDefault) {
-        event.preventDefault = () => {
+      if (!event2.preventDefault) {
+        event2.preventDefault = () => {
           defaultPrevented = true;
         };
       }
       let curr = element;
       while (curr) {
-        const handlers = curr._listeners?.[event.type] ?? [];
+        const handlers = curr._listeners?.[event2.type] ?? [];
         for (const h of handlers) {
-          h(event);
+          h(event2);
         }
         curr = curr.parent;
       }
-      if (!defaultPrevented && event.type === "click") {
+      if (!defaultPrevented && event2.type === "click") {
         const isBtn = element.tagName === "BUTTON" || element.tagName === "INPUT" && attributes.type === "submit";
         const btnType = attributes.type ?? (element.tagName === "BUTTON" ? "submit" : "button");
         if (isBtn && btnType === "submit") {
@@ -14224,23 +15238,23 @@ function createMockElement(tagName, props = {}) {
       }
       return true;
     },
-    async dispatchEventAsync(event) {
-      event.target = element;
+    async dispatchEventAsync(event2) {
+      event2.target = element;
       let defaultPrevented = false;
-      if (!event.preventDefault) {
-        event.preventDefault = () => {
+      if (!event2.preventDefault) {
+        event2.preventDefault = () => {
           defaultPrevented = true;
         };
       }
       let curr = element;
       while (curr) {
-        const handlers = curr._listeners?.[event.type] ?? [];
+        const handlers = curr._listeners?.[event2.type] ?? [];
         for (const h of handlers) {
-          await h(event);
+          await h(event2);
         }
         curr = curr.parent;
       }
-      if (!defaultPrevented && event.type === "click") {
+      if (!defaultPrevented && event2.type === "click") {
         const isBtn = element.tagName === "BUTTON" || element.tagName === "INPUT" && attributes.type === "submit";
         const btnType = attributes.type ?? (element.tagName === "BUTTON" ? "submit" : "button");
         if (isBtn && btnType === "submit") {
@@ -14352,14 +15366,14 @@ var BaseApp = globalThis.foundry?.applications?.api?.ApplicationV2 ?? class Mock
   _attachActionListeners(element) {
     if (!element || element.__actionsBound) return;
     element.__actionsBound = true;
-    const actions = this.constructor.DEFAULT_OPTIONS?.actions ?? {};
-    element.addEventListener("click", async (event) => {
-      const actionEl = event.target?.closest?.("[data-action]");
+    const actions2 = this.constructor.DEFAULT_OPTIONS?.actions ?? {};
+    element.addEventListener("click", async (event2) => {
+      const actionEl = event2.target?.closest?.("[data-action]");
       if (!actionEl) return;
       const actionName = actionEl.getAttribute?.("data-action");
-      if (actionName && typeof actions[actionName] === "function") {
-        event.preventDefault?.();
-        await actions[actionName].call(this, event, actionEl);
+      if (actionName && typeof actions2[actionName] === "function") {
+        event2.preventDefault?.();
+        await actions2[actionName].call(this, event2, actionEl);
       }
     });
   }
@@ -14452,9 +15466,9 @@ var PeopleApplication = class _PeopleApplication extends BaseApp {
     forms.forEach((form) => {
       if (form.__submitBound) return;
       form.__submitBound = true;
-      form.addEventListener?.("submit", async (event) => {
-        event.preventDefault?.();
-        await _PeopleApplication.#onSubmitCreate.call(this, event, form);
+      form.addEventListener?.("submit", async (event2) => {
+        event2.preventDefault?.();
+        await _PeopleApplication.#onSubmitCreate.call(this, event2, form);
       });
     });
   }
@@ -14483,7 +15497,7 @@ var PeopleApplication = class _PeopleApplication extends BaseApp {
     }
     return modal;
   }
-  static async #onSelectTab(event, target) {
+  static async #onSelectTab(event2, target) {
     const tab = target.getAttribute?.("data-tab");
     if (tab) {
       this.#controller.selectTab(tab);
@@ -14491,7 +15505,7 @@ var PeopleApplication = class _PeopleApplication extends BaseApp {
       await this.render?.();
     }
   }
-  static async #onSelectEntity(event, target) {
+  static async #onSelectEntity(event2, target) {
     const type = target.getAttribute?.("data-entity-type");
     const id = target.getAttribute?.("data-entity-id");
     if (type && id) {
@@ -14500,16 +15514,16 @@ var PeopleApplication = class _PeopleApplication extends BaseApp {
       await this.render?.();
     }
   }
-  static async #onOpenCreateModal(event, target) {
+  static async #onOpenCreateModal(event2, target) {
     const createType = target.getAttribute?.("data-create-type") ?? this.#controller.activeTab;
     this.openCreateModal(createType);
   }
-  static async #onCloseModal(event, target) {
-    event?.preventDefault?.();
+  static async #onCloseModal(event2, target) {
+    event2?.preventDefault?.();
     this.closeModal();
   }
-  static async #onSubmitCreate(event, target) {
-    event?.preventDefault?.();
+  static async #onSubmitCreate(event2, target) {
+    event2?.preventDefault?.();
     const form = target.tagName === "FORM" ? target : target.closest?.("form");
     if (!form) return;
     const createType = form.getAttribute?.("data-create-type") ?? target.getAttribute?.("data-create-type") ?? "";
@@ -14927,8 +15941,8 @@ var G2DiagnosticsProvider = class {
 
 // src/core/versioning/build-metadata.ts
 var BUILD_METADATA = Object.freeze({
-  moduleVersion: "0.0.6",
-  buildChannel: "dev",
+  moduleVersion: "0.0.7",
+  buildChannel: "g6-candidate",
   target: "foundry-vtt"
 });
 
@@ -16105,11 +17119,11 @@ var ReservationStore = class {
     });
   }
   #recordEvent(eventParams) {
-    const event = {
+    const event2 = {
       id: createOpaqueId("reve"),
       ...eventParams
     };
-    this.#events.push(event);
+    this.#events.push(event2);
   }
   async #persist() {
     if (!this.#storageAdapter) return;
@@ -22716,7 +23730,7 @@ function commitProjectStartPlan(plan, project, options) {
       })
     );
   }
-  const timestamp = options?.timestamp ?? Date.now();
+  const timestamp2 = options?.timestamp ?? Date.now();
   const sequence = (project.entries?.length ?? 0) + 1;
   const startEntry = {
     id: createOpaqueId("prj"),
@@ -22729,7 +23743,7 @@ function commitProjectStartPlan(plan, project, options) {
     sourceKind: "command",
     reasonCode: "PROJECT_STARTED",
     requestedByUserId: options?.userId ?? null,
-    timestamp,
+    timestamp: timestamp2,
     note: `Project transitioned from '${project.lifecycle}' to '${plan.targetLifecycle}' via plan ${plan.planId}`
   };
   const transitioningProject = {
@@ -30717,6 +31731,2529 @@ var DefaultTransactionalChildHandlerRegistry = class {
   }
 };
 
+// src/diplomacy/diplomacy-store.ts
+var DIPLOMACY_FLAG = "domain-manager-diplomacy";
+var DIPLOMACY_KINDS = ["relation", "reputation", "agreement", "territory", "dispute", "proposal"];
+var diplomacyKey = (kind, id) => JSON.stringify([kind, id]);
+function assertDiplomacyEntity(x) {
+  if (!isRecord3(x) || !isJsonData(x) || x.schemaVersion !== 1 || !DIPLOMACY_KINDS.includes(x.kind) || !isText(x.id) || !isTimestamp(x.revision) || !Array.isArray(x.receipts)) throw new Error("DM_DIPLOMACY_STORAGE_CORRUPT");
+  const ids = /* @__PURE__ */ new Set();
+  for (const r of x.receipts) {
+    if (!isRecord3(r) || !isText(r.commandId) || ids.has(r.commandId) || !isText(r.fingerprint) || !isTimestamp(r.revision) || r.revision > x.revision || typeof r.changed !== "boolean") throw new Error("DM_DIPLOMACY_STORAGE_CORRUPT");
+    ids.add(r.commandId);
+  }
+}
+var FoundryDiplomacyStorageAdapter = class {
+  constructor(host) {
+    this.host = host;
+  }
+  #documents = /* @__PURE__ */ new Map();
+  #host() {
+    if (this.host) return this.host;
+    const globals = globalThis;
+    return globals.game?.journal && globals.JournalEntry?.create ? { journal: globals.game.journal, create: (d, o) => globals.JournalEntry.create(d, o) } : void 0;
+  }
+  #record(doc) {
+    const e = doc.flags?.[DIPLOMACY_FLAG];
+    assertDiplomacyEntity(e);
+    if (Object.entries(doc.ownership ?? {}).some(([id, level]) => level > 0 && !globalThis.game?.users?.get?.(id)?.isGM))
+      throw new Error("DM_DIPLOMACY_STORAGE_NOT_PRIVATE");
+    return e;
+  }
+  async loadAll() {
+    this.#documents.clear();
+    const result = [];
+    for (const doc of this.#host()?.journal.contents ?? []) {
+      if (!doc.flags?.[DIPLOMACY_FLAG]) continue;
+      const e = this.#record(doc), key = diplomacyKey(e.kind, e.id);
+      if (this.#documents.has(key)) throw new Error("DM_DIPLOMACY_STORAGE_DUPLICATE");
+      this.#documents.set(key, doc);
+      result.push(structuredClone(e));
+    }
+    return result;
+  }
+  async read(kind, id) {
+    const key = diplomacyKey(kind, id);
+    let doc = this.#documents.get(key);
+    if (doc && this.#host()?.journal.get && this.#host().journal.get(doc.id) !== doc) {
+      this.#documents.delete(key);
+      doc = void 0;
+    }
+    if (!doc) doc = this.#host()?.journal.contents.find((d) => {
+      const e = d.flags?.[DIPLOMACY_FLAG];
+      return e?.kind === kind && e.id === id;
+    });
+    if (!doc) return null;
+    this.#documents.set(key, doc);
+    return structuredClone(this.#record(doc));
+  }
+  async write(entity) {
+    assertDiplomacyEntity(entity);
+    const host = this.#host();
+    if (!host) throw new Error("DM_DIPLOMACY_STORAGE_UNAVAILABLE");
+    const key = diplomacyKey(entity.kind, entity.id), current = await this.read(entity.kind, entity.id), doc = this.#documents.get(key);
+    const data = { name: "[Domain Manager] Diplomacy", ownership: { default: 0 }, flags: { [DIPLOMACY_FLAG]: structuredClone(entity) } };
+    if (current && doc) await doc.update({ [`flags.${DIPLOMACY_FLAG}`]: entity, ownership: { default: 0 } });
+    else {
+      const territoryId = entity.kind === "territory" && /^JournalEntry\.[a-zA-Z0-9]{16}$/.test(entity.id) ? entity.id.slice(13) : null;
+      if (entity.kind === "territory" && territoryId === null) throw new Error("DM_TERRITORY_DOCUMENT_ID_INVALID");
+      const created = await host.create({ ...data, ...territoryId ? { _id: territoryId } : {} }, { keepId: !!territoryId });
+      this.#documents.set(key, created);
+    }
+  }
+  async remove(kind, id) {
+    const current = await this.read(kind, id);
+    if (!current) return;
+    const key = diplomacyKey(kind, id), doc = this.#documents.get(key);
+    if (doc) await doc.delete();
+    this.#documents.delete(key);
+  }
+};
+var DiplomacyEntityStore = class {
+  constructor(adapter) {
+    this.adapter = adapter;
+  }
+  #entities = /* @__PURE__ */ new Map();
+  #byKind = /* @__PURE__ */ new Map();
+  #children = /* @__PURE__ */ new Map();
+  async rehydrate() {
+    const rows = await this.adapter.loadAll();
+    this.#entities.clear();
+    this.#byKind.clear();
+    this.#children.clear();
+    for (const e of rows) {
+      assertDiplomacyEntity(e);
+      const key = diplomacyKey(e.kind, e.id);
+      if (this.#entities.has(key)) throw new Error("DM_DIPLOMACY_STORAGE_DUPLICATE");
+      this.#index(e);
+    }
+  }
+  #index(entity) {
+    const key = diplomacyKey(entity.kind, entity.id), old = this.#entities.get(key);
+    this.#indexParents(old, key, false);
+    this.#indexParents(entity, key, true);
+    this.#entities.set(key, immutable(structuredClone(entity)));
+    const kind = this.#byKind.get(entity.kind) ?? /* @__PURE__ */ new Set();
+    kind.add(key);
+    this.#byKind.set(entity.kind, kind);
+  }
+  #indexParents(entity, key, add) {
+    if (entity?.kind !== "territory" || !isRecord3(entity.data) || !isRecord3(entity.data.territory)) return;
+    for (const axis of ["locatedInUuid", "administrativeParentUuid"]) {
+      const parent = JSON.stringify([axis, entity.data.territory[axis]]), index = this.#children.get(parent) ?? /* @__PURE__ */ new Set();
+      if (add) index.add(key);
+      else index.delete(key);
+      this.#children.set(parent, index);
+    }
+  }
+  children(parentUuid, axis) {
+    return [...this.#children.get(JSON.stringify([axis, parentUuid])) ?? []].map((key) => this.#entities.get(key)).filter(Boolean);
+  }
+  list(kind) {
+    return [...this.#byKind.get(kind) ?? []].map((k) => this.#entities.get(k));
+  }
+  get(kind, id) {
+    return this.#entities.get(diplomacyKey(kind, id)) ?? null;
+  }
+  async freshRead(kind, id) {
+    const e = await this.adapter.read(kind, id);
+    if (e) {
+      assertDiplomacyEntity(e);
+      this.#index(e);
+    } else {
+      const key = diplomacyKey(kind, id);
+      this.#indexParents(this.#entities.get(key), key, false);
+      this.#entities.delete(key);
+      this.#byKind.get(kind)?.delete(key);
+    }
+    return e;
+  }
+  async save(entity) {
+    await this.adapter.write(entity);
+    this.#index(entity);
+  }
+  async stage(entity) {
+    await this.adapter.write(entity);
+  }
+  publish(entity) {
+    this.#index(entity);
+  }
+  async remove(kind, id) {
+    await this.adapter.remove(kind, id);
+    const key = diplomacyKey(kind, id);
+    this.#entities.delete(key);
+    this.#byKind.get(kind)?.delete(key);
+  }
+};
+var diplomacyFingerprint = (type, payload) => canonicalJsonStringify({ type, payload });
+
+// src/diplomacy/owner-contract.ts
+var historyWindow = (items, c) => items.slice(c.historyOffset, c.historyOffset + c.historyLimit);
+
+// src/relations/relation-history.ts
+var refValid = (ref) => isRecord3(ref) && isText(ref.type) && (isText(ref.id) && ref.uuid === void 0 || isFoundryUuid(ref.uuid) && ref.id === void 0);
+var directionKey = (score) => JSON.stringify([score.axisId, score.fromPartyId, score.toPartyId]);
+function scoreValid(score, r, d, delta) {
+  if (!isRecord3(score) || !isSafeInteger(score.value) || !d.axes.some((a) => a.id === score.axisId)) return false;
+  const axis = d.axes.find((a) => a.id === score.axisId);
+  if (!delta && (score.value < axis.minimum || score.value > axis.maximum)) return false;
+  if (d.symmetry === "symmetric") return score.fromPartyId === null && score.toPartyId === null;
+  return isText(score.fromPartyId) && isText(score.toPartyId) && score.fromPartyId !== score.toPartyId && r.parties.some((p) => p.id === score.fromPartyId) && r.parties.some((p) => p.id === score.toPartyId);
+}
+function validateRelationState(raw, d) {
+  if (!isRecord3(raw) || !isJsonData(raw)) return failure("DM_RELATION_STATE_INVALID", "Relation state must be a JSON-safe object");
+  const relation = validateRelationInstance(raw.relation, d);
+  if (!relation.ok) return relation;
+  if (!Array.isArray(raw.modifiers) || !Array.isArray(raw.events)) return failure("DM_RELATION_STATE_INVALID", "Modifiers and events must be lists");
+  const modifierIds = /* @__PURE__ */ new Set(), eventIds = /* @__PURE__ */ new Set(), reversals = /* @__PURE__ */ new Set();
+  for (const m of raw.modifiers) {
+    if (!isRecord3(m) || !isText(m.id) || modifierIds.has(m.id) || !scoreValid(m, relation.value, d, true) || !refValid(m.source) || !isVisibility(m.visibility) || m.lifecycle !== "active" && m.lifecycle !== "ended" || !isTimestamp(m.createdAt) || m.expiresAt !== null && (!isTimestamp(m.expiresAt) || m.expiresAt <= m.createdAt) || m.expiresAtWorldTick !== null && !isTimestamp(m.expiresAtWorldTick) || !isText(m.stackKey) || m.stacking !== "add" && m.stacking !== "replace" && m.stacking !== "strongest")
+      return failure("DM_RELATION_MODIFIER_INVALID", "Invalid modifier, source, expiry or duplicate ID");
+    modifierIds.add(m.id);
+  }
+  let lastTime = relation.value.createdAt;
+  for (const e of raw.events) {
+    if (!isRecord3(e) || !isOpaqueId(e.id, "reve") || eventIds.has(e.id) || !isTimestamp(e.at) || e.at < lastTime || typeof e.kind !== "string" || !["incident", "reversal", "modifier-added", "modifier-ended", "ended"].includes(e.kind) || !isText(e.summary) || !isVisibility(e.visibility) || e.worldTick !== null && !isTimestamp(e.worldTick) || !Array.isArray(e.partyIds) || !e.partyIds.every((id) => relation.value.parties.some((p) => p.id === id)) || !Array.isArray(e.sourceRefs) || !e.sourceRefs.every(refValid) || !Array.isArray(e.effects) || !e.effects.every((s) => scoreValid(s, relation.value, d, true)) || new Set(e.effects.map(directionKey)).size !== e.effects.length || e.reversalOf !== null && (!isText(e.reversalOf) || !eventIds.has(e.reversalOf) || reversals.has(e.reversalOf)) || (e.kind === "reversal" ? e.reversalOf === null : e.reversalOf !== null) || e.modifierId !== null && (!isText(e.modifierId) || !modifierIds.has(e.modifierId)))
+      return failure("DM_RELATION_EVENT_INVALID", "Invalid event history, order or reversal reference");
+    if (e.reversalOf) {
+      const original = raw.events.find((prior) => prior.id === e.reversalOf);
+      if (original?.kind !== "incident" || original.visibility !== e.visibility || JSON.stringify(e.effects) !== JSON.stringify(original.effects.map((score) => ({ ...score, value: -score.value }))))
+        return failure("DM_RELATION_EVENT_INVALID", "Reversal does not match the original applied effects");
+      reversals.add(e.reversalOf);
+    }
+    eventIds.add(e.id);
+    lastTime = e.at;
+  }
+  if (lastTime > relation.value.updatedAt) return failure("DM_RELATION_EVENT_INVALID", "History timestamp exceeds entity timestamp");
+  return ok(immutable(structuredClone({ relation: relation.value, modifiers: raw.modifiers, events: raw.events })));
+}
+function changeGuard(s, d, c) {
+  const valid = validateRelationState(s, d);
+  if (!valid.ok) return valid;
+  const stale = revisionGuard(s.relation.revision, c.expectedRevision);
+  if (stale) return stale;
+  if (s.relation.lifecycle !== "active") return failure("DM_RELATION_ENDED", "Ended relation is read-only");
+  if (!isOpaqueId(c.eventId, "reve") || s.events.some((e) => e.id === c.eventId) || !isTimestamp(c.at) || c.at < s.relation.updatedAt || c.worldTick !== null && !isTimestamp(c.worldTick) || !isText(c.summary) || !isVisibility(c.visibility) || !Array.isArray(c.sourceRefs) || !c.sourceRefs.every(refValid)) return failure("DM_RELATION_CHANGE_INVALID", "Invalid change context or duplicate event");
+  return null;
+}
+function event(s, c, kind, effects = [], reversalOf = null, modifierId = null) {
+  return {
+    id: c.eventId,
+    kind,
+    partyIds: s.relation.parties.map((p) => p.id),
+    sourceRefs: c.sourceRefs,
+    at: c.at,
+    worldTick: c.worldTick,
+    summary: c.summary,
+    visibility: c.visibility,
+    effects,
+    reversalOf,
+    modifierId
+  };
+}
+function applyRelationIncident(s, d, c, deltas, reversalOf = null) {
+  const guard = changeGuard(s, d, c);
+  if (guard) return guard;
+  if (c.visibility !== s.relation.visibility) return failure("DM_RELATION_VISIBILITY_CONFLICT", "A base-score change must retain the relation visibility; use a restricted modifier for hidden effects");
+  if (!Array.isArray(deltas) || !deltas.length || !deltas.every((delta) => scoreValid(delta, s.relation, d, true)) || new Set(deltas.map(directionKey)).size !== deltas.length) return failure("DM_RELATION_INCIDENT_INVALID", "Incident requires unique valid axis deltas");
+  if (reversalOf !== null) {
+    const original = s.events.find((e) => e.id === reversalOf);
+    if (!original || original.kind !== "incident" || s.events.some((e) => e.reversalOf === reversalOf) || c.visibility !== original.visibility || JSON.stringify(deltas) !== JSON.stringify(original.effects.map((x) => ({ ...x, value: -x.value }))))
+      return failure("DM_RELATION_REVERSAL_INVALID", "Reversal must compensate the original applied deltas exactly once with the same visibility");
+  }
+  const baseAxes = [...s.relation.baseAxes], effects = [];
+  for (const delta of deltas) {
+    const axis = d.axes.find((a) => a.id === delta.axisId);
+    const index = baseAxes.findIndex((a) => directionKey(a) === directionKey(delta));
+    const before = index < 0 ? axis.defaultValue : baseAxes[index].value;
+    const sum = BigInt(before) + BigInt(delta.value), after = boundedInteger(sum, axis.minimum, axis.maximum);
+    if (reversalOf !== null && BigInt(after) !== sum) return failure("DM_RELATION_REVERSAL_OUT_OF_RANGE", "Reversal requires review; later changes prevent exact compensation");
+    const applied = Number(BigInt(after) - BigInt(before));
+    if (!isSafeInteger(applied)) return failure("DM_RELATION_AXIS_OVERFLOW", "Applied delta exceeds safe integer range");
+    const score = { ...delta, value: after };
+    if (index < 0) baseAxes.push(score);
+    else baseAxes[index] = score;
+    effects.push({ ...delta, value: applied });
+  }
+  return validateRelationState({
+    ...s,
+    relation: { ...s.relation, baseAxes, revision: s.relation.revision + 1, updatedAt: c.at },
+    events: [...s.events, event(s, c, reversalOf ? "reversal" : "incident", effects, reversalOf)]
+  }, d);
+}
+function addRelationModifier(s, d, c, modifier) {
+  const guard = changeGuard(s, d, c);
+  if (guard) return guard;
+  if (modifier.createdAt !== c.at || modifier.lifecycle !== "active" || modifier.visibility !== c.visibility)
+    return failure("DM_RELATION_MODIFIER_INVALID", "Modifier creation time/visibility must match the event");
+  return validateRelationState({
+    relation: { ...s.relation, revision: s.relation.revision + 1, updatedAt: c.at },
+    modifiers: [...s.modifiers, modifier],
+    events: [...s.events, event(s, c, "modifier-added", [], null, modifier.id)]
+  }, d);
+}
+function endRelationModifier(s, d, c, id) {
+  const guard = changeGuard(s, d, c);
+  if (guard) return guard;
+  const modifier = s.modifiers.find((m) => m.id === id);
+  if (!modifier) return failure("DM_RELATION_MODIFIER_NOT_FOUND", "Modifier missing", "not-found");
+  if (modifier.visibility !== c.visibility) return failure("DM_RELATION_MODIFIER_INVALID", "Modifier event must retain source visibility");
+  if (modifier.lifecycle === "ended") return ok(s);
+  return validateRelationState({
+    relation: { ...s.relation, revision: s.relation.revision + 1, updatedAt: c.at },
+    modifiers: s.modifiers.map((m) => m.id === id ? { ...m, lifecycle: "ended" } : m),
+    events: [...s.events, event(s, c, "modifier-ended", [], null, id)]
+  }, d);
+}
+function endRelation(s, d, c) {
+  const valid = validateRelationState(s, d);
+  if (!valid.ok) return valid;
+  const stale = revisionGuard(s.relation.revision, c.expectedRevision);
+  if (stale) return stale;
+  if (s.relation.lifecycle === "ended") return ok(s);
+  const guard = changeGuard(s, d, c);
+  if (guard) return guard;
+  return validateRelationState({ ...s, relation: {
+    ...s.relation,
+    lifecycle: "ended",
+    endedAt: c.at,
+    updatedAt: c.at,
+    revision: s.relation.revision + 1
+  }, events: [...s.events, event(s, c, "ended")] }, d);
+}
+function resolveRelationAxis(s, d, selector, at, worldTick, canSee) {
+  const valid = validateRelationState(s, d);
+  if (!valid.ok) return valid;
+  if (!isTimestamp(at) || worldTick !== null && !isTimestamp(worldTick)) return failure("DM_RELATION_TIME_INVALID", "Invalid resolver time");
+  if (!canSee(s.relation.visibility)) return failure("DM_RELATION_NOT_FOUND", "Relation not available", "not-found");
+  if (!scoreValid({ ...selector, value: 0 }, s.relation, d, true)) return failure("DM_RELATION_AXIS_DIRECTION_INVALID", "Unknown score direction");
+  const axis = d.axes.find((a) => a.id === selector.axisId);
+  const base = s.relation.baseAxes.find((a) => directionKey(a) === directionKey({ ...selector, value: 0 }))?.value ?? axis.defaultValue;
+  const groups = /* @__PURE__ */ new Map();
+  for (const m of s.modifiers) {
+    if (s.relation.lifecycle !== "active" || m.lifecycle !== "active" || m.createdAt > at || m.expiresAt !== null && m.expiresAt <= at || m.expiresAtWorldTick !== null && (worldTick === null || m.expiresAtWorldTick <= worldTick) || !canSee(m.visibility) || directionKey(m) !== directionKey({ ...selector, value: 0 })) continue;
+    const key = JSON.stringify([m.stackKey, m.stacking]);
+    groups.set(key, [...groups.get(key) ?? [], m]);
+  }
+  const active = [];
+  for (const list of groups.values()) {
+    if (list[0].stacking === "add") active.push(...list);
+    else if (list[0].stacking === "replace") active.push(list.reduce((a, b) => a.createdAt > b.createdAt || a.createdAt === b.createdAt && a.id > b.id ? a : b));
+    else active.push(list.reduce((a, b) => Math.abs(a.value) > Math.abs(b.value) || Math.abs(a.value) === Math.abs(b.value) && a.id > b.id ? a : b));
+  }
+  return ok({
+    base,
+    effective: boundedInteger(active.reduce((sum, m) => sum + BigInt(m.value), BigInt(base)), axis.minimum, axis.maximum),
+    modifierIds: Object.freeze(active.map((m) => m.id))
+  });
+}
+
+// src/relations/relation-owner.ts
+var relationOwner = {
+  validate(raw) {
+    if (!isRecord3(raw)) return failure("DM_RELATION_STATE_INVALID", "Relation envelope unavailable");
+    const d = validateRelationDefinition(raw.definition);
+    if (!d.ok) return d;
+    const s = validateRelationState(raw.state, d.value);
+    return s.ok ? ok({ definition: d.value, state: s.value }) : s;
+  },
+  identity(data) {
+    return data.state.relation;
+  },
+  parties(data) {
+    return data.state.relation.parties.map((p) => p.ref);
+  },
+  change(data, action, c) {
+    const { state: s, definition: d } = data;
+    if (!isRecord3(action)) return failure("DM_RELATION_CHANGE_INVALID", "Relation action must be structured");
+    const context = {
+      ...c,
+      eventId: c.eventId.startsWith("cmd_") ? `reve_${c.eventId.slice(4)}` : c.eventId,
+      summary: c.reason,
+      visibility: action.kind === "modifier" ? action.value?.visibility : action.kind === "end-modifier" ? s.modifiers.find((m) => m.id === action.id)?.visibility ?? s.relation.visibility : s.relation.visibility
+    };
+    let changed;
+    if (action.kind === "incident") changed = applyRelationIncident(s, d, context, action.deltas, action.reversalOf ?? null);
+    else if (action.kind === "modifier") changed = addRelationModifier(s, d, context, { ...action.value, createdAt: c.at });
+    else if (action.kind === "end-modifier") changed = endRelationModifier(s, d, context, action.id);
+    else if (action.kind === "end") changed = endRelation(s, d, context);
+    else return failure("DM_RELATION_CHANGE_INVALID", "Unsupported relation action");
+    return changed.ok ? ok({ definition: d, state: changed.value }) : changed;
+  },
+  project(data, c) {
+    const { state: s, definition: d } = data, r = s.relation;
+    if (!c.canSee(r.visibility)) return failure("DM_DIPLOMACY_NOT_FOUND", "Entity unavailable", "not-found");
+    const selectors = d.symmetry === "symmetric" ? d.axes.map((a) => ({ axisId: a.id, fromPartyId: null, toPartyId: null })) : d.axes.flatMap((a) => r.parties.flatMap((from) => r.parties.filter((to) => to.id !== from.id).map((to) => ({ axisId: a.id, fromPartyId: from.id, toPartyId: to.id }))));
+    const scores = [];
+    for (const selector of selectors) {
+      const score = resolveRelationAxis(s, d, selector, c.at, c.worldTick, c.canSee);
+      if (!score.ok) return score;
+      scores.push({ ...selector, ...score.value });
+    }
+    return ok({
+      id: r.id,
+      revision: r.revision,
+      label: r.label,
+      lifecycle: r.lifecycle,
+      parties: r.parties,
+      scope: r.scope,
+      scores,
+      history: historyWindow(s.events.filter((e) => c.canSee(e.visibility)), c),
+      ...c.isGm ? { definition: d, modifiers: s.modifiers } : {}
+    });
+  }
+};
+
+// src/reputation/reputation-model.ts
+function validateReputationTrackDefinition(raw) {
+  if (!isRecord3(raw) || !isJsonData(raw) || !isNamespaced(raw.id) || !isTimestamp(raw.version) || raw.version < 1 || !isText(raw.label) || !isSafeInteger(raw.minimum) || !isSafeInteger(raw.maximum) || raw.maximum < raw.minimum || !isSafeInteger(raw.baseline) || raw.baseline < raw.minimum || raw.baseline > raw.maximum || !isVisibility(raw.visibility) || raw.publicPresentation !== "hidden" && raw.publicPresentation !== "band" && raw.publicPresentation !== "score" || !Array.isArray(raw.bands))
+    return failure("DM_REPUTATION_TRACK_INVALID", "Invalid track ID, version, range, baseline or presentation");
+  const ids = /* @__PURE__ */ new Set();
+  let previousMax = null;
+  for (const band of raw.bands) {
+    if (!isRecord3(band) || !isNamespaced(band.id) || ids.has(band.id) || !isText(band.label) || !isSafeInteger(band.minimum) || !isSafeInteger(band.maximum) || band.maximum < band.minimum || band.minimum < raw.minimum || band.maximum > raw.maximum || previousMax !== null && band.minimum <= previousMax) return failure("DM_REPUTATION_BAND_INVALID", "Bands must have unique IDs and sorted non-overlapping integer ranges");
+    if (raw.publicPresentation === "band" && BigInt(band.minimum) !== (previousMax === null ? BigInt(raw.minimum) : BigInt(previousMax) + 1n))
+      return failure("DM_REPUTATION_BAND_INVALID", "Band-only presentation requires complete range coverage");
+    ids.add(band.id);
+    previousMax = band.maximum;
+  }
+  if (raw.publicPresentation === "band" && previousMax !== raw.maximum) return failure("DM_REPUTATION_BAND_INVALID", "Band-only presentation requires complete range coverage");
+  if (raw.decay !== null && (!isRecord3(raw.decay) || !isSafeInteger(raw.decay.amount) || raw.decay.amount <= 0 || !isSafeInteger(raw.decay.periodTicks) || raw.decay.periodTicks <= 0)) return failure("DM_REPUTATION_DECAY_INVALID", "Decay requires positive safe integer amount/period");
+  return ok(immutable(structuredClone(raw)));
+}
+var ReputationTrackRegistry = class {
+  #definitions = /* @__PURE__ */ new Map();
+  #frozen = false;
+  register(raw) {
+    if (this.#frozen) return failure("DM_REGISTRY_FROZEN", "Reputation registry is frozen", "conflict");
+    const def = validateReputationTrackDefinition(raw);
+    if (!def.ok) return def;
+    const key = JSON.stringify([def.value.id, def.value.version]);
+    if (this.#definitions.has(key)) return failure("DM_REPUTATION_TRACK_ALREADY_EXISTS", "Track version already exists", "conflict");
+    this.#definitions.set(key, def.value);
+    return ok(void 0);
+  }
+  get(id, version) {
+    return this.#definitions.get(JSON.stringify([id, version]));
+  }
+  list() {
+    return Object.freeze([...this.#definitions.values()]);
+  }
+  freeze() {
+    this.#frozen = true;
+  }
+};
+function validateReputationRecord(raw, registry) {
+  if (!isRecord3(raw) || !isJsonData(raw) || raw.schemaVersion !== 1 || !isOpaqueId(raw.id, "rep") || !isTimestamp(raw.revision) || !isText(raw.label) || !isVisibility(raw.visibility) || !isTimestamp(raw.createdAt) || !isTimestamp(raw.updatedAt) || raw.updatedAt < raw.createdAt || !Array.isArray(raw.tracks) || !raw.tracks.length || !Array.isArray(raw.entries))
+    return failure("DM_REPUTATION_RECORD_INVALID", "Invalid reputation identity, timestamps or track/entry lists");
+  const subject = validateRelationPartyRef(raw.subjectRef), audience = validateRelationPartyRef(raw.audienceRef);
+  if (!subject.ok) return subject;
+  if (!audience.ok) return audience;
+  const tracks = /* @__PURE__ */ new Map(), scores = /* @__PURE__ */ new Map(), ids = /* @__PURE__ */ new Set(), reversed = /* @__PURE__ */ new Set();
+  for (const track of raw.tracks) {
+    if (!isRecord3(track) || !isNamespaced(track.definitionId) || !isTimestamp(track.definitionVersion) || tracks.has(track.definitionId))
+      return failure("DM_REPUTATION_TRACK_INVALID", "Record track IDs must be unique/versioned");
+    const def = registry.get(track.definitionId, track.definitionVersion);
+    if (!def) return failure("DM_REPUTATION_TRACK_UNAVAILABLE", "Track definition version unavailable", "not-found");
+    if (!isSafeInteger(track.score) || !isSafeInteger(track.initialScore) || track.score < def.minimum || track.score > def.maximum || track.initialScore < def.minimum || track.initialScore > def.maximum || track.lastDecayWorldTick !== null && !isTimestamp(track.lastDecayWorldTick))
+      return failure("DM_REPUTATION_SCORE_INVALID", "Track score, initial score or decay time invalid");
+    tracks.set(track.definitionId, track);
+    scores.set(track.definitionId, track.initialScore);
+  }
+  let lastAt = raw.createdAt;
+  const entries = /* @__PURE__ */ new Map();
+  for (const entry of raw.entries) {
+    if (!isRecord3(entry) || !isText(entry.id) || ids.has(entry.id) || !isNamespaced(entry.trackId) || !tracks.has(entry.trackId) || entry.kind !== "adjustment" && entry.kind !== "reversal" && entry.kind !== "decay" || !isSafeInteger(entry.delta) || !isSafeInteger(entry.before) || !isSafeInteger(entry.after) || scores.get(entry.trackId) !== entry.before || BigInt(entry.after) - BigInt(entry.before) !== BigInt(entry.delta) || !isTypedRef(entry.source) || !isText(entry.reason) || !isTimestamp(entry.at) || entry.at < lastAt || entry.at > raw.updatedAt || entry.worldTick !== null && !isTimestamp(entry.worldTick))
+      return failure("DM_REPUTATION_ENTRY_INVALID", "Broken score history, source, delta or event order");
+    const track = tracks.get(entry.trackId), def = registry.get(track.definitionId, track.definitionVersion);
+    if (entry.after < def.minimum || entry.after > def.maximum) return failure("DM_REPUTATION_ENTRY_INVALID", "Historical score outside definition range");
+    if (entry.kind === "reversal") {
+      const original = typeof entry.reversalOf === "string" ? entries.get(entry.reversalOf) : void 0;
+      if (!original || original.kind !== "adjustment" || original.trackId !== entry.trackId || original.delta !== -entry.delta || reversed.has(original.id))
+        return failure("DM_REPUTATION_REVERSAL_INVALID", "Reversal must compensate an original adjustment once");
+      reversed.add(original.id);
+    } else if (entry.reversalOf !== null) return failure("DM_REPUTATION_ENTRY_INVALID", "Only reversal entries reference an earlier entry");
+    ids.add(entry.id);
+    entries.set(entry.id, entry);
+    scores.set(entry.trackId, entry.after);
+    lastAt = entry.at;
+  }
+  if ([...tracks].some(([id, t]) => scores.get(id) !== t.score)) return failure("DM_REPUTATION_HISTORY_MISMATCH", "Current score diverges from append-oriented history");
+  return ok(immutable(structuredClone(raw)));
+}
+function adjustReputation(record, registry, input, kind = "adjustment") {
+  const valid = validateReputationRecord(record, registry);
+  if (!valid.ok) return valid;
+  const stale = revisionGuard(record.revision, input.expectedRevision);
+  if (stale) return stale;
+  if (!isText(input.entryId) || record.entries.some((e) => e.id === input.entryId) || !isSafeInteger(input.delta) || !isTimestamp(input.at) || input.at < record.updatedAt || !isTypedRef(input.source) || !isText(input.reason) || input.worldTick !== null && !isTimestamp(input.worldTick)) return failure("DM_REPUTATION_ADJUSTMENT_INVALID", "Invalid adjustment or duplicate entry");
+  const track = record.tracks.find((t) => t.definitionId === input.trackId);
+  if (!track) return failure("DM_REPUTATION_TRACK_UNAVAILABLE", "Record track missing", "not-found");
+  const def = registry.get(track.definitionId, track.definitionVersion);
+  const sum = BigInt(track.score) + BigInt(input.delta), after = boundedInteger(sum, def.minimum, def.maximum);
+  if (kind === "reversal" && BigInt(after) !== sum) return failure("DM_REPUTATION_REVERSAL_OUT_OF_RANGE", "Exact compensation no longer fits the track range");
+  const delta = Number(BigInt(after) - BigInt(track.score));
+  if (!isSafeInteger(delta)) return failure("DM_REPUTATION_SCORE_OVERFLOW", "Applied score delta exceeds safe integer range");
+  if (delta === 0 && kind === "adjustment") return ok(record);
+  const entry = {
+    id: input.entryId,
+    trackId: input.trackId,
+    kind,
+    delta,
+    before: track.score,
+    after,
+    source: input.source,
+    reason: input.reason,
+    at: input.at,
+    worldTick: input.worldTick,
+    reversalOf: input.reversalOf ?? null
+  };
+  return validateReputationRecord({
+    ...record,
+    revision: record.revision + 1,
+    updatedAt: input.at,
+    tracks: record.tracks.map((t) => t === track ? { ...t, score: after } : t),
+    entries: [...record.entries, entry]
+  }, registry);
+}
+function decayReputation(record, registry, input) {
+  const valid = validateReputationRecord(record, registry);
+  if (!valid.ok) return valid;
+  const stale = revisionGuard(record.revision, input.expectedRevision);
+  if (stale) return stale;
+  if (!isText(input.entryId) || record.entries.some((e) => e.id === input.entryId) || !isTimestamp(input.at) || input.at < record.updatedAt || !isTypedRef(input.source) || !isText(input.reason) || input.reversalOf !== void 0)
+    return failure("DM_REPUTATION_DECAY_INVALID", "Invalid decay audit context");
+  const track = record.tracks.find((t) => t.definitionId === input.trackId), def = track ? registry.get(track.definitionId, track.definitionVersion) : void 0;
+  if (!track || !def?.decay || track.lastDecayWorldTick === null || !isTimestamp(input.worldTick) || input.worldTick < track.lastDecayWorldTick)
+    return failure("DM_REPUTATION_DECAY_UNAVAILABLE", "Decay requires an explicit policy, baseline time and monotonic world tick");
+  const periods = Math.floor((input.worldTick - track.lastDecayWorldTick) / def.decay.periodTicks);
+  if (!periods) return ok(record);
+  const distance = BigInt(def.baseline) - BigInt(track.score), amount = BigInt(periods) * BigInt(def.decay.amount);
+  const magnitude = distance < 0n ? -distance : distance, movement = amount < magnitude ? amount : magnitude;
+  const delta = Number(distance < 0n ? -movement : movement);
+  if (!isSafeInteger(delta)) return failure("DM_REPUTATION_SCORE_OVERFLOW", "Decay delta exceeds safe integer range");
+  const changed = adjustReputation(record, registry, { ...input, delta }, "decay");
+  if (!changed.ok) return changed;
+  const next = changed.value;
+  const consumedTick = track.lastDecayWorldTick + periods * def.decay.periodTicks;
+  return validateReputationRecord({
+    ...next,
+    tracks: next.tracks.map((t) => t.definitionId === track.definitionId ? { ...t, lastDecayWorldTick: consumedTick } : t)
+  }, registry);
+}
+function projectReputation(record, registry, isGM, canSee) {
+  const valid = validateReputationRecord(record, registry);
+  if (!valid.ok) return valid;
+  if (!canSee(record.visibility)) return failure("DM_REPUTATION_NOT_FOUND", "Reputation not available", "not-found");
+  if (isGM) return ok(structuredClone(record));
+  const tracks = record.tracks.flatMap((track) => {
+    const def = registry.get(track.definitionId, track.definitionVersion);
+    if (!canSee(def.visibility) || def.publicPresentation === "hidden") return [];
+    const band = def.bands.find((b) => track.score >= b.minimum && track.score <= b.maximum);
+    return [{
+      definitionId: def.id,
+      label: def.label,
+      band: band?.label ?? null,
+      ...def.publicPresentation === "score" ? { score: track.score } : {}
+    }];
+  });
+  const subject = validateRelationPartyRef(record.subjectRef), audience = validateRelationPartyRef(record.audienceRef);
+  if (!subject.ok) return subject;
+  if (!audience.ok) return audience;
+  return ok({ id: record.id, label: record.label, subjectRef: subject.value, audienceRef: audience.value, tracks });
+}
+
+// src/reputation/reputation-owner.ts
+function reputationRegistry(definitions) {
+  const registry = new ReputationTrackRegistry();
+  for (const d of definitions) {
+    const r = registry.register(d);
+    if (!r.ok) return r;
+  }
+  registry.freeze();
+  return ok(registry);
+}
+var reputationOwner = {
+  validate(raw) {
+    if (!isRecord3(raw) || !Array.isArray(raw.definitions)) return failure("DM_REPUTATION_RECORD_INVALID", "Reputation envelope unavailable");
+    const registry = reputationRegistry(raw.definitions);
+    if (!registry.ok) return registry;
+    const record = validateReputationRecord(raw.record, registry.value);
+    return record.ok ? ok({ definitions: raw.definitions, record: record.value }) : record;
+  },
+  identity(data) {
+    return data.record;
+  },
+  parties(data) {
+    const r = data.record;
+    return [r.subjectRef, r.audienceRef];
+  },
+  change(data, action, c) {
+    const { definitions, record } = data, registry = reputationRegistry(definitions);
+    if (!registry.ok) return registry;
+    if (!isRecord3(action)) return failure("DM_REPUTATION_CHANGE_INVALID", "Invalid reputation action");
+    const input = {
+      expectedRevision: c.expectedRevision,
+      entryId: c.eventId,
+      trackId: action.trackId,
+      delta: action.delta,
+      source: c.sourceRefs[0],
+      reason: c.reason,
+      at: c.at,
+      worldTick: c.worldTick,
+      ...action.reversalOf !== void 0 ? { reversalOf: action.reversalOf } : {}
+    };
+    const changed = action.kind === "adjust" ? adjustReputation(record, registry.value, input, action.reversalOf ? "reversal" : "adjustment") : action.kind === "decay" ? decayReputation(record, registry.value, input) : failure("DM_REPUTATION_CHANGE_INVALID", "Unsupported reputation action");
+    return changed.ok ? ok({ definitions, record: changed.value }) : changed;
+  },
+  project(data, c) {
+    const { definitions, record } = data, registry = reputationRegistry(definitions);
+    if (!registry.ok) return registry;
+    const p = projectReputation(record, registry.value, c.isGm, c.canSee);
+    if (!p.ok) return p;
+    return c.isGm ? ok({ ...p.value, entries: historyWindow(record.entries, c), definitions }) : ok({ ...p.value, revision: record.revision });
+  }
+};
+
+// src/agreements/agreement-owner.ts
+function agreementTermRegistry() {
+  const registry = new AgreementTermRegistry();
+  registerAgreementTermOwners(registry);
+  registry.freeze();
+  return registry;
+}
+var agreementOwner = {
+  validate(raw) {
+    if (!isRecord3(raw)) return failure("DM_AGREEMENT_STATE_INVALID", "Agreement envelope unavailable");
+    const d = validateAgreementDefinition(raw.definition);
+    if (!d.ok) return d;
+    if (raw.executedOperations !== void 0 && (!Array.isArray(raw.executedOperations) || !raw.executedOperations.every(isText) || new Set(raw.executedOperations).size !== raw.executedOperations.length)) return failure("DM_AGREEMENT_STATE_INVALID", "Invalid effect execution history");
+    const state = validateAgreementState(raw.state, d.value, agreementTermRegistry());
+    return state.ok ? ok({
+      definition: d.value,
+      state: state.value,
+      executedOperations: raw.executedOperations ?? []
+    }) : state;
+  },
+  identity(data) {
+    return data.state.agreement;
+  },
+  parties(data) {
+    return data.state.agreement.parties.map((p) => p.ref);
+  },
+  change(data, action, c) {
+    const { definition: d, state: s } = data;
+    if (!isRecord3(action)) return failure("DM_AGREEMENT_CHANGE_INVALID", "Invalid agreement action");
+    let state;
+    if (action.kind === "obligation") {
+      const nested = action.action;
+      const normalized = nested?.kind === "evidence" ? { ...nested, evidence: { ...nested.evidence, at: c.at } } : nested;
+      state = changeObligation(
+        s,
+        d,
+        agreementTermRegistry(),
+        action.obligationId,
+        action.expectedObligationRevision,
+        c,
+        normalized
+      );
+    } else {
+      const a = changeAgreement(s.agreement, d, agreementTermRegistry(), c, action);
+      state = a.ok ? validateAgreementState({ agreement: a.value, obligations: initializeAgreementObligations(a.value, s.obligations) }, d, agreementTermRegistry()) : a;
+    }
+    return state.ok ? ok({ ...data, definition: d, state: state.value }) : state;
+  },
+  project(data, c) {
+    const { definition: d, state: s } = data, a = s.agreement;
+    if (!c.canSee(a.visibility)) return failure("DM_DIPLOMACY_NOT_FOUND", "Entity unavailable", "not-found");
+    const terms = a.terms.filter((t) => c.canSee(t.visibility)), compliance = resolveAgreementCompliance(s, c.worldTick);
+    if (!compliance.ok) return compliance;
+    const visibleObligations = s.obligations.filter((o) => {
+      const source = o.termsSource.kind === "amendment" ? a.amendments.find((x) => x.id === o.termsSource.id)?.afterTerms : a.proposals.find((x) => x.id === o.termsSource.id && x.lifecycle === "enacted")?.rounds.at(-1)?.terms;
+      return source?.some((t) => t.id === o.termId && c.canSee(t.visibility));
+    });
+    return ok({
+      id: a.id,
+      label: a.label,
+      revision: a.revision,
+      lifecycle: a.lifecycle,
+      parties: a.parties,
+      duration: a.duration,
+      terms,
+      obligations: visibleObligations.map((o) => ({ ...o, evidence: o.evidence.filter((e) => c.canSee(e.visibility)), events: c.isGm ? historyWindow(o.events, c) : [] })),
+      compliance: compliance.value.filter((row) => visibleObligations.some((o) => o.id === row.obligationId)),
+      proposals: a.proposals.map((p) => ({ ...p, rounds: p.rounds.map((r) => ({ ...r, terms: r.terms.filter((t) => c.canSee(t.visibility)) })) })),
+      amendments: c.isGm ? historyWindow(a.amendments, c) : [],
+      history: c.isGm ? historyWindow(a.events, c) : [],
+      ...c.isGm ? { definition: d } : {}
+    });
+  }
+};
+
+// src/territory/territory-disputes.ts
+var DISPUTE_LIFECYCLES = ["latent", "active", "escalated", "frozen", "settled", "abandoned", "superseded"];
+function validateTerritoryDispute(raw, territories) {
+  if (!isRecord3(raw) || !isJsonData(raw) || raw.schemaVersion !== 1 || !isText(raw.id) || !isText(raw.label) || !isTimestamp(raw.revision) || !isNamespaced(raw.disputeType) || !Array.isArray(raw.territoryUuids) || !raw.territoryUuids.length || !raw.territoryUuids.every(isJournalEntryUuid) || new Set(raw.territoryUuids).size !== raw.territoryUuids.length || !Array.isArray(raw.parties) || raw.parties.length < 2 || !raw.parties.every((p) => validateRelationPartyRef(p).ok) || new Set(raw.parties.map((p) => JSON.stringify(p))).size !== raw.parties.length || !Array.isArray(raw.claimRefs) || !isVisibility(raw.visibility) || !DISPUTE_LIFECYCLES.includes(raw.lifecycle) || !isTimestamp(raw.createdAt) || !isTimestamp(raw.updatedAt) || raw.updatedAt < raw.createdAt || !Array.isArray(raw.events))
+    return failure("DM_TERRITORY_DISPUTE_INVALID", "Invalid independent dispute entity");
+  if (raw.territoryUuids.some((uuid) => !territories.some((s) => s.territory.uuid === uuid))) return failure("DM_TERRITORY_DISPUTE_REF_MISSING", "Dispute territory unavailable", "not-found");
+  for (const ref of raw.claimRefs) if (!isRecord3(ref) || !isJournalEntryUuid(ref.territoryUuid) || !isText(ref.claimId) || !raw.territoryUuids.includes(ref.territoryUuid) || !territories.some((s) => s.territory.uuid === ref.territoryUuid && s.claims.some((c) => c.id === ref.claimId)))
+    return failure("DM_TERRITORY_DISPUTE_REF_MISSING", "Dispute claim unavailable", "not-found");
+  let lifecycle = "latent", at = raw.createdAt;
+  const ids = /* @__PURE__ */ new Set();
+  for (const e of raw.events) {
+    if (!isRecord3(e) || !isText(e.id) || ids.has(e.id) || !isTimestamp(e.at) || e.at < at || e.at > raw.updatedAt || !isTimestamp(e.worldTick) || !isText(e.reason) || !Array.isArray(e.sourceRefs) || !e.sourceRefs.length || !e.sourceRefs.every(isTypedRef) || e.before !== lifecycle || !DISPUTE_LIFECYCLES.includes(e.after) || e.before === e.after || e.outcomeRef !== null && !isTypedRef(e.outcomeRef) || e.after === "settled" && e.outcomeRef === null || ["settled", "abandoned", "superseded"].includes(lifecycle)) return failure("DM_TERRITORY_DISPUTE_HISTORY_INVALID", "Invalid dispute transition audit chain");
+    lifecycle = e.after;
+    at = e.at;
+    ids.add(e.id);
+  }
+  if (lifecycle !== raw.lifecycle || raw.revision !== raw.events.length) return failure("DM_TERRITORY_DISPUTE_HISTORY_INVALID", "Dispute state diverges from history");
+  return ok(immutable(structuredClone(raw)));
+}
+function changeTerritoryDispute(d, territories, c, lifecycle, outcomeRef) {
+  const valid = validateTerritoryDispute(d, territories);
+  if (!valid.ok) return valid;
+  const stale = revisionGuard(d.revision, c.expectedRevision);
+  if (stale) return stale;
+  if (!DISPUTE_LIFECYCLES.includes(lifecycle) || !isText(c.eventId) || d.events.some((e) => e.id === c.eventId) || !isTimestamp(c.at) || c.at < d.updatedAt || !isTimestamp(c.worldTick) || !isText(c.reason) || !Array.isArray(c.sourceRefs) || !c.sourceRefs.length || !c.sourceRefs.every(isTypedRef) || outcomeRef !== null && !isTypedRef(outcomeRef)) return failure("DM_TERRITORY_DISPUTE_CHANGE_INVALID", "Invalid dispute decision context");
+  if (lifecycle === d.lifecycle) return ok(d);
+  return validateTerritoryDispute({ ...d, lifecycle, revision: d.revision + 1, updatedAt: c.at, events: [...d.events, {
+    ...c,
+    id: c.eventId,
+    before: d.lifecycle,
+    after: lifecycle,
+    outcomeRef
+  }] }, territories);
+}
+
+// src/territory/territory-owner.ts
+var territoryOwner = {
+  validate: validateTerritoryState,
+  identity(data) {
+    const t = data.territory;
+    return { ...t, id: t.uuid };
+  },
+  parties(data) {
+    const s = data;
+    return [
+      ...s.claims.map((c) => c.claimantRef),
+      ...s.recognitions.map((r) => r.recognizingRef),
+      ...s.presence.map((p) => p.partyRef),
+      ...s.influence.map((i) => i.partyRef),
+      ...s.rights.map((r) => r.beneficiaryRef),
+      ...s.occupations.map((o) => o.occupierRef)
+    ];
+  },
+  change(data, action, c) {
+    return changeTerritoryState(data, c, action);
+  },
+  project(data, c) {
+    const s = data, projected = projectTerritoryState(s, c.canSee);
+    if (!projected) return failure("DM_DIPLOMACY_NOT_FOUND", "Entity unavailable", "not-found");
+    return ok({
+      id: s.territory.uuid,
+      label: s.territory.label,
+      revision: s.territory.revision,
+      ...projected,
+      events: historyWindow(projected.events, c),
+      territory: { ...projected.territory, hierarchyHistory: historyWindow(projected.territory.hierarchyHistory, c) },
+      effectiveInfluence: resolveTerritoryInfluence(projected, c.worldTick, c.canSee)
+    });
+  }
+};
+var disputeOwner = {
+  validate: validateTerritoryDispute,
+  identity(data) {
+    return data;
+  },
+  parties(data) {
+    return data.parties;
+  },
+  change(data, action, c, territories) {
+    if (!isRecord3(action) || action.kind !== "decide") return failure("DM_TERRITORY_DISPUTE_CHANGE_INVALID", "Unsupported dispute decision");
+    return changeTerritoryDispute(data, territories, c, action.lifecycle, action.outcomeRef ?? null);
+  },
+  project(data, c) {
+    const d = data;
+    if (!c.canSee(d.visibility)) return failure("DM_DIPLOMACY_NOT_FOUND", "Entity unavailable", "not-found");
+    return ok({ ...d, events: c.isGm ? historyWindow(d.events, c) : [] });
+  }
+};
+
+// src/territory/territory-transfer.ts
+function previewTerritoryTransfer(states, targets, c) {
+  if (!isJsonData(targets) || !targets.length || new Set(targets.map((t) => t.territoryUuid)).size !== targets.length || !isText(c.eventId) || !isTimestamp(c.at) || !isTimestamp(c.worldTick) || !isText(c.reason) || !Array.isArray(c.sourceRefs) || !c.sourceRefs.length || !c.sourceRefs.every(isTypedRef)) return failure("DM_TERRITORY_TRANSFER_INVALID", "Transfer requires unique targets and audit context");
+  let count = 0;
+  for (const target of targets) {
+    const state = states.find((s) => s.territory.uuid === target.territoryUuid);
+    if (!state) return failure("DM_TERRITORY_NOT_FOUND", "Transfer territory unavailable", "not-found");
+    const valid = validateTerritoryState(state);
+    if (!valid.ok) return valid;
+    const stale = revisionGuard(state.territory.revision, target.expectedRevision);
+    if (stale) return stale;
+    if (c.at < state.territory.updatedAt || state.events.some((e) => e.id === c.eventId) || state.territory.hierarchyHistory.some((e) => e.id === c.eventId) || !Array.isArray(target.supersedeClaimIds) || !target.supersedeClaimIds.length || new Set(target.supersedeClaimIds).size !== target.supersedeClaimIds.length || target.supersedeClaimIds.some((id) => !state.claims.some((x) => x.id === id && x.claimType === "domain-manager:ownership" && x.lifecycle === "active")) || !target.newClaim || target.newClaim.claimType !== "domain-manager:ownership" || target.newClaim.lifecycle !== "active" || target.newClaim.startsAtWorldTick !== c.worldTick || state.claims.some((x) => x.id === target.newClaim.id))
+      return failure("DM_TERRITORY_TRANSFER_INVALID", "Transfer requires active ownership claims and a new distinct ownership claim");
+    const candidate = transferredState(state, target, c), check = validateTerritoryState(candidate);
+    if (!check.ok) return check;
+    count += target.supersedeClaimIds.length;
+  }
+  return ok(immutable(structuredClone({ targets, context: c, affectedClaimCount: count, facilityOwnershipChanges: 0 })));
+}
+function transferredState(state, t, c) {
+  const old = state.claims.filter((x) => t.supersedeClaimIds.includes(x.id)), claims = [...state.claims.map((x) => t.supersedeClaimIds.includes(x.id) ? { ...x, lifecycle: "superseded" } : x), t.newClaim];
+  const event2 = {
+    ...c,
+    id: c.eventId,
+    kind: "domain-manager:ownership-transfer",
+    targetIds: [...t.supersedeClaimIds, t.newClaim.id],
+    before: old,
+    after: claims.filter((x) => t.supersedeClaimIds.includes(x.id) || x.id === t.newClaim.id)
+  };
+  return { ...state, territory: { ...state.territory, revision: state.territory.revision + 1, updatedAt: c.at }, claims, events: [...state.events, event2] };
+}
+function commitTerritoryTransfer(states, plan) {
+  const fresh = previewTerritoryTransfer(states, plan.targets, plan.context);
+  if (!fresh.ok) return fresh;
+  const targets = new Map(plan.targets.map((t) => [t.territoryUuid, t]));
+  return ok(immutable(states.map((s) => {
+    const t = targets.get(s.territory.uuid);
+    return t ? transferredState(s, t, plan.context) : structuredClone(s);
+  })));
+}
+
+// src/agreements/agreement-owner-operations.ts
+var AgreementEffectOwnerRegistry = class {
+  #owners = /* @__PURE__ */ new Map();
+  #frozen = false;
+  register(owner) {
+    if (this.#frozen || this.#owners.has(owner.id)) return failure("DM_AGREEMENT_OWNER_REGISTRY_CONFLICT", "Owner registry frozen or duplicate ID", "conflict");
+    if (!isNamespaced(owner.id) || ![owner.validate, owner.getLockKeys, owner.execute, owner.reconcile, owner.compensate].every((x) => typeof x === "function"))
+      return failure("DM_AGREEMENT_OWNER_INVALID", "Owner requires validation, locks, execution and recovery contracts");
+    this.#owners.set(owner.id, owner);
+    return ok(void 0);
+  }
+  get(id) {
+    return this.#owners.get(id);
+  }
+  freeze() {
+    this.#frozen = true;
+  }
+};
+function prepareAgreementOwnerOperations(operations, owners) {
+  if (!isJsonData(operations)) return failure("DM_AGREEMENT_OWNER_OPERATION_INVALID", "Owner intents must be JSON data");
+  const ids = /* @__PURE__ */ new Set(), locks = [];
+  for (const op of operations) {
+    if (!isText(op.id) || ids.has(op.id) || !isNamespaced(op.ownerId) || !isNamespaced(op.operation))
+      return failure("DM_AGREEMENT_OWNER_OPERATION_INVALID", "Owner operation IDs must be unique and types namespaced");
+    const owner = owners.get(op.ownerId);
+    if (!owner) return failure("DM_AGREEMENT_OWNER_UNAVAILABLE", "Required effect owner unavailable", "not-found");
+    const valid = owner.validate(op);
+    if (!valid.ok) return valid;
+    const keys = owner.getLockKeys(op);
+    if (!keys.length || !keys.every(isText)) return failure("DM_AGREEMENT_OWNER_LOCK_INVALID", "Effect owner must declare its canonical write locks");
+    const forbidden = assertNoForbiddenLockKeys(keys);
+    if (!forbidden.ok) return forbidden;
+    ids.add(op.id);
+    locks.push(...keys);
+  }
+  return ok(immutable(structuredClone({ operations, lockKeys: canonicalizeLockKeys(locks) })));
+}
+async function executeAgreementOwnerOperations(plan, owners, session) {
+  const prepared = prepareAgreementOwnerOperations(plan.operations, owners);
+  if (!prepared.ok) return prepared;
+  if (prepared.value.lockKeys.some((k) => !session.lockKeys.includes(k))) return failure("DM_AGREEMENT_OWNER_LOCK_INVALID", "Parent session does not hold all owner locks", "conflict");
+  const receipts = [];
+  for (const op of prepared.value.operations) {
+    const owner = owners.get(op.ownerId), operationRef = `${session.transactionId}:agreement-effect:${op.id}`;
+    const receipt = await session.runChildStep({
+      stepId: `agreement-effect:${op.id}`,
+      subsystem: owner.subsystem,
+      operation: op.operation,
+      intent: op,
+      operationRef,
+      idempotencyKey: operationRef,
+      execute: async () => {
+        const result = await owner.execute(op, {
+          commandId: session.commandId,
+          authorityEpoch: session.authorityEpoch,
+          idempotencyKey: operationRef,
+          operationRef
+        });
+        if (!result.ok) return result;
+        if (result.value.operationId !== op.id || !isTypedRef(result.value.receiptRef) || !isJsonData(result.value))
+          return err(createPublicError({
+            code: "DM_AGREEMENT_OWNER_RECEIPT_INVALID",
+            category: "internal",
+            message: "Owner returned a mismatched or non-serializable receipt",
+            details: { outcome: "unknown" }
+          }));
+        return result;
+      }
+    });
+    if (!receipt.ok) return receipt;
+    receipts.push(receipt.value);
+  }
+  return ok(immutable(structuredClone(receipts)));
+}
+
+// src/diplomacy/diplomacy-mutation.ts
+function diplomacyMutationDefinition(kind, o, getLocks, prepare) {
+  return {
+    getLockKeys: getLocks,
+    async freshRead(context) {
+      try {
+        const entity = await o.store.freshRead(kind, context.command.payload.id);
+        return ok({ entity, revision: entity?.revision ?? 0, context });
+      } catch {
+        return storageError();
+      }
+    },
+    async buildPlan(ctx, fresh) {
+      const fingerprint = diplomacyFingerprint(ctx.command.type, ctx.command.payload), prior = fresh.entity?.receipts.find((r) => r.commandId === ctx.command.commandId);
+      if (prior) {
+        if (prior.fingerprint !== fingerprint) return failure("DM_COMMAND_ID_CONFLICT", "Command ID already has a different durable payload", "conflict");
+        return ok(createMutationPlan({
+          commandId: ctx.command.commandId,
+          lockKeys: getLocks(ctx),
+          writeSet: [],
+          customData: { writes: [], effects: [], effectsPlan: { operations: [], lockKeys: [] }, result: prior.result ?? { kind, id: fresh.entity.id, revision: prior.revision, changed: prior.changed }, authorityEpoch: ctx.authorityEpoch, fingerprint }
+        }));
+      }
+      const built = await prepare(fresh);
+      if (!built.ok) return built;
+      const effectsPlan = prepareAgreementOwnerOperations(built.value.effects, o.effectOwners);
+      if (!effectsPlan.ok) return effectsPlan;
+      const locks = getLocks(ctx);
+      if (effectsPlan.value.lockKeys.some((k) => !locks.includes(k))) return failure("DM_TX_LOCKSET_DIVERGENCE", "Effect targets changed during preparation", "conflict");
+      const writes = built.value.writes.map((w) => ({ before: w.before, after: {
+        ...w.after,
+        receipts: [...w.after.receipts, {
+          commandId: ctx.command.commandId,
+          fingerprint,
+          revision: w.after.revision,
+          changed: w.before === null || w.before.revision !== w.after.revision,
+          result: built.value.result
+        }]
+      } }));
+      return ok(createMutationPlan({
+        commandId: ctx.command.commandId,
+        lockKeys: locks,
+        writeSet: writes.map((w) => ({ targetRef: lockKey.diplomacy(w.after.kind, w.after.id), operationType: w.before ? "update" : "create", payload: w.after })),
+        customData: { ...built.value, writes, effectsPlan: effectsPlan.value, authorityEpoch: ctx.authorityEpoch, fingerprint }
+      }));
+    },
+    async commit(plan) {
+      const data = plan.customData;
+      if (!data.writes.length) return ok({ result: data.result, changed: false, resultingRevisions: {} });
+      const prepared = await CompositeMutationSession.prepare({
+        commandId: plan.commandId,
+        authorityEpoch: data.authorityEpoch,
+        lockKeys: plan.lockKeys,
+        expectedLockKeys: plan.lockKeys,
+        transactionStore: o.transactions,
+        recoveryService: o.recovery,
+        recoveryType: "diplomacy:write",
+        parentRef: plan.writeSet[0].targetRef,
+        safeAutoRecovery: true,
+        initialRecoveryData: { writes: data.writes, effects: data.effects, fingerprint: data.fingerprint, result: data.result }
+      });
+      if (!prepared.ok) return prepared;
+      const session = prepared.value;
+      const entering = await session.enterCommitting();
+      if (!entering.ok) return session.failAndCompensate(entering.error);
+      const effects = await executeAgreementOwnerOperations(data.effectsPlan, o.effectOwners, session);
+      if (!effects.ok) return session.failAndCompensate(effects.error);
+      for (const w of data.writes) {
+        const saved = await session.runChildStep({
+          stepId: `entity:${w.after.kind}:${w.after.id}`,
+          subsystem: "custom",
+          operation: "diplomacy:save",
+          targetRef: lockKey.diplomacy(w.after.kind, w.after.id),
+          intent: w,
+          execute: async () => {
+            try {
+              await o.store.stage(w.after);
+              return ok({ kind: w.after.kind, id: w.after.id, revision: w.after.revision });
+            } catch {
+              return storageError();
+            }
+          }
+        });
+        if (!saved.ok) return session.failAndCompensate(saved.error);
+      }
+      const done = await session.commitDurably(data.result);
+      if (!done.ok) return done;
+      for (const w of data.writes) o.store.publish(w.after);
+      return ok({
+        result: done.value,
+        changed: data.writes.some((w) => !w.before || w.before.revision !== w.after.revision),
+        resultingRevisions: Object.fromEntries(data.writes.map((w) => [lockKey.diplomacy(w.after.kind, w.after.id), w.after.revision]))
+      });
+    }
+  };
+}
+function storageError() {
+  return err(createPublicError({
+    code: "DM_DIPLOMACY_STORAGE_ERROR",
+    category: "internal",
+    message: "Diplomacy persistence could not be confirmed",
+    details: { outcome: "unknown" }
+  }));
+}
+function registerDiplomacyRecovery(o) {
+  o.recovery.registerCompensator("diplomacy:write", async (record) => {
+    const data = record.recoveryData;
+    if (!isRecord3(data) || !Array.isArray(data.writes) || !Array.isArray(data.effects)) return failure("DM_RECOVERY_RECONCILIATION_UNCERTAIN", "Durable diplomacy intent unavailable", "conflict");
+    const writes = data.writes;
+    try {
+      for (const w of writes) {
+        assertDiplomacyEntity(w.after);
+        if (w.before !== null) assertDiplomacyEntity(w.before);
+        if (!record.lockKeys.includes(lockKey.diplomacy(w.after.kind, w.after.id)) || w.before && (w.before.kind !== w.after.kind || w.before.id !== w.after.id || w.after.revision < w.before.revision))
+          return failure("DM_RECOVERY_RECONCILIATION_UNCERTAIN", "Invalid durable write identity or locks", "conflict");
+        const current = await o.store.adapter.read(w.after.kind, w.after.id);
+        if (canonicalJsonStringify(current) !== canonicalJsonStringify(w.before) && canonicalJsonStringify(current) !== canonicalJsonStringify(w.after))
+          return failure("DM_RECOVERY_RECONCILIATION_UNCERTAIN", "Diplomacy state diverges from recorded durable intent", "conflict");
+      }
+      const effectPlan = prepareAgreementOwnerOperations(data.effects, o.effectOwners);
+      if (!effectPlan.ok) return effectPlan;
+      if (effectPlan.value.lockKeys.some((k) => !record.lockKeys.includes(k))) return failure("DM_TX_LOCKSET_DIVERGENCE", "Recovery effect lacks recorded locks", "conflict");
+      for (const op of effectPlan.value.operations) {
+        const owner = o.effectOwners.get(op.ownerId);
+        if (!owner) return failure("DM_AGREEMENT_OWNER_UNAVAILABLE", "Effect owner unavailable during recovery", "not-found");
+        const operationRef = `${record.transactionId}:agreement-effect:${op.id}`, context = {
+          commandId: record.commandId,
+          authorityEpoch: record.authorityEpoch,
+          idempotencyKey: operationRef,
+          operationRef
+        };
+        const r = await owner.reconcile(op, context);
+        if (!r.ok) return r;
+        if (r.value === "unknown") return failure("DM_RECOVERY_RECONCILIATION_UNCERTAIN", "Agreement owner outcome is unknown", "conflict");
+        let receipt = { operationId: op.id, operationRef, reconciled: "applied" };
+        if (r.value === "not-applied") {
+          const intent = await o.transactions.patchDurable(record.transactionId, (current) => ({ ...current, recoveryData: {
+            ...current.recoveryData,
+            steps: [
+              ...(current.recoveryData?.steps ?? []).filter((s) => s.stepId !== `agreement-effect:${op.id}`),
+              {
+                stepId: `agreement-effect:${op.id}`,
+                subsystem: owner.subsystem,
+                operation: op.operation,
+                idempotencyKey: operationRef,
+                operationRef,
+                state: "executing",
+                intent: op
+              }
+            ]
+          } }));
+          if (!intent.ok) return intent;
+          const execute = await owner.execute(op, { ...context, commandId: `recovery_${record.transactionId}` });
+          if (!execute.ok) return execute;
+          receipt = execute.value;
+        }
+        const confirmed = await o.transactions.patchDurable(record.transactionId, (current) => ({ ...current, recoveryData: {
+          ...current.recoveryData,
+          steps: [
+            ...(current.recoveryData?.steps ?? []).filter((s) => s.stepId !== `agreement-effect:${op.id}`),
+            {
+              stepId: `agreement-effect:${op.id}`,
+              subsystem: owner.subsystem,
+              operation: op.operation,
+              idempotencyKey: operationRef,
+              operationRef,
+              state: "applied",
+              intent: op,
+              receipt
+            }
+          ]
+        } }));
+        if (!confirmed.ok) return confirmed;
+      }
+      for (const w of writes) {
+        const current = await o.store.adapter.read(w.after.kind, w.after.id);
+        if (canonicalJsonStringify(current) !== canonicalJsonStringify(w.after)) await o.store.stage(w.after);
+      }
+      const committed = await o.transactions.transitionDurable(record.transactionId, "committed", record.authorityEpoch, "Reconciled diplomacy plan and owner receipts");
+      if (!committed.ok) return committed;
+      for (const w of writes) o.store.publish(w.after);
+      return ok(void 0);
+    } catch {
+      return storageError();
+    }
+  });
+}
+
+// src/diplomacy/diplomacy-permissions.ts
+function diplomacyViewerIsGm(ctx) {
+  return ctx.senderUserId === ctx.authorityUserId || !!(ctx.senderUserId && globalThis.game?.users?.get?.(ctx.senderUserId)?.isGM);
+}
+async function diplomacyViewerControls(ctx, parties, domains, controllers) {
+  if (!ctx.senderUserId) return false;
+  for (const party2 of parties) {
+    const uuid = party2.type === "domain" ? party2.uuid : party2.domainUuid;
+    if (!uuid) continue;
+    const doc = await domains.read(normalizeDomainId(uuid));
+    if (!doc.ok) continue;
+    if (await controllers.isDomainController(normalizeDomainId(uuid), ctx.senderUserId, { document: doc.value, record: doc.value.record })) return true;
+  }
+  return false;
+}
+
+// src/diplomacy/diplomacy-query.ts
+function validateDiplomacyQuery(raw) {
+  if (!isRecord3(raw) || raw.id !== void 0 && (typeof raw.id !== "string" || !raw.id) || raw.offset !== void 0 && !isTimestamp(raw.offset) || raw.limit !== void 0 && (!isTimestamp(raw.limit) || raw.limit < 1 || raw.limit > 100) || raw.historyOffset !== void 0 && !isTimestamp(raw.historyOffset) || raw.historyLimit !== void 0 && (!isTimestamp(raw.historyLimit) || raw.historyLimit > 100) || raw.search !== void 0 && (typeof raw.search !== "string" || raw.search.length > 200) || raw.parentUuid !== void 0 && raw.parentUuid !== null && !isJournalEntryUuid(raw.parentUuid) || raw.treeAxis !== void 0 && !["locatedInUuid", "administrativeParentUuid"].includes(raw.treeAxis)) return failure("DM_DIPLOMACY_QUERY_INVALID", "Invalid query pagination");
+  return ok(raw);
+}
+async function queryDiplomacyOwner(ctx, kind, owner, store, domains, controllers, recovery, worldTick) {
+  const isGm = diplomacyViewerIsGm(ctx), p = ctx.command.payload;
+  const rows = p.id ? [store.get(kind, p.id)].filter((x) => x !== null) : kind === "territory" && Object.hasOwn(p, "parentUuid") ? store.children(p.parentUuid ?? null, p.treeAxis ?? "locatedInUuid") : store.list(kind), visible = [];
+  const offset = p.offset ?? 0, limit = p.limit ?? 30;
+  let count = 0;
+  const territoryVisible = async (uuid) => {
+    const row = store.get("territory", uuid);
+    if (!row) return false;
+    const state = row.data;
+    return isGm || state.territory.visibility === "public" || state.territory.visibility === "restricted" && await diplomacyViewerControls(ctx, territoryOwner.parties(state), domains, controllers);
+  };
+  if (p.parentUuid && !isGm && !await territoryVisible(p.parentUuid)) return failure("DM_DIPLOMACY_NOT_FOUND", "Tree branch unavailable", "not-found");
+  for (const row of rows) {
+    if (!row) continue;
+    const identity = owner.identity(row.data), controlled = identity.visibility === "restricted" || p.id ? await diplomacyViewerControls(ctx, owner.parties(row.data), domains, controllers) : false;
+    const canSee = (v) => isGm || v === "public" || v === "restricted" && controlled;
+    if (!canSee(identity.visibility) || p.search && !identity.label.toLocaleLowerCase().includes(p.search.toLocaleLowerCase())) continue;
+    const fenced = recovery.fenceRegistry.assertKeysAvailable([lockKey.diplomacy(kind, row.id), ...kind === "territory" || kind === "dispute" ? [lockKey.territoryGraph()] : []]);
+    if (!fenced.ok) {
+      if (p.id) return fenced;
+      continue;
+    }
+    if (count++ < offset || visible.length >= limit) continue;
+    if (p.id) {
+      const detail = owner.project(row.data, {
+        isGm,
+        canSee,
+        at: ctx.receivedAtReal,
+        worldTick,
+        historyOffset: p.historyOffset ?? 0,
+        historyLimit: p.historyLimit ?? 30
+      });
+      if (!detail.ok) return detail;
+      let projected = detail.value;
+      if (!isGm && kind === "territory") {
+        const t = projected.territory, links = [];
+        for (const l of projected.links) if (await territoryVisible(l.targetTerritoryUuid)) links.push(l);
+        projected = { ...projected, links, territory: {
+          ...t,
+          locatedInUuid: t.locatedInUuid && await territoryVisible(t.locatedInUuid) ? t.locatedInUuid : null,
+          administrativeParentUuid: t.administrativeParentUuid && await territoryVisible(t.administrativeParentUuid) ? t.administrativeParentUuid : null
+        } };
+      }
+      if (!isGm && kind === "dispute") {
+        const territoryUuids = [];
+        for (const id of projected.territoryUuids) if (await territoryVisible(id)) territoryUuids.push(id);
+        projected = { ...projected, territoryUuids, claimRefs: projected.claimRefs.filter((r) => territoryUuids.includes(r.territoryUuid) && store.get("territory", r.territoryUuid)?.data?.claims.some((c) => c.id === r.claimId && canSee(c.visibility))) };
+      }
+      visible.push(projected);
+    } else visible.push({
+      id: identity.id,
+      revision: identity.revision,
+      label: identity.label,
+      lifecycle: row.data.state?.relation?.lifecycle ?? row.data.state?.agreement?.lifecycle ?? row.data.lifecycle ?? "active"
+    });
+  }
+  if (p.id) return visible.length ? ok(visible[0]) : failure("DM_DIPLOMACY_NOT_FOUND", "Entity unavailable", "not-found");
+  return ok({ items: visible, total: count, offset, limit, isGm, worldTick });
+}
+
+// src/diplomacy/owner-commands.ts
+var DIPLOMACY_OWNERS = Object.freeze({
+  relation: relationOwner,
+  reputation: reputationOwner,
+  agreement: agreementOwner,
+  territory: territoryOwner,
+  dispute: disputeOwner
+});
+var DIPLOMACY_NAMESPACES = { relation: "relations", reputation: "reputation", agreement: "agreements", territory: "territory", dispute: "disputes" };
+function validateOwnerIntent(raw) {
+  if (!isRecord3(raw) || !isJsonData(raw) || !Object.hasOwn(DIPLOMACY_OWNERS, raw.kind) || raw.mode !== "create" && raw.mode !== "modify" || !isText(raw.id) || !isText(raw.reason) || raw.mode === "modify" && (!isTimestamp(raw.expectedRevision) || !isRecord3(raw.action)) || raw.mode === "create" && !isRecord3(raw.data)) return failure("DM_DIPLOMACY_INTENT_INVALID", "Invalid semantic owner intent");
+  return ok(raw);
+}
+function diplomacyIntentLocks(intent, o) {
+  const locks = /* @__PURE__ */ new Set([lockKey.diplomacy(intent.kind, intent.id)]);
+  if (intent.mode === "create") locks.add("diplomacy:catalog");
+  if (intent.kind === "territory" || intent.kind === "dispute") locks.add(lockKey.territoryGraph());
+  const scan = (x) => {
+    if (Array.isArray(x)) {
+      x.forEach(scan);
+      return;
+    }
+    if (!isRecord3(x)) return;
+    for (const [key, value] of Object.entries(x)) {
+      if (typeof value === "string" && value.startsWith("JournalEntry.") && (key === "domainUuid" || x.type === "domain" && key === "uuid")) locks.add(lockKey.domain(value));
+      else if (typeof value === "object" && value !== null) scan(value);
+    }
+  };
+  scan(intent);
+  scan(o.store.get(intent.kind, intent.id)?.data);
+  if (intent.kind === "territory" && isRecord3(intent.action) && Array.isArray(intent.action.targets)) {
+    for (const t of intent.action.targets) if (isRecord3(t) && isText(t.territoryUuid)) locks.add(lockKey.diplomacy("territory", t.territoryUuid));
+  }
+  return [...locks].sort();
+}
+function mutationContext(ctx, revision, o, reason) {
+  return {
+    expectedRevision: revision,
+    eventId: ctx.command.commandId,
+    at: ctx.receivedAtReal,
+    worldTick: o.worldTick(),
+    reason,
+    sourceRefs: [{ type: "command", id: ctx.command.commandId }]
+  };
+}
+async function validatePartyReferences(parties, o) {
+  for (const party2 of parties) {
+    const uuid = party2.type === "domain" ? party2.uuid : party2.domainUuid;
+    if (uuid) {
+      const d = await o.domains.read(normalizeDomainId(uuid));
+      if (!d.ok) return failure("DM_DIPLOMACY_PARTY_UNAVAILABLE", "Referenced Domain unavailable", "not-found");
+      if (party2.type !== "domain") {
+        const people = tryGetDomainPeopleData(d.value.record), collection = { populationGroup: "populationGroups", operationalGroup: "operationalGroups", notable: "notables" }[party2.type];
+        if (!people.ok || !collection || !people.value[collection].some((p) => p.id === party2.id))
+          return failure("DM_DIPLOMACY_PARTY_UNAVAILABLE", "Referenced People entity unavailable", "not-found");
+      }
+    } else if (party2.type === "actor") {
+      const actor = globalThis.fromUuid ? await globalThis.fromUuid(party2.uuid) : globalThis.game?.actors?.get?.(party2.uuid?.slice(6));
+      if (!actor) return failure("DM_DIPLOMACY_PARTY_UNAVAILABLE", "Referenced Actor unavailable", "not-found");
+    } else if (party2.type !== "narrative") return failure("DM_DIPLOMACY_PARTY_PROVIDER_UNAVAILABLE", "Referenced party provider unavailable", "not-found");
+  }
+  return ok(void 0);
+}
+async function prepareOwnerIntent(intent, ctx, o) {
+  const owner = DIPLOMACY_OWNERS[intent.kind], before = await o.store.freshRead(intent.kind, intent.id);
+  let territories = o.store.list("territory").map((e) => e.data);
+  if (intent.kind === "territory" || intent.kind === "dispute") {
+    for (const e of o.store.list("territory")) await o.store.freshRead("territory", e.id);
+    territories = o.store.list("territory").map((e) => e.data);
+  }
+  let data, revision;
+  if (intent.mode === "create") {
+    if (before) return failure("DM_DIPLOMACY_ALREADY_EXISTS", "Entity already exists", "conflict");
+    const valid = owner.validate(intent.data, territories);
+    if (!valid.ok) return valid;
+    data = valid.value;
+    const identity = owner.identity(data);
+    if (identity.id !== intent.id || identity.revision !== 0) return failure("DM_DIPLOMACY_CREATE_INVALID", "New entity must have matching identity and revision zero");
+    if (intent.kind === "agreement" && data.state.agreement.lifecycle !== "draft")
+      return failure("DM_AGREEMENT_CREATE_INVALID", "New agreement must start as a draft");
+    if (intent.kind === "relation") {
+      const candidate = data;
+      const unique = validateRelationUniqueness(
+        candidate.state.relation,
+        candidate.definition,
+        o.store.list("relation").map((e) => e.data.state.relation)
+      );
+      if (!unique.ok) return unique;
+    }
+    const definitions = (d) => d.definitions ?? (d.definition ? [d.definition] : []);
+    for (const definition of definitions(data)) for (const e of o.store.list(intent.kind)) for (const old of definitions(e.data))
+      if (old.id === definition.id && old.version === definition.version && canonicalJsonStringify(old) !== canonicalJsonStringify(definition))
+        return failure("DM_DIPLOMACY_DEFINITION_CONFLICT", "Exact definition version already has a different snapshot", "conflict");
+    revision = 0;
+  } else {
+    if (!before) return failure("DM_DIPLOMACY_NOT_FOUND", "Entity unavailable", "not-found");
+    const stale = revisionGuard(before.revision, intent.expectedRevision);
+    if (stale) return stale;
+    const c = mutationContext(ctx, before.revision, o, intent.reason), action = intent.action;
+    if (intent.kind === "territory" && action.kind === "reparent") {
+      const plan = previewTerritoryReparent(territories.map((s) => s.territory), intent.id, action.parents, c);
+      if (!plan.ok) return plan;
+      const changed = commitTerritoryReparent(territories.map((s) => s.territory), plan.value);
+      if (!changed.ok) return changed;
+      data = { ...before.data, territory: changed.value.find((t) => t.uuid === intent.id) };
+    } else if (intent.kind === "territory" && action.kind === "transfer") {
+      if (!Array.isArray(action.targets) || !action.targets.some((t) => isRecord3(t) && t.territoryUuid === intent.id))
+        return failure("DM_TERRITORY_TRANSFER_INVALID", "Transfer must include the command's primary territory");
+      const plan = previewTerritoryTransfer(territories, action.targets, c);
+      if (!plan.ok) return plan;
+      const changed = commitTerritoryTransfer(territories, plan.value);
+      if (!changed.ok) return changed;
+      const writes = changed.value.filter((s) => plan.value.targets.some((t) => t.territoryUuid === s.territory.uuid)).map((s) => {
+        const prior = o.store.get("territory", s.territory.uuid);
+        return { before: prior, after: { ...prior, revision: s.territory.revision, data: s } };
+      });
+      const references2 = await validatePartyReferences(writes.flatMap((w) => owner.parties(w.after.data)), o);
+      if (!references2.ok) return references2;
+      return ok({ writes, effects: [], result: {
+        kind: "territory",
+        id: intent.id,
+        revision: writes.find((w) => w.after.id === intent.id)?.after.revision ?? before.revision,
+        changed: true,
+        transferred: writes.map((w) => ({ id: w.after.id, revision: w.after.revision }))
+      } });
+    } else {
+      const changed = owner.change(before.data, intent.action, c, territories);
+      if (!changed.ok) return changed;
+      data = changed.value;
+    }
+    const valid = owner.validate(data, territories);
+    if (!valid.ok) return valid;
+    data = valid.value;
+    revision = owner.identity(data).revision;
+  }
+  const references = await validatePartyReferences(owner.parties(data), o);
+  if (!references.ok) return references;
+  if (intent.kind === "territory") {
+    const candidate = data, all = [...territories.filter((s) => s.territory.uuid !== intent.id), candidate];
+    const graph = validateTerritoryGraph(all.map((s) => s.territory));
+    if (!graph.ok) return graph;
+    if (candidate.links.some((l) => !all.some((s) => s.territory.uuid === l.targetTerritoryUuid))) return failure("DM_TERRITORY_LINK_TARGET_MISSING", "Link target unavailable", "not-found");
+  }
+  const effects = [];
+  if (intent.kind === "agreement") {
+    const next = data, old = before?.data;
+    const prior = old?.executedOperations ?? [];
+    effects.push(...collectAgreementOwnerOperations(next.state.agreement, next.definition, o.worldTick()).filter((op) => !prior.includes(canonicalJsonStringify(op))));
+    const action = intent.action;
+    if (isRecord3(action) && action.kind === "obligation" && action.applyConsequences === true) {
+      const obligation = next.state.obligations.find((x) => x.id === action.obligationId);
+      if (!isRecord3(action.action) || action.action.kind !== "decide" || action.action.lifecycle !== "breached" || obligation?.lifecycle !== "breached")
+        return failure("DM_AGREEMENT_CONSEQUENCE_INVALID", "Consequences require an explicit confirmed breach decision");
+      const term = obligationTerm(next.state.agreement, obligation);
+      for (const op of term?.payload?.consequences ?? []) {
+        const consequence = { ...op, id: `${obligation.id}:${op.id}` };
+        if (!prior.includes(canonicalJsonStringify(consequence))) effects.push(consequence);
+      }
+    }
+    data = { ...next, executedOperations: [...prior, ...effects.map((op) => canonicalJsonStringify(op))] };
+  }
+  const after = { schemaVersion: 1, kind: intent.kind, id: intent.id, revision, data, receipts: before?.receipts ?? [] };
+  return ok({ writes: [{ before, after }], effects, result: { kind: intent.kind, id: intent.id, revision, changed: !before || revision !== before.revision } });
+}
+function registerOwnerCommands(o) {
+  o.registry.register({
+    type: "territory:preview",
+    visibility: "public",
+    permissionValidator: validateGmOnlyCommandPermission,
+    schemaValidator: (p) => validateOwnerIntent({ ...isRecord3(p) ? p : {}, kind: "territory", mode: "modify" }),
+    handler: async (ctx) => {
+      const intent = { ...ctx.command.payload, kind: "territory", mode: "modify" };
+      const available = o.recovery.fenceRegistry.assertKeysAvailable(diplomacyIntentLocks(intent, o));
+      if (!available.ok) return available;
+      const prepared = await prepareOwnerIntent(intent, ctx, o);
+      if (!prepared.ok) return prepared;
+      return ok({
+        id: intent.id,
+        expectedRevision: intent.expectedRevision,
+        facilityOwnershipChanges: 0,
+        changes: prepared.value.writes.map((w) => ({ id: w.after.id, before: w.before?.data ?? null, after: w.after.data }))
+      });
+    }
+  });
+  for (const [kind, owner] of Object.entries(DIPLOMACY_OWNERS)) {
+    const namespace = DIPLOMACY_NAMESPACES[kind];
+    for (const mode of ["create", "modify"]) {
+      const intentFor = (ctx) => ({ ...ctx.command.payload, kind, mode });
+      const definition = diplomacyMutationDefinition(kind, o, (ctx) => diplomacyIntentLocks(intentFor(ctx), o), (fresh) => prepareOwnerIntent(intentFor(fresh.context), fresh.context, o));
+      o.registry.register({
+        type: `${namespace}:${mode}`,
+        visibility: "public",
+        transactional: true,
+        permissionValidator: validateGmOnlyCommandPermission,
+        schemaValidator: (p) => validateOwnerIntent({ ...isRecord3(p) ? p : {}, kind, mode }),
+        mutationDefinition: definition,
+        handler: createTransactionalHandler(o.coordinator, definition)
+      });
+    }
+    o.registry.register({
+      type: `${namespace}:query`,
+      visibility: "public",
+      schemaValidator: validateDiplomacyQuery,
+      handler: (ctx) => queryDiplomacyOwner(ctx, kind, owner, o.store, o.domains, o.controllers, o.recovery, o.worldTick())
+    });
+  }
+}
+
+// src/diplomacy/diplomacy-drafts.ts
+function createDiplomacyDraft(kind, label, parties, visibility, territoryUuids = []) {
+  const base = { schemaVersion: 1, revision: 0, label, visibility, createdAt: 0, updatedAt: 0 };
+  if (kind === "relation") {
+    const id2 = createOpaqueId("rel");
+    return { id: id2, data: {
+      definition: {
+        id: "domain-manager:diplomatic-relation",
+        version: 1,
+        label: "Diplomatic relation",
+        symmetry: "symmetric",
+        minParties: 2,
+        maxParties: null,
+        allowedPartyTypes: ["domain", "actor", "narrative"],
+        allowedPartyRoles: ["participant"],
+        allowMultiple: true,
+        stancePolicy: "derived",
+        axes: ["trust", "affinity", "fear", "respect"].map((axis) => ({ id: `domain-manager:${axis}`, label: axis, minimum: -100, maximum: 100, defaultValue: 0 }))
+      },
+      state: { relation: {
+        ...base,
+        id: id2,
+        definitionId: "domain-manager:diplomatic-relation",
+        definitionVersion: 1,
+        lifecycle: "active",
+        parties: parties.map((ref, i) => ({ id: `party-${i}`, role: "participant", ref })),
+        scope: null,
+        baseAxes: [],
+        endedAt: null
+      }, modifiers: [], events: [] }
+    } };
+  }
+  if (kind === "reputation") {
+    const id2 = createOpaqueId("rep");
+    return { id: id2, data: {
+      definitions: [{
+        id: "domain-manager:standing",
+        version: 1,
+        label: "Standing",
+        minimum: -100,
+        maximum: 100,
+        baseline: 0,
+        visibility: "public",
+        publicPresentation: "band",
+        bands: [
+          { id: "domain-manager:distrusted", label: "Distrusted", minimum: -100, maximum: -1 },
+          { id: "domain-manager:neutral", label: "Neutral", minimum: 0, maximum: 0 },
+          { id: "domain-manager:trusted", label: "Trusted", minimum: 1, maximum: 100 }
+        ],
+        decay: null
+      }],
+      record: {
+        ...base,
+        id: id2,
+        subjectRef: parties[0],
+        audienceRef: parties[1],
+        entries: [],
+        tracks: [{ definitionId: "domain-manager:standing", definitionVersion: 1, score: 0, initialScore: 0, lastDecayWorldTick: null }]
+      }
+    } };
+  }
+  if (kind === "agreement") {
+    const id2 = crypto.randomUUID();
+    return { id: id2, data: { definition: {
+      id: "domain-manager:treaty",
+      version: 1,
+      label: "Treaty",
+      minParties: 2,
+      maxParties: null,
+      allowedPartyRoles: ["signatory"],
+      allowedTermTypes: ["domain-manager:narrative", "domain-manager:obligation", "domain-manager:right", "domain-manager:capability", "domain-manager:owner-operation"],
+      amendmentRequiresApproval: true,
+      automaticRenewalAllowed: false,
+      effectiveLifecycles: ["active", "breached"]
+    }, state: { agreement: {
+      ...base,
+      id: id2,
+      definitionId: "domain-manager:treaty",
+      definitionVersion: 1,
+      lifecycle: "draft",
+      parties: parties.map((ref, i) => ({ id: `party-${i}`, role: "signatory", ref })),
+      terms: [],
+      duration: { startsAtWorldTick: null, expiresAtWorldTick: null },
+      proposals: [],
+      amendments: [],
+      events: [],
+      supersedesId: null
+    }, obligations: [] }, executedOperations: [] } };
+  }
+  if (kind === "territory") {
+    const id2 = `JournalEntry.${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`;
+    return { id: id2, data: emptyTerritoryState({
+      ...base,
+      uuid: id2,
+      kind: "domain-manager:region",
+      scale: "region",
+      locatedInUuid: null,
+      administrativeParentUuid: null,
+      geography: {},
+      hierarchyHistory: []
+    }) };
+  }
+  const id = crypto.randomUUID();
+  return { id, data: { ...base, id, disputeType: "domain-manager:ownership", territoryUuids, parties, claimRefs: [], lifecycle: "latent", events: [] } };
+}
+
+// src/ui/domain-patterns/facilities/facility-view.ts
+function escapeHtml2(value) {
+  if (value === null || value === void 0) return "";
+  return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+function escapeAttribute2(value) {
+  return escapeHtml2(value);
+}
+function renderFacilitiesTableHtml(facilities) {
+  if (facilities.length === 0) {
+    return `<div class="dm-empty-state">No facilities found.</div>`;
+  }
+  return `
+    <table class="dm-facilities-table">
+      <thead>
+        <tr>
+          <th>Facility</th>
+          <th>Level</th>
+          <th>Lifecycle</th>
+          <th>Readiness</th>
+          <th>Integrity</th>
+          <th>Maintenance</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${facilities.map((f) => {
+    const hasConditions = f.conditions.length > 0;
+    return `
+            <tr class="dm-facility-row" data-facility-id="${escapeAttribute2(f.id)}">
+              <td class="dm-cell-name">
+                <span class="dm-facility-label">${escapeHtml2(f.name)}</span>
+                <span class="dm-def-id">(${escapeHtml2(f.definitionId)})</span>
+                ${f.isSecret ? `<span class="dm-badge dm-badge-secret">Secret</span>` : ""}
+                ${hasConditions ? `<span class="dm-badge dm-badge-warning" title="${f.conditions.length} active condition(s)">Conditions (${f.conditions.length})</span>` : ""}
+              </td>
+              <td class="dm-cell-level">
+                <span class="dm-level-pill">Lv.${f.level}</span>
+              </td>
+              <td class="dm-cell-lifecycle">
+                <span class="dm-badge ${escapeAttribute2(f.lifecycleBadgeClass)}">${escapeHtml2(f.lifecycle)}</span>
+              </td>
+              <td class="dm-cell-readiness">
+                <span class="dm-badge ${escapeAttribute2(f.readinessBadgeClass)}">${escapeHtml2(f.readiness)}</span>
+              </td>
+              <td class="dm-cell-integrity">
+                <div class="dm-progress-container dm-integrity-meter dm-integrity-${escapeAttribute2(f.integrityClass)}">
+                  <div class="dm-progress-bar" style="width: ${f.integrityPercent}%;"></div>
+                  <span class="dm-progress-text">${f.structuralIntegrity} / ${f.maxStructuralIntegrity} (${f.integrityPercent}%)</span>
+                </div>
+              </td>
+              <td class="dm-cell-maintenance">
+                <span class="dm-badge ${escapeAttribute2(f.maintenance.statusBadgeClass)}">${escapeHtml2(f.maintenance.status)}</span>
+                <span class="dm-subtext">${escapeHtml2(f.maintenance.formattedRatio)}</span>
+              </td>
+              <td class="dm-cell-actions">
+                <button type="button" class="dm-btn dm-btn-sm" data-action="openFacilityDetail" data-facility-id="${escapeAttribute2(f.id)}" title="Inspect Facility">
+                  <i class="fas fa-search"></i> Inspect
+                </button>
+                ${f.canMaintain ? `
+                  <button type="button" class="dm-btn dm-btn-sm dm-btn-secondary" data-action="openMaintenanceModal" data-facility-id="${escapeAttribute2(f.id)}" title="Perform Maintenance">
+                    <i class="fas fa-wrench"></i> Maintain
+                  </button>
+                ` : ""}
+                ${f.canRepair ? `
+                  <button type="button" class="dm-btn dm-btn-sm dm-btn-primary" data-action="openRepairModal" data-facility-id="${escapeAttribute2(f.id)}" title="Repair Facility">
+                    <i class="fas fa-tools"></i> Repair
+                  </button>
+                ` : ""}
+              </td>
+            </tr>
+          `;
+  }).join("")}
+      </tbody>
+    </table>
+  `;
+}
+function renderFacilityDetailModalHtml(facility, viewerIsGm) {
+  return `
+    <div class="dm-modal dm-facility-detail-modal" data-facility-id="${escapeAttribute2(facility.id)}">
+      <header class="dm-modal-header">
+        <h3>Facility Inspector: ${escapeHtml2(facility.name)}</h3>
+        <button type="button" class="dm-btn-close" data-action="closeModal">&times;</button>
+      </header>
+
+      <div class="dm-modal-body">
+        <section class="dm-detail-summary">
+          <div class="dm-summary-grid">
+            <div class="dm-stat">
+              <span class="dm-stat-label">Lifecycle</span>
+              <span class="dm-badge ${escapeAttribute2(facility.lifecycleBadgeClass)}">${escapeHtml2(facility.lifecycle)}</span>
+            </div>
+            <div class="dm-stat">
+              <span class="dm-stat-label">Readiness (Operational)</span>
+              <span class="dm-badge ${escapeAttribute2(facility.readinessBadgeClass)}">${escapeHtml2(facility.readiness)}</span>
+            </div>
+            <div class="dm-stat">
+              <span class="dm-stat-label">Level</span>
+              <span>Level ${facility.level}</span>
+            </div>
+            <div class="dm-stat">
+              <span class="dm-stat-label">Revision</span>
+              <span>v${facility.revision}</span>
+            </div>
+          </div>
+
+          <div class="dm-integrity-section">
+            <h4>Structural Integrity</h4>
+            <div class="dm-progress-container dm-progress-large dm-integrity-${escapeAttribute2(facility.integrityClass)}">
+              <div class="dm-progress-bar" style="width: ${facility.integrityPercent}%;"></div>
+              <span class="dm-progress-text">${facility.structuralIntegrity} / ${facility.maxStructuralIntegrity} HP (${facility.integrityPercent}%)</span>
+            </div>
+          </div>
+
+          <div class="dm-maintenance-section">
+            <h4>Maintenance Status</h4>
+            <div class="dm-maint-overview">
+              <span class="dm-badge ${escapeAttribute2(facility.maintenance.statusBadgeClass)}">
+                ${escapeHtml2(facility.maintenance.status.toUpperCase())}
+              </span>
+              <span class="dm-maint-ratio">Cycle Progress: ${escapeHtml2(facility.maintenance.formattedRatio)} (${facility.maintenance.ticksSinceLastMaintenance}/${facility.maintenance.intervalTicks} ticks)</span>
+              ${facility.maintenance.consecutiveMissedCycles > 0 ? `
+                <span class="dm-badge dm-badge-danger">${facility.maintenance.consecutiveMissedCycles} missed cycle(s)</span>
+              ` : ""}
+            </div>
+          </div>
+        </section>
+
+        ${facility.conditions.length > 0 ? `
+          <section class="dm-section dm-conditions-section">
+            <h4 class="dm-warning-text"><i class="fas fa-exclamation-circle"></i> Active Conditions & Damage</h4>
+            <ul class="dm-condition-list">
+              ${facility.conditions.map((c) => `
+                <li class="dm-condition-item">
+                  <span class="dm-badge ${escapeAttribute2(c.severityBadgeClass)}">${escapeHtml2(c.severity)}</span>
+                  <span class="dm-condition-desc">${escapeHtml2(c.description)}</span>
+                  ${c.suppressesCapabilities.length > 0 ? `
+                    <span class="dm-suppression-note">(Suppresses: ${c.suppressesCapabilities.map(escapeHtml2).join(", ")})</span>
+                  ` : ""}
+                </li>
+              `).join("")}
+            </ul>
+          </section>
+        ` : ""}
+
+        <section class="dm-section dm-capabilities-section">
+          <h4>Effective Capabilities</h4>
+          ${facility.effectiveCapabilities.length > 0 ? `
+            <div class="dm-caps-tags">
+              ${facility.effectiveCapabilities.map((cap) => `
+                <span class="dm-cap-tag"><code>${escapeHtml2(cap)}</code></span>
+              `).join("")}
+            </div>
+          ` : `
+            <div class="dm-muted-text">No active capabilities provided in current status.</div>
+          `}
+        </section>
+
+        <section class="dm-section dm-modules-section">
+          <h4>Infrastructure Modules & Upgrades</h4>
+          <div class="dm-slots-overview">
+            <span>Installed Modules: ${facility.activeModulesCount}</span> |
+            <span>Active Upgrades: ${facility.activeUpgradesCount}</span>
+          </div>
+        </section>
+      </div>
+
+      <footer class="dm-modal-footer">
+        ${facility.canMaintain ? `
+          <button type="button" class="dm-btn dm-btn-secondary" data-action="openMaintenanceModal" data-facility-id="${escapeAttribute2(facility.id)}">
+            <i class="fas fa-wrench"></i> Perform Maintenance
+          </button>
+        ` : ""}
+
+        ${facility.canRepair ? `
+          <button type="button" class="dm-btn dm-btn-primary" data-action="openRepairModal" data-facility-id="${escapeAttribute2(facility.id)}">
+            <i class="fas fa-tools"></i> Repair Damage
+          </button>
+        ` : ""}
+
+        <button type="button" class="dm-btn" data-action="closeModal">Close</button>
+      </footer>
+    </div>
+  `;
+}
+function renderFacilityCreateModalHtml(domainUuid, definitions) {
+  return `
+    <div class="dm-modal dm-facility-create-modal">
+      <header class="dm-modal-header">
+        <h3>Commission / Plan Facility</h3>
+        <button type="button" class="dm-btn-close" data-action="closeModal">&times;</button>
+      </header>
+
+      <form data-form-type="createFacility" data-domain-uuid="${escapeAttribute2(domainUuid)}">
+        <div class="dm-modal-body">
+          <div class="dm-form-group">
+            <label for="dm-facility-definition">Facility Type / Blueprint</label>
+            <select id="dm-facility-definition" name="definitionId" required>
+              <option value="">-- Select a blueprint --</option>
+              ${definitions.map((d) => `
+                <option value="${escapeAttribute2(d.id)}">
+                  ${escapeHtml2(d.label)} - Max Lv.${d.maxLevel}
+                </option>
+              `).join("")}
+            </select>
+          </div>
+
+          <div class="dm-form-group">
+            <label for="dm-facility-name">Facility Name</label>
+            <input type="text" id="dm-facility-name" name="name" placeholder="Custom facility designation (optional)" />
+          </div>
+
+          <div class="dm-form-group">
+            <label for="dm-facility-level">Starting Level</label>
+            <input type="number" id="dm-facility-level" name="level" min="1" max="10" value="1" required />
+          </div>
+
+          <div class="dm-form-group">
+            <label for="dm-facility-lifecycle">Initial Lifecycle State</label>
+            <select id="dm-facility-lifecycle" name="initialLifecycle">
+              <option value="operational">Operational (Fully functional)</option>
+              <option value="planned">Planned (Blueprint / Draft)</option>
+              <option value="underConstruction">Under Construction</option>
+              <option value="inactive">Inactive</option>
+            </select>
+          </div>
+        </div>
+
+        <footer class="dm-modal-footer">
+          <button type="submit" class="dm-btn dm-btn-primary">
+            <i class="fas fa-check"></i> Commission Facility
+          </button>
+          <button type="button" class="dm-btn" data-action="closeModal">Cancel</button>
+        </footer>
+      </form>
+    </div>
+  `;
+}
+function renderFacilityMaintenanceModalHtml(facility) {
+  return `
+    <div class="dm-modal dm-facility-maintenance-modal" data-facility-id="${escapeAttribute2(facility.id)}">
+      <header class="dm-modal-header">
+        <h3>Perform Maintenance: ${escapeHtml2(facility.name)}</h3>
+        <button type="button" class="dm-btn-close" data-action="closeModal">&times;</button>
+      </header>
+
+      <form data-form-type="maintainFacility" data-facility-id="${escapeAttribute2(facility.id)}">
+        <div class="dm-modal-body">
+          <p>
+            Committing maintenance will reset the maintenance cycle timer to 0 ticks, clear overdue statuses, and restore standard operational readiness.
+          </p>
+
+          <div class="dm-maint-details">
+            <div>Current Status: <strong>${escapeHtml2(facility.maintenance.status)}</strong></div>
+            <div>Elapsed Ticks: <strong>${facility.maintenance.ticksSinceLastMaintenance} / ${facility.maintenance.intervalTicks}</strong></div>
+            <div>Missed Cycles: <strong>${facility.maintenance.consecutiveMissedCycles}</strong></div>
+          </div>
+
+          <div class="dm-form-group">
+            <label for="dm-maint-notes">Maintenance Log Notes</label>
+            <input type="text" id="dm-maint-notes" name="notes" placeholder="Standard inspection and overhaul" />
+          </div>
+        </div>
+
+        <footer class="dm-modal-footer">
+          <button type="submit" class="dm-btn dm-btn-primary">
+            <i class="fas fa-wrench"></i> Complete Maintenance
+          </button>
+          <button type="button" class="dm-btn" data-action="closeModal">Cancel</button>
+        </footer>
+      </form>
+    </div>
+  `;
+}
+function renderFacilityRepairModalHtml(facility) {
+  const missingIntegrity = facility.maxStructuralIntegrity - facility.structuralIntegrity;
+  return `
+    <div class="dm-modal dm-facility-repair-modal" data-facility-id="${escapeAttribute2(facility.id)}">
+      <header class="dm-modal-header">
+        <h3>Repair Facility: ${escapeHtml2(facility.name)}</h3>
+        <button type="button" class="dm-btn-close" data-action="closeModal">&times;</button>
+      </header>
+
+      <form data-form-type="repairFacility" data-facility-id="${escapeAttribute2(facility.id)}">
+        <div class="dm-modal-body">
+          <div class="dm-form-group">
+            <label for="dm-repair-amount">Restore Structural Integrity (HP)</label>
+            <input type="number" id="dm-repair-amount" name="restoreIntegrity" min="1" max="${missingIntegrity > 0 ? missingIntegrity : 100}" value="${missingIntegrity > 0 ? missingIntegrity : 10}" required />
+            <small class="dm-help-text">Deficit: ${missingIntegrity} HP (Current: ${facility.structuralIntegrity} / Max: ${facility.maxStructuralIntegrity})</small>
+          </div>
+
+          ${facility.conditions.length > 0 ? `
+            <div class="dm-form-group">
+              <label>Clear Active Damage Conditions</label>
+              <div class="dm-conditions-checkboxes">
+                ${facility.conditions.map((c) => `
+                  <label class="dm-checkbox-label">
+                    <input type="checkbox" name="clearConditions" value="${escapeAttribute2(c.id)}" checked />
+                    [${escapeHtml2(c.severity)}] ${escapeHtml2(c.description)}
+                  </label>
+                `).join("")}
+              </div>
+            </div>
+          ` : ""}
+        </div>
+
+        <footer class="dm-modal-footer">
+          <button type="submit" class="dm-btn dm-btn-primary">
+            <i class="fas fa-tools"></i> Execute Repairs
+          </button>
+          <button type="button" class="dm-btn" data-action="closeModal">Cancel</button>
+        </footer>
+      </form>
+    </div>
+  `;
+}
+function renderFacilitiesSubsystemHtml(vm) {
+  return `
+    <div class="dm-facilities-subsystem" data-domain-uuid="${escapeAttribute2(vm.domainUuid)}">
+      <header class="dm-subsystem-header">
+        <div class="dm-header-title">
+          <h2>Facilities & Infrastructure</h2>
+          <span class="dm-header-subtitle">Domain Installations, Capacities, Maintenance & Readiness</span>
+        </div>
+
+        <div class="dm-summary-counters">
+          <div class="dm-counter-card">
+            <span class="dm-counter-value">${vm.totalCount}</span>
+            <span class="dm-counter-label">Total</span>
+          </div>
+          <div class="dm-counter-card dm-counter-operational">
+            <span class="dm-counter-value">${vm.operationalCount}</span>
+            <span class="dm-counter-label">Operational</span>
+          </div>
+          <div class="dm-counter-card dm-counter-ready">
+            <span class="dm-counter-value">${vm.readyCount}</span>
+            <span class="dm-counter-label">Ready</span>
+          </div>
+          <div class="dm-counter-card dm-counter-damaged">
+            <span class="dm-counter-value">${vm.degradedOrDamagedCount}</span>
+            <span class="dm-counter-label">Damaged/Degraded</span>
+          </div>
+        </div>
+      </header>
+
+      <div class="dm-toolbar">
+        <div class="dm-toolbar-filters">
+          <label class="dm-filter-label">Readiness:</label>
+          <select name="filterReadiness" data-action="filterReadiness" class="dm-select-sm">
+            <option value="all" ${vm.filterReadiness === "all" ? "selected" : ""}>All Readiness</option>
+            <option value="ready" ${vm.filterReadiness === "ready" ? "selected" : ""}>Ready</option>
+            <option value="limited" ${vm.filterReadiness === "limited" ? "selected" : ""}>Limited</option>
+            <option value="blocked" ${vm.filterReadiness === "blocked" ? "selected" : ""}>Blocked</option>
+            <option value="unavailable" ${vm.filterReadiness === "unavailable" ? "selected" : ""}>Unavailable</option>
+          </select>
+
+          <input
+            type="text"
+            placeholder="Search facilities..."
+            data-action="searchFacilities"
+            value="${escapeAttribute2(vm.searchTerm)}"
+            class="dm-input-sm dm-search-input"
+          />
+        </div>
+
+        <div class="dm-toolbar-actions">
+          <button type="button" class="dm-btn dm-btn-primary dm-btn-sm" data-action="openCreateModal">
+            <i class="fas fa-plus"></i> Commission Facility
+          </button>
+        </div>
+      </div>
+
+      <main class="dm-subsystem-content">
+        ${renderFacilitiesTableHtml(vm.facilities)}
+      </main>
+    </div>
+  `;
+}
+
+// src/ui/domain-patterns/diplomacy/diplomacy-app.ts
+var labels = { relations: "Rela\xE7\xF5es", reputation: "Reputa\xE7\xE3o", agreements: "Acordos", territory: "Territ\xF3rio", disputes: "Disputas", proposals: "Propostas" };
+var kinds = { relations: "relation", reputation: "reputation", agreements: "agreement", territory: "territory", disputes: "dispute" };
+var actions = {
+  relations: [["incident", "Registrar incidente / revers\xE3o"], ["modifier", "Adicionar modificador tempor\xE1rio"], ["end-modifier", "Encerrar modificador"], ["end", "Encerrar rela\xE7\xE3o"]],
+  reputation: [["adjust", "Ajustar reputa\xE7\xE3o"], ["decay", "Aplicar decad\xEAncia configurada"]],
+  agreements: [["propose", "Propor termos"], ["amend", "Propor emenda"], ["counter", "Contrapropor termos"], ["accept", "Aceitar proposta de termos"], ["reject", "Rejeitar termos"], ["activate", "Ativar termos aceitos"], ["suspend", "Suspender"], ["resume", "Retomar"], ["breach", "Registrar quebra"], ["expire", "Expirar"], ["terminate", "Encerrar"], ["obligation:evidence", "Adicionar evid\xEAncia"], ["obligation:allege", "Alegar descumprimento"], ["obligation:contest", "Contestar alega\xE7\xE3o"], ["obligation:decide", "Decidir obriga\xE7\xE3o"]],
+  territory: [["claim", "Adicionar reivindica\xE7\xE3o"], ["presence", "Registrar presen\xE7a"], ["right", "Conceder direito"], ["reparent", "Alterar hierarquia"], ["transfer", "Transferir reivindica\xE7\xE3o de propriedade"], ["end-claim", "Encerrar reivindica\xE7\xE3o"], ["contest-claim", "Contestar reivindica\xE7\xE3o"], ["revoke-right", "Revogar direito"]],
+  disputes: [["decide", "Registrar decis\xE3o de disputa"]]
+};
+var party = (raw) => raw.startsWith("JournalEntry.") ? { type: "domain", uuid: raw } : raw.startsWith("Actor.") ? { type: "actor", uuid: raw } : { type: "narrative", id: raw };
+var refLabel = (x) => typeof x === "string" ? x : x?.label ?? x?.title ?? x?.uuid ?? x?.id ?? "\u2014";
+function table(title, rows, columns) {
+  return `<section><h3>${escapeHtml2(title)}</h3>${rows.length ? `<table><thead><tr>${columns.map(([name]) => `<th>${escapeHtml2(name)}</th>`).join("")}</tr></thead><tbody>${rows.map((row) => `<tr>${columns.map(([, get]) => `<td>${escapeHtml2(String(get(row) ?? "\u2014"))}</td>`).join("")}</tr>`).join("")}</tbody></table>` : "<p>Nenhum registro vis\xEDvel.</p>"}</section>`;
+}
+var DiplomacyApplicationController = class {
+  constructor(api) {
+    this.api = api;
+  }
+  tab = "relations";
+  offset = 0;
+  search = "";
+  historyOffset = 0;
+  selectedId = null;
+  list = null;
+  detail = null;
+  error = "";
+  creating = false;
+  preview = null;
+  #previewInput = null;
+  #previewIntent = null;
+  treeAxis = null;
+  treeParent = null;
+  selectTab(tab) {
+    this.tab = tab;
+    this.offset = 0;
+    this.selectedId = null;
+    this.detail = null;
+    this.historyOffset = 0;
+    this.creating = false;
+    this.preview = null;
+  }
+  select(id) {
+    this.selectedId = id;
+    this.historyOffset = 0;
+    this.creating = false;
+    this.preview = null;
+  }
+  async load() {
+    const queried = await this.api[this.tab].query({
+      offset: this.offset,
+      limit: 30,
+      search: this.search,
+      ...this.tab === "territory" && this.treeAxis ? { treeAxis: this.treeAxis, parentUuid: this.treeParent } : {}
+    });
+    if (!queried.ok) {
+      this.error = queried.error.message;
+      return queried;
+    }
+    this.list = queried.value;
+    if (this.selectedId) {
+      const detail = await this.api[this.tab].query({ id: this.selectedId, historyOffset: this.historyOffset, historyLimit: 30 });
+      if (!detail.ok) {
+        this.error = detail.error.message;
+        this.detail = null;
+        return detail;
+      }
+      this.detail = detail.value;
+    }
+    return ok(this.list);
+  }
+  async create(fields) {
+    if (this.tab === "proposals") return failure("DM_DIPLOMACY_INTENT_INVALID", "Selecione o tipo de registro para criar uma proposta.");
+    const parties = [fields.subject, fields.audience, ...fields.additionalParties?.split(",") ?? []].filter(Boolean).map((x) => party(x.trim())), draft = createDiplomacyDraft(
+      kinds[this.tab],
+      fields.label,
+      parties,
+      fields.visibility,
+      fields.territories?.split(",").map((x) => x.trim()).filter(Boolean)
+    );
+    const intent = { kind: kinds[this.tab], mode: "create", id: draft.id, data: draft.data, reason: fields.reason };
+    const result = this.list?.isGm ? await this.api[this.tab].create({ id: draft.id, data: draft.data, reason: fields.reason }) : await this.api.proposals.submit({ id: crypto.randomUUID(), intent });
+    this.capture(result);
+    if (result.ok) {
+      this.creating = false;
+      if (this.list?.isGm) this.select(draft.id);
+    }
+    return result;
+  }
+  buildAction(f) {
+    if (!this.detail || this.tab === "proposals") return failure("DM_DIPLOMACY_INTENT_INVALID", "Selecione um registro.");
+    const n = Number(f.amount), kind = f.kind, d = this.detail;
+    if (["incident", "modifier", "adjust", "presence"].includes(kind) && (!f.amount || !Number.isSafeInteger(n))) return failure("DM_DIPLOMACY_INTENT_INVALID", "Informe uma quantidade inteira.");
+    if (this.tab === "relations") {
+      const selector = { axisId: f.axis, fromPartyId: f.from || null, toPartyId: f.to || null };
+      return ok(kind === "incident" ? { kind, deltas: [{ ...selector, value: n }], ...f.reversalOf ? { reversalOf: f.reversalOf } : {} } : kind === "modifier" ? { kind, value: {
+        ...selector,
+        value: n,
+        id: crypto.randomUUID(),
+        source: { type: "manual", id: "gm-input" },
+        visibility: f.visibility,
+        lifecycle: "active",
+        createdAt: 0,
+        expiresAt: null,
+        expiresAtWorldTick: f.expires ? Number(f.expires) : null,
+        stackKey: "domain-manager:temporary",
+        stacking: "add"
+      } } : kind === "end-modifier" ? { kind, id: f.sourceId } : { kind });
+    }
+    if (this.tab === "reputation") return ok({ kind, trackId: f.axis, delta: n, ...f.reversalOf ? { reversalOf: f.reversalOf } : {} });
+    if (this.tab === "agreements") {
+      const p = d.proposals?.find((x) => x.id === f.sourceId) ?? d.proposals?.at(-1);
+      if (kind.startsWith("obligation:")) {
+        const o = d.obligations?.find((x) => x.id === f.obligationId), nested = kind.slice(11);
+        return ok({
+          kind: "obligation",
+          obligationId: o?.id,
+          expectedObligationRevision: o?.revision,
+          action: nested === "evidence" ? { kind: nested, evidence: {
+            id: crypto.randomUUID(),
+            ref: { type: "evidence", id: f.outcome },
+            statement: f.text,
+            position: f.position || "support",
+            visibility: f.visibility,
+            at: 0
+          } } : nested === "decide" ? { kind: nested, lifecycle: f.lifecycle } : { kind: nested },
+          applyConsequences: f.applyConsequences === "on"
+        });
+      }
+      if (["propose", "amend", "counter"].includes(kind)) {
+        const type = f.termType || "narrative", grants = f.grants?.split(",").map((x) => x.trim()).filter(Boolean) ?? [];
+        const operation = {
+          id: crypto.randomUUID(),
+          ownerId: "domain-manager:economy",
+          operation: "economy:adjust",
+          targetRefs: [{ type: "domain", uuid: f.beneficiary }],
+          payload: { domainUuid: f.beneficiary, resourceId: f.resource, deltaMinor: Number(f.amount), reason: f.reason }
+        };
+        const payload = type === "capability" ? {
+          beneficiaryPartyId: f.beneficiaryPartyId,
+          capabilityIds: grants,
+          scopeRef: f.territories ? { type: "territory", uuid: f.territories } : null,
+          conditionRefs: []
+        } : type === "right" ? {
+          beneficiaryPartyId: f.beneficiaryPartyId,
+          territoryUuid: f.territories,
+          rightType: f.rightType || "domain-manager:entry",
+          startsAtWorldTick: null,
+          expiresAtWorldTick: f.expires ? Number(f.expires) : null,
+          inherited: f.inherited === "on",
+          revocable: true,
+          conditionRefs: [],
+          grants
+        } : type === "obligation" ? {
+          kind: "domain-manager:payment",
+          obligatedPartyId: f.partyId,
+          beneficiaryPartyId: f.beneficiaryPartyId || null,
+          dueAtWorldTick: f.due ? Number(f.due) : null,
+          graceTicks: Number(f.grace || "0"),
+          overduePolicy: "report",
+          requirementRef: { type: "resource", id: f.resource },
+          consequences: f.consequence === "on" ? [operation] : []
+        } : type === "owner-operation" ? { operations: [operation] } : {};
+        return ok({
+          kind,
+          proposalId: kind === "counter" ? p?.id : crypto.randomUUID(),
+          ...kind === "counter" ? { expectedProposalRevision: p?.revision } : { proposalExpiresAtWorldTick: null },
+          partyId: f.partyId,
+          terms: [{
+            id: crypto.randomUUID(),
+            type: `domain-manager:${type}`,
+            title: f.title,
+            text: f.text || null,
+            visibility: f.visibility,
+            partyIds: d.parties.map((p2) => p2.id),
+            payload
+          }],
+          duration: { startsAtWorldTick: null, expiresAtWorldTick: f.expires ? Number(f.expires) : null }
+        });
+      }
+      if (["accept", "reject", "activate"].includes(kind)) return ok({ kind, proposalId: p?.id, expectedProposalRevision: p?.revision, ...kind !== "activate" ? { partyId: f.partyId } : { amendmentId: crypto.randomUUID() } });
+      return ok({ kind });
+    }
+    if (this.tab === "disputes") return ok({ kind, lifecycle: f.lifecycle, outcomeRef: f.outcome ? { type: "manual-outcome", id: f.outcome } : null });
+    const source = {
+      id: crypto.randomUUID(),
+      sourceRef: { type: "manual", id: "gm-review" },
+      visibility: f.visibility,
+      startsAtWorldTick: f.starts ? Number(f.starts) : this.list?.worldTick ?? 0,
+      expiresAtWorldTick: f.expires ? Number(f.expires) : null
+    };
+    if (kind === "claim") return ok({ kind, value: { ...source, claimantRef: party(f.beneficiary), claimType: f.claimType, lifecycle: "active", contested: false, strength: null, inherited: false } });
+    if (kind === "presence") return ok({ kind, value: { ...source, partyRef: party(f.beneficiary), presenceType: "domain-manager:military", amount: n, active: true } });
+    if (kind === "right") return ok({ kind, value: {
+      ...source,
+      beneficiaryRef: party(f.beneficiary),
+      rightType: f.rightType,
+      inherited: f.inherited === "on",
+      revocable: true,
+      active: true,
+      conditionRefs: [],
+      grants: f.grants ? f.grants.split(",").map((x) => x.trim()).filter(Boolean) : []
+    } });
+    if (kind === "reparent") return ok({ kind, parents: { locatedInUuid: f.physical || null, administrativeParentUuid: f.administrative || null } });
+    if (kind === "transfer") return ok({ kind, targets: [{
+      territoryUuid: d.id,
+      expectedRevision: d.revision,
+      supersedeClaimIds: [f.sourceId],
+      newClaim: { ...source, claimantRef: party(f.beneficiary), claimType: "domain-manager:ownership", lifecycle: "active", contested: false, strength: null, inherited: false }
+    }] });
+    return ok({ kind, id: f.sourceId });
+  }
+  async change(fields, previewOnly = false) {
+    const built = this.buildAction(fields);
+    if (!built.ok) {
+      this.capture(built);
+      return built;
+    }
+    let intent = {
+      kind: kinds[this.tab],
+      mode: "modify",
+      id: this.detail.id,
+      expectedRevision: this.detail.revision,
+      action: built.value,
+      reason: fields.reason
+    };
+    if (previewOnly) {
+      const result2 = await this.api.previewTerritory(intent);
+      this.capture(result2);
+      if (result2.ok) {
+        this.preview = result2.value;
+        this.#previewInput = JSON.stringify(fields);
+        this.#previewIntent = intent;
+      } else this.preview = null;
+      return result2;
+    }
+    if (this.tab === "territory" && ["transfer", "reparent"].includes(fields.kind) && this.list?.isGm && (!this.preview || this.#previewInput !== JSON.stringify(fields) || this.#previewIntent?.expectedRevision !== this.detail.revision))
+      return this.capture(failure("DM_DIPLOMACY_PREVIEW_REQUIRED", "Confira a pr\xE9via antes de confirmar a altera\xE7\xE3o territorial."));
+    if (this.preview && this.#previewIntent && this.#previewInput === JSON.stringify(fields)) intent = this.#previewIntent;
+    const result = this.list?.isGm ? await this.api[this.tab].modify(intent) : await this.api.proposals.submit({ id: crypto.randomUUID(), intent });
+    this.capture(result);
+    if (result.ok) this.preview = null;
+    return result;
+  }
+  async review(decision, reason, fields = {}) {
+    let editedIntent;
+    if (decision === "approve" && (fields.amount || fields.targetRevision)) {
+      editedIntent = structuredClone(this.detail.original);
+      const action = editedIntent.action;
+      if (fields.amount) {
+        const delta = Number(fields.amount);
+        if (!Number.isSafeInteger(delta)) return this.capture(failure("DM_DIPLOMACY_INTENT_INVALID", "A altera\xE7\xE3o deve ser inteira."));
+        if (action?.kind === "incident" && action.deltas?.length === 1) action.deltas[0].value = delta;
+        else if (action?.kind === "adjust") action.delta = delta;
+        else return this.capture(failure("DM_DIPLOMACY_INTENT_INVALID", "Este pedido exige revis\xE3o pela API sem\xE2ntica."));
+      }
+      if (fields.targetRevision) editedIntent = { ...editedIntent, expectedRevision: Number(fields.targetRevision) };
+    }
+    const result = await this.api.proposals.decide({ id: this.detail.id, expectedRevision: this.detail.revision, decision, reason, ...editedIntent ? { editedIntent } : {} });
+    this.capture(result);
+    return result;
+  }
+  capture(result) {
+    this.error = result.ok ? "" : result.error.message;
+    return result;
+  }
+  render() {
+    const tabs = Object.entries(labels).map(([key, name]) => `<button type="button" data-dm-tab="${key}" aria-pressed="${this.tab === key}">${name}</button>`).join("");
+    const list = (this.list?.items ?? []).map((r) => `<button type="button" data-dm-id="${escapeAttribute2(r.id)}">${escapeHtml2(r.label)} <small>${escapeHtml2(r.lifecycle)}</small></button>`).join("");
+    return `<div class="dm-diplomacy"><nav>${tabs}</nav><p>Resumo \u2192 explica\xE7\xE3o \u2192 detalhes \u2192 a\xE7\xE3o. As altera\xE7\xF5es s\xE3o confirmadas pela autoridade do mundo.</p>
+      ${this.error ? `<p role="alert">${escapeHtml2(this.error)}</p>` : ""}<form data-dm-form="search"><input name="search" aria-label="Pesquisar" value="${escapeAttribute2(this.search)}"><button>Pesquisar</button></form>
+      ${this.tab === "territory" ? `<nav><button type="button" data-dm-tree="all">Lista</button><button type="button" data-dm-tree="locatedInUuid">\xC1rvore f\xEDsica</button><button type="button" data-dm-tree="administrativeParentUuid">\xC1rvore administrativa</button><button type="button" data-dm-root="true">Ra\xEDzes</button></nav><p>Ramo atual: ${escapeHtml2(this.treeParent ?? "ra\xEDzes / lista")}</p>` : ""}
+      <div class="dm-diplomacy-columns"><aside><p>${this.list?.total ?? 0} registros vis\xEDveis</p>${list || "<p>Nenhum registro.</p>"}
+      <button type="button" data-dm-page="-1" ${this.offset === 0 ? "disabled" : ""}>Anterior</button><button type="button" data-dm-page="1" ${this.offset + 30 >= (this.list?.total ?? 0) ? "disabled" : ""}>Pr\xF3xima</button>
+      ${this.tab !== "proposals" ? '<button type="button" data-dm-create="true">Novo registro</button>' : ""}</aside><main>${this.creating ? this.createForm() : this.detail ? this.inspector() : "<p>Selecione um registro para ver a explica\xE7\xE3o e o hist\xF3rico.</p>"}</main></div></div>`;
+  }
+  createForm() {
+    const input = (name, label, required = true) => `<label>${label}<input name="${name}" ${required ? "required" : ""}></label>`;
+    return `<h2>Novo registro: ${labels[this.tab]}</h2><form data-dm-form="create">${input("label", "Nome")}${this.tab !== "territory" ? input("subject", "Parte / sujeito (UUID de Dom\xEDnio ou Actor; nome para parte narrativa)") + input("audience", "Outra parte / audi\xEAncia") : ""}
+      ${this.tab !== "reputation" && this.tab !== "territory" ? input("additionalParties", "Outras partes, separadas por v\xEDrgula (opcional)", false) : ""}
+      ${this.tab === "disputes" ? input("territories", "UUIDs dos territ\xF3rios, separados por v\xEDrgula") : ""}${this.visibilityField()}${input("reason", "Motivo audit\xE1vel")}
+      <button>${this.list?.isGm ? "Criar registro" : "Enviar proposta ao GM"}</button></form>`;
+  }
+  visibilityField() {
+    return '<label>Visibilidade<select name="visibility"><option value="public">P\xFAblica</option><option value="restricted">Participantes</option><option value="secret">GM</option></select></label>';
+  }
+  inspector() {
+    const d = this.detail;
+    let blocks = `<h2>${escapeHtml2(d.label ?? d.id)}</h2><p>Estado: ${escapeHtml2(d.lifecycle ?? "active")} \xB7 revis\xE3o ${d.revision}</p>`;
+    const columns = [["Parte", (x) => refLabel(x.ref ?? x.partyRef ?? x.claimantRef ?? x.beneficiaryRef ?? x)], ["Papel", (x) => x.role ?? x.claimType ?? x.rightType ?? "\u2014"]];
+    if (d.parties) blocks += table("Participantes", d.parties, columns);
+    if (d.scores) blocks += table("Eixos", d.scores, [["Eixo", (x) => x.axisId], ["Base", (x) => x.base], ["Efetivo", (x) => x.effective]]);
+    if (d.tracks) blocks += table("Reputa\xE7\xE3o", d.tracks, [["Trilha", (x) => x.label ?? x.definitionId], ["Faixa / valor", (x) => x.band?.label ?? x.band ?? x.bandLabel ?? x.score ?? x.value ?? x.presentation]]);
+    if (d.terms) blocks += table("Termos vigentes", d.terms, [["Termo", (x) => x.title], ["Descri\xE7\xE3o", (x) => x.text]]);
+    if (d.proposals) blocks += table("Rodadas de termos", d.proposals, [["Proposta", (x) => x.id], ["Estado", (x) => x.lifecycle], ["Revis\xE3o", (x) => x.revision]]);
+    if (d.obligations) blocks += table("Obriga\xE7\xF5es", d.obligations, [["Obriga\xE7\xE3o", (x) => x.id], ["Estado", (x) => x.lifecycle], ["Contestada", (x) => x.contested ? "Sim" : "N\xE3o"]]);
+    if (d.territory) {
+      blocks += `<p>Propriedade, administra\xE7\xE3o, controle e presen\xE7a possuem registros independentes. Transfer\xEAncias preservam as reivindica\xE7\xF5es concorrentes.</p>
+      <p>Localiza\xE7\xE3o: ${escapeHtml2(d.territory.locatedInUuid ?? "raiz")} \xB7 hierarquia administrativa: ${escapeHtml2(d.territory.administrativeParentUuid ?? "raiz")}</p>`;
+      if (this.treeAxis) blocks += `<button type="button" data-dm-children="${escapeAttribute2(d.id)}">Abrir filhos neste ramo</button>`;
+      for (const [key, name] of [["claims", "Reivindica\xE7\xF5es"], ["presence", "Presen\xE7a"], ["rights", "Direitos"], ["occupations", "Ocupa\xE7\xF5es"]]) blocks += table(name, d[key] ?? [], [...columns, ["Estado", (x) => x.lifecycle ?? (x.active ? "active" : "inactive")]]);
+      blocks += table("Influ\xEAncia efetiva", d.effectiveInfluence ?? [], [["Parte", (x) => refLabel(x.partyRef)], ["Eixo", (x) => x.axisId], ["Valor", (x) => x.value]]);
+      blocks += table("Liga\xE7\xF5es", d.links ?? [], [["Destino", (x) => x.targetTerritoryUuid], ["Dire\xE7\xE3o", (x) => x.direction], ["Estado", (x) => x.status]]);
+    }
+    if (this.tab === "proposals") {
+      blocks += `<h3>Pedido original</h3><p>${escapeHtml2(d.original.kind)} \xB7 ${escapeHtml2(d.original.mode)} \xB7 ${escapeHtml2(d.original.id)}</p><p>${escapeHtml2(d.original.reason)}</p>
+        <p>Solicitante: ${escapeHtml2(d.requesterUserId)}</p>${d.decision ? `<h3>Decis\xE3o</h3><p>${escapeHtml2(d.decision.reason)} \xB7 ${escapeHtml2(d.decision.reviewerUserId)}</p>` : ""}`;
+      const a = d.original.action;
+      if (a) blocks += `<p>A\xE7\xE3o solicitada: ${escapeHtml2(a.kind)} \xB7 revis\xE3o esperada: ${d.original.expectedRevision}</p>` + table("Altera\xE7\xE3o solicitada", a.deltas ?? (a.delta !== void 0 ? [{ axisId: a.trackId, value: a.delta }] : []), [["Eixo", (x) => x.axisId], ["Altera\xE7\xE3o", (x) => x.value]]);
+      if (d.decision?.approvedIntent) blocks += `<p>A\xE7\xE3o aprovada: ${escapeHtml2(d.decision.approvedIntent.action?.kind ?? "create")} \xB7 revis\xE3o esperada: ${d.decision.approvedIntent.expectedRevision ?? "nova"}</p>`;
+      if (this.list?.isGm && d.lifecycle === "pending") blocks += '<form data-dm-form="review"><label>Altera\xE7\xE3o revisada (incidente de um eixo ou ajuste de reputa\xE7\xE3o; opcional)<input name="amount" type="number" step="1"></label><label>Revis\xE3o atual do alvo (se estiver aceitando uma mudan\xE7a ap\xF3s outra edi\xE7\xE3o; opcional)<input name="targetRevision" type="number" min="0" step="1"></label><label>Motivo<input name="reason" required></label><button name="decision" value="approve">Aprovar</button><button name="decision" value="reject">Rejeitar</button></form>';
+      return blocks;
+    }
+    const history = d.history ?? d.entries ?? d.events ?? [];
+    blocks += table("Hist\xF3rico vis\xEDvel", history, [["Evento", (x) => x.kind], ["Explica\xE7\xE3o", (x) => x.reason ?? x.summary], ["Momento", (x) => x.at]]);
+    blocks += `<button type="button" data-dm-history="-1" ${this.historyOffset === 0 ? "disabled" : ""}>Hist\xF3rico anterior</button><button type="button" data-dm-history="1" ${history.length < 30 ? "disabled" : ""}>Pr\xF3ximo hist\xF3rico</button>`;
+    return blocks + this.actionForm();
+  }
+  actionForm() {
+    const d = this.detail, input = (name, label) => `<label>${label}<input name="${name}"></label>`;
+    const choices = actions[this.tab].map(([key, label]) => `<option value="${key}">${label}</option>`).join("");
+    let fields = "";
+    if (this.tab === "relations" || this.tab === "reputation") {
+      const axes = d.definition?.axes?.map((x) => ({ id: x.id, label: x.label })) ?? d.scores?.map((x) => ({ id: x.axisId, label: x.axisId })) ?? d.tracks?.map((x) => ({ id: x.definitionId ?? x.trackId, label: x.label ?? x.definitionId ?? x.trackId })) ?? [];
+      fields = `<label>Eixo / trilha<select name="axis">${axes.map((x) => `<option value="${escapeAttribute2(x.id)}">${escapeHtml2(x.label)}</option>`).join("")}</select></label>${input("amount", "Altera\xE7\xE3o inteira")}${input("reversalOf", "ID do evento original a compensar (opcional)")}`;
+      if (this.tab === "relations") {
+        if (d.scores.some((x) => x.fromPartyId !== null)) for (const [key, label] of [["from", "De"], ["to", "Para"]]) fields += `<label>${label}<select name="${key}">${d.parties.map((p) => `<option value="${escapeAttribute2(p.id)}">${escapeHtml2(refLabel(p.ref))}</option>`).join("")}</select></label>`;
+        fields += `${this.visibilityField()}${input("expires", "Expira\xE7\xE3o do modificador no rel\xF3gio do mundo")}${input("sourceId", "ID do modificador a encerrar")}`;
+      }
+    } else if (this.tab === "agreements") fields = `<label>Parte<select name="partyId">${d.parties.map((p) => `<option value="${escapeAttribute2(p.id)}">${escapeHtml2(refLabel(p.ref))}</option>`).join("")}</select></label>
+      <label>Benefici\xE1rio<select name="beneficiaryPartyId">${d.parties.map((p) => `<option value="${escapeAttribute2(p.id)}">${escapeHtml2(refLabel(p.ref))}</option>`).join("")}</select></label>
+      <label>Tipo de termo<select name="termType"><option value="narrative">Narrativo</option><option value="capability">Capacidade</option><option value="right">Direito territorial</option><option value="obligation">Obriga\xE7\xE3o</option><option value="owner-operation">Ajuste econ\xF4mico na ativa\xE7\xE3o</option></select></label>
+      ${input("title", "T\xEDtulo do novo termo")}<label>Texto / evid\xEAncia<textarea name="text"></textarea></label>${input("sourceId", "ID da proposta de termos (em branco usa a mais recente)")}${input("expires", "Expira\xE7\xE3o no rel\xF3gio do mundo (opcional)")}${this.visibilityField()}
+      ${input("grants", "Capacidades, separadas por v\xEDrgula")}${input("territories", "UUID do territ\xF3rio do direito / escopo")}${input("rightType", "Tipo de direito (ex.: domain-manager:entry)")}<label><input type="checkbox" name="inherited">Direito herd\xE1vel</label>
+      ${input("beneficiary", "UUID do Dom\xEDnio para ajuste econ\xF4mico")}${input("resource", "Recurso econ\xF4mico (ex.: domain-manager:treasury)")}${input("amount", "Ajuste econ\xF4mico inteiro")}${input("due", "Vencimento da obriga\xE7\xE3o (rel\xF3gio do mundo)")}${input("grace", "Toler\xE2ncia em ticks")}<label><input type="checkbox" name="consequence">Declarar o ajuste como consequ\xEAncia da obriga\xE7\xE3o</label>
+      <label>Obriga\xE7\xE3o<select name="obligationId">${(d.obligations ?? []).map((o) => `<option value="${escapeAttribute2(o.id)}">${escapeHtml2(o.id)} \xB7 ${escapeHtml2(o.lifecycle)}</option>`).join("")}</select></label>
+      <label>Decis\xE3o de obriga\xE7\xE3o<select name="lifecycle">${["satisfied", "waived", "breached", "expired", "cancelled"].map((x) => `<option>${x}</option>`).join("")}</select></label>${input("outcome", "Refer\xEAncia da evid\xEAncia")}<label>Posi\xE7\xE3o<select name="position"><option value="support">Apoia</option><option value="contest">Contesta</option></select></label><label><input type="checkbox" name="applyConsequences">Executar consequ\xEAncias declaradas ao confirmar quebra</label>`;
+    else if (this.tab === "territory") fields = `${input("beneficiary", "Parte / benefici\xE1rio (UUID ou nome narrativo)")}${input("sourceId", "ID da reivindica\xE7\xE3o ou direito existente")}
+      <label>Tipo de reivindica\xE7\xE3o<select name="claimType"><option value="domain-manager:ownership">Propriedade</option><option value="domain-manager:administration">Administra\xE7\xE3o</option><option value="domain-manager:control">Controle</option></select></label>
+      <label>Direito<select name="rightType">${["entry", "trade", "transit", "build", "extract"].map((x) => `<option value="domain-manager:${x}">${x}</option>`).join("")}</select></label>${input("amount", "Quantidade de presen\xE7a")}${input("grants", "Capacidades concedidas, separadas por v\xEDrgula")}
+      <label><input type="checkbox" name="inherited">Herdar direito pela localiza\xE7\xE3o</label>${input("starts", "In\xEDcio no rel\xF3gio do mundo (para transfer\xEAncia: momento atual)")}${input("expires", "Expira\xE7\xE3o (opcional)")}${this.visibilityField()}
+      ${input("physical", "UUID do novo pai f\xEDsico (em branco: raiz)")}${input("administrative", "UUID do novo pai administrativo (em branco: raiz)")}`;
+    else fields = `<label>Decis\xE3o<select name="lifecycle">${["latent", "active", "escalated", "frozen", "settled", "abandoned", "superseded"].map((x) => `<option>${x}</option>`).join("")}</select></label>${input("outcome", "Refer\xEAncia do resultado expl\xEDcito do GM")}`;
+    return `<h3>${this.list?.isGm ? "A\xE7\xE3o" : "Propor mudan\xE7a ao GM"}</h3><form data-dm-form="change"><label>Opera\xE7\xE3o<select name="kind">${choices}</select></label>${fields}<label>Motivo<input name="reason" required></label>
+      ${this.tab === "territory" && this.list?.isGm ? '<button type="button" data-dm-preview="true">Conferir pr\xE9via</button>' : ""}<button>${this.list?.isGm ? "Confirmar a\xE7\xE3o" : "Enviar proposta"}</button></form>
+      ${this.preview ? `<p role="status">Pr\xE9via validada: ${this.preview.changes.length} territ\xF3rio(s). Nenhuma propriedade de instala\xE7\xE3o ser\xE1 alterada.</p>` : ""}`;
+  }
+};
+var HeadlessApplication = class {
+  element = null;
+  async render() {
+    const app = this;
+    const c = await app._prepareContext();
+    this.element = { innerHTML: app._renderHTML(c) };
+    return this;
+  }
+  async close() {
+    this.element = null;
+  }
+};
+var BaseApp2 = globalThis.foundry?.applications?.api?.ApplicationV2 ?? HeadlessApplication;
+var DiplomacyApplication = class extends BaseApp2 {
+  static DEFAULT_OPTIONS = {
+    id: "domain-manager-diplomacy",
+    classes: ["domain-manager", "dm-diplomacy-app"],
+    tag: "div",
+    window: { title: "Diplomacia e territ\xF3rio", icon: "fas fa-handshake", resizable: true },
+    position: { width: 1050, height: 720 }
+  };
+  controller;
+  #bound = /* @__PURE__ */ new WeakSet();
+  constructor(options) {
+    super(options);
+    this.controller = new DiplomacyApplicationController(options.api);
+  }
+  async _prepareContext() {
+    await this.controller.load();
+    return {};
+  }
+  _renderHTML() {
+    return `<style>.dm-diplomacy-app .dm-diplomacy-columns{display:grid;grid-template-columns:240px 1fr;gap:16px}.dm-diplomacy-app aside button,.dm-diplomacy-app label{display:block;margin:6px 0}.dm-diplomacy-app table{width:100%;text-align:left;border-collapse:collapse}.dm-diplomacy-app td,.dm-diplomacy-app th{padding:6px;border-bottom:1px solid #7775}.dm-diplomacy-app input,.dm-diplomacy-app textarea{max-width:100%}.dm-diplomacy-app [role=alert]{color:#b3261e}</style>${this.controller.render()}`;
+  }
+  _replaceHTML(html, content) {
+    content.innerHTML = html;
+  }
+  _onRender() {
+    const element = this.element;
+    if (!element || this.#bound.has(element)) return;
+    this.#bound.add(element);
+    const fields = (form) => {
+      const result = {};
+      new FormData(form).forEach((v, k) => {
+        result[k] = String(v).trim();
+      });
+      return result;
+    };
+    element.addEventListener("click", async (e) => {
+      const button = e.target?.closest?.("button");
+      if (!button) return;
+      if (button.dataset.dmTab) this.controller.selectTab(button.dataset.dmTab);
+      else if (button.dataset.dmId) this.controller.select(button.dataset.dmId);
+      else if (button.dataset.dmPage) this.controller.offset = Math.max(0, this.controller.offset + Number(button.dataset.dmPage) * 30);
+      else if (button.dataset.dmHistory) this.controller.historyOffset = Math.max(0, this.controller.historyOffset + Number(button.dataset.dmHistory) * 30);
+      else if (button.dataset.dmCreate) this.controller.creating = true;
+      else if (button.dataset.dmTree) {
+        this.controller.treeAxis = button.dataset.dmTree === "all" ? null : button.dataset.dmTree;
+        this.controller.treeParent = null;
+        this.controller.offset = 0;
+      } else if (button.dataset.dmRoot) {
+        this.controller.treeParent = null;
+        this.controller.offset = 0;
+      } else if (button.dataset.dmChildren) {
+        this.controller.treeParent = button.dataset.dmChildren;
+        this.controller.offset = 0;
+      } else if (button.dataset.dmPreview) await this.controller.change(fields(button.closest("form")), true);
+      else return;
+      await this.render(true);
+    });
+    element.addEventListener("submit", async (e) => {
+      const form = e.target;
+      if (!form.dataset.dmForm) return;
+      e.preventDefault();
+      const data = fields(form);
+      if (form.dataset.dmForm === "search") {
+        this.controller.search = data.search;
+        this.controller.offset = 0;
+      } else if (form.dataset.dmForm === "create") await this.controller.create(data);
+      else if (form.dataset.dmForm === "change") await this.controller.change(data);
+      else if (form.dataset.dmForm === "review") await this.controller.review(e.submitter.value, data.reason, data);
+      await this.render(true);
+    });
+  }
+};
+
+// src/diplomacy/public-diplomacy-api.ts
+function createPublicDiplomacyApi(bus) {
+  const send = async (type, payload) => {
+    const response = await bus.execute({ contractVersion: 1, commandId: createCommandId(), type, payload, issuedAtReal: Date.now() });
+    if (!response.ok) return response;
+    return response.value.error ? err(response.value.error) : response.value.status === "executed" ? ok(response.value.result) : err(createPublicError({ code: "DM_DIPLOMACY_COMMAND_INCOMPLETE", category: "busy", message: "Authority has not confirmed the command" }));
+  };
+  const owner = (kind) => {
+    const namespace = DIPLOMACY_NAMESPACES[kind];
+    return Object.freeze({
+      query: (p = {}) => send(`${namespace}:query`, p),
+      create: (p) => send(`${namespace}:create`, p),
+      modify: (p) => send(`${namespace}:modify`, p)
+    });
+  };
+  const api = Object.freeze({
+    open: () => new DiplomacyApplication({ api }).render(true),
+    relations: owner("relation"),
+    reputation: owner("reputation"),
+    agreements: owner("agreement"),
+    territory: owner("territory"),
+    disputes: owner("dispute"),
+    previewTerritory: (p) => send("territory:preview", p),
+    proposals: Object.freeze({
+      query: (p = {}) => send("diplomacy:query-proposals", p),
+      submit: (p) => send("diplomacy:submit-proposal", p),
+      decide: (p) => send("diplomacy:decide-proposal", p)
+    }),
+    capabilities: (domainUuid, territoryUuid) => send("diplomacy:capabilities", { domainUuid, ...territoryUuid ? { territoryUuid } : {} })
+  });
+  return api;
+}
+
+// src/diplomacy/capability-command.ts
+function registerDiplomacyCapabilityCommand(o) {
+  o.registry.register({
+    type: "diplomacy:capabilities",
+    visibility: "public",
+    schemaValidator: (p) => isRecord3(p) && isJournalEntryUuid(p.domainUuid) && (p.territoryUuid === void 0 || isJournalEntryUuid(p.territoryUuid)) ? ok(p) : failure("DM_DIPLOMACY_QUERY_INVALID", "Capabilities require a valid Domain context"),
+    handler: async (ctx) => {
+      const p = ctx.command.payload, isGm = diplomacyViewerIsGm(ctx);
+      const unfenced = o.recovery.fenceRegistry.assertKeysAvailable([
+        lockKey.domain(p.domainUuid),
+        lockKey.territoryGraph(),
+        ...o.store.list("agreement").map((e) => lockKey.diplomacy("agreement", e.id))
+      ]);
+      if (!unfenced.ok) return unfenced;
+      const controlled = await diplomacyViewerControls(ctx, [{ type: "domain", uuid: p.domainUuid }], o.domains, o.controllers);
+      if (!isGm && !controlled) return failure("DM_SECURITY_PERMISSION_DENIED", "Domain capability context unavailable", "permission");
+      const domain = await o.domains.read(normalizeDomainId(p.domainUuid));
+      if (!domain.ok) return domain;
+      const agreements = [];
+      for (const row of o.store.list("agreement")) {
+        const a = row.data, maySeeRestricted = isGm || await diplomacyViewerControls(ctx, a.state.agreement.parties.map((p2) => p2.ref), o.domains, o.controllers);
+        const canSee2 = (v) => isGm || v === "public" || v === "restricted" && maySeeRestricted;
+        if (!canSee2(a.state.agreement.visibility)) continue;
+        agreements.push({ agreement: { ...a.state.agreement, terms: a.state.agreement.terms.filter((t) => canSee2(t.visibility)) }, definition: a.definition });
+      }
+      const canSee = (v) => isGm || v === "public" || v === "restricted" && controlled;
+      const territories = [];
+      for (const row of o.store.list("territory")) {
+        const s = row.data, controlsSource = isGm || await diplomacyViewerControls(
+          ctx,
+          territoryOwner.parties(s),
+          o.domains,
+          o.controllers
+        );
+        const projected = projectTerritoryState(s, (v) => isGm || v === "public" || v === "restricted" && controlsSource);
+        if (projected) territories.push(projected);
+      }
+      if (p.territoryUuid && !territories.some((s) => s.territory.uuid === p.territoryUuid)) return failure("DM_DIPLOMACY_NOT_FOUND", "Territory capability scope unavailable", "not-found");
+      return ok(createDefaultCapabilityResolver().resolveEffectiveCapabilities({
+        domainUuid: domain.value.uuid,
+        domainDoc: domain.value,
+        diplomacy: {
+          worldTick: o.worldTick(),
+          agreements,
+          territories,
+          ...p.territoryUuid ? { territoryUuid: p.territoryUuid } : {},
+          canSee,
+          conditionSatisfied: o.conditionSatisfied ?? (() => false)
+        }
+      }));
+    }
+  });
+}
+
+// src/diplomacy/diplomacy-proposals.ts
+function validateDiplomacyProposal(raw) {
+  if (!isRecord3(raw) || !isJsonData(raw) || !isText(raw.id) || !isTimestamp(raw.revision) || !isText(raw.label) || raw.visibility !== "restricted" || !["pending", "approved", "rejected"].includes(raw.lifecycle) || !isText(raw.requesterUserId) || !isTimestamp(raw.createdAt)) return failure("DM_DIPLOMACY_PROPOSAL_INVALID", "Invalid proposal record");
+  const intent = validateOwnerIntent(raw.original);
+  if (!intent.ok) return intent;
+  if (raw.lifecycle === "pending" ? raw.decision !== null || raw.revision !== 0 : !isRecord3(raw.decision) || !isText(raw.decision.reviewerUserId) || !isTimestamp(raw.decision.at) || raw.decision.at < raw.createdAt || !isText(raw.decision.reason) || raw.revision !== 1 || (raw.lifecycle === "approved" ? !validateOwnerIntent(raw.decision.approvedIntent).ok : raw.decision.approvedIntent !== null))
+    return failure("DM_DIPLOMACY_PROPOSAL_INVALID", "Invalid proposal decision audit");
+  return ok(immutable(structuredClone(raw)));
+}
+function registerDiplomacyProposals(o) {
+  const submitSchema = (p) => isRecord3(p) && isText(p.id) && validateOwnerIntent(p.intent).ok ? ok(p) : failure("DM_DIPLOMACY_PROPOSAL_INVALID", "Proposal needs a stable ID and semantic intent");
+  const submit = diplomacyMutationDefinition("proposal", o, (ctx) => [
+    lockKey.diplomacy("proposal", ctx.command.payload.id),
+    ...diplomacyIntentLocks(ctx.command.payload.intent, o)
+  ], async (fresh) => {
+    const ctx = fresh.context, p = ctx.command.payload, intent = p.intent;
+    if (fresh.entity) return failure("DM_DIPLOMACY_ALREADY_EXISTS", "Proposal already exists", "conflict");
+    if (!ctx.senderUserId) return failure("DM_SECURITY_PERMISSION_DENIED", "Authenticated proposer required", "permission");
+    const owner = DIPLOMACY_OWNERS[intent.kind], existing = intent.mode === "modify" ? o.store.get(intent.kind, intent.id) : null;
+    if (intent.mode === "modify" && !existing) return failure("DM_DIPLOMACY_NOT_FOUND", "Entity unavailable", "not-found");
+    const source = existing?.data ?? intent.data, valid = owner.validate(source, o.store.list("territory").map((e) => e.data));
+    if (!valid.ok) return valid;
+    const controls = await diplomacyViewerControls(ctx, owner.parties(valid.value), o.domains, o.controllers);
+    if (!diplomacyViewerIsGm(ctx) && (!controls || owner.identity(valid.value).visibility === "secret"))
+      return failure("DM_SECURITY_PERMISSION_DENIED", "Proposer must control a visible participating Domain", "permission");
+    const prepared = await prepareOwnerIntent(intent, ctx, o);
+    if (!prepared.ok) return prepared;
+    const data = {
+      id: p.id,
+      revision: 0,
+      label: owner.identity(valid.value).label,
+      visibility: "restricted",
+      lifecycle: "pending",
+      requesterUserId: ctx.senderUserId,
+      createdAt: ctx.receivedAtReal,
+      original: structuredClone(intent),
+      decision: null
+    };
+    return ok({
+      writes: [{ before: null, after: { schemaVersion: 1, kind: "proposal", id: p.id, revision: 0, data, receipts: [] } }],
+      effects: [],
+      result: { id: p.id, revision: 0, lifecycle: "pending" }
+    });
+  });
+  o.registry.register({
+    type: "diplomacy:submit-proposal",
+    visibility: "public",
+    transactional: true,
+    schemaValidator: submitSchema,
+    mutationDefinition: submit,
+    handler: createTransactionalHandler(o.coordinator, submit)
+  });
+  const decideSchema = (p) => isRecord3(p) && isText(p.id) && isTimestamp(p.expectedRevision) && ["approve", "reject"].includes(p.decision) && isText(p.reason) && (p.editedIntent === void 0 || validateOwnerIntent(p.editedIntent).ok) ? ok(p) : failure("DM_DIPLOMACY_PROPOSAL_INVALID", "Invalid proposal review");
+  const decide = diplomacyMutationDefinition("proposal", o, (ctx) => {
+    const p = ctx.command.payload, proposal = o.store.get("proposal", p.id)?.data;
+    return [lockKey.diplomacy("proposal", p.id), ...proposal ? diplomacyIntentLocks(p.editedIntent ?? proposal.original, o) : []];
+  }, async (fresh) => {
+    if (!fresh.entity) return failure("DM_DIPLOMACY_NOT_FOUND", "Proposal unavailable", "not-found");
+    const checked = validateDiplomacyProposal(fresh.entity.data);
+    if (!checked.ok) return checked;
+    const proposal = checked.value, ctx = fresh.context, p = ctx.command.payload, stale = revisionGuard(proposal.revision, p.expectedRevision);
+    if (stale) return stale;
+    if (proposal.lifecycle !== "pending") return failure("DM_DIPLOMACY_PROPOSAL_CLOSED", "Proposal already reviewed", "conflict");
+    const approvedIntent = p.decision === "approve" ? p.editedIntent ?? proposal.original : null;
+    if (approvedIntent && (approvedIntent.id !== proposal.original.id || approvedIntent.kind !== proposal.original.kind || approvedIntent.mode !== proposal.original.mode))
+      return failure("DM_DIPLOMACY_PROPOSAL_INVALID", "Edited review must preserve target identity and operation mode");
+    const prepared = approvedIntent ? await prepareOwnerIntent(approvedIntent, ctx, o) : ok({ writes: [], effects: [], result: null });
+    if (!prepared.ok) return prepared;
+    const data = {
+      ...proposal,
+      revision: 1,
+      lifecycle: approvedIntent ? "approved" : "rejected",
+      decision: { reviewerUserId: ctx.senderUserId, at: ctx.receivedAtReal, reason: p.reason, approvedIntent }
+    };
+    return ok({
+      writes: [{ before: fresh.entity, after: { ...fresh.entity, revision: 1, data } }, ...prepared.value.writes],
+      effects: prepared.value.effects,
+      result: { id: proposal.id, revision: 1, lifecycle: data.lifecycle, target: prepared.value.result }
+    });
+  });
+  o.registry.register({
+    type: "diplomacy:decide-proposal",
+    visibility: "public",
+    transactional: true,
+    permissionValidator: validateGmOnlyCommandPermission,
+    schemaValidator: decideSchema,
+    mutationDefinition: decide,
+    handler: createTransactionalHandler(o.coordinator, decide)
+  });
+  o.registry.register({
+    type: "diplomacy:query-proposals",
+    visibility: "public",
+    schemaValidator: validateDiplomacyQuery,
+    handler: async (ctx) => {
+      const p = ctx.command.payload, isGm = diplomacyViewerIsGm(ctx), visible = o.store.list("proposal").map((e) => e.data).filter((x) => isGm || x.requesterUserId === ctx.senderUserId).filter((x) => !p.id || x.id === p.id).filter((x) => !p.search || x.label.toLocaleLowerCase().includes(p.search.toLocaleLowerCase()));
+      if (p.id) {
+        if (!visible[0]) return failure("DM_DIPLOMACY_NOT_FOUND", "Proposal unavailable", "not-found");
+        const available2 = o.recovery.fenceRegistry.assertKeysAvailable([lockKey.diplomacy("proposal", p.id)]);
+        if (!available2.ok) return available2;
+        const proposal = visible[0];
+        if (isGm || !proposal.decision?.approvedIntent) return ok(proposal);
+        const redact = (value) => {
+          if (Array.isArray(value)) return value.filter((x) => !isRecord3(x) || x.visibility !== "secret").map(redact);
+          if (!isRecord3(value)) return value;
+          if (value.visibility === "secret") return null;
+          return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, redact(v)]));
+        };
+        return ok({ ...proposal, decision: { ...proposal.decision, approvedIntent: redact(proposal.decision.approvedIntent) } });
+      }
+      const available = visible.filter((x) => o.recovery.fenceRegistry.assertKeysAvailable([lockKey.diplomacy("proposal", x.id)]).ok);
+      return ok({
+        items: available.slice(p.offset ?? 0, (p.offset ?? 0) + (p.limit ?? 30)).map((x) => ({ id: x.id, label: x.label, lifecycle: x.lifecycle, revision: x.revision })),
+        total: available.length,
+        offset: p.offset ?? 0,
+        limit: p.limit ?? 30,
+        isGm
+      });
+    }
+  });
+}
+
+// src/agreements/economy-effect-owner.ts
+function createEconomyAgreementEffectOwner(economy) {
+  return {
+    id: "domain-manager:economy",
+    subsystem: "economy",
+    validate(op) {
+      const p = op.payload;
+      return op.operation === "economy:adjust" && isRecord3(p) && isJournalEntryUuid(p.domainUuid) && isNamespaced(p.resourceId) && isSafeInteger(p.deltaMinor) && isText(p.reason) && op.targetRefs.length === 1 && op.targetRefs[0].type === "domain" && op.targetRefs[0].uuid === p.domainUuid ? ok(void 0) : failure("DM_AGREEMENT_ECONOMY_EFFECT_INVALID", "Economic term requires a semantic adjustment and matching target Domain");
+    },
+    getLockKeys(op) {
+      return [lockKey.domain(op.payload.domainUuid)];
+    },
+    async execute(op, context) {
+      const p = op.payload;
+      const result = await economy.commitAdjust({
+        domainUuid: p.domainUuid,
+        resourceId: p.resourceId,
+        deltaMinor: p.deltaMinor,
+        reason: p.reason,
+        commandId: context.commandId,
+        authorityEpoch: context.authorityEpoch,
+        lockOwner: context.commandId,
+        idempotencyKey: context.operationRef,
+        recoveryOwner: "parent"
+      });
+      return result.ok ? ok({ operationId: op.id, receiptRef: { type: "economy-operation", id: context.operationRef }, result: {
+        balanceMinor: "balanceMinor" in result.value.account ? result.value.account.balanceMinor : null,
+        entryId: result.value.entry?.id ?? null,
+        isNoop: !!result.value.isNoop
+      } }) : result;
+    },
+    async reconcile(op, context) {
+      const p = op.payload, account = await economy.getAccount(p.domainUuid, p.resourceId);
+      if (!account.ok) return account;
+      if (account.value?.mode === "provider") {
+        const r = await economy.reconcileProviderAdjustment({ domainUuid: p.domainUuid, resourceId: p.resourceId, operationRef: context.operationRef });
+        return r.ok ? ok(r.value.outcome === "fully-applied" ? "applied" : r.value.outcome === "not-applied" ? "not-applied" : "unknown") : r;
+      }
+      return economy.reconcileAdjustment({ domainUuid: p.domainUuid, resourceId: p.resourceId, operationRef: context.operationRef });
+    },
+    async compensate(op, context) {
+      const p = op.payload;
+      return economy.compensateAdjustment({
+        domainUuid: p.domainUuid,
+        resourceId: p.resourceId,
+        originalDeltaMinor: p.deltaMinor,
+        originalOperationRef: context.operationRef,
+        compensationOperationRef: `${context.operationRef}:compensation`,
+        reason: "Agreement effect compensation",
+        lockOwner: context.commandId
+      });
+    }
+  };
+}
+
 // src/economy/math/minor-units.ts
 function assertSafeInteger(value, fieldName = "amount") {
   if (typeof value !== "number" || !Number.isSafeInteger(value)) {
@@ -30777,8 +34314,8 @@ function formatResourceAmount(amountMinor, definition, options) {
   const unitLabel = isSingular ? unit.singular ?? unit.plural ?? "" : unit.plural ?? unit.singular ?? "";
   return unitLabel ? `${formattedNumber} ${unitLabel}` : formattedNumber;
 }
-function parseResourceAmount(text, precision) {
-  if (typeof text !== "string" || text.trim().length === 0) {
+function parseResourceAmount(text2, precision) {
+  if (typeof text2 !== "string" || text2.trim().length === 0) {
     return err(
       createPublicError({
         code: "DM_ECON_AMOUNT_INVALID",
@@ -30787,7 +34324,7 @@ function parseResourceAmount(text, precision) {
       })
     );
   }
-  const clean = text.trim();
+  const clean = text2.trim();
   let normalized = clean;
   const commaIdx = clean.lastIndexOf(",");
   const dotIdx = clean.lastIndexOf(".");
@@ -30810,7 +34347,7 @@ function parseResourceAmount(text, precision) {
       createPublicError({
         code: "DM_ECON_AMOUNT_INVALID",
         category: "validation",
-        message: `Could not parse '${text}' as a valid number`
+        message: `Could not parse '${text2}' as a valid number`
       })
     );
   }
@@ -31095,16 +34632,16 @@ function buildEconomyViewModel(domainInput, options) {
 }
 
 // src/ui/domain-patterns/economy/economy-view.ts
-function escapeHtml2(value) {
+function escapeHtml3(value) {
   if (value === null || value === void 0) return "";
   return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
-function escapeAttribute2(value) {
-  return escapeHtml2(value);
+function escapeAttribute3(value) {
+  return escapeHtml3(value);
 }
 function renderEconomySubsystemHtml(vm) {
   return `
-    <div class="dm-economy-subsystem" data-domain-uuid="${escapeAttribute2(vm.domainUuid)}">
+    <div class="dm-economy-subsystem" data-domain-uuid="${escapeAttribute3(vm.domainUuid)}">
       <header class="dm-economy-header">
         <div class="dm-header-title">
           <h3><i class="fas fa-coins"></i> Economy & Resources</h3>
@@ -31159,9 +34696,9 @@ function renderProviderStatusSection(providers = []) {
         <div class="dm-provider-badges-list">
           ${providers.map(
     (p) => `
-            <span class="dm-badge-provider-health dm-health-${escapeAttribute2(p.status)}" title="${escapeAttribute2(p.message ?? p.status)}">
-              <i class="fas fa-circle"></i> ${escapeHtml2(p.providerId)}: <strong>${escapeHtml2(p.status.toUpperCase())}</strong>
-              ${p.lastCheckedFormatted ? `<small>(${escapeHtml2(p.lastCheckedFormatted)})</small>` : ""}
+            <span class="dm-badge-provider-health dm-health-${escapeAttribute3(p.status)}" title="${escapeAttribute3(p.message ?? p.status)}">
+              <i class="fas fa-circle"></i> ${escapeHtml3(p.providerId)}: <strong>${escapeHtml3(p.status.toUpperCase())}</strong>
+              ${p.lastCheckedFormatted ? `<small>(${escapeHtml3(p.lastCheckedFormatted)})</small>` : ""}
             </span>
           `
   ).join("")}
@@ -31178,42 +34715,42 @@ function renderResourceCards(accounts = []) {
     <div class="dm-resource-grid">
       ${accounts.map(
     (acc) => `
-        <div class="dm-card dm-resource-card ${escapeAttribute2(acc.statusBadgeClass)} ${acc.isSecret ? "secret" : ""}"
-             data-resource-id="${escapeAttribute2(acc.resourceId)}">
+        <div class="dm-card dm-resource-card ${escapeAttribute3(acc.statusBadgeClass)} ${acc.isSecret ? "secret" : ""}"
+             data-resource-id="${escapeAttribute3(acc.resourceId)}">
           <div class="dm-card-header">
-            <div class="dm-card-icon"><i class="${escapeAttribute2(acc.icon ?? "fas fa-box")}"></i></div>
-            <h4 class="dm-card-title">${escapeHtml2(acc.label)}</h4>
+            <div class="dm-card-icon"><i class="${escapeAttribute3(acc.icon ?? "fas fa-box")}"></i></div>
+            <h4 class="dm-card-title">${escapeHtml3(acc.label)}</h4>
             <div class="dm-card-badges">
               ${acc.isSecret ? `<span class="dm-badge-secret"><i class="fas fa-eye-slash"></i> Secret</span>` : ""}
-              ${acc.mode === "provider" ? `<span class="dm-badge-provider ${acc.providerStatus ? `status-${escapeAttribute2(acc.providerStatus)}` : acc.providerAvailable ? "online" : "offline"}"><i class="fas fa-plug"></i> ${escapeHtml2(acc.providerId ?? "Provider")} (${escapeHtml2((acc.providerStatus ?? (acc.providerAvailable ? "Active" : "Offline")).toUpperCase())})</span>` : ""}
-              <button type="button" class="dm-btn-icon dm-btn-detail" data-action="openResourceDetail" data-resource-id="${escapeAttribute2(acc.resourceId)}" title="View details">
+              ${acc.mode === "provider" ? `<span class="dm-badge-provider ${acc.providerStatus ? `status-${escapeAttribute3(acc.providerStatus)}` : acc.providerAvailable ? "online" : "offline"}"><i class="fas fa-plug"></i> ${escapeHtml3(acc.providerId ?? "Provider")} (${escapeHtml3((acc.providerStatus ?? (acc.providerAvailable ? "Active" : "Offline")).toUpperCase())})</span>` : ""}
+              <button type="button" class="dm-btn-icon dm-btn-detail" data-action="openResourceDetail" data-resource-id="${escapeAttribute3(acc.resourceId)}" title="View details">
                 <i class="fas fa-info-circle"></i>
               </button>
             </div>
           </div>
 
           <div class="dm-card-balance">
-            <span class="dm-balance-major">${escapeHtml2(acc.balanceFormatted)}</span>
+            <span class="dm-balance-major">${escapeHtml3(acc.balanceFormatted)}</span>
           </div>
 
           <div class="dm-card-metrics">
             <div class="dm-metric">
               <span class="dm-metric-label">Reserved:</span>
-              <span class="dm-metric-value">${escapeHtml2(acc.reservedFormatted)}</span>
+              <span class="dm-metric-value">${escapeHtml3(acc.reservedFormatted)}</span>
             </div>
             <div class="dm-metric">
               <span class="dm-metric-label">Available:</span>
-              <span class="dm-metric-value dm-metric-available">${escapeHtml2(acc.availableFormatted)}</span>
+              <span class="dm-metric-value dm-metric-available">${escapeHtml3(acc.availableFormatted)}</span>
             </div>
             <div class="dm-metric">
               <span class="dm-metric-label">Capacity:</span>
-              <span class="dm-metric-value">${escapeHtml2(acc.capacityFormatted)}</span>
+              <span class="dm-metric-value">${escapeHtml3(acc.capacityFormatted)}</span>
             </div>
           </div>
 
           ${acc.capacityPercentage !== null ? `
             <div class="dm-capacity-progress-bar">
-              <div class="dm-progress-fill ${escapeAttribute2(acc.statusBadgeClass)}" style="width: ${acc.capacityPercentage}%"></div>
+              <div class="dm-progress-fill ${escapeAttribute3(acc.statusBadgeClass)}" style="width: ${acc.capacityPercentage}%"></div>
             </div>
           ` : ""}
         </div>
@@ -31242,11 +34779,11 @@ function renderLedgerTable(entries = [], pagination) {
           ${entries.map(
     (e) => `
             <tr class="dm-ledger-row">
-              <td class="dm-col-time">${escapeHtml2(e.timestampFormatted)}</td>
-              <td class="dm-col-resource">${escapeHtml2(e.resourceLabel)}</td>
-              <td class="dm-col-kind"><span class="dm-kind-badge">${escapeHtml2(e.kind)}</span></td>
-              <td class="dm-col-delta ${escapeAttribute2(e.deltaClass)}">${escapeHtml2(e.deltaFormatted)}</td>
-              <td class="dm-col-reason">${escapeHtml2(e.reason ?? "\u2014")}</td>
+              <td class="dm-col-time">${escapeHtml3(e.timestampFormatted)}</td>
+              <td class="dm-col-resource">${escapeHtml3(e.resourceLabel)}</td>
+              <td class="dm-col-kind"><span class="dm-kind-badge">${escapeHtml3(e.kind)}</span></td>
+              <td class="dm-col-delta ${escapeAttribute3(e.deltaClass)}">${escapeHtml3(e.deltaFormatted)}</td>
+              <td class="dm-col-reason">${escapeHtml3(e.reason ?? "\u2014")}</td>
             </tr>
           `
   ).join("")}
@@ -31285,14 +34822,14 @@ function renderReservationsTable(reservations = []) {
       <tbody>
         ${reservations.map(
     (r) => `
-          <tr class="dm-reservation-row" data-reservation-id="${escapeAttribute2(r.id)}">
-            <td class="dm-col-resource">${escapeHtml2(r.resourceLabel)}</td>
-            <td class="dm-col-amount">${escapeHtml2(r.amountFormatted)}</td>
-            <td class="dm-col-status"><span class="dm-kind-badge ${escapeAttribute2(r.status)}">${escapeHtml2(r.status)}</span></td>
-            <td class="dm-col-reason">${escapeHtml2(r.reason ?? "\u2014")}</td>
-            <td class="dm-col-expires">${escapeHtml2(r.expiresAtFormatted ?? "Never")}</td>
+          <tr class="dm-reservation-row" data-reservation-id="${escapeAttribute3(r.id)}">
+            <td class="dm-col-resource">${escapeHtml3(r.resourceLabel)}</td>
+            <td class="dm-col-amount">${escapeHtml3(r.amountFormatted)}</td>
+            <td class="dm-col-status"><span class="dm-kind-badge ${escapeAttribute3(r.status)}">${escapeHtml3(r.status)}</span></td>
+            <td class="dm-col-reason">${escapeHtml3(r.reason ?? "\u2014")}</td>
+            <td class="dm-col-expires">${escapeHtml3(r.expiresAtFormatted ?? "Never")}</td>
             <td class="dm-col-actions">
-              <button type="button" class="dm-btn dm-btn-xs dm-btn-danger" data-action="releaseReservation" data-reservation-id="${escapeAttribute2(r.id)}" title="Release Reservation">
+              <button type="button" class="dm-btn dm-btn-xs dm-btn-danger" data-action="releaseReservation" data-reservation-id="${escapeAttribute3(r.id)}" title="Release Reservation">
                 <i class="fas fa-times-circle"></i> Release
               </button>
             </td>
@@ -31308,11 +34845,11 @@ function renderTransferModalHtml(domainUuid, accounts) {
     <div class="dm-modal dm-transfer-modal" data-modal-type="transfer">
       <h3><i class="fas fa-exchange-alt"></i> Transfer Resources</h3>
       <form data-form-type="transfer">
-        <input type="hidden" name="sourceDomainUuid" value="${escapeAttribute2(domainUuid)}" />
+        <input type="hidden" name="sourceDomainUuid" value="${escapeAttribute3(domainUuid)}" />
         <label>
           Resource:
           <select name="resourceId" required>
-            ${accounts.map((a) => `<option value="${escapeAttribute2(a.resourceId)}" data-precision="${escapeAttribute2(a.precision)}" data-available="${escapeAttribute2(a.availableMinor)}" data-label="${escapeAttribute2(a.label)}" data-unit="${escapeAttribute2(a.displayUnit ?? "")}">${escapeHtml2(a.label)} (Available: ${escapeHtml2(a.availableFormatted)})</option>`).join("")}
+            ${accounts.map((a) => `<option value="${escapeAttribute3(a.resourceId)}" data-precision="${escapeAttribute3(a.precision)}" data-available="${escapeAttribute3(a.availableMinor)}" data-label="${escapeAttribute3(a.label)}" data-unit="${escapeAttribute3(a.displayUnit ?? "")}">${escapeHtml3(a.label)} (Available: ${escapeHtml3(a.availableFormatted)})</option>`).join("")}
           </select>
         </label>
         <label>
@@ -31346,11 +34883,11 @@ function renderAdjustModalHtml(domainUuid, accounts) {
     <div class="dm-modal dm-adjust-modal" data-modal-type="adjust">
       <h3><i class="fas fa-sliders-h"></i> Authoritative Adjustment</h3>
       <form data-form-type="adjust">
-        <input type="hidden" name="domainUuid" value="${escapeAttribute2(domainUuid)}" />
+        <input type="hidden" name="domainUuid" value="${escapeAttribute3(domainUuid)}" />
         <label>
           Resource:
           <select name="resourceId" required>
-            ${accounts.map((a) => `<option value="${escapeAttribute2(a.resourceId)}" data-precision="${escapeAttribute2(a.precision)}" data-balance="${escapeAttribute2(a.balanceMinor)}" data-label="${escapeAttribute2(a.label)}" data-unit="${escapeAttribute2(a.displayUnit ?? "")}">${escapeHtml2(a.label)} (Current: ${escapeHtml2(a.balanceFormatted)})</option>`).join("")}
+            ${accounts.map((a) => `<option value="${escapeAttribute3(a.resourceId)}" data-precision="${escapeAttribute3(a.precision)}" data-balance="${escapeAttribute3(a.balanceMinor)}" data-label="${escapeAttribute3(a.label)}" data-unit="${escapeAttribute3(a.displayUnit ?? "")}">${escapeHtml3(a.label)} (Current: ${escapeHtml3(a.balanceFormatted)})</option>`).join("")}
           </select>
         </label>
         <label>
@@ -31378,19 +34915,19 @@ function renderAdjustModalHtml(domainUuid, accounts) {
 function renderResourceDetailModalHtml(account) {
   return `
     <div class="dm-modal dm-detail-modal" data-modal-type="resourceDetail">
-      <h3><i class="${escapeAttribute2(account.icon ?? "fas fa-box")}"></i> ${escapeHtml2(account.label)}</h3>
+      <h3><i class="${escapeAttribute3(account.icon ?? "fas fa-box")}"></i> ${escapeHtml3(account.label)}</h3>
       <div class="dm-detail-content">
-        <div class="dm-detail-row"><span class="dm-detail-label">Resource ID:</span> <code>${escapeHtml2(account.resourceId)}</code></div>
-        <div class="dm-detail-row"><span class="dm-detail-label">Description:</span> <span>${escapeHtml2(account.description || "No description provided.")}</span></div>
-        <div class="dm-detail-row"><span class="dm-detail-label">Category:</span> <span>${escapeHtml2(account.categoryId || "Custom")}</span></div>
-        ${account.tags && account.tags.length > 0 ? `<div class="dm-detail-row"><span class="dm-detail-label">Tags:</span> <span>${account.tags.map((t) => `<span class="dm-tag">${escapeHtml2(t)}</span>`).join(" ")}</span></div>` : ""}
-        <div class="dm-detail-row"><span class="dm-detail-label">Mode:</span> <span class="dm-kind-badge">${escapeHtml2(account.mode)}</span></div>
-        ${account.mode === "provider" ? `<div class="dm-detail-row"><span class="dm-detail-label">Provider:</span> <span>${escapeHtml2(account.providerId ?? "external")} (${account.providerAvailable ? "Active" : "Unavailable"})</span></div>` : ""}
-        <div class="dm-detail-row"><span class="dm-detail-label">Balance:</span> <strong>${escapeHtml2(account.balanceFormatted)}</strong> (raw: ${escapeHtml2(account.balanceMinor)})</div>
-        <div class="dm-detail-row"><span class="dm-detail-label">Reserved:</span> <span>${escapeHtml2(account.reservedFormatted)}</span> (raw: ${escapeHtml2(account.reservedMinor)})</div>
-        <div class="dm-detail-row"><span class="dm-detail-label">Available:</span> <span>${escapeHtml2(account.availableFormatted)}</span> (raw: ${escapeHtml2(account.availableMinor)})</div>
-        <div class="dm-detail-row"><span class="dm-detail-label">Capacity:</span> <span>${escapeHtml2(account.capacityFormatted)}</span></div>
-        <div class="dm-detail-row"><span class="dm-detail-label">Status:</span> <span>${escapeHtml2(account.status)}</span></div>
+        <div class="dm-detail-row"><span class="dm-detail-label">Resource ID:</span> <code>${escapeHtml3(account.resourceId)}</code></div>
+        <div class="dm-detail-row"><span class="dm-detail-label">Description:</span> <span>${escapeHtml3(account.description || "No description provided.")}</span></div>
+        <div class="dm-detail-row"><span class="dm-detail-label">Category:</span> <span>${escapeHtml3(account.categoryId || "Custom")}</span></div>
+        ${account.tags && account.tags.length > 0 ? `<div class="dm-detail-row"><span class="dm-detail-label">Tags:</span> <span>${account.tags.map((t) => `<span class="dm-tag">${escapeHtml3(t)}</span>`).join(" ")}</span></div>` : ""}
+        <div class="dm-detail-row"><span class="dm-detail-label">Mode:</span> <span class="dm-kind-badge">${escapeHtml3(account.mode)}</span></div>
+        ${account.mode === "provider" ? `<div class="dm-detail-row"><span class="dm-detail-label">Provider:</span> <span>${escapeHtml3(account.providerId ?? "external")} (${account.providerAvailable ? "Active" : "Unavailable"})</span></div>` : ""}
+        <div class="dm-detail-row"><span class="dm-detail-label">Balance:</span> <strong>${escapeHtml3(account.balanceFormatted)}</strong> (raw: ${escapeHtml3(account.balanceMinor)})</div>
+        <div class="dm-detail-row"><span class="dm-detail-label">Reserved:</span> <span>${escapeHtml3(account.reservedFormatted)}</span> (raw: ${escapeHtml3(account.reservedMinor)})</div>
+        <div class="dm-detail-row"><span class="dm-detail-label">Available:</span> <span>${escapeHtml3(account.availableFormatted)}</span> (raw: ${escapeHtml3(account.availableMinor)})</div>
+        <div class="dm-detail-row"><span class="dm-detail-label">Capacity:</span> <span>${escapeHtml3(account.capacityFormatted)}</span></div>
+        <div class="dm-detail-row"><span class="dm-detail-label">Status:</span> <span>${escapeHtml3(account.status)}</span></div>
       </div>
       <div class="dm-modal-actions">
         <button type="button" class="dm-btn dm-btn-primary" data-action="closeModal">Close</button>
@@ -31417,12 +34954,12 @@ function renderTransactionHistoryModalHtml(domainUuid, transactions = []) {
             <tbody>
               ${transactions.map(
     (tx) => `
-                <tr class="dm-tx-row ${escapeAttribute2(tx.stateBadgeClass)}">
-                  <td><code>${escapeHtml2(tx.transactionId)}</code></td>
-                  <td><span class="dm-badge-tx dm-state-${escapeAttribute2(tx.stateBadgeClass)}">${escapeHtml2(tx.state)}</span></td>
-                  <td>${escapeHtml2(tx.authorityEpoch)}</td>
-                  <td>${escapeHtml2(tx.createdAtFormatted)}</td>
-                  <td>${escapeHtml2(tx.failureReason ?? "\u2014")}</td>
+                <tr class="dm-tx-row ${escapeAttribute3(tx.stateBadgeClass)}">
+                  <td><code>${escapeHtml3(tx.transactionId)}</code></td>
+                  <td><span class="dm-badge-tx dm-state-${escapeAttribute3(tx.stateBadgeClass)}">${escapeHtml3(tx.state)}</span></td>
+                  <td>${escapeHtml3(tx.authorityEpoch)}</td>
+                  <td>${escapeHtml3(tx.createdAtFormatted)}</td>
+                  <td>${escapeHtml3(tx.failureReason ?? "\u2014")}</td>
                 </tr>
               `
   ).join("")}
@@ -31441,7 +34978,7 @@ function renderCreateAccountModalHtml(domainUuid, availableDefinitions = []) {
     <div class="dm-modal dm-create-account-modal" data-modal-type="createAccount">
       <h3><i class="fas fa-plus-circle"></i> Create Resource Account</h3>
       <form data-form-type="createAccount">
-        <input type="hidden" name="domainUuid" value="${escapeAttribute2(domainUuid)}" />
+        <input type="hidden" name="domainUuid" value="${escapeAttribute3(domainUuid)}" />
 
         <div class="dm-form-group dm-mode-selector">
           <label class="dm-radio-inline">
@@ -31459,7 +34996,7 @@ function renderCreateAccountModalHtml(domainUuid, availableDefinitions = []) {
             Resource:
             ${availableDefinitions.length > 0 ? `
               <select name="resourceId">
-                ${availableDefinitions.map((d) => `<option value="${escapeAttribute2(d.id)}" data-precision="${escapeAttribute2(d.precision)}">${escapeHtml2(d.label)} (${escapeHtml2(d.id)})</option>`).join("")}
+                ${availableDefinitions.map((d) => `<option value="${escapeAttribute3(d.id)}" data-precision="${escapeAttribute3(d.precision)}">${escapeHtml3(d.label)} (${escapeHtml3(d.id)})</option>`).join("")}
               </select>
             ` : `
               <input type="text" name="resourceId" placeholder="e.g. domain-manager:treasury" />
@@ -31762,7 +35299,7 @@ var EconomyApplicationController = class {
       }
     }
     return `
-      <div class="dm-economy-app-v2" data-domain-uuid="${escapeAttribute2(this.#domainUuid)}">
+      <div class="dm-economy-app-v2" data-domain-uuid="${escapeAttribute3(this.#domainUuid)}">
         ${mainHtml}
         ${modalHtml ? `<div class="dm-modal-backdrop">${modalHtml}</div>` : ""}
       </div>
@@ -31789,13 +35326,13 @@ var MockApplicationV22 = class {
   _setupActions(element) {
     if (!element || element._dmActionsConfigured) return;
     element._dmActionsConfigured = true;
-    const actions = this.constructor.DEFAULT_OPTIONS?.actions ?? {};
-    element.addEventListener?.("click", async (event) => {
-      let target = event?.target;
+    const actions2 = this.constructor.DEFAULT_OPTIONS?.actions ?? {};
+    element.addEventListener?.("click", async (event2) => {
+      let target = event2?.target;
       while (target) {
         const action = target.getAttribute?.("data-action") ?? target.dataset?.action;
-        if (action && typeof actions[action] === "function") {
-          await actions[action].call(this, event, target);
+        if (action && typeof actions2[action] === "function") {
+          await actions2[action].call(this, event2, target);
           return;
         }
         if (target === element) break;
@@ -31839,8 +35376,8 @@ var MockApplicationV22 = class {
     this.element = null;
   }
 };
-var BaseApp2 = globalThis.foundry?.applications?.api?.ApplicationV2 ?? MockApplicationV22;
-var EconomyApplication = class _EconomyApplication extends BaseApp2 {
+var BaseApp3 = globalThis.foundry?.applications?.api?.ApplicationV2 ?? MockApplicationV22;
+var EconomyApplication = class _EconomyApplication extends BaseApp3 {
   static DEFAULT_OPTIONS = {
     id: "domain-manager-economy-{id}",
     classes: ["domain-manager", "dm-economy-app-v2"],
@@ -31884,7 +35421,7 @@ var EconomyApplication = class _EconomyApplication extends BaseApp2 {
   }
   _renderHTML(context, options) {
     if (context.error) {
-      return `<div class="dm-error-state">${escapeHtml2(context.error.message)}</div>`;
+      return `<div class="dm-error-state">${escapeHtml3(context.error.message)}</div>`;
     }
     return this.#controller.render(context.viewModel);
   }
@@ -32099,15 +35636,15 @@ var EconomyApplication = class _EconomyApplication extends BaseApp2 {
     this.#controller.openModal("transactionHistory");
     this.render();
   }
-  static #onOpenResourceDetail(event, target) {
-    const resId = target?.dataset?.resourceId ?? target?.getAttribute?.("data-resource-id") ?? event?.currentTarget?.dataset?.resourceId ?? event?.currentTarget?.getAttribute?.("data-resource-id");
+  static #onOpenResourceDetail(event2, target) {
+    const resId = target?.dataset?.resourceId ?? target?.getAttribute?.("data-resource-id") ?? event2?.currentTarget?.dataset?.resourceId ?? event2?.currentTarget?.getAttribute?.("data-resource-id");
     if (resId) {
       this.#controller.openResourceDetail(resId);
       this.render();
     }
   }
-  static async #onReleaseReservation(event, target) {
-    const resId = target?.dataset?.reservationId ?? target?.getAttribute?.("data-reservation-id") ?? event?.currentTarget?.dataset?.reservationId ?? event?.currentTarget?.getAttribute?.("data-reservation-id");
+  static async #onReleaseReservation(event2, target) {
+    const resId = target?.dataset?.reservationId ?? target?.getAttribute?.("data-reservation-id") ?? event2?.currentTarget?.dataset?.reservationId ?? event2?.currentTarget?.getAttribute?.("data-reservation-id");
     if (!resId) return;
     let confirmed = true;
     let releaseReason = void 0;
@@ -32157,12 +35694,12 @@ var EconomyApplication = class _EconomyApplication extends BaseApp2 {
 };
 
 // src/ui/domain-patterns/projects/project-view.ts
-function escapeHtml3(value) {
+function escapeHtml4(value) {
   if (value === null || value === void 0) return "";
   return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
-function escapeAttribute3(value) {
-  return escapeHtml3(value);
+function escapeAttribute4(value) {
+  return escapeHtml4(value);
 }
 function renderProjectsTableHtml(projects) {
   if (projects.length === 0) {
@@ -32184,17 +35721,17 @@ function renderProjectsTableHtml(projects) {
         ${projects.map((p) => {
     const hasBlockers = p.blockers.length > 0;
     return `
-            <tr class="dm-project-row ${escapeAttribute3(p.statusBadgeClass)}" data-project-id="${escapeAttribute3(p.id)}">
+            <tr class="dm-project-row ${escapeAttribute4(p.statusBadgeClass)}" data-project-id="${escapeAttribute4(p.id)}">
               <td class="dm-cell-name">
-                <span class="dm-project-label">${escapeHtml3(p.label)}</span>
+                <span class="dm-project-label">${escapeHtml4(p.label)}</span>
                 ${p.isSecret ? `<span class="dm-badge dm-badge-secret">Secret</span>` : ""}
                 ${hasBlockers ? `<span class="dm-badge dm-badge-blocked" title="Blocked">Blocked (${p.blockers.length})</span>` : ""}
               </td>
               <td class="dm-cell-def">
-                <code>${escapeHtml3(p.definitionId)}</code>
+                <code>${escapeHtml4(p.definitionId)}</code>
               </td>
               <td class="dm-cell-status">
-                <span class="dm-badge ${escapeAttribute3(p.statusBadgeClass)}">${escapeHtml3(p.lifecycle)}</span>
+                <span class="dm-badge ${escapeAttribute4(p.statusBadgeClass)}">${escapeHtml4(p.lifecycle)}</span>
               </td>
               <td class="dm-cell-progress">
                 <div class="dm-progress-container">
@@ -32203,24 +35740,24 @@ function renderProjectsTableHtml(projects) {
                 </div>
               </td>
               <td class="dm-cell-target">
-                <span>${escapeHtml3(p.targetRef)}</span>
+                <span>${escapeHtml4(p.targetRef)}</span>
               </td>
               <td class="dm-cell-actions">
-                <button type="button" class="dm-btn dm-btn-sm" data-action="openProjectDetail" data-project-id="${escapeAttribute3(p.id)}" title="Inspect Project">
+                <button type="button" class="dm-btn dm-btn-sm" data-action="openProjectDetail" data-project-id="${escapeAttribute4(p.id)}" title="Inspect Project">
                   <i class="fas fa-search"></i> Inspect
                 </button>
                 ${p.canAdvance ? `
-                  <button type="button" class="dm-btn dm-btn-sm dm-btn-primary" data-action="advanceProject" data-project-id="${escapeAttribute3(p.id)}" title="Advance Project">
+                  <button type="button" class="dm-btn dm-btn-sm dm-btn-primary" data-action="advanceProject" data-project-id="${escapeAttribute4(p.id)}" title="Advance Project">
                     <i class="fas fa-play"></i> Advance
                   </button>
                 ` : ""}
                 ${p.canPause ? `
-                  <button type="button" class="dm-btn dm-btn-sm" data-action="pauseProject" data-project-id="${escapeAttribute3(p.id)}" title="Pause Project">
+                  <button type="button" class="dm-btn dm-btn-sm" data-action="pauseProject" data-project-id="${escapeAttribute4(p.id)}" title="Pause Project">
                     <i class="fas fa-pause"></i> Pause
                   </button>
                 ` : ""}
                 ${p.canResume ? `
-                  <button type="button" class="dm-btn dm-btn-sm" data-action="resumeProject" data-project-id="${escapeAttribute3(p.id)}" title="Resume Project">
+                  <button type="button" class="dm-btn dm-btn-sm" data-action="resumeProject" data-project-id="${escapeAttribute4(p.id)}" title="Resume Project">
                     <i class="fas fa-play"></i> Resume
                   </button>
                 ` : ""}
@@ -32235,9 +35772,9 @@ function renderProjectsTableHtml(projects) {
 function renderProjectDetailModalHtml(project, viewerIsGm) {
   const hasBlockers = project.blockers.length > 0;
   return `
-    <div class="dm-modal dm-project-detail-modal" data-project-id="${escapeAttribute3(project.id)}">
+    <div class="dm-modal dm-project-detail-modal" data-project-id="${escapeAttribute4(project.id)}">
       <header class="dm-modal-header">
-        <h3>Project Inspector: ${escapeHtml3(project.label)}</h3>
+        <h3>Project Inspector: ${escapeHtml4(project.label)}</h3>
         <button type="button" class="dm-btn-close" data-action="closeModal">&times;</button>
       </header>
 
@@ -32246,15 +35783,15 @@ function renderProjectDetailModalHtml(project, viewerIsGm) {
           <div class="dm-summary-grid">
             <div class="dm-stat">
               <span class="dm-stat-label">Status</span>
-              <span class="dm-badge ${escapeAttribute3(project.statusBadgeClass)}">${escapeHtml3(project.lifecycle)}</span>
+              <span class="dm-badge ${escapeAttribute4(project.statusBadgeClass)}">${escapeHtml4(project.lifecycle)}</span>
             </div>
             <div class="dm-stat">
               <span class="dm-stat-label">Definition</span>
-              <code>${escapeHtml3(project.definitionId)}</code>
+              <code>${escapeHtml4(project.definitionId)}</code>
             </div>
             <div class="dm-stat">
               <span class="dm-stat-label">Target</span>
-              <span>${escapeHtml3(project.targetRef)}</span>
+              <span>${escapeHtml4(project.targetRef)}</span>
             </div>
             <div class="dm-stat">
               <span class="dm-stat-label">Revision</span>
@@ -32277,8 +35814,8 @@ function renderProjectDetailModalHtml(project, viewerIsGm) {
             <ul class="dm-blocker-list">
               ${project.blockers.map((b) => `
                 <li class="dm-blocker-item ${b.isSecret ? "dm-secret" : ""}">
-                  <span class="dm-blocker-category">[${escapeHtml3(b.category)}]</span>
-                  <span class="dm-blocker-message">${escapeHtml3(b.message)}</span>
+                  <span class="dm-blocker-category">[${escapeHtml4(b.category)}]</span>
+                  <span class="dm-blocker-message">${escapeHtml4(b.message)}</span>
                   ${b.isSecret ? `<span class="dm-badge dm-badge-secret">Secret</span>` : ""}
                 </li>
               `).join("")}
@@ -32292,7 +35829,7 @@ function renderProjectDetailModalHtml(project, viewerIsGm) {
             <div class="dm-workforce-grid">
               ${project.workforce.map((w) => `
                 <div class="dm-wf-stat ${w.satisfied ? "dm-satisfied" : "dm-unsatisfied"}">
-                  <span class="dm-wf-type">${escapeHtml3(w.typeId)}</span>
+                  <span class="dm-wf-type">${escapeHtml4(w.typeId)}</span>
                   <span class="dm-wf-numbers">${w.allocated} / ${w.required}</span>
                   <span class="dm-badge ${w.satisfied ? "dm-badge-healthy" : "dm-badge-danger"}">
                     ${w.satisfied ? "Met" : "Deficit"}
@@ -32308,10 +35845,10 @@ function renderProjectDetailModalHtml(project, viewerIsGm) {
             <h4>Prerequisites & Requirements</h4>
             <ul class="dm-req-list">
               ${project.requirements.map((r) => `
-                <li class="dm-req-item dm-req-${escapeAttribute3(r.status)}">
-                  <span class="dm-req-kind">${escapeHtml3(r.kind)}</span>
-                  <span class="dm-req-target">${escapeHtml3(r.targetRef)}</span>
-                  <span class="dm-badge dm-badge-${escapeAttribute3(r.status)}">${escapeHtml3(r.status)}</span>
+                <li class="dm-req-item dm-req-${escapeAttribute4(r.status)}">
+                  <span class="dm-req-kind">${escapeHtml4(r.kind)}</span>
+                  <span class="dm-req-target">${escapeHtml4(r.targetRef)}</span>
+                  <span class="dm-badge dm-badge-${escapeAttribute4(r.status)}">${escapeHtml4(r.status)}</span>
                 </li>
               `).join("")}
             </ul>
@@ -32321,14 +35858,14 @@ function renderProjectDetailModalHtml(project, viewerIsGm) {
         ${project.description ? `
           <section class="dm-section dm-desc-section">
             <h4>Description</h4>
-            <p>${escapeHtml3(project.description)}</p>
+            <p>${escapeHtml4(project.description)}</p>
           </section>
         ` : ""}
       </div>
 
       <footer class="dm-modal-footer">
         ${project.canAdvance ? `
-          <form class="dm-advance-inline-form" data-form-type="advanceProject" data-project-id="${escapeAttribute3(project.id)}">
+          <form class="dm-advance-inline-form" data-form-type="advanceProject" data-project-id="${escapeAttribute4(project.id)}">
             <input type="number" name="progressUnits" value="1" min="1" max="1000" class="dm-input-sm" style="width: 70px;" />
             <button type="submit" class="dm-btn dm-btn-primary">
               <i class="fas fa-hammer"></i> Commit Advance
@@ -32337,19 +35874,19 @@ function renderProjectDetailModalHtml(project, viewerIsGm) {
         ` : ""}
 
         ${project.canPause ? `
-          <button type="button" class="dm-btn" data-action="pauseProject" data-project-id="${escapeAttribute3(project.id)}">
+          <button type="button" class="dm-btn" data-action="pauseProject" data-project-id="${escapeAttribute4(project.id)}">
             <i class="fas fa-pause"></i> Pause
           </button>
         ` : ""}
 
         ${project.canResume ? `
-          <button type="button" class="dm-btn dm-btn-success" data-action="resumeProject" data-project-id="${escapeAttribute3(project.id)}">
+          <button type="button" class="dm-btn dm-btn-success" data-action="resumeProject" data-project-id="${escapeAttribute4(project.id)}">
             <i class="fas fa-play"></i> Resume
           </button>
         ` : ""}
 
         ${project.canCancel ? `
-          <button type="button" class="dm-btn dm-btn-danger" data-action="cancelProject" data-project-id="${escapeAttribute3(project.id)}">
+          <button type="button" class="dm-btn dm-btn-danger" data-action="cancelProject" data-project-id="${escapeAttribute4(project.id)}">
             <i class="fas fa-times"></i> Cancel Project
           </button>
         ` : ""}
@@ -32367,15 +35904,15 @@ function renderProjectStartModalHtml(domainUuid, definitions) {
         <button type="button" class="dm-btn-close" data-action="closeModal">&times;</button>
       </header>
 
-      <form data-form-type="startProject" data-domain-uuid="${escapeAttribute3(domainUuid)}">
+      <form data-form-type="startProject" data-domain-uuid="${escapeAttribute4(domainUuid)}">
         <div class="dm-modal-body">
           <div class="dm-form-group">
             <label for="dm-project-definition">Project Template / Definition</label>
             <select id="dm-project-definition" name="definitionId" required>
               <option value="">-- Select a definition --</option>
               ${definitions.map((d) => `
-                <option value="${escapeAttribute3(d.id)}" data-work="${d.defaultWorkRequired}">
-                  ${escapeHtml3(d.label)} (${d.defaultWorkRequired} units) ${d.category ? `- ${escapeHtml3(d.category)}` : ""}
+                <option value="${escapeAttribute4(d.id)}" data-work="${d.defaultWorkRequired}">
+                  ${escapeHtml4(d.label)} (${d.defaultWorkRequired} units) ${d.category ? `- ${escapeHtml4(d.category)}` : ""}
                 </option>
               `).join("")}
             </select>
@@ -32388,7 +35925,7 @@ function renderProjectStartModalHtml(domainUuid, definitions) {
 
           <div class="dm-form-group">
             <label for="dm-project-target">Target Reference</label>
-            <input type="text" id="dm-project-target" name="targetRef" value="${escapeAttribute3(domainUuid)}" placeholder="Target entity ref or domain UUID" />
+            <input type="text" id="dm-project-target" name="targetRef" value="${escapeAttribute4(domainUuid)}" placeholder="Target entity ref or domain UUID" />
           </div>
 
           <div class="dm-form-group">
@@ -32417,7 +35954,7 @@ function renderProjectStartModalHtml(domainUuid, definitions) {
 }
 function renderProjectsSubsystemHtml(vm) {
   return `
-    <div class="dm-projects-subsystem" data-domain-uuid="${escapeAttribute3(vm.domainUuid)}">
+    <div class="dm-projects-subsystem" data-domain-uuid="${escapeAttribute4(vm.domainUuid)}">
       <header class="dm-subsystem-header">
         <div class="dm-header-title">
           <h2>Projects & Construction</h2>
@@ -32464,7 +36001,7 @@ function renderProjectsSubsystemHtml(vm) {
             type="text"
             placeholder="Search projects..."
             data-action="searchProjects"
-            value="${escapeAttribute3(vm.searchTerm)}"
+            value="${escapeAttribute4(vm.searchTerm)}"
             class="dm-input-sm dm-search-input"
           />
         </div>
@@ -32593,7 +36130,7 @@ var ProjectsApplicationController = class {
       }
     }
     return `
-      <div class="dm-projects-app-v2" data-domain-uuid="${escapeAttribute3(this.#domainUuid)}">
+      <div class="dm-projects-app-v2" data-domain-uuid="${escapeAttribute4(this.#domainUuid)}">
         ${mainHtml}
         ${modalHtml ? `<div class="dm-modal-backdrop">${modalHtml}</div>` : ""}
       </div>
@@ -32705,13 +36242,13 @@ var MockApplicationV23 = class {
   _setupActions(element) {
     if (!element || element._dmActionsConfigured) return;
     element._dmActionsConfigured = true;
-    const actions = this.constructor.DEFAULT_OPTIONS?.actions ?? {};
-    element.addEventListener?.("click", async (event) => {
-      let target = event?.target;
+    const actions2 = this.constructor.DEFAULT_OPTIONS?.actions ?? {};
+    element.addEventListener?.("click", async (event2) => {
+      let target = event2?.target;
       while (target) {
         const action = target.getAttribute?.("data-action") ?? target.dataset?.action;
-        if (action && typeof actions[action] === "function") {
-          await actions[action].call(this, event, target);
+        if (action && typeof actions2[action] === "function") {
+          await actions2[action].call(this, event2, target);
           return;
         }
         if (target === element) break;
@@ -32755,8 +36292,8 @@ var MockApplicationV23 = class {
     this.element = null;
   }
 };
-var BaseApp3 = globalThis.foundry?.applications?.api?.ApplicationV2 ?? MockApplicationV23;
-var ProjectsApplication = class _ProjectsApplication extends BaseApp3 {
+var BaseApp4 = globalThis.foundry?.applications?.api?.ApplicationV2 ?? MockApplicationV23;
+var ProjectsApplication = class _ProjectsApplication extends BaseApp4 {
   static DEFAULT_OPTIONS = {
     id: "domain-manager-projects-{id}",
     classes: ["domain-manager", "dm-projects-app-v2"],
@@ -32798,7 +36335,7 @@ var ProjectsApplication = class _ProjectsApplication extends BaseApp3 {
   }
   _renderHTML(context, options) {
     if (context.error) {
-      return `<div class="dm-error-state">${escapeHtml3(context.error.message)}</div>`;
+      return `<div class="dm-error-state">${escapeHtml4(context.error.message)}</div>`;
     }
     return this.#controller.render(context.viewModel);
   }
@@ -32875,35 +36412,35 @@ var ProjectsApplication = class _ProjectsApplication extends BaseApp3 {
     this.#controller.openStartModal();
     this.render();
   }
-  static #onOpenProjectDetail(event, target) {
+  static #onOpenProjectDetail(event2, target) {
     const id = target?.dataset?.projectId ?? target?.getAttribute?.("data-project-id");
     if (id) {
       this.#controller.openProjectDetail(id);
       this.render();
     }
   }
-  static async #onAdvanceProject(event, target) {
+  static async #onAdvanceProject(event2, target) {
     const id = target?.dataset?.projectId ?? target?.getAttribute?.("data-project-id");
     if (id) {
       await this.#controller.dispatchAdvanceProject({ projectId: id, units: 1 });
       this.render();
     }
   }
-  static async #onPauseProject(event, target) {
+  static async #onPauseProject(event2, target) {
     const id = target?.dataset?.projectId ?? target?.getAttribute?.("data-project-id");
     if (id) {
       await this.#controller.dispatchPauseProject(id);
       this.render();
     }
   }
-  static async #onResumeProject(event, target) {
+  static async #onResumeProject(event2, target) {
     const id = target?.dataset?.projectId ?? target?.getAttribute?.("data-project-id");
     if (id) {
       await this.#controller.dispatchResumeProject(id);
       this.render();
     }
   }
-  static async #onCancelProject(event, target) {
+  static async #onCancelProject(event2, target) {
     const id = target?.dataset?.projectId ?? target?.getAttribute?.("data-project-id");
     if (id) {
       await this.#controller.dispatchCancelProject(id);
@@ -32915,385 +36452,6 @@ var ProjectsApplication = class _ProjectsApplication extends BaseApp3 {
     this.render();
   }
 };
-
-// src/ui/domain-patterns/facilities/facility-view.ts
-function escapeHtml4(value) {
-  if (value === null || value === void 0) return "";
-  return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-}
-function escapeAttribute4(value) {
-  return escapeHtml4(value);
-}
-function renderFacilitiesTableHtml(facilities) {
-  if (facilities.length === 0) {
-    return `<div class="dm-empty-state">No facilities found.</div>`;
-  }
-  return `
-    <table class="dm-facilities-table">
-      <thead>
-        <tr>
-          <th>Facility</th>
-          <th>Level</th>
-          <th>Lifecycle</th>
-          <th>Readiness</th>
-          <th>Integrity</th>
-          <th>Maintenance</th>
-          <th>Actions</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${facilities.map((f) => {
-    const hasConditions = f.conditions.length > 0;
-    return `
-            <tr class="dm-facility-row" data-facility-id="${escapeAttribute4(f.id)}">
-              <td class="dm-cell-name">
-                <span class="dm-facility-label">${escapeHtml4(f.name)}</span>
-                <span class="dm-def-id">(${escapeHtml4(f.definitionId)})</span>
-                ${f.isSecret ? `<span class="dm-badge dm-badge-secret">Secret</span>` : ""}
-                ${hasConditions ? `<span class="dm-badge dm-badge-warning" title="${f.conditions.length} active condition(s)">Conditions (${f.conditions.length})</span>` : ""}
-              </td>
-              <td class="dm-cell-level">
-                <span class="dm-level-pill">Lv.${f.level}</span>
-              </td>
-              <td class="dm-cell-lifecycle">
-                <span class="dm-badge ${escapeAttribute4(f.lifecycleBadgeClass)}">${escapeHtml4(f.lifecycle)}</span>
-              </td>
-              <td class="dm-cell-readiness">
-                <span class="dm-badge ${escapeAttribute4(f.readinessBadgeClass)}">${escapeHtml4(f.readiness)}</span>
-              </td>
-              <td class="dm-cell-integrity">
-                <div class="dm-progress-container dm-integrity-meter dm-integrity-${escapeAttribute4(f.integrityClass)}">
-                  <div class="dm-progress-bar" style="width: ${f.integrityPercent}%;"></div>
-                  <span class="dm-progress-text">${f.structuralIntegrity} / ${f.maxStructuralIntegrity} (${f.integrityPercent}%)</span>
-                </div>
-              </td>
-              <td class="dm-cell-maintenance">
-                <span class="dm-badge ${escapeAttribute4(f.maintenance.statusBadgeClass)}">${escapeHtml4(f.maintenance.status)}</span>
-                <span class="dm-subtext">${escapeHtml4(f.maintenance.formattedRatio)}</span>
-              </td>
-              <td class="dm-cell-actions">
-                <button type="button" class="dm-btn dm-btn-sm" data-action="openFacilityDetail" data-facility-id="${escapeAttribute4(f.id)}" title="Inspect Facility">
-                  <i class="fas fa-search"></i> Inspect
-                </button>
-                ${f.canMaintain ? `
-                  <button type="button" class="dm-btn dm-btn-sm dm-btn-secondary" data-action="openMaintenanceModal" data-facility-id="${escapeAttribute4(f.id)}" title="Perform Maintenance">
-                    <i class="fas fa-wrench"></i> Maintain
-                  </button>
-                ` : ""}
-                ${f.canRepair ? `
-                  <button type="button" class="dm-btn dm-btn-sm dm-btn-primary" data-action="openRepairModal" data-facility-id="${escapeAttribute4(f.id)}" title="Repair Facility">
-                    <i class="fas fa-tools"></i> Repair
-                  </button>
-                ` : ""}
-              </td>
-            </tr>
-          `;
-  }).join("")}
-      </tbody>
-    </table>
-  `;
-}
-function renderFacilityDetailModalHtml(facility, viewerIsGm) {
-  return `
-    <div class="dm-modal dm-facility-detail-modal" data-facility-id="${escapeAttribute4(facility.id)}">
-      <header class="dm-modal-header">
-        <h3>Facility Inspector: ${escapeHtml4(facility.name)}</h3>
-        <button type="button" class="dm-btn-close" data-action="closeModal">&times;</button>
-      </header>
-
-      <div class="dm-modal-body">
-        <section class="dm-detail-summary">
-          <div class="dm-summary-grid">
-            <div class="dm-stat">
-              <span class="dm-stat-label">Lifecycle</span>
-              <span class="dm-badge ${escapeAttribute4(facility.lifecycleBadgeClass)}">${escapeHtml4(facility.lifecycle)}</span>
-            </div>
-            <div class="dm-stat">
-              <span class="dm-stat-label">Readiness (Operational)</span>
-              <span class="dm-badge ${escapeAttribute4(facility.readinessBadgeClass)}">${escapeHtml4(facility.readiness)}</span>
-            </div>
-            <div class="dm-stat">
-              <span class="dm-stat-label">Level</span>
-              <span>Level ${facility.level}</span>
-            </div>
-            <div class="dm-stat">
-              <span class="dm-stat-label">Revision</span>
-              <span>v${facility.revision}</span>
-            </div>
-          </div>
-
-          <div class="dm-integrity-section">
-            <h4>Structural Integrity</h4>
-            <div class="dm-progress-container dm-progress-large dm-integrity-${escapeAttribute4(facility.integrityClass)}">
-              <div class="dm-progress-bar" style="width: ${facility.integrityPercent}%;"></div>
-              <span class="dm-progress-text">${facility.structuralIntegrity} / ${facility.maxStructuralIntegrity} HP (${facility.integrityPercent}%)</span>
-            </div>
-          </div>
-
-          <div class="dm-maintenance-section">
-            <h4>Maintenance Status</h4>
-            <div class="dm-maint-overview">
-              <span class="dm-badge ${escapeAttribute4(facility.maintenance.statusBadgeClass)}">
-                ${escapeHtml4(facility.maintenance.status.toUpperCase())}
-              </span>
-              <span class="dm-maint-ratio">Cycle Progress: ${escapeHtml4(facility.maintenance.formattedRatio)} (${facility.maintenance.ticksSinceLastMaintenance}/${facility.maintenance.intervalTicks} ticks)</span>
-              ${facility.maintenance.consecutiveMissedCycles > 0 ? `
-                <span class="dm-badge dm-badge-danger">${facility.maintenance.consecutiveMissedCycles} missed cycle(s)</span>
-              ` : ""}
-            </div>
-          </div>
-        </section>
-
-        ${facility.conditions.length > 0 ? `
-          <section class="dm-section dm-conditions-section">
-            <h4 class="dm-warning-text"><i class="fas fa-exclamation-circle"></i> Active Conditions & Damage</h4>
-            <ul class="dm-condition-list">
-              ${facility.conditions.map((c) => `
-                <li class="dm-condition-item">
-                  <span class="dm-badge ${escapeAttribute4(c.severityBadgeClass)}">${escapeHtml4(c.severity)}</span>
-                  <span class="dm-condition-desc">${escapeHtml4(c.description)}</span>
-                  ${c.suppressesCapabilities.length > 0 ? `
-                    <span class="dm-suppression-note">(Suppresses: ${c.suppressesCapabilities.map(escapeHtml4).join(", ")})</span>
-                  ` : ""}
-                </li>
-              `).join("")}
-            </ul>
-          </section>
-        ` : ""}
-
-        <section class="dm-section dm-capabilities-section">
-          <h4>Effective Capabilities</h4>
-          ${facility.effectiveCapabilities.length > 0 ? `
-            <div class="dm-caps-tags">
-              ${facility.effectiveCapabilities.map((cap) => `
-                <span class="dm-cap-tag"><code>${escapeHtml4(cap)}</code></span>
-              `).join("")}
-            </div>
-          ` : `
-            <div class="dm-muted-text">No active capabilities provided in current status.</div>
-          `}
-        </section>
-
-        <section class="dm-section dm-modules-section">
-          <h4>Infrastructure Modules & Upgrades</h4>
-          <div class="dm-slots-overview">
-            <span>Installed Modules: ${facility.activeModulesCount}</span> |
-            <span>Active Upgrades: ${facility.activeUpgradesCount}</span>
-          </div>
-        </section>
-      </div>
-
-      <footer class="dm-modal-footer">
-        ${facility.canMaintain ? `
-          <button type="button" class="dm-btn dm-btn-secondary" data-action="openMaintenanceModal" data-facility-id="${escapeAttribute4(facility.id)}">
-            <i class="fas fa-wrench"></i> Perform Maintenance
-          </button>
-        ` : ""}
-
-        ${facility.canRepair ? `
-          <button type="button" class="dm-btn dm-btn-primary" data-action="openRepairModal" data-facility-id="${escapeAttribute4(facility.id)}">
-            <i class="fas fa-tools"></i> Repair Damage
-          </button>
-        ` : ""}
-
-        <button type="button" class="dm-btn" data-action="closeModal">Close</button>
-      </footer>
-    </div>
-  `;
-}
-function renderFacilityCreateModalHtml(domainUuid, definitions) {
-  return `
-    <div class="dm-modal dm-facility-create-modal">
-      <header class="dm-modal-header">
-        <h3>Commission / Plan Facility</h3>
-        <button type="button" class="dm-btn-close" data-action="closeModal">&times;</button>
-      </header>
-
-      <form data-form-type="createFacility" data-domain-uuid="${escapeAttribute4(domainUuid)}">
-        <div class="dm-modal-body">
-          <div class="dm-form-group">
-            <label for="dm-facility-definition">Facility Type / Blueprint</label>
-            <select id="dm-facility-definition" name="definitionId" required>
-              <option value="">-- Select a blueprint --</option>
-              ${definitions.map((d) => `
-                <option value="${escapeAttribute4(d.id)}">
-                  ${escapeHtml4(d.label)} - Max Lv.${d.maxLevel}
-                </option>
-              `).join("")}
-            </select>
-          </div>
-
-          <div class="dm-form-group">
-            <label for="dm-facility-name">Facility Name</label>
-            <input type="text" id="dm-facility-name" name="name" placeholder="Custom facility designation (optional)" />
-          </div>
-
-          <div class="dm-form-group">
-            <label for="dm-facility-level">Starting Level</label>
-            <input type="number" id="dm-facility-level" name="level" min="1" max="10" value="1" required />
-          </div>
-
-          <div class="dm-form-group">
-            <label for="dm-facility-lifecycle">Initial Lifecycle State</label>
-            <select id="dm-facility-lifecycle" name="initialLifecycle">
-              <option value="operational">Operational (Fully functional)</option>
-              <option value="planned">Planned (Blueprint / Draft)</option>
-              <option value="underConstruction">Under Construction</option>
-              <option value="inactive">Inactive</option>
-            </select>
-          </div>
-        </div>
-
-        <footer class="dm-modal-footer">
-          <button type="submit" class="dm-btn dm-btn-primary">
-            <i class="fas fa-check"></i> Commission Facility
-          </button>
-          <button type="button" class="dm-btn" data-action="closeModal">Cancel</button>
-        </footer>
-      </form>
-    </div>
-  `;
-}
-function renderFacilityMaintenanceModalHtml(facility) {
-  return `
-    <div class="dm-modal dm-facility-maintenance-modal" data-facility-id="${escapeAttribute4(facility.id)}">
-      <header class="dm-modal-header">
-        <h3>Perform Maintenance: ${escapeHtml4(facility.name)}</h3>
-        <button type="button" class="dm-btn-close" data-action="closeModal">&times;</button>
-      </header>
-
-      <form data-form-type="maintainFacility" data-facility-id="${escapeAttribute4(facility.id)}">
-        <div class="dm-modal-body">
-          <p>
-            Committing maintenance will reset the maintenance cycle timer to 0 ticks, clear overdue statuses, and restore standard operational readiness.
-          </p>
-
-          <div class="dm-maint-details">
-            <div>Current Status: <strong>${escapeHtml4(facility.maintenance.status)}</strong></div>
-            <div>Elapsed Ticks: <strong>${facility.maintenance.ticksSinceLastMaintenance} / ${facility.maintenance.intervalTicks}</strong></div>
-            <div>Missed Cycles: <strong>${facility.maintenance.consecutiveMissedCycles}</strong></div>
-          </div>
-
-          <div class="dm-form-group">
-            <label for="dm-maint-notes">Maintenance Log Notes</label>
-            <input type="text" id="dm-maint-notes" name="notes" placeholder="Standard inspection and overhaul" />
-          </div>
-        </div>
-
-        <footer class="dm-modal-footer">
-          <button type="submit" class="dm-btn dm-btn-primary">
-            <i class="fas fa-wrench"></i> Complete Maintenance
-          </button>
-          <button type="button" class="dm-btn" data-action="closeModal">Cancel</button>
-        </footer>
-      </form>
-    </div>
-  `;
-}
-function renderFacilityRepairModalHtml(facility) {
-  const missingIntegrity = facility.maxStructuralIntegrity - facility.structuralIntegrity;
-  return `
-    <div class="dm-modal dm-facility-repair-modal" data-facility-id="${escapeAttribute4(facility.id)}">
-      <header class="dm-modal-header">
-        <h3>Repair Facility: ${escapeHtml4(facility.name)}</h3>
-        <button type="button" class="dm-btn-close" data-action="closeModal">&times;</button>
-      </header>
-
-      <form data-form-type="repairFacility" data-facility-id="${escapeAttribute4(facility.id)}">
-        <div class="dm-modal-body">
-          <div class="dm-form-group">
-            <label for="dm-repair-amount">Restore Structural Integrity (HP)</label>
-            <input type="number" id="dm-repair-amount" name="restoreIntegrity" min="1" max="${missingIntegrity > 0 ? missingIntegrity : 100}" value="${missingIntegrity > 0 ? missingIntegrity : 10}" required />
-            <small class="dm-help-text">Deficit: ${missingIntegrity} HP (Current: ${facility.structuralIntegrity} / Max: ${facility.maxStructuralIntegrity})</small>
-          </div>
-
-          ${facility.conditions.length > 0 ? `
-            <div class="dm-form-group">
-              <label>Clear Active Damage Conditions</label>
-              <div class="dm-conditions-checkboxes">
-                ${facility.conditions.map((c) => `
-                  <label class="dm-checkbox-label">
-                    <input type="checkbox" name="clearConditions" value="${escapeAttribute4(c.id)}" checked />
-                    [${escapeHtml4(c.severity)}] ${escapeHtml4(c.description)}
-                  </label>
-                `).join("")}
-              </div>
-            </div>
-          ` : ""}
-        </div>
-
-        <footer class="dm-modal-footer">
-          <button type="submit" class="dm-btn dm-btn-primary">
-            <i class="fas fa-tools"></i> Execute Repairs
-          </button>
-          <button type="button" class="dm-btn" data-action="closeModal">Cancel</button>
-        </footer>
-      </form>
-    </div>
-  `;
-}
-function renderFacilitiesSubsystemHtml(vm) {
-  return `
-    <div class="dm-facilities-subsystem" data-domain-uuid="${escapeAttribute4(vm.domainUuid)}">
-      <header class="dm-subsystem-header">
-        <div class="dm-header-title">
-          <h2>Facilities & Infrastructure</h2>
-          <span class="dm-header-subtitle">Domain Installations, Capacities, Maintenance & Readiness</span>
-        </div>
-
-        <div class="dm-summary-counters">
-          <div class="dm-counter-card">
-            <span class="dm-counter-value">${vm.totalCount}</span>
-            <span class="dm-counter-label">Total</span>
-          </div>
-          <div class="dm-counter-card dm-counter-operational">
-            <span class="dm-counter-value">${vm.operationalCount}</span>
-            <span class="dm-counter-label">Operational</span>
-          </div>
-          <div class="dm-counter-card dm-counter-ready">
-            <span class="dm-counter-value">${vm.readyCount}</span>
-            <span class="dm-counter-label">Ready</span>
-          </div>
-          <div class="dm-counter-card dm-counter-damaged">
-            <span class="dm-counter-value">${vm.degradedOrDamagedCount}</span>
-            <span class="dm-counter-label">Damaged/Degraded</span>
-          </div>
-        </div>
-      </header>
-
-      <div class="dm-toolbar">
-        <div class="dm-toolbar-filters">
-          <label class="dm-filter-label">Readiness:</label>
-          <select name="filterReadiness" data-action="filterReadiness" class="dm-select-sm">
-            <option value="all" ${vm.filterReadiness === "all" ? "selected" : ""}>All Readiness</option>
-            <option value="ready" ${vm.filterReadiness === "ready" ? "selected" : ""}>Ready</option>
-            <option value="limited" ${vm.filterReadiness === "limited" ? "selected" : ""}>Limited</option>
-            <option value="blocked" ${vm.filterReadiness === "blocked" ? "selected" : ""}>Blocked</option>
-            <option value="unavailable" ${vm.filterReadiness === "unavailable" ? "selected" : ""}>Unavailable</option>
-          </select>
-
-          <input
-            type="text"
-            placeholder="Search facilities..."
-            data-action="searchFacilities"
-            value="${escapeAttribute4(vm.searchTerm)}"
-            class="dm-input-sm dm-search-input"
-          />
-        </div>
-
-        <div class="dm-toolbar-actions">
-          <button type="button" class="dm-btn dm-btn-primary dm-btn-sm" data-action="openCreateModal">
-            <i class="fas fa-plus"></i> Commission Facility
-          </button>
-        </div>
-      </div>
-
-      <main class="dm-subsystem-content">
-        ${renderFacilitiesTableHtml(vm.facilities)}
-      </main>
-    </div>
-  `;
-}
 
 // src/ui/domain-patterns/facilities/facility-app.ts
 function cleanPayload3(payload) {
@@ -33423,7 +36581,7 @@ var FacilitiesApplicationController = class {
       }
     }
     return `
-      <div class="dm-facilities-app-v2" data-domain-uuid="${escapeAttribute4(this.#domainUuid)}">
+      <div class="dm-facilities-app-v2" data-domain-uuid="${escapeAttribute2(this.#domainUuid)}">
         ${mainHtml}
         ${modalHtml ? `<div class="dm-modal-backdrop">${modalHtml}</div>` : ""}
       </div>
@@ -33528,13 +36686,13 @@ var MockApplicationV24 = class {
   _setupActions(element) {
     if (!element || element._dmActionsConfigured) return;
     element._dmActionsConfigured = true;
-    const actions = this.constructor.DEFAULT_OPTIONS?.actions ?? {};
-    element.addEventListener?.("click", async (event) => {
-      let target = event?.target;
+    const actions2 = this.constructor.DEFAULT_OPTIONS?.actions ?? {};
+    element.addEventListener?.("click", async (event2) => {
+      let target = event2?.target;
       while (target) {
         const action = target.getAttribute?.("data-action") ?? target.dataset?.action;
-        if (action && typeof actions[action] === "function") {
-          await actions[action].call(this, event, target);
+        if (action && typeof actions2[action] === "function") {
+          await actions2[action].call(this, event2, target);
           return;
         }
         if (target === element) break;
@@ -33578,8 +36736,8 @@ var MockApplicationV24 = class {
     this.element = null;
   }
 };
-var BaseApp4 = globalThis.foundry?.applications?.api?.ApplicationV2 ?? MockApplicationV24;
-var FacilitiesApplication = class _FacilitiesApplication extends BaseApp4 {
+var BaseApp5 = globalThis.foundry?.applications?.api?.ApplicationV2 ?? MockApplicationV24;
+var FacilitiesApplication = class _FacilitiesApplication extends BaseApp5 {
   static DEFAULT_OPTIONS = {
     id: "domain-manager-facilities-{id}",
     classes: ["domain-manager", "dm-facilities-app-v2"],
@@ -33619,7 +36777,7 @@ var FacilitiesApplication = class _FacilitiesApplication extends BaseApp4 {
   }
   _renderHTML(context, options) {
     if (context.error) {
-      return `<div class="dm-error-state">${escapeHtml4(context.error.message)}</div>`;
+      return `<div class="dm-error-state">${escapeHtml2(context.error.message)}</div>`;
     }
     return this.#controller.render(context.viewModel);
   }
@@ -33712,21 +36870,21 @@ var FacilitiesApplication = class _FacilitiesApplication extends BaseApp4 {
     this.#controller.openCreateModal();
     this.render();
   }
-  static #onOpenFacilityDetail(event, target) {
+  static #onOpenFacilityDetail(event2, target) {
     const id = target?.dataset?.facilityId ?? target?.getAttribute?.("data-facility-id");
     if (id) {
       this.#controller.openFacilityDetail(id);
       this.render();
     }
   }
-  static #onOpenMaintenanceModal(event, target) {
+  static #onOpenMaintenanceModal(event2, target) {
     const id = target?.dataset?.facilityId ?? target?.getAttribute?.("data-facility-id");
     if (id) {
       this.#controller.openMaintenanceModal(id);
       this.render();
     }
   }
-  static #onOpenRepairModal(event, target) {
+  static #onOpenRepairModal(event2, target) {
     const id = target?.dataset?.facilityId ?? target?.getAttribute?.("data-facility-id");
     if (id) {
       this.#controller.openRepairModal(id);
@@ -34266,13 +37424,13 @@ var MockApplicationV25 = class {
   _setupActions(element) {
     if (!element || element._dmActionsConfigured) return;
     element._dmActionsConfigured = true;
-    const actions = this.constructor.DEFAULT_OPTIONS?.actions ?? {};
-    element.addEventListener?.("click", async (event) => {
-      let target = event?.target;
+    const actions2 = this.constructor.DEFAULT_OPTIONS?.actions ?? {};
+    element.addEventListener?.("click", async (event2) => {
+      let target = event2?.target;
       while (target) {
         const action = target.getAttribute?.("data-action") ?? target.dataset?.action;
-        if (action && typeof actions[action] === "function") {
-          await actions[action].call(this, event, target);
+        if (action && typeof actions2[action] === "function") {
+          await actions2[action].call(this, event2, target);
           return;
         }
         if (target === element) break;
@@ -34316,8 +37474,8 @@ var MockApplicationV25 = class {
     this.element = null;
   }
 };
-var BaseApp5 = globalThis.foundry?.applications?.api?.ApplicationV2 ?? MockApplicationV25;
-var DowntimeApplication = class _DowntimeApplication extends BaseApp5 {
+var BaseApp6 = globalThis.foundry?.applications?.api?.ApplicationV2 ?? MockApplicationV25;
+var DowntimeApplication = class _DowntimeApplication extends BaseApp6 {
   static DEFAULT_OPTIONS = {
     id: "domain-manager-downtime-{id}",
     classes: ["domain-manager", "dm-downtime-app-v2"],
@@ -34435,28 +37593,28 @@ var DowntimeApplication = class _DowntimeApplication extends BaseApp5 {
     this.#controller.openStartModal();
     this.render();
   }
-  static #onOpenDowntimeDetail(event, target) {
+  static #onOpenDowntimeDetail(event2, target) {
     const id = target?.dataset?.downtimeId ?? target?.getAttribute?.("data-downtime-id");
     if (id) {
       this.#controller.openDowntimeDetail(id);
       this.render();
     }
   }
-  static async #onAdvanceDowntime(event, target) {
+  static async #onAdvanceDowntime(event2, target) {
     const id = target?.dataset?.downtimeId ?? target?.getAttribute?.("data-downtime-id");
     if (id) {
       await this.#controller.dispatchAdvanceDowntime({ activityId: id, ticks: 1 });
       this.render();
     }
   }
-  static async #onCompleteDowntime(event, target) {
+  static async #onCompleteDowntime(event2, target) {
     const id = target?.dataset?.downtimeId ?? target?.getAttribute?.("data-downtime-id");
     if (id) {
       await this.#controller.dispatchCompleteDowntime(id);
       this.render();
     }
   }
-  static async #onCancelDowntime(event, target) {
+  static async #onCancelDowntime(event2, target) {
     const id = target?.dataset?.downtimeId ?? target?.getAttribute?.("data-downtime-id");
     if (id) {
       await this.#controller.dispatchCancelDowntime(id);
@@ -34522,6 +37680,11 @@ function composeDomainManagerRuntime(options = {}) {
     thresholdService
   });
   const controllerProvider = options.controllerProvider ?? new DefaultDomainControllerProvider();
+  const diplomacyStore = new DiplomacyEntityStore(options.diplomacyStorageAdapter ?? new FoundryDiplomacyStorageAdapter());
+  const agreementEffectOwners = new AgreementEffectOwnerRegistry();
+  agreementEffectOwners.register(createEconomyAgreementEffectOwner(economyService));
+  agreementEffectOwners.freeze();
+  const worldTick = options.worldTick ?? (() => Math.max(0, Math.floor(globalThis.game?.time?.worldTime ?? 0)));
   const projectRegistry = options.projectRegistry ?? createDefaultProjectRegistry();
   const facilityRegistry = options.facilityRegistry ?? createDefaultFacilityRegistry();
   const downtimeRegistry = options.downtimeRegistry ?? createDefaultDowntimeRegistry();
@@ -34581,6 +37744,7 @@ function composeDomainManagerRuntime(options = {}) {
       if (authority.service.isCurrentUser()) {
         const currentEpoch = authority.service.getStatus().authorityEpoch;
         try {
+          await diplomacyStore.rehydrate();
           await recovery.scanOnStartup(currentEpoch);
           await recovery.recoverAll(currentEpoch);
           if (currentSequence === authorityTransitionSequence) {
@@ -34639,7 +37803,6 @@ function composeDomainManagerRuntime(options = {}) {
     controllerProvider,
     coordinator
   });
-  registry.freeze();
   const commandQueue = options.commandQueue ?? new CommandQueue({ maxConcurrency: 10 });
   const dedupeStore = options.dedupeStore ?? new CommandDedupeStore();
   const rateLimiter = options.rateLimiter ?? new RateLimiter();
@@ -34655,6 +37818,24 @@ function composeDomainManagerRuntime(options = {}) {
     dedupeStore,
     commandQueue
   });
+  const diplomacyOptions = {
+    store: diplomacyStore,
+    effectOwners: agreementEffectOwners,
+    transactions: transactionStore,
+    recovery,
+    coordinator,
+    conditionSatisfied: options.diplomacyConditionSatisfied,
+    registry,
+    domains: readOnlyDomains,
+    controllers: controllerProvider,
+    worldTick
+  };
+  registerOwnerCommands(diplomacyOptions);
+  registerDiplomacyRecovery(diplomacyOptions);
+  registerDiplomacyCapabilityCommand(diplomacyOptions);
+  registerDiplomacyProposals(diplomacyOptions);
+  registry.freeze();
+  const publicDiplomacy = createPublicDiplomacyApi(commandBus);
   const diagnostics = new G2DiagnosticsProvider({
     authorityService: authority.service,
     lockManager,
@@ -34698,6 +37879,7 @@ function composeDomainManagerRuntime(options = {}) {
     downtimeService
   });
   const publicApi = Object.freeze({
+    diplomacy: publicDiplomacy,
     version: BUILD_METADATA.moduleVersion,
     domains: readOnlyDomains,
     economy: publicEconomy,
@@ -34708,6 +37890,7 @@ function composeDomainManagerRuntime(options = {}) {
     diagnostics
   });
   return Object.freeze({
+    diplomacy: publicDiplomacy,
     publicApi,
     // G2-AUD-008 & G4-AUD-004: Read-only facades exposed publicly
     domains: readOnlyDomains,
@@ -34742,6 +37925,19 @@ function composeDomainManagerRuntime(options = {}) {
     handleAuthorityTransition,
     initialize: async () => {
       try {
+        await diplomacyStore.rehydrate();
+        const territories = diplomacyStore.list("territory").map((e) => e.data);
+        const graph = validateTerritoryGraph(territories.map((t) => t.territory));
+        if (!graph.ok) throw new Error(graph.error.code);
+        for (const entity of diplomacyStore.list("proposal")) {
+          const valid = validateDiplomacyProposal(entity.data);
+          if (!valid.ok || valid.value.id !== entity.id || valid.value.revision !== entity.revision) throw new Error("DM_DIPLOMACY_STORAGE_CORRUPT");
+        }
+        for (const [kind, owner] of Object.entries(DIPLOMACY_OWNERS)) for (const entity of diplomacyStore.list(kind)) {
+          const valid = owner.validate(entity.data, territories);
+          if (!valid.ok || owner.identity(valid.value).id !== entity.id || owner.identity(valid.value).revision !== entity.revision)
+            throw new Error("DM_DIPLOMACY_STORAGE_CORRUPT");
+        }
         await transactionStore.rehydrate();
         await ledgerStore.rehydrate();
         await reservationStore.rehydrate();
@@ -34867,6 +38063,8 @@ Hooks.once("ready", async () => {
 export {
   DefaultDomainControllerProvider,
   DefaultPublicEconomyApi,
+  DiplomacyApplication,
+  DiplomacyApplicationController,
   DowntimeApplication,
   DowntimeApplicationController,
   EconomyApplication,

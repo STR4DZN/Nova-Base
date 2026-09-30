@@ -1,0 +1,55 @@
+name: Publish G6 candidate
+
+on:
+  push:
+    branches: [feat/g6-continuous]
+    paths:
+      - module.json
+      - .github/workflows/g6-candidate-release.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: g6-candidate-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Validate candidate
+        run: |
+          npm run typecheck
+          npm test
+          npm run build
+          npm run package
+          npm run validate:release
+          node --check scripts/g6-foundry-smoke.js
+      - name: Publish verified installation and smoke assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version=$(node -p 'JSON.parse(require("fs").readFileSync("module.json", "utf8")).version')
+          test "$version" = "0.0.7"
+          gh release create "v$version" \
+            "module.json" \
+            "dist/domain-manager-v$version.zip" \
+            "scripts/g6-foundry-smoke.js" \
+            "docs/G6_FOUNDRY_SMOKE_GUIDE.md" \
+            "docs/G6_FULL_SPEC_AUDIT.md" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Domain Manager v$version — candidata G6" \
+            --notes-file docs/G6_RELEASE_NOTES.md \
+            --prerelease --latest=false

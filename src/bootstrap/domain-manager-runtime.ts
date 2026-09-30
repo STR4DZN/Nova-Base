@@ -115,6 +115,16 @@ import {
   type TransactionalChildHandlerRegistry,
   DefaultTransactionalChildHandlerRegistry
 } from "../mutations/child-handler-contract.js";
+import { DiplomacyEntityStore, FoundryDiplomacyStorageAdapter, type DiplomacyStorageAdapter } from "../diplomacy/diplomacy-store.js";
+import { createPublicDiplomacyApi, type PublicDiplomacyApi } from "../diplomacy/public-diplomacy-api.js";
+import { registerOwnerCommands, DIPLOMACY_OWNERS } from "../diplomacy/owner-commands.js";
+import { registerDiplomacyRecovery } from "../diplomacy/diplomacy-mutation.js";
+import { registerDiplomacyCapabilityCommand } from "../diplomacy/capability-command.js";
+import { registerDiplomacyProposals, validateDiplomacyProposal } from "../diplomacy/diplomacy-proposals.js";
+import { validateTerritoryGraph } from "../territory/territory-hierarchy.js";
+import { AgreementEffectOwnerRegistry } from "../agreements/agreement-owner-operations.js";
+import { createEconomyAgreementEffectOwner } from "../agreements/economy-effect-owner.js";
+import type { TerritoryState } from "../territory/territory-state.js";
 
 /**
  * Public API exposed to external modules / users via module.api.
@@ -123,6 +133,7 @@ import {
  * Strict isolation between internal stores/mutators and public query/dispatch facades.
  */
 export interface PublicModuleApi {
+  readonly diplomacy: PublicDiplomacyApi;
   readonly version: string;
   readonly domains: DomainReadRepository;
   readonly economy: PublicEconomyApi;
@@ -142,6 +153,7 @@ export interface PublicModuleApi {
  * - Complete Gate G2, G3, G4, and G5 verticals are composed and reachable from production entrypoint.
  */
 export interface DomainManagerRuntime {
+  readonly diplomacy: PublicDiplomacyApi;
   readonly publicApi: PublicModuleApi;
   readonly domains: DomainReadRepository;
   readonly authority: PrimaryAuthorityHost;
@@ -176,6 +188,9 @@ export interface DomainManagerRuntime {
 }
 
 export interface DomainManagerRuntimeOptions {
+  readonly diplomacyStorageAdapter?: DiplomacyStorageAdapter;
+  readonly worldTick?: () => number;
+  readonly diplomacyConditionSatisfied?: (ref: import("../core/identity/refs.js").TypedRef) => boolean;
   readonly domainStore?: DomainDocumentStore;
   readonly authority?: PrimaryAuthorityHost;
   readonly transport?: CommandTransport;
@@ -285,6 +300,11 @@ export function composeDomainManagerRuntime(
 
   // G4-AUD-005: Instantiate canonical DomainControllerProvider BEFORE registering economy commands
   const controllerProvider = options.controllerProvider ?? new DefaultDomainControllerProvider();
+  const diplomacyStore = new DiplomacyEntityStore(options.diplomacyStorageAdapter ?? new FoundryDiplomacyStorageAdapter());
+  const agreementEffectOwners = new AgreementEffectOwnerRegistry();
+  agreementEffectOwners.register(createEconomyAgreementEffectOwner(economyService));
+  agreementEffectOwners.freeze();
+  const worldTick = options.worldTick ?? (() => Math.max(0, Math.floor((globalThis as any).game?.time?.worldTime ?? 0)));
 
   const projectRegistry = options.projectRegistry ?? createDefaultProjectRegistry();
   const facilityRegistry = options.facilityRegistry ?? createDefaultFacilityRegistry();
@@ -359,6 +379,7 @@ export function composeDomainManagerRuntime(
       if (authority.service.isCurrentUser()) {
         const currentEpoch = authority.service.getStatus().authorityEpoch;
         try {
+          await diplomacyStore.rehydrate();
           await recovery.scanOnStartup(currentEpoch);
           await recovery.recoverAll(currentEpoch);
           if (currentSequence === authorityTransitionSequence) {
@@ -419,7 +440,6 @@ export function composeDomainManagerRuntime(
     controllerProvider,
     coordinator
   });
-  registry.freeze();
 
   const commandQueue = options.commandQueue ?? new CommandQueue({ maxConcurrency: 10 });
   const dedupeStore = options.dedupeStore ?? new CommandDedupeStore();
@@ -440,6 +460,15 @@ export function composeDomainManagerRuntime(
     dedupeStore,
     commandQueue
   });
+  const diplomacyOptions = { store: diplomacyStore, effectOwners: agreementEffectOwners, transactions: transactionStore, recovery, coordinator,
+    conditionSatisfied: options.diplomacyConditionSatisfied,
+    registry, domains: readOnlyDomains, controllers: controllerProvider, worldTick };
+  registerOwnerCommands(diplomacyOptions);
+  registerDiplomacyRecovery(diplomacyOptions);
+  registerDiplomacyCapabilityCommand(diplomacyOptions);
+  registerDiplomacyProposals(diplomacyOptions);
+  registry.freeze();
+  const publicDiplomacy = createPublicDiplomacyApi(commandBus);
 
   const diagnostics = new G2DiagnosticsProvider({
     authorityService: authority.service,
@@ -494,6 +523,7 @@ export function composeDomainManagerRuntime(
   });
 
   const publicApi: PublicModuleApi = Object.freeze({
+    diplomacy: publicDiplomacy,
     version: BUILD_METADATA.moduleVersion,
     domains: readOnlyDomains,
     economy: publicEconomy,
@@ -505,6 +535,7 @@ export function composeDomainManagerRuntime(
   });
 
   return Object.freeze({
+    diplomacy: publicDiplomacy,
     publicApi,
     // G2-AUD-008 & G4-AUD-004: Read-only facades exposed publicly
     domains: readOnlyDomains,
@@ -539,6 +570,18 @@ export function composeDomainManagerRuntime(
     handleAuthorityTransition,
     initialize: async () => {
       try {
+        await diplomacyStore.rehydrate();
+        const territories = diplomacyStore.list("territory").map(e => e.data as TerritoryState);
+        const graph = validateTerritoryGraph(territories.map(t => t.territory)); if (!graph.ok) throw new Error(graph.error.code);
+        for (const entity of diplomacyStore.list("proposal")) {
+          const valid = validateDiplomacyProposal(entity.data);
+          if (!valid.ok || valid.value.id !== entity.id || valid.value.revision !== entity.revision) throw new Error("DM_DIPLOMACY_STORAGE_CORRUPT");
+        }
+        for (const [kind, owner] of Object.entries(DIPLOMACY_OWNERS)) for (const entity of diplomacyStore.list(kind as any)) {
+          const valid = owner.validate(entity.data, territories);
+          if (!valid.ok || owner.identity(valid.value).id !== entity.id || owner.identity(valid.value).revision !== entity.revision)
+            throw new Error("DM_DIPLOMACY_STORAGE_CORRUPT");
+        }
         await transactionStore.rehydrate();
         await ledgerStore.rehydrate();
         await reservationStore.rehydrate();
@@ -659,4 +702,3 @@ export {
   DowntimeApplication,
   DowntimeApplicationController
 } from "../ui/domain-patterns/downtime/downtime-app.js";
-

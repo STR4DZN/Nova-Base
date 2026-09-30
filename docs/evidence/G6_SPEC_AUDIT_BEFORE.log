@@ -1,0 +1,122 @@
+✔ G6.9 runtime: composed owners, immutable facade and durable semantic state survive reload (31.049409ms)
+✔ G6.9 runtime: authenticated remote sender cannot forge GM or inspect secrets (21.120693ms)
+✔ G6.9 runtime: durable command dedupe persists after process restart (14.218468ms)
+✔ G6.9 runtime: uncertain storage is fenced and recovered forward from durable intent (12.810364ms)
+✔ G6.9 runtime: shared location hierarchy rejects missing/cyclic parent through semantic command (19.618622ms)
+✔ G6.9 persistence: canonical journals have neutral names and deny public ownership (6.413063ms)
+✔ G6.9 proposals: controller proposes, GM edits and approves atomically, original survives reload (12.281832ms)
+✔ G6.9 proposals: stale approval fails closed and rejection preserves the request (7.710076ms)
+✔ G6.9 UI: draft forms create each owner through authority and open a paginated escaped inspector (22.970186ms)
+✔ G6.9 UI: territorial preview binds the confirmed payload and stale/edited fields require another preview (5.192216ms)
+✔ G6.9 agreements: real economic owner executes once on activation, remains once after suspend/resume and restart (71.045099ms)
+✔ G6.10 security: recovery journals deny observer access to secret before/after images (0.544689ms)
+✔ G6.10 recovery: partial batch transfer is isolated and completed without erasing competing claims (13.648956ms)
+✔ G6.10 recovery: divergent canonical state is never overwritten by automatic recovery (3.407429ms)
+✔ G6.10 grants: authority applies source visibility, conditions, scope and expiry before provenance (16.799368ms)
+✔ G6.10 tree and scale: indexed branches are independent and list pagination excludes secret counts (30.985587ms)
+✔ G6.10 security: public territory cannot expose private parent, target or unclassified metadata (6.906777ms)
+✔ G6.10 security: GM-only changes to a reviewed proposal stay on the authority (10.339749ms)
+✔ G6.10 effects: economic receipt is reconciled after lost parent-save response without paying twice (35.842854ms)
+✔ G6.10 effects: unavailable owner prevents activation before any canonical write (17.647655ms)
+✔ G6.10 obligations: due date only reports; explicit confirmed breach may apply owner consequence once (52.738636ms)
+✔ G6.10 reference guards: transfer cannot introduce a missing Domain, and embedded People parties require their owner record (8.4568ms)
+✖ G6 audit: authority enforces relation uniqueness policy and independent scopes (17.999004ms)
+✖ G6 audit: inherited treaty rights reach descendants without becoming global or copied truth (33.31639ms)
+✖ G6 audit: restricted territory access uses all participating party types consistently (5.588363ms)
+✖ G6 audit: public reputation and influence DTOs discard undeclared party metadata (3.407169ms)
+ℹ tests 26
+ℹ suites 0
+ℹ pass 22
+ℹ fail 4
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 643.264164
+
+✖ failing tests:
+
+test at .test-build/g6-runtime-vertical.test.js:38914:1
+✖ G6 audit: authority enforces relation uniqueness policy and independent scopes (17.999004ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  true !== false
+  
+      at TestContext.<anonymous> (file:///workspace/scratch/6eb59607946c/nova-base/.test-build/g6-runtime-vertical.test.js:38922:12)
+      at async Test.run (node:internal/test_runner/test:1389:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:960:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: true,
+    expected: false,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at .test-build/g6-runtime-vertical.test.js:38931:1
+✖ G6 audit: inherited treaty rights reach descendants without becoming global or copied truth (33.31639ms)
+  AssertionError [ERR_ASSERTION]: The expression evaluated to a falsy value:
+  
+    assert.ok(scoped.enabledCapabilityIds.includes("test:treaty-entry"))
+  
+      at TestContext.<anonymous> (file:///workspace/scratch/6eb59607946c/nova-base/.test-build/g6-runtime-vertical.test.js:38959:12)
+      at async Test.run (node:internal/test_runner/test:1389:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:960:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: false,
+    expected: true,
+    operator: '==',
+    diff: 'simple'
+  }
+
+test at .test-build/g6-runtime-vertical.test.js:38973:1
+✖ G6 audit: restricted territory access uses all participating party types consistently (5.588363ms)
+  AssertionError [ERR_ASSERTION]: {"code":"DM_DIPLOMACY_NOT_FOUND","category":"not-found","message":"Tree branch unavailable"}
+      at unwrap (file:///workspace/scratch/6eb59607946c/nova-base/.test-build/g6-runtime-vertical.test.js:38124:21)
+      at TestContext.<anonymous> (file:///workspace/scratch/6eb59607946c/nova-base/.test-build/g6-runtime-vertical.test.js:39005:18)
+      at async Test.run (node:internal/test_runner/test:1389:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:960:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: undefined,
+    expected: undefined,
+    operator: 'fail',
+    diff: 'simple'
+  }
+
+test at .test-build/g6-runtime-vertical.test.js:39013:1
+✖ G6 audit: public reputation and influence DTOs discard undeclared party metadata (3.407169ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  true !== false
+  
+      at TestContext.<anonymous> (file:///workspace/scratch/6eb59607946c/nova-base/.test-build/g6-runtime-vertical.test.js:39033:12)
+      at async Test.run (node:internal/test_runner/test:1389:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:960:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: true,
+    expected: false,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+node:internal/errors:985
+  const err = new Error(message);
+              ^
+
+Error: Command failed: /opt/codex/runtimes/codex-primary-runtime/dependencies/node/bin/node --test --test-concurrency=1 .test-build/g6-runtime-vertical.test.js
+    at genericNodeError (node:internal/errors:985:15)
+    at wrappedFn (node:internal/errors:539:14)
+    at checkExecSyncError (node:child_process:942:11)
+    at execFileSync (node:child_process:978:15)
+    at file:///workspace/scratch/6eb59607946c/nova-base/tests/run-tests.mjs:53:3
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5) {
+  status: 1,
+  signal: null,
+  output: [ null, null, null ],
+  pid: 27,
+  stdout: null,
+  stderr: null
+}
+
+Node.js v24.19.0

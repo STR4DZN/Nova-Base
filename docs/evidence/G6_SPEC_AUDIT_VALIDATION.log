@@ -1,0 +1,17 @@
+npm warn Unknown env config "http-proxy". This will stop working in the next major version of npm.
+
+> domain-manager@0.0.6 typecheck
+> tsc --noEmit
+
+npm warn Unknown env config "http-proxy". This will stop working in the next major version of npm.
+
+> domain-manager@0.0.6 validate:package
+> node scripts/validate-package.mjs
+
+Package validation passed
+npm warn Unknown env config "http-proxy". This will stop working in the next major version of npm.
+
+> domain-manager@0.0.6 validate:artifact
+> node scripts/validate-artifact.mjs
+
+Artifact validation passed

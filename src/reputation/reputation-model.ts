@@ -161,5 +161,7 @@ export function projectReputation(record: ReputationRecord, registry: Reputation
       ...(def.publicPresentation === "score" ? { score: track.score } : {}) }];
   });
   // No raw history, numeric before/after, source refs or hidden track counts leak into band-only view.
-  return ok({ id: record.id, label: record.label, subjectRef: record.subjectRef, audienceRef: record.audienceRef, tracks });
+  const subject = validateRelationPartyRef(record.subjectRef), audience = validateRelationPartyRef(record.audienceRef);
+  if (!subject.ok) return subject; if (!audience.ok) return audience;
+  return ok({ id: record.id, label: record.label, subjectRef: subject.value, audienceRef: audience.value, tracks });
 }

@@ -48,6 +48,7 @@ export interface FoundryTransactionJournalRuntime {
   createJournalEntry(data: {
     readonly name: string;
     readonly flags: Readonly<Record<string, unknown>>;
+    readonly ownership?: Readonly<Record<string, number>>;
   }): Promise<IdentifiedJournalEntryDocumentLike | null | undefined>;
 }
 
@@ -98,6 +99,7 @@ export class FoundryJournalTransactionStorageAdapter implements TransactionStora
     }
 
     this.#documentId = doc.id;
+    this.#assertPrivate(doc);
     const rawFlag = (doc.flags as any)?.[TRANSACTION_FLAG_NAMESPACE];
     if (!rawFlag || typeof rawFlag !== "object") {
       return null;
@@ -115,6 +117,7 @@ export class FoundryJournalTransactionStorageAdapter implements TransactionStora
     if (!doc) {
       const created = await this.#runtime.createJournalEntry({
         name: TRANSACTION_DOCUMENT_NAME,
+        ownership: { default: 0 },
         flags: {
           [TRANSACTION_FLAG_NAMESPACE]: snapshot
         }
@@ -126,7 +129,9 @@ export class FoundryJournalTransactionStorageAdapter implements TransactionStora
     }
 
     this.#documentId = doc.id;
+    this.#assertPrivate(doc);
     await doc.update({
+      ownership: { default: 0 },
       [`flags.${TRANSACTION_FLAG_NAMESPACE}`]: snapshot
     });
   }
@@ -138,5 +143,9 @@ export class FoundryJournalTransactionStorageAdapter implements TransactionStora
       if (doc) return doc;
     }
     return this.#runtime.journal.contents.find((d) => d.name === TRANSACTION_DOCUMENT_NAME);
+  }
+  #assertPrivate(doc: IdentifiedJournalEntryDocumentLike): void {
+    if (Object.entries(doc.ownership ?? {}).some(([id, level]) => Number(level) > 0 && !(globalThis as any).game?.users?.get?.(id)?.isGM))
+      throw new Error("DM_TRANSACTION_STORAGE_NOT_PRIVATE");
   }
 }
