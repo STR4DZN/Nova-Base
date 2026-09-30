@@ -9,6 +9,17 @@
 - Schema Domain: `1`
 - Data de conclusão do Gate G5: `2026-09-21`
 
+## Parte G6 — Postura das relações — 2026-09-30
+
+- Instrução atual do usuário: executar parte por parte, testar, registrar e parar. Esta tarefa cobre somente postura das relações.
+- Resolver derivado configurável por Definition, eixos efetivos/direções e razões sanitizadas. Regras/modifiers privados filtrados antes de classificar.
+- Edição/limpeza de postura manual pelo owner e pipeline existentes, com revisão, no-op e eventos antes/depois. UI exibe postura/razões e oferece criação/política/regras e edição manual.
+- Drafts novos usam snapshot v2; snapshots v1 preservados. Definitions antigas derived sem regras indicam política sem configuração.
+- **895/895 testes PASS** (17 novos); TypeScript/build/package/release validation PASS no GitHub Actions. Commit de código validado `bb844d6c0aeb0236e10deca740d759372de21bd5`, workflow `36762797052` SUCCESS.
+- Relatório: `docs/G6_STANCE_REPORT.md`. Evidência: `docs/evidence/G6_STANCE_VALIDATION.json`. ZIP/logs no artifact do workflow; não houve publicação de release.
+- G6 segue parcial. Razões compostas com Agreements/Reputation/Disputes, demais linhas da matriz e smoke/interface reais continuam pendentes.
+- **PARAR AQUI.** Aguardar escolha/autorização da próxima parte; não iniciar G7.
+
 ## Revisão atual G0–G6
 
 Candidata v0.0.8: 13 defeitos reproduzidos/corrigidos; 878/878 testes locais PASS. Relatório `docs/G0_G6_REVIEW.md`. Novo smoke necessário; a confirmação Foundry da v0.0.7 permanece histórica. Os registros de gates abaixo não equivalem a ausência de bugs. G6 permanece parcial e G7 não iniciado.
@@ -558,7 +569,7 @@ Candidata v0.0.8: 13 defeitos reproduzidos/corrigidos; 878/878 testes locais PAS
 
 ## Próxima ação canônica
 
-- **Gate G6 — Relations / Reputation / Agreements / Territory**, iniciado após a aceitação do G5: revisar a matriz de pendências de `docs/G6_FULL_SPEC_AUDIT.md` e completar a próxima microparte de G6. Em paralelo, testar o núcleo corrigido por `scripts/g6-foundry-smoke.js` e `docs/G6_FOUNDRY_SMOKE_GUIDE.md`. Smoke sem FAIL não fecha funcionalidades ausentes do plano.
+- **Execução pausada ao concluir a parte de postura das relações** (895/895 PASS; relatório `docs/G6_STANCE_REPORT.md`). Aguardar escolha da próxima parte pelo usuário. G6 permanece parcial; matriz em `docs/G6_FULL_SPEC_AUDIT.md`. Smoke Foundry continua independente e não fecha recursos ausentes.
 - Publicação solicitada pelo usuário em 2026-09-30 e concluída na conta verificada `STR4DZN/Nova-Base`, branch `feat/g6-continuous`. Workflow `36718651288` PASS; prerelease `v0.0.7` com manifest, ZIP e roteiro de teste disponíveis. Publicação não significa homologação do G6.
 - Gates G0–G5 aceitos pelo usuário; smoke da candidata G6 aprovado pelo usuário em 2026-09-30. G6 aguarda conclusão das pendências normativas antes da aceitação integral. **Não iniciar G7**.
 - Candidata G6 `0.0.7` publicada. Manifest: `https://github.com/STR4DZN/Nova-Base/releases/download/v0.0.7/module.json`. Manifest e ZIP públicos foram baixados e comparados byte a byte com os artefatos validados. Evidência: `docs/evidence/G6_RELEASE_PUBLICATION.json`.

@@ -2,6 +2,8 @@
 
 **Atualização v0.0.8:** revisão G0–G6 corrigiu 13 defeitos, com 878/878 testes locais PASS. Novo smoke necessário; detalhes/evidências em `docs/G0_G6_REVIEW.md`. As lacunas desta matriz continuam explícitas.
 
+**Atualização por partes — postura:** resolver derivado por eixos/direções, postura manual auditada e UI concluídos nesta parte; 895/895 testes PASS, TypeScript/build/package PASS em GitHub Actions. Ver `docs/G6_STANCE_REPORT.md`. Não fecha as demais linhas do Gate.
+
 Data: 2026-09-30. Projeto: `STR4DZN/Nova-Base`, branch `feat/g6-continuous`. Escopo: Gate G6, sem iniciar G7. Esta auditoria substitui a interpretação anterior de que faltava apenas smoke para fechar todo o plano.
 
 **Veredito: não é possível confirmar 100% de implementação ou de homologação.** O núcleo dos quatro subsistemas existe, mas há funcionalidades previstas ainda ausentes/parciais e verificação real Foundry pendente. Esta revisão encontrou quatro defeitos concretos no núcleo, reproduziu cada um por teste, corrigiu-os e retestou. O candidato corrigido serve para smoke dos fluxos implementados; não é fechamento do Gate.
@@ -32,7 +34,7 @@ Não se calcula uma porcentagem por contagem de linhas: requisitos têm pesos e 
 
 | Microbuild | Estado | Evidência e lacuna |
 |---|---|---|
-| G6.1 Definitions/instances | PARCIAL | `relations/types`, registry versionado, parties/scopes/axes/lifecycle e unicidade corrigida no comando. `stancePolicy` existe; resolver de stance derivada e edição de stance manual não estão completos. |
+| G6.1 Definitions/instances | PARCIAL | `relations/types`, registry versionado, parties/scopes/axes/lifecycle e unicidade corrigida no comando. Postura derivada por eixos/direções, regras de Definition e edição manual auditada/UI implementadas e testadas nesta parte. Snapshots antigos derived sem regras permanecem explicitamente sem configuração; integrações compostas são pendência separada. |
 | G6.2 Modifiers/history | IMPLEMENTADO LOCAL | `relation-history.ts`: base separada, stacking, incidentes, reversão exata, expiração e histórico após término; testes unitários e verticais. Incidentes compostos com outras fontes não têm um fluxo geral público. |
 | G6.3 Reputation | PARCIAL | Tracks/audiences, entries, reversão, decadência e bandas funcionam. UI não configura múltiplos tracks/policies/decay; draft padrão possui decay null. |
 | G6.4 Agreements | PARCIAL | Propose/counter/accept/reject/activate/amend/renew/expire têm modelo e testes. UI não oferece renew/expire-proposal e não mostra diff completo das rodadas. |
@@ -50,13 +52,13 @@ As referências R08 abaixo são subseções do register congelado anexado ao Mas
 | Fonte R08 | Requisito | Estado e constatação |
 |---|---|---|
 | 1.1 | Definition/Instance, refs, multiparty, symmetry, scopes, lifecycle | IMPLEMENTADO LOCAL; integração com party providers externos é indisponível e rejeitada, sem execução fictícia. |
-| 1.2 | Axes, stance, modifiers | PARCIAL: axes/ranges/modifiers completos; stance derivada não implementada, stance manual não projetada/editada na UI. |
+| 1.2 | Axes, stance, modifiers | IMPLEMENTADO AUTOMATED: axes/ranges/modifiers, postura derivada por regras e direções, postura manual projetada/editável na UI, razões por eixos e sigilo. Configuração antiga sem regras permanece explícita; não houve migração silenciosa. |
 | 1.3 | Subject/audience, tracks, entries, decay, bands | IMPLEMENTADO LOCAL no modelo; configuração de tracks/decay por UI é parcial. |
 | 1.4 | Agreements independentes, terms e lifecycle | IMPLEMENTADO LOCAL para termos nativos; extensões via novos owners/providers são parciais. |
 | 1.5 | Ownership/admin/control/presence/influence/access; competing/secret claims | IMPLEMENTADO LOCAL; não escolhe vencedor nem exige força universal. |
 | 2.1 | Events/incidents, corrections, refs/time/effects | PARCIAL: append/reversal/modifiers funcionam; attribution contestada e incidente composto Relation→Reputation não têm fluxo completo. |
 | 2.2 | Reputation dinâmica e decay auditável | IMPLEMENTADO LOCAL manual; Scheduler/TimeProvider completo pertence a G8. |
-| 2.3 | Derived Relation state/stance e reasons sanitizados | PARCIAL: scores têm base/effective/source IDs filtrados; resolver de stance e reasons combinando agreements/reputation/disputes ausentes. |
+| 2.3 | Derived Relation state/stance e reasons sanitizados | PARCIAL: scores e resolver de postura por axes/modifiers têm razões sanitizadas e direções; combinação com agreements/reputation/disputes continua pendente. |
 | 2.4 | Obligation lifecycle/requirements/evidence | IMPLEMENTADO LOCAL para declarações, refs e decisões; receipts externos não são resolvidos automaticamente em todos os owners. |
 | 2.5 | Partial/alleged/contested breach, grace, consequences | PARCIAL: decisões e consequences econômicas funcionam; consequences públicas de Relation/Reputation/Rights não estão integradas como owners. |
 | 2.6 | Proposal rounds, counter, amendments, renewal/expiry | IMPLEMENTADO LOCAL no modelo; renew e expire-proposal não estão na UI. |

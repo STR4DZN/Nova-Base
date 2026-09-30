@@ -1,0 +1,43 @@
+{
+  "date": "2026-09-30",
+  "scope": "G6 relation stance only",
+  "repository": "STR4DZN/Nova-Base",
+  "branch": "feat/g6-continuous",
+  "baselineCommit": "f571772ff7b388c17197a4c5edc38ef038fd1849",
+  "validatedCodeCommit": "bb844d6c0aeb0236e10deca740d759372de21bd5",
+  "runner": "GitHub Actions Ubuntu / Node 22",
+  "workflowRunId": 36762797052,
+  "jobId": 110049344578,
+  "conclusion": "success",
+  "tests": {
+    "stance": 15,
+    "verticalG6": 32,
+    "full": 895,
+    "new": 17,
+    "failed": 0,
+    "cancelled": 0,
+    "skipped": 0
+  },
+  "checks": {
+    "typecheck": "PASS",
+    "build": "PASS",
+    "package": "PASS",
+    "releaseValidation": "PASS",
+    "artifactValidation": "PASS"
+  },
+  "initialFailure": {
+    "workflowRunId": 36762629087,
+    "code": "TS18046",
+    "cause": "unknown stanceChange after conditional validation",
+    "solution": "typed validated audit record before continuity comparison"
+  },
+  "artifact": {
+    "url": "https://github.com/STR4DZN/Nova-Base/actions/runs/36762797052/artifacts/11119627107",
+    "sha256": "e90da6714d6882bc5ef2a8f3b3cee0c2e32fceb00009d1ed9aab791f36094b96",
+    "contains": "validation logs and generated v0.0.8 review ZIP",
+    "releasePublished": false
+  },
+  "gateAccepted": false,
+  "foundryExecuted": false,
+  "stopAfterPart": true
+}

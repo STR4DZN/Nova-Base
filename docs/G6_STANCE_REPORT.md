@@ -17,13 +17,24 @@ A pedido do usuário, executar esta parte, testar, registrar e parar. G7 e demai
 - Drafts novos usam snapshot v2 com regras iniciais de confiança/neutralidade/desconfiança; thresholds pertencem ao conteúdo do draft. Core não fixa eixos ou rótulos.
 - Snapshots antigos não são migrados nem alterados. Definitions derived sem regras continuam legíveis, explicitamente sem configuração. Não se inventa classificação retrospectiva.
 
-## Verificação preparada
+## Verificação executada
 
 15 testes específicos e 2 testes verticais novos: intervalos/defaults, condições combinadas/precedência, sigilo de regras/modificadores, expiração, direções, legacy, validação de políticas, edição/limpeza/no-op, histórico forjado, round-trip, permissões, proposal/GM approval/retry/reload, XSS, drafts/UI e fixture de 1000 registros.
 
 Workflow `g6-stance-validation.yml`: typecheck, testes alvo, suíte completa, build, package e validação da candidata. Evidências e ZIP gerados como artifact; não publica release.
 
-**Estado neste commit: implementação preparada; validação automatizada ainda não executada.** Resultado final será registrado depois da execução. Este chat não tem terminal/checkout local; a execução usa GitHub Actions, sem alegar testes locais inexistentes.
+**Estado final: PARTE IMPLEMENTADA E AUTOMATED PASS; aguarda smoke/interface reais do Foundry.**
+
+- Commit de código validado: `bb844d6c0aeb0236e10deca740d759372de21bd5`.
+- Workflow: https://github.com/STR4DZN/Nova-Base/actions/runs/36762797052 — SUCCESS.
+- Alvo de postura: 15/15 PASS. Cluster vertical G6: 32/32 PASS, incluindo dois novos casos.
+- Suíte completa: **895/895 PASS**, fail/cancelled/skipped = 0 (baseline documentada 878; 17 casos novos).
+- TypeScript, build, empacotamento e validação de release/pacote/artefato: PASS.
+- ZIP de revisão e logs: https://github.com/STR4DZN/Nova-Base/actions/runs/36762797052/artifacts/11119627107
+- Digest do artifact agregado: `e90da6714d6882bc5ef2a8f3b3cee0c2e32fceb00009d1ed9aab791f36094b96`.
+- Primeira execução `36762629087`: typecheck encontrou TS18046 no acesso a `stanceChange` após validação. A referência passou a usar o tipo já validado; reexecução completa acima PASS. Nenhum teste foi removido ou ignorado.
+
+Este chat não tem terminal/checkout local; a execução ocorreu em Ubuntu/Node 22 no GitHub Actions. A aprovação automática não equivale a execução real Foundry.
 
 ## Limites
 
