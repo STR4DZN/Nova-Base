@@ -1,0 +1,22 @@
+{
+  "repository": "STR4DZN/Nova-Base",
+  "branch": "feat/g6-continuous",
+  "version": "0.0.7",
+  "channel": "g6-candidate",
+  "prerelease": true,
+  "source_commit": "ab0e6fc6346d2279dae81d533cfab272fcc85309",
+  "source_tree": "4df8343b12397b85fc3fd0b0dae7ce5fa99f7ef1",
+  "workflow_url": "https://github.com/STR4DZN/Nova-Base/actions/runs/36718651288",
+  "workflow_conclusion": "success",
+  "automated_tests": 859,
+  "manifest_url": "https://github.com/STR4DZN/Nova-Base/releases/download/v0.0.7/module.json",
+  "download_url": "https://github.com/STR4DZN/Nova-Base/releases/download/v0.0.7/domain-manager-v0.0.7.zip",
+  "manifest_sha256": "994c18236a8442b96fac4cfba2a197743cbfcaeea4890256f9c91d540dea72e3",
+  "zip_sha256": "c35d7ae859dd52eff95f936cdf1ba97ab7c1a7314bead790b6ec15c7a403c1fc",
+  "public_downloads_verified": true,
+  "zip_crc_and_entries_verified": true,
+  "exact_local_byte_equality": true,
+  "foundry_live_validation": "pending",
+  "g6_full_spec_coverage": "partial",
+  "g7_started": false
+}

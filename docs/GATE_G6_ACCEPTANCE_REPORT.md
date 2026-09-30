@@ -2,7 +2,7 @@
 
 Data: 2026-09-30. Repositório: STR4DZN/Nova-Base, branch `feat/g6-continuous`. Baseline remoto recuperado: `b9fa7fe`. Módulo: `0.0.6`.
 
-**Resultado revisado pela auditoria integral: núcleo implementado, cobertura do plano parcial. 859/859 testes PASS; G6 ainda não está 100% nem homologado. G7 não iniciado.** Este pacote contém código G6 e não representa uma release nova já publicada. A matriz normativa completa e as lacunas estão em `docs/G6_FULL_SPEC_AUDIT.md`; passar os testes do código existente não comprova funcionalidades ausentes.
+**Resultado revisado pela auditoria integral: núcleo implementado, cobertura do plano parcial. 859/859 testes PASS; G6 ainda não está 100% nem homologado. G7 não iniciado.** A candidata G6 v0.0.7 está publicada no GitHub como prerelease para testes. A matriz normativa completa e as lacunas estão em `docs/G6_FULL_SPEC_AUDIT.md`; passar os testes do código existente não comprova funcionalidades ausentes.
 
 ## Implementação verificada
 
@@ -70,7 +70,7 @@ Log completo preservado: `docs/evidence/G6_AUTOMATED_TESTS.log`. O checkpoint co
 
 ## Roteiro no Foundry
 
-Instalar o bundle candidato no módulo de teste e reiniciar a sessão. O manifest mantém `0.0.6`; usar o arquivo deste checkpoint, não a release G5 remota com o mesmo número.
+Instalar pelo Manifest URL `https://github.com/STR4DZN/Nova-Base/releases/download/v0.0.7/module.json` e reiniciar a sessão. Versão `0.0.7`, canal `g6-candidate`. O script e o guia estão nos assets da release.
 
 O script agora executa os fluxos centrais com fixtures próprias e fases persistidas: GM setup → Player propostas → GM aprovação editada/rejeição e injeção controlada → F5/recovery → troca de Primary GM → Player final. Instruções completas: `docs/G6_FOUNDRY_SMOKE_GUIDE.md`. Relatórios JSON acumulados são exportados por `DM_G6_SMOKE.download()` em cada navegador.
 
@@ -84,9 +84,9 @@ O usuário autorizou o upload e solicitou o roteiro Foundry em 2026-09-30. O com
 
 A revisão automática rejeitou o push desta atualização: considerou que o texto do usuário autorizou upload de forma geral, mas não nomeou explicitamente `STR4DZN/Nova-Base` e `feat/g6-continuous` como destino. Nenhum commit foi enviado e não houve tentativa por outra rota. O destino configurado em origin é `https://github.com/STR4DZN/Nova-Base.git`.
 
-Próximo passo de publicação: obter a confirmação textual desse repositório e branch e publicar os commits G6 locais, incluindo o roteiro. Isto não cria release nem marca `GATE_ACCEPTED`. O candidato mantém versão 0.0.6.
+Bloqueio histórico superado após a solicitação explícita de publicação no GitHub e a verificação da conta/repositório. A conexão autenticada publicou uma árvore idêntica à candidata local e o workflow `36718651288` reconstruiu, testou e publicou a prerelease `v0.0.7`. Manifest e ZIP foram baixados pelas URLs públicas, tiveram CRC/estrutura conferidos e são idênticos aos artefatos locais. Isto não marca `GATE_ACCEPTED`.
 
-Após smoke real aprovado, atualizar BUILD_STATE para aceitação do G6 e preparar eventual release. G7 continua fora da autorização atual.
+Após completar as pendências normativas e obter smoke real aprovado, reavaliar a aceitação do G6. A candidata publicada serve para testar o núcleo implementado. G7 continua fora da autorização atual.
 
 ## Auditoria integral do plano — 2026-09-30
 

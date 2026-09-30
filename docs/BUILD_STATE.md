@@ -555,9 +555,9 @@
 ## Próxima ação canônica
 
 - **Gate G6 — Relations / Reputation / Agreements / Territory**, iniciado após a aceitação do G5: revisar a matriz de pendências de `docs/G6_FULL_SPEC_AUDIT.md` e completar a próxima microparte de G6. Em paralelo, testar o núcleo corrigido por `scripts/g6-foundry-smoke.js` e `docs/G6_FOUNDRY_SMOKE_GUIDE.md`. Smoke sem FAIL não fecha funcionalidades ausentes do plano.
-- Usuário autorizou upload em 2026-09-30, mas a revisão automática exige confirmação textual nomeando `STR4DZN/Nova-Base` e `feat/g6-continuous` como destino. Push rejeitado; nenhum commit enviado. Não criar release nem presumir homologação com esse upload.
+- Publicação solicitada pelo usuário em 2026-09-30 e concluída na conta verificada `STR4DZN/Nova-Base`, branch `feat/g6-continuous`. Workflow `36718651288` PASS; prerelease `v0.0.7` com manifest, ZIP e roteiro de teste disponíveis. Publicação não significa homologação do G6.
 - Gates G0–G5 aceitos pelo usuário; G6 aguarda homologação real. **Não iniciar G7**.
-- O pacote G6 é candidato local, mantendo a versão de módulo `0.0.6`; não é uma nova release publicada no GitHub.
+- Candidata G6 `0.0.7` publicada. Manifest: `https://github.com/STR4DZN/Nova-Base/releases/download/v0.0.7/module.json`. Manifest e ZIP públicos foram baixados e comparados byte a byte com os artefatos validados. Evidência: `docs/evidence/G6_RELEASE_PUBLICATION.json`.
 
 
 

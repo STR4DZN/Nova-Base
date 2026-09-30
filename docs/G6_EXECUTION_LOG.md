@@ -85,3 +85,11 @@ A revisão automática rejeitou o push também após esta autorização geral: e
 - Versão `0.0.7`, canal `g6-candidate`, URLs fixadas à release `v0.0.7`; G6 permanece parcial e não homologado. G7 não iniciado.
 - Publicação automatizada pela branch `feat/g6-continuous`: instala dependências travadas, executa typecheck e testes, reconstrói e valida ZIP/URLs e cria prerelease com manifest, pacote, script e documentos de teste. A release G5 existente não é sobrescrita.
 - Validação local: 859/859 PASS; TypeScript/build/package/release validation e sintaxe do smoke PASS. Publicação remota somente confirmável após sucesso do workflow e verificação dos assets.
+
+## Publicação candidata concluída — 2026-09-30
+
+- Conta/repositório verificados; publicação solicitada pelo usuário concluída via conexão autenticada do GitHub. O Git local não possuía credencial HTTPS.
+- Árvore remota `4df8343b12397b85fc3fd0b0dae7ce5fa99f7ef1` idêntica à árvore local `306e17d`; commit publicado `ab0e6fc6346d2279dae81d533cfab272fcc85309`. Histórico local preservado em branch de arquivo.
+- Workflow `36718651288` PASS em todas as etapas, incluindo 859 testes, TypeScript/build/package/release validation. Prerelease `v0.0.7` publicada com cinco assets.
+- Manifest e ZIP baixados das URLs públicas: byte equality, CRC, estrutura, versão e links PASS. Digests publicados coincidem com os artefatos locais. Evidência: `docs/evidence/G6_RELEASE_PUBLICATION.json`.
+- G6 permanece com cobertura parcial e homologação Foundry pendente; G7 não iniciado.
