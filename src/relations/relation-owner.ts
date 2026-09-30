@@ -2,9 +2,10 @@ import { ok, type Result } from "../core/contracts/result.js";
 import { failure, isRecord } from "../core/validation/value-validation.js";
 import type { DiplomacyOwner } from "../diplomacy/owner-contract.js";
 import { historyWindow } from "../diplomacy/owner-contract.js";
+import { resolveRelationStances } from "./relation-stance.js";
 import { validateRelationDefinition } from "./types/relation-validation.js";
 import type { RelationDefinition, RelationBaseAxis } from "./types/relation-types.js";
-import { validateRelationState, applyRelationIncident, addRelationModifier, endRelationModifier, endRelation, resolveRelationAxis,
+import { validateRelationState, applyRelationIncident, addRelationModifier, endRelationModifier, endRelation, resolveRelationAxis, setRelationStance,
   type RelationState, type RelationModifier } from "./relation-history.js";
 export interface RelationOwnerData { readonly definition: RelationDefinition; readonly state: RelationState; }
 export const relationOwner: DiplomacyOwner = {
@@ -25,6 +26,7 @@ export const relationOwner: DiplomacyOwner = {
     if (action.kind === "incident") changed = applyRelationIncident(s, d, context, action.deltas as readonly RelationBaseAxis[], (action.reversalOf ?? null) as string | null);
     else if (action.kind === "modifier") changed = addRelationModifier(s, d, context, { ...(action.value as RelationModifier), createdAt: c.at });
     else if (action.kind === "end-modifier") changed = endRelationModifier(s, d, context, action.id as string);
+    else if (action.kind === "stance") changed = setRelationStance(s, d, context, action.value);
     else if (action.kind === "end") changed = endRelation(s, d, context);
     else return failure("DM_RELATION_CHANGE_INVALID", "Unsupported relation action");
     return changed.ok ? ok({ definition: d, state: changed.value }) : changed;
@@ -36,7 +38,8 @@ export const relationOwner: DiplomacyOwner = {
       : d.axes.flatMap(a => r.parties.flatMap(from => r.parties.filter(to => to.id !== from.id).map(to => ({ axisId: a.id, fromPartyId: from.id, toPartyId: to.id }))));
     const scores: unknown[] = [];
     for (const selector of selectors) { const score = resolveRelationAxis(s, d, selector, c.at, c.worldTick, c.canSee); if (!score.ok) return score; scores.push({ ...selector, ...score.value }); }
-    return ok({ id: r.id, revision: r.revision, label: r.label, lifecycle: r.lifecycle, parties: r.parties, scope: r.scope, scores,
+    const stances = resolveRelationStances(s, d, c.at, c.worldTick, c.canSee); if (!stances.ok) return stances;
+    return ok({ stancePolicy: d.stancePolicy, stances: stances.value, id: r.id, revision: r.revision, label: r.label, lifecycle: r.lifecycle, parties: r.parties, scope: r.scope, scores,
       history: historyWindow(s.events.filter(e => c.canSee(e.visibility)), c),
       ...(c.isGm ? { definition: d, modifiers: s.modifiers } : {}) });
   }

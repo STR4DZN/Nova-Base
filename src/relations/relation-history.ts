@@ -19,7 +19,7 @@ export interface RelationModifier extends RelationBaseAxis {
 }
 export interface RelationEvent {
   readonly id: string;
-  readonly kind: "incident" | "reversal" | "modifier-added" | "modifier-ended" | "ended";
+  readonly kind: "incident" | "reversal" | "modifier-added" | "modifier-ended" | "ended" | "stance-changed";
   readonly partyIds: readonly string[];
   readonly sourceRefs: readonly TypedRef[];
   readonly at: number;
@@ -29,6 +29,7 @@ export interface RelationEvent {
   readonly effects: readonly RelationBaseAxis[];
   readonly reversalOf: string | null;
   readonly modifierId: string | null;
+  readonly stanceChange?: { readonly before: string | null; readonly after: string | null };
 }
 export interface RelationState {
   readonly relation: RelationInstance;
@@ -70,9 +71,10 @@ export function validateRelationState(raw: unknown, d: RelationDefinition): Resu
     modifierIds.add(m.id);
   }
   let lastTime = relation.value.createdAt;
+  let lastStanceChange: RelationEvent["stanceChange"] | undefined;
   for (const e of raw.events) {
     if (!isRecord(e) || !isOpaqueId(e.id, "reve") || eventIds.has(e.id) || !isTimestamp(e.at) || e.at < lastTime
-      || typeof e.kind !== "string" || !["incident", "reversal", "modifier-added", "modifier-ended", "ended"].includes(e.kind)
+      || typeof e.kind !== "string" || !["incident", "reversal", "modifier-added", "modifier-ended", "ended", "stance-changed"].includes(e.kind)
       || !isText(e.summary) || !isVisibility(e.visibility) || (e.worldTick !== null && !isTimestamp(e.worldTick))
       || !Array.isArray(e.partyIds) || !e.partyIds.every(id => relation.value.parties.some(p => p.id === id))
       || !Array.isArray(e.sourceRefs) || !e.sourceRefs.every(refValid) || !Array.isArray(e.effects)
@@ -81,6 +83,17 @@ export function validateRelationState(raw: unknown, d: RelationDefinition): Resu
       || (e.kind === "reversal" ? e.reversalOf === null : e.reversalOf !== null)
       || (e.modifierId !== null && (!isText(e.modifierId) || !modifierIds.has(e.modifierId))))
       return failure("DM_RELATION_EVENT_INVALID", "Invalid event history, order or reversal reference");
+    if (e.kind === "stance-changed" ? d.stancePolicy !== "manual" || !isRecord(e.stanceChange)
+      || !(e.stanceChange.before === null || isText(e.stanceChange.before))
+      || !(e.stanceChange.after === null || isText(e.stanceChange.after))
+      || e.stanceChange.before === e.stanceChange.after || e.visibility !== relation.value.visibility
+      || e.effects.length !== 0 || e.modifierId !== null : e.stanceChange !== undefined)
+      return failure("DM_RELATION_EVENT_INVALID", "Stance audit requires a manual change with its before/after values");
+    if (e.kind === "stance-changed") {
+      if (lastStanceChange && e.stanceChange.before !== lastStanceChange.after)
+        return failure("DM_RELATION_EVENT_INVALID", "Manual stance history must preserve the prior after-value");
+      lastStanceChange = e.stanceChange as unknown as RelationEvent["stanceChange"];
+    }
     if (e.reversalOf) {
       const original = raw.events.find(prior => prior.id === e.reversalOf);
       if (original?.kind !== "incident" || original.visibility !== e.visibility
@@ -90,6 +103,8 @@ export function validateRelationState(raw: unknown, d: RelationDefinition): Resu
     }
     eventIds.add(e.id); lastTime = e.at;
   }
+  if (lastStanceChange && lastStanceChange.after !== (relation.value.stance ?? null))
+    return failure("DM_RELATION_EVENT_INVALID", "Manual stance does not match the latest audit event");
   if (lastTime > relation.value.updatedAt) return failure("DM_RELATION_EVENT_INVALID", "History timestamp exceeds entity timestamp");
   return ok(immutable(structuredClone({ relation: relation.value, modifiers: raw.modifiers, events: raw.events })) as RelationState);
 }
@@ -158,6 +173,19 @@ export function endRelation(s: RelationState, d: RelationDefinition, c: Relation
   const guard = changeGuard(s, d, c); if (guard) return guard;
   return validateRelationState({ ...s, relation: { ...s.relation, lifecycle: "ended", endedAt: c.at, updatedAt: c.at,
     revision: s.relation.revision + 1 }, events: [...s.events, event(s, c, "ended")] }, d);
+}
+
+/** Only a manual policy persists stance; identical values leave revision/history unchanged. */
+export function setRelationStance(s: RelationState, d: RelationDefinition, c: RelationChangeContext, stance: unknown): Result<RelationState> {
+  const guard = changeGuard(s, d, c); if (guard) return guard;
+  if (d.stancePolicy !== "manual" || !(stance === null || isText(stance)) || c.visibility !== s.relation.visibility)
+    return failure("DM_RELATION_STANCE_INVALID", "Manual stance requires its policy, text or null, and the relation visibility");
+  const before = s.relation.stance ?? null;
+  if (stance === before) return ok(s);
+  const { stance: ignored, ...relation } = s.relation;
+  return validateRelationState({ ...s, relation: { ...relation, ...(stance !== null ? { stance } : {}),
+    revision: relation.revision + 1, updatedAt: c.at },
+    events: [...s.events, { ...event(s, c, "stance-changed"), stanceChange: { before, after: stance } }] }, d);
 }
 
 /** Resolve without writes; filter sources before deriving the public score. */

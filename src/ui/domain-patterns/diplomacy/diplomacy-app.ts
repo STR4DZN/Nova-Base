@@ -9,7 +9,7 @@ export type DiplomacyTab = "relations" | "reputation" | "agreements" | "territor
 const labels: Record<DiplomacyTab, string> = { relations: "Relações", reputation: "Reputação", agreements: "Acordos", territory: "Território", disputes: "Disputas", proposals: "Propostas" };
 const kinds: Record<Exclude<DiplomacyTab, "proposals">, OwnerIntent["kind"]> = { relations: "relation", reputation: "reputation", agreements: "agreement", territory: "territory", disputes: "dispute" };
 const actions: Record<Exclude<DiplomacyTab, "proposals">, readonly [string, string][]> = {
-  relations: [["incident", "Registrar incidente / reversão"], ["modifier", "Adicionar modificador temporário"], ["end-modifier", "Encerrar modificador"], ["end", "Encerrar relação"]],
+  relations: [["incident", "Registrar incidente / reversão"], ["modifier", "Adicionar modificador temporário"], ["end-modifier", "Encerrar modificador"], ["end", "Encerrar relação"], ["stance", "Definir / limpar postura manual"]],
   reputation: [["adjust", "Ajustar reputação"], ["decay", "Aplicar decadência configurada"]],
   agreements: [["propose", "Propor termos"], ["amend", "Propor emenda"], ["counter", "Contrapropor termos"], ["accept", "Aceitar proposta de termos"], ["reject", "Rejeitar termos"], ["activate", "Ativar termos aceitos"], ["suspend", "Suspender"], ["resume", "Retomar"], ["breach", "Registrar quebra"], ["expire", "Expirar"], ["terminate", "Encerrar"], ["obligation:evidence", "Adicionar evidência"], ["obligation:allege", "Alegar descumprimento"], ["obligation:contest", "Contestar alegação"], ["obligation:decide", "Decidir obrigação"]],
   territory: [["claim", "Adicionar reivindicação"], ["presence", "Registrar presença"], ["right", "Conceder direito"], ["reparent", "Alterar hierarquia"], ["transfer", "Transferir reivindicação de propriedade"], ["end-claim", "Encerrar reivindicação"], ["contest-claim", "Contestar reivindicação"], ["revoke-right", "Revogar direito"]],
@@ -41,6 +41,18 @@ export class DiplomacyApplicationController {
     if (this.tab === "proposals") return failure("DM_DIPLOMACY_INTENT_INVALID", "Selecione o tipo de registro para criar uma proposta.");
     const parties = [fields.subject, fields.audience, ...fields.additionalParties?.split(",") ?? []].filter(Boolean).map(x => party(x.trim())), draft = createDiplomacyDraft(kinds[this.tab], fields.label, parties,
       fields.visibility as any, fields.territories?.split(",").map(x => x.trim()).filter(Boolean));
+    if (this.tab === "relations" && fields.stancePolicy) {
+      if (!["none", "manual", "derived"].includes(fields.stancePolicy))
+        return this.capture(failure("DM_RELATION_STANCE_INVALID", "Selecione uma política de postura válida."));
+      const data = draft.data as any;
+      data.definition.stancePolicy = fields.stancePolicy;
+      if (fields.stancePolicy !== "derived") delete data.definition.stanceRules;
+      if (fields.stancePolicy === "manual" && fields.stance) data.state.relation.stance = fields.stance;
+      if (fields.stancePolicy === "derived" && fields.stanceRules) {
+        try { data.definition.stanceRules = JSON.parse(fields.stanceRules); }
+        catch { return this.capture(failure("DM_RELATION_STANCE_POLICY_INVALID", "As regras de postura precisam ser um JSON válido.")); }
+      }
+    }
     const intent: OwnerIntent = { kind: kinds[this.tab], mode: "create", id: draft.id, data: draft.data, reason: fields.reason };
     const result = this.list?.isGm ? await (this.api[this.tab] as PublicDiplomacyOwnerApi).create({ id: draft.id, data: draft.data, reason: fields.reason })
       : await this.api.proposals.submit({ id: crypto.randomUUID(), intent });
@@ -51,6 +63,10 @@ export class DiplomacyApplicationController {
     const n = Number(f.amount), kind = f.kind, d = this.detail;
     if (["incident", "modifier", "adjust", "presence"].includes(kind) && (!f.amount || !Number.isSafeInteger(n))) return failure("DM_DIPLOMACY_INTENT_INVALID", "Informe uma quantidade inteira.");
     if (this.tab === "relations") {
+      if (kind === "stance") {
+        if (d.stancePolicy !== "manual") return failure("DM_RELATION_STANCE_INVALID", "Esta relação não usa postura manual.");
+        return ok({ kind, value: f.stance || null });
+      }
       const selector = { axisId: f.axis, fromPartyId: f.from || null, toPartyId: f.to || null };
       return ok(kind === "incident" ? { kind, deltas: [{ ...selector, value: n }], ...(f.reversalOf ? { reversalOf: f.reversalOf } : {}) }
         : kind === "modifier" ? { kind, value: { ...selector, value: n, id: crypto.randomUUID(), source: { type: "manual", id: "gm-input" },
@@ -142,7 +158,8 @@ export class DiplomacyApplicationController {
     const input = (name: string, label: string, required = true) => `<label>${label}<input name="${name}" ${required ? "required" : ""}></label>`;
     return `<h2>Novo registro: ${labels[this.tab]}</h2><form data-dm-form="create">${input("label", "Nome")}${this.tab !== "territory" ? input("subject", "Parte / sujeito (UUID de Domínio ou Actor; nome para parte narrativa)") + input("audience", "Outra parte / audiência") : ""}
       ${this.tab !== "reputation" && this.tab !== "territory" ? input("additionalParties", "Outras partes, separadas por vírgula (opcional)", false) : ""}
-      ${this.tab === "disputes" ? input("territories", "UUIDs dos territórios, separados por vírgula") : ""}${this.visibilityField()}${input("reason", "Motivo auditável")}
+      ${this.tab === "relations" ? '<label>Postura<select name="stancePolicy"><option value="derived">Derivada dos eixos</option><option value="manual">Manual</option><option value="none">Sem postura</option></select></label>' + input("stance", "Postura inicial (somente manual; opcional)", false)
+        + '<details><summary>Regras avançadas da postura derivada</summary><p>Regras avaliadas na ordem declarada. Cada regra usa id, label, visibility e conditions com axisId, minimum e maximum. Em branco usa confiança, neutralidade e desconfiança pelo eixo de confiança.</p><label>Regras (JSON)<textarea name="stanceRules"></textarea></label></details>' : ""}\n      ${this.tab === "disputes" ? input("territories", "UUIDs dos territórios, separados por vírgula") : ""}${this.visibilityField()}${input("reason", "Motivo auditável")}
       <button>${this.list?.isGm ? "Criar registro" : "Enviar proposta ao GM"}</button></form>`;
   }
   visibilityField(): string { return '<label>Visibilidade<select name="visibility"><option value="public">Pública</option><option value="restricted">Participantes</option><option value="secret">GM</option></select></label>'; }
@@ -150,6 +167,15 @@ export class DiplomacyApplicationController {
     const d = this.detail; let blocks = `<h2>${escapeHtml(d.label ?? d.id)}</h2><p>Estado: ${escapeHtml(d.lifecycle ?? "active")} · revisão ${d.revision}</p>`;
     const columns: readonly [string, (x: any) => unknown][] = [["Parte", x => refLabel(x.ref ?? x.partyRef ?? x.claimantRef ?? x.beneficiaryRef ?? x)], ["Papel", x => x.role ?? x.claimType ?? x.rightType ?? "—"]];
     if (d.parties) blocks += table("Participantes", d.parties, columns);
+    if (d.stances?.length) {
+      blocks += table("Postura", d.stances, [["De", x => x.fromPartyId ?? "Compartilhada"], ["Para", x => x.toPartyId ?? "Todos"],
+        ["Postura", x => x.value ?? (x.status === "unconfigured" ? "Política sem regras configuradas" : "Sem classificação")],
+        ["Origem", x => x.status === "manual" ? "Manual" : "Derivada dos eixos"]]);
+      blocks += table("Razões da postura", d.stances.flatMap((stance: any) => stance.reasons.map((reason: any) => ({ ...reason,
+        fromPartyId: stance.fromPartyId, toPartyId: stance.toPartyId }))),
+        [["De", x => x.fromPartyId ?? "Compartilhada"], ["Para", x => x.toPartyId ?? "Todos"],
+          ["Eixo", x => x.axisId], ["Base", x => x.base], ["Efetivo", x => x.effective]]);
+    }
     if (d.scores) blocks += table("Eixos", d.scores, [["Eixo", x => x.axisId], ["Base", x => x.base], ["Efetivo", x => x.effective]]);
     if (d.tracks) blocks += table("Reputação", d.tracks, [["Trilha", x => x.label ?? x.definitionId], ["Faixa / valor", x => x.band?.label ?? x.band ?? x.bandLabel ?? x.score ?? x.value ?? x.presentation]]);
     if (d.terms) blocks += table("Termos vigentes", d.terms, [["Termo", x => x.title], ["Descrição", x => x.text]]);
@@ -179,12 +205,13 @@ export class DiplomacyApplicationController {
   }
   actionForm(): string {
     const d = this.detail, input = (name: string, label: string) => `<label>${label}<input name="${name}"></label>`;
-    const choices = actions[this.tab as Exclude<DiplomacyTab, "proposals">].map(([key, label]) => `<option value="${key}">${label}</option>`).join("");
+    const choices = actions[this.tab as Exclude<DiplomacyTab, "proposals">].filter(([key]) => key !== "stance" || d.stancePolicy === "manual").map(([key, label]) => `<option value="${key}">${label}</option>`).join("");
     let fields = "";
     if (this.tab === "relations" || this.tab === "reputation") {
       const axes = d.definition?.axes?.map((x: any) => ({ id: x.id, label: x.label })) ?? d.scores?.map((x: any) => ({ id: x.axisId, label: x.axisId })) ?? d.tracks?.map((x: any) => ({ id: x.definitionId ?? x.trackId, label: x.label ?? x.definitionId ?? x.trackId })) ?? [];
       fields = `<label>Eixo / trilha<select name="axis">${axes.map((x: any) => `<option value="${escapeAttribute(x.id)}">${escapeHtml(x.label)}</option>`).join("")}</select></label>${input("amount", "Alteração inteira")}${input("reversalOf", "ID do evento original a compensar (opcional)")}`;
       if (this.tab === "relations") {
+        if (d.stancePolicy === "manual") fields += input("stance", "Nova postura manual (em branco: limpar)");
         if (d.scores.some((x: any) => x.fromPartyId !== null)) for (const [key, label] of [["from", "De"], ["to", "Para"]]) fields += `<label>${label}<select name="${key}">${d.parties.map((p: any) => `<option value="${escapeAttribute(p.id)}">${escapeHtml(refLabel(p.ref))}</option>`).join("")}</select></label>`;
         fields += `${this.visibilityField()}${input("expires", "Expiração do modificador no relógio do mundo")}${input("sourceId", "ID do modificador a encerrar")}`;
       }

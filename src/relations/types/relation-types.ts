@@ -28,6 +28,18 @@ export interface RelationAxisDefinition {
   readonly defaultValue: number;
 }
 
+/** Ordered, configurable classification; no core axis or political label is fixed. */
+export interface RelationStanceRule {
+  readonly id: string;
+  readonly label: string;
+  readonly visibility: RelationVisibility;
+  readonly conditions: readonly {
+    readonly axisId: string;
+    readonly minimum: number;
+    readonly maximum: number;
+  }[];
+}
+
 /** Versioned content, never a mutable instance or a diplomatic template. */
 export interface RelationDefinition {
   readonly id: string;
@@ -41,6 +53,8 @@ export interface RelationDefinition {
   readonly allowMultiple: boolean;
   readonly axes: readonly RelationAxisDefinition[];
   readonly stancePolicy: "none" | "manual" | "derived";
+  /** Optional for legacy definitions; absent rules resolve to an unconfigured stance. */
+  readonly stanceRules?: readonly RelationStanceRule[];
 }
 
 /** Base truth only. Temporary modifiers and effective scores belong to G6.2. */

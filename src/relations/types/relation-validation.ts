@@ -4,7 +4,7 @@ import { isOpaqueId } from "../../core/identity/ids.js";
 import { isActorUuid, isFoundryUuid, isJournalEntryUuid, type TypedRef } from "../../core/identity/refs.js";
 import {
   RELATION_SCHEMA_VERSION, type RelationDefinition, type RelationInstance,
-  type RelationPartyRef, type RelationLifecycle, type RelationBaseAxis, type RelationAxisDefinition
+  type RelationPartyRef, type RelationLifecycle, type RelationBaseAxis, type RelationAxisDefinition, type RelationStanceRule
 } from "./relation-types.js";
 
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object"
@@ -41,11 +41,37 @@ export function validateRelationDefinition(raw: unknown): Result<RelationDefinit
     seen.add(axis.id);
     axes.push(Object.freeze({ id: axis.id, label: axis.label, minimum: axis.minimum, maximum: axis.maximum, defaultValue: axis.defaultValue }));
   }
+  const stanceRules: RelationStanceRule[] = [], ruleIds = new Set<string>();
+  if (raw.stanceRules !== undefined) {
+    if (raw.stancePolicy !== "derived" || !Array.isArray(raw.stanceRules))
+      return invalid("DM_RELATION_STANCE_POLICY_INVALID", "Stance rules require the derived policy");
+    for (const rule of raw.stanceRules) {
+      if (!object(rule) || !namespaced(rule.id) || ruleIds.has(rule.id) || !text(rule.label)
+        || !["public", "restricted", "secret"].includes(rule.visibility as string)
+        || !Array.isArray(rule.conditions) || !rule.conditions.length)
+        return invalid("DM_RELATION_STANCE_POLICY_INVALID", "Stance rules require unique IDs, labels, visibility and axis conditions");
+      const conditionIds = new Set<string>(), conditions: RelationStanceRule["conditions"][number][] = [];
+      for (const condition of rule.conditions) {
+        if (!object(condition) || !text(condition.axisId) || conditionIds.has(condition.axisId)
+          || !integer(condition.minimum) || !integer(condition.maximum) || condition.maximum < condition.minimum)
+          return invalid("DM_RELATION_STANCE_POLICY_INVALID", "Stance conditions require unique axes and integer intervals");
+        const axis = axes.find(a => a.id === condition.axisId);
+        if (!axis || condition.minimum < axis.minimum || condition.maximum > axis.maximum)
+          return invalid("DM_RELATION_STANCE_POLICY_INVALID", "Stance condition is outside its declared axis range");
+        conditionIds.add(condition.axisId);
+        conditions.push(Object.freeze({ axisId: condition.axisId, minimum: condition.minimum, maximum: condition.maximum }));
+      }
+      ruleIds.add(rule.id);
+      stanceRules.push(Object.freeze({ id: rule.id, label: rule.label, visibility: rule.visibility as RelationStanceRule["visibility"],
+        conditions: Object.freeze(conditions) }));
+    }
+  }
   return ok(Object.freeze({ id: raw.id, version: raw.version, label: raw.label,
     symmetry: raw.symmetry as RelationDefinition["symmetry"], minParties: raw.minParties, maxParties: raw.maxParties as number | null,
     allowedPartyTypes: Object.freeze([...raw.allowedPartyTypes]) as RelationDefinition["allowedPartyTypes"],
     allowedPartyRoles: Object.freeze([...raw.allowedPartyRoles]), allowMultiple: raw.allowMultiple,
-    axes: Object.freeze(axes), stancePolicy: raw.stancePolicy as RelationDefinition["stancePolicy"] }));
+    axes: Object.freeze(axes), stancePolicy: raw.stancePolicy as RelationDefinition["stancePolicy"],
+    ...(raw.stanceRules !== undefined ? { stanceRules: Object.freeze(stanceRules) } : {}) }));
 }
 
 function validateScope(raw: unknown): Result<TypedRef | null> {

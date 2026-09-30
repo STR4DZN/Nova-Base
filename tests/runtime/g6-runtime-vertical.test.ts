@@ -456,3 +456,47 @@ test("G6 audit: public reputation and influence DTOs discard undeclared party me
     assert.equal(JSON.stringify(unwrap(await player.diplomacy.territory.query({ id: territory.id }))).includes("private-sentinel"), false);
   } finally { player.destroy(); r.destroy(); }
 });
+
+test("G6 stance vertical: Player proposes a manual stance; GM approval, retry and reload preserve a single audit event", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player"), data: any = relation(), id = data.state.relation.id;
+  data.definition.stancePolicy = "manual";
+  try {
+    await gm.initialize(); unwrap(await gm.diplomacy.relations.create({ id, data, reason: "Create manual relation" }));
+    assert.equal((await player.diplomacy.relations.modify({ id, expectedRevision: 0, action: { kind: "stance", value: "Alliance" }, reason: "Denied direct write" })).ok, false);
+    unwrap(await player.diplomacy.proposals.submit({ id: "stance-request", intent: {
+      kind: "relation", mode: "modify", id, expectedRevision: 0, action: { kind: "stance", value: "Alliance" }, reason: "Player proposal" } }));
+    assert.equal((unwrap(await gm.diplomacy.relations.query({ id })) as any).revision, 0);
+    const ticket = unwrap(gm.diplomacy.commands.prepare("diplomacy:decide-proposal", {
+      id: "stance-request", expectedRevision: 0, decision: "approve", reason: "GM approved" }));
+    unwrap(await gm.diplomacy.commands.execute(ticket)); unwrap(await gm.diplomacy.commands.retry(ticket));
+    const detail: any = unwrap(await player.diplomacy.relations.query({ id }));
+    assert.equal(detail.stances[0].value, "Alliance"); assert.equal(detail.revision, 1);
+    assert.equal(detail.history.filter((e: any) => e.kind === "stance-changed").length, 1);
+  } finally { player.destroy(); gm.destroy(); }
+  const reload = f.make(); try {
+    await reload.initialize(); const detail: any = unwrap(await reload.diplomacy.relations.query({ id }));
+    assert.equal(detail.stances[0].value, "Alliance"); assert.equal(detail.revision, 1);
+    assert.equal(detail.history.filter((e: any) => e.kind === "stance-changed").length, 1);
+    unwrap(await reload.diplomacy.relations.modify({ id, expectedRevision: 1, action: { kind: "stance", value: "Alliance" }, reason: "Same value" }));
+    assert.equal((unwrap(await reload.diplomacy.relations.query({ id })) as any).revision, 1);
+  } finally { reload.destroy(); }
+});
+test("G6 stance vertical: secret temporary sources affect only GM classification through the real public API", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player"), data: any = relation(), id = data.state.relation.id;
+  data.definition.stanceRules = [
+    { id: "test:high", label: "High", visibility: "public", conditions: [{ axisId: "test:trust", minimum: 30, maximum: 100 }] },
+    { id: "test:low", label: "Low", visibility: "public", conditions: [{ axisId: "test:trust", minimum: -100, maximum: 29 }] }
+  ];
+  try {
+    await gm.initialize(); unwrap(await gm.diplomacy.relations.create({ id, data, reason: "Create derived relation" }));
+    unwrap(await gm.diplomacy.relations.modify({ id, expectedRevision: 0, reason: "Secret modifier", action: { kind: "modifier", value: {
+      id: "secret-stance-modifier", axisId: "test:trust", value: 20, fromPartyId: null, toPartyId: null,
+      source: { type: "incident", id: "private-stance-source" }, visibility: "secret", lifecycle: "active", createdAt: 0,
+      expiresAt: null, expiresAtWorldTick: 20, stackKey: "test:stack", stacking: "add" } } }));
+    const publicDetail: any = unwrap(await player.diplomacy.relations.query({ id }));
+    assert.equal(publicDetail.stances[0].value, "Low"); assert.equal(JSON.stringify(publicDetail).includes("private-stance-source"), false);
+    assert.equal(JSON.stringify(publicDetail).includes("secret-stance-modifier"), false);
+    assert.equal((unwrap(await gm.diplomacy.relations.query({ id })) as any).stances[0].value, "High");
+    f.time.tick = 20; assert.equal((unwrap(await gm.diplomacy.relations.query({ id })) as any).stances[0].value, "Low");
+  } finally { player.destroy(); gm.destroy(); }
+});

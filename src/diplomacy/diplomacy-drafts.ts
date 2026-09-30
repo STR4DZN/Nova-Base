@@ -8,10 +8,14 @@ export function createDiplomacyDraft(kind: OwnerIntent["kind"], label: string, p
   const base = { schemaVersion: 1 as const, revision: 0, label, visibility, createdAt: 0, updatedAt: 0 };
   if (kind === "relation") {
     const id = createOpaqueId("rel");
-    return { id, data: { definition: { id: "domain-manager:diplomatic-relation", version: 1, label: "Diplomatic relation", symmetry: "symmetric",
+    return { id, data: { definition: { id: "domain-manager:diplomatic-relation", version: 2, label: "Diplomatic relation", symmetry: "symmetric",
       minParties: 2, maxParties: null, allowedPartyTypes: ["domain", "actor", "narrative"], allowedPartyRoles: ["participant"],
-      allowMultiple: true, stancePolicy: "derived", axes: ["trust", "affinity", "fear", "respect"].map(axis => ({ id: `domain-manager:${axis}`, label: axis, minimum: -100, maximum: 100, defaultValue: 0 })) },
-      state: { relation: { ...base, id, definitionId: "domain-manager:diplomatic-relation", definitionVersion: 1, lifecycle: "active",
+      allowMultiple: true, stancePolicy: "derived", stanceRules: [
+        { id: "domain-manager:distrust", label: "Desconfiança", visibility: "public", conditions: [{ axisId: "domain-manager:trust", minimum: -100, maximum: -1 }] },
+        { id: "domain-manager:neutral", label: "Neutralidade", visibility: "public", conditions: [{ axisId: "domain-manager:trust", minimum: 0, maximum: 0 }] },
+        { id: "domain-manager:trust", label: "Confiança", visibility: "public", conditions: [{ axisId: "domain-manager:trust", minimum: 1, maximum: 100 }] }
+      ], axes: ["trust", "affinity", "fear", "respect"].map(axis => ({ id: `domain-manager:${axis}`, label: axis, minimum: -100, maximum: 100, defaultValue: 0 })) },
+      state: { relation: { ...base, id, definitionId: "domain-manager:diplomatic-relation", definitionVersion: 2, lifecycle: "active",
         parties: parties.map((ref, i) => ({ id: `party-${i}`, role: "participant", ref })), scope: null, baseAxes: [], endedAt: null }, modifiers: [], events: [] } } };
   }
   if (kind === "reputation") {
