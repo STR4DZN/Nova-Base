@@ -1,0 +1,89 @@
+{
+  "schemaVersion": 1,
+  "verifiedOn": "2026-09-30",
+  "repository": "STR4DZN/Nova-Base",
+  "branch": "feat/g6-continuous",
+  "release": {
+    "tag": "v0.0.8",
+    "url": "https://github.com/STR4DZN/Nova-Base/releases/tag/v0.0.8",
+    "prerelease": true,
+    "draft": false,
+    "targetCommit": "a9fd5662f421f58adb579b966bc792c07fbeba87"
+  },
+  "sourceTree": "88195405b9d48cc91434a605d975ed2fce61ed40",
+  "validation": {
+    "localTests": {
+      "tests": 878,
+      "pass": 878,
+      "fail": 0,
+      "skipped": 0
+    },
+    "typecheck": "PASS",
+    "build": "PASS",
+    "package": "PASS",
+    "releaseValidation": "PASS",
+    "githubActions": {
+      "runId": 36729245576,
+      "jobId": 109934130337,
+      "conclusion": "success",
+      "url": "https://github.com/STR4DZN/Nova-Base/actions/runs/36729245576"
+    },
+    "publicManifestAndZipByteEqualToLocal": true,
+    "zipCRC": "PASS",
+    "zipEntries": 3,
+    "foundryV008": "NOT_YET_RUN"
+  },
+  "assets": [
+    {
+      "name": "domain-manager-v0.0.8.zip",
+      "bytes": 729759,
+      "digest": "sha256:036beec49ad6b2909ee50c8e54f2f2bfd6baa47fa99e9507db72c15bf570e3ad",
+      "url": "https://github.com/STR4DZN/Nova-Base/releases/download/v0.0.8/domain-manager-v0.0.8.zip"
+    },
+    {
+      "name": "foundry-v13-g5-full-smoke-test.js",
+      "bytes": 21136,
+      "digest": "sha256:5eb6f49f263c70a2424c7768fa0ab15ce1dc6261e8b22aa549ba930c766b43b0",
+      "url": "https://github.com/STR4DZN/Nova-Base/releases/download/v0.0.8/foundry-v13-g5-full-smoke-test.js"
+    },
+    {
+      "name": "foundry-v13-socketlib-smoke-test.js",
+      "bytes": 10284,
+      "digest": "sha256:7250e51cb88e03bf31088b99a5d18a14b8f70ea570df5277ffe17e3348751423",
+      "url": "https://github.com/STR4DZN/Nova-Base/releases/download/v0.0.8/foundry-v13-socketlib-smoke-test.js"
+    },
+    {
+      "name": "G0_G6_REVIEW.md",
+      "bytes": 8558,
+      "digest": "sha256:fe2bdfe495e2785b016ffa89c6619883cf547853a647deea589a7ef2c21c1281",
+      "url": "https://github.com/STR4DZN/Nova-Base/releases/download/v0.0.8/G0_G6_REVIEW.md"
+    },
+    {
+      "name": "g6-foundry-smoke.js",
+      "bytes": 34587,
+      "digest": "sha256:f41cc1aacfd35c9ab3343a12adca890416c1ff6fb4bfae60c8bb7d95f04f408e",
+      "url": "https://github.com/STR4DZN/Nova-Base/releases/download/v0.0.8/g6-foundry-smoke.js"
+    },
+    {
+      "name": "G6_FOUNDRY_SMOKE_GUIDE.md",
+      "bytes": 5239,
+      "digest": "sha256:67ca6d049a2b32df528ee0b856937b5f77b930a05778a5dd0fd8c0e3dfb67cdb",
+      "url": "https://github.com/STR4DZN/Nova-Base/releases/download/v0.0.8/G6_FOUNDRY_SMOKE_GUIDE.md"
+    },
+    {
+      "name": "G6_FULL_SPEC_AUDIT.md",
+      "bytes": 22578,
+      "digest": "sha256:8a34fbe238697ce8b8f3fff1b7e2adfbb793c31956e76f4759f3e83502768ff4",
+      "url": "https://github.com/STR4DZN/Nova-Base/releases/download/v0.0.8/G6_FULL_SPEC_AUDIT.md"
+    },
+    {
+      "name": "module.json",
+      "bytes": 891,
+      "digest": "sha256:1800709b890629f65b002670f8abe8d7db6957b4e25566461b149575172a1bd0",
+      "url": "https://github.com/STR4DZN/Nova-Base/releases/download/v0.0.8/module.json"
+    }
+  ],
+  "gateG6": "PARTIAL_SPEC_COVERAGE",
+  "priorFoundryV007": "PASS_USER_REPORTED",
+  "g7Started": false
+}
