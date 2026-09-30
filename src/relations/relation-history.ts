@@ -90,9 +90,10 @@ export function validateRelationState(raw: unknown, d: RelationDefinition): Resu
       || e.effects.length !== 0 || e.modifierId !== null : e.stanceChange !== undefined)
       return failure("DM_RELATION_EVENT_INVALID", "Stance audit requires a manual change with its before/after values");
     if (e.kind === "stance-changed") {
-      if (lastStanceChange && e.stanceChange.before !== lastStanceChange.after)
+      const change = e.stanceChange as NonNullable<RelationEvent["stanceChange"]>;
+      if (lastStanceChange && change.before !== lastStanceChange.after)
         return failure("DM_RELATION_EVENT_INVALID", "Manual stance history must preserve the prior after-value");
-      lastStanceChange = e.stanceChange as unknown as RelationEvent["stanceChange"];
+      lastStanceChange = change;
     }
     if (e.reversalOf) {
       const original = raw.events.find(prior => prior.id === e.reversalOf);
