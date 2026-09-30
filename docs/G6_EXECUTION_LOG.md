@@ -93,3 +93,9 @@ A revisão automática rejeitou o push também após esta autorização geral: e
 - Workflow `36718651288` PASS em todas as etapas, incluindo 859 testes, TypeScript/build/package/release validation. Prerelease `v0.0.7` publicada com cinco assets.
 - Manifest e ZIP baixados das URLs públicas: byte equality, CRC, estrutura, versão e links PASS. Digests publicados coincidem com os artefatos locais. Evidência: `docs/evidence/G6_RELEASE_PUBLICATION.json`.
 - G6 permanece com cobertura parcial e homologação Foundry pendente; G7 não iniciado.
+
+## Smoke Foundry aprovado pelo usuário — 2026-09-30
+
+- Após a entrega do manifest da candidata e do roteiro, usuário confirmou: “Todos os testes passaram”.
+- Resultado: `FOUNDRY_SMOKE_PASS_USER_REPORTED`. Não foram anexados relatórios JSON; não inventar logs individuais, versão do servidor ou resultados independentes por sessão.
+- Próxima tarefa permanece no G6: completar lacunas de `docs/G6_FULL_SPEC_AUDIT.md`. Smoke aprovado verifica fluxos implementados; não cria funcionalidades ausentes. Não marcar aceitação integral nem iniciar G7.

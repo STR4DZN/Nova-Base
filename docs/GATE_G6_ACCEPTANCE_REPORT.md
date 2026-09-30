@@ -1,8 +1,8 @@
-# G6 — relatório de aceitação do candidato local
+# G6 — relatório da candidata publicada
 
-Data: 2026-09-30. Repositório: STR4DZN/Nova-Base, branch `feat/g6-continuous`. Baseline remoto recuperado: `b9fa7fe`. Módulo: `0.0.6`.
+Data: 2026-09-30. Repositório: STR4DZN/Nova-Base, branch `feat/g6-continuous`. Baseline remoto recuperado: `b9fa7fe`. Módulo atual: `0.0.7`.
 
-**Resultado revisado pela auditoria integral: núcleo implementado, cobertura do plano parcial. 859/859 testes PASS; G6 ainda não está 100% nem homologado. G7 não iniciado.** A candidata G6 v0.0.7 está publicada no GitHub como prerelease para testes. A matriz normativa completa e as lacunas estão em `docs/G6_FULL_SPEC_AUDIT.md`; passar os testes do código existente não comprova funcionalidades ausentes.
+**Resultado revisado pela auditoria integral: núcleo implementado, cobertura do plano parcial. 859/859 testes automatizados PASS; smoke Foundry PASS reportado pelo usuário em 2026-09-30; cobertura integral do G6 ainda não concluída. G7 não iniciado.** A candidata G6 v0.0.7 está publicada no GitHub como prerelease para testes. A matriz normativa completa e as lacunas estão em `docs/G6_FULL_SPEC_AUDIT.md`; passar os testes do código existente não comprova funcionalidades ausentes.
 
 ## Implementação verificada
 
@@ -93,3 +93,7 @@ Após completar as pendências normativas e obter smoke real aprovado, reavaliar
 A revisão de G6.1–G6.10, Master §18–21/§10–12/§25 e Rodada 08 completa corrigiu a classificação de conclusão. `docs/G6_FULL_SPEC_AUDIT.md` registra requisito por requisito. Permanecem stance derivada, templates versionados, overview/feeds, detalhes/formulários/preview, diagnostic/repair, retry/status público e consumers incompletos; infraestruturas gerais de gates posteriores continuam explicitamente separadas.
 
 Quatro bugs tiveram reprodução negativa antes da correção: unicidade não aplicada no runtime, right herdável de tratado sem grant nos filhos, controle inconsistente de território restrito e metadados extras no DTO público de Reputation/influence. Todos foram corrigidos e retestados; suíte final 859/859 PASS. Não foi realizada homologação Foundry nem publicação remota nesta auditoria.
+
+## Confirmação dos testes no Foundry — 2026-09-30
+
+Após receber o manifest da candidata v0.0.7, o script e o roteiro de execução, o usuário informou: “Todos os testes passaram”. Registrado como aprovação do smoke pelo usuário. Relatórios JSON das sessões não foram anexados; resultados individuais, versões de ambiente e logs não são presumidos. As lacunas normativas da auditoria continuam abertas e impedem declarar G6 100% concluído ou iniciar G7.

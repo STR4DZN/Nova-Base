@@ -1,0 +1,12 @@
+{
+  "date": "2026-09-30",
+  "timezone": "America/Sao_Paulo",
+  "candidate_context_version": "0.0.7",
+  "user_statement": "Todos os testes passaram",
+  "result": "FOUNDRY_SMOKE_PASS_USER_REPORTED",
+  "evidence_source": "user confirmation in current conversation after installation manifest and smoke runner delivery",
+  "individual_reports_attached": false,
+  "g6_full_spec_coverage": "partial",
+  "g6_gate_accepted": false,
+  "g7_started": false
+}
