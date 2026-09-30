@@ -32,6 +32,9 @@ export function registerDiplomacyProposals(o: OwnerCommandOptions): void {
     const ctx = fresh.context, p = ctx.command.payload, intent = p.intent as OwnerIntent;
     if (fresh.entity) return failure("DM_DIPLOMACY_ALREADY_EXISTS", "Proposal already exists", "conflict");
     if (!ctx.senderUserId) return failure("DM_SECURITY_PERMISSION_DENIED", "Authenticated proposer required", "permission");
+    if (!diplomacyViewerIsGm(ctx) && intent.kind === "reputation" && intent.mode === "modify"
+      && isRecord(intent.action) && ["add-track", "configure-track"].includes(intent.action.kind as string))
+      return failure("DM_SECURITY_PERMISSION_DENIED", "Existing reputation policy configuration requires the GM", "permission");
     const owner = DIPLOMACY_OWNERS[intent.kind], existing = intent.mode === "modify" ? o.store.get(intent.kind, intent.id) : null;
     if (intent.mode === "modify" && !existing) return failure("DM_DIPLOMACY_NOT_FOUND", "Entity unavailable", "not-found");
     const source = existing?.data ?? intent.data, valid = owner.validate(source, o.store.list("territory").map(e => e.data as any));

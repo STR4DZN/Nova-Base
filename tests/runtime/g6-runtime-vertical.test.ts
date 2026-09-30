@@ -500,3 +500,117 @@ test("G6 stance vertical: secret temporary sources affect only GM classification
     f.time.tick = 20; assert.equal((unwrap(await gm.diplomacy.relations.query({ id })) as any).stances[0].value, "Low");
   } finally { player.destroy(); gm.destroy(); }
 });
+
+const reputationDraftFor = (label = "Standing") => createDiplomacyDraft("reputation", label,
+  [{ type: "domain", uuid: domainUuid }, { type: "narrative", id: "guild" }], "public");
+const reputationPolicyFor = (detail: any, trackId: string, patch: Record<string, unknown> = {}) => {
+  const track = detail.tracks.find((t: any) => t.definitionId === trackId);
+  const current = detail.definitions.find((d: any) => d.id === trackId && d.version === track.definitionVersion);
+  const { id, version, ...policy } = current; return { ...policy, ...patch };
+};
+test("G6 reputation configuration vertical: UI creates multiple tracks with an authority clock and private presentation", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player"), controller = new DiplomacyApplicationController(gm.diplomacy);
+  try {
+    await gm.initialize(); f.time.tick = 100;
+    controller.tab = "reputation"; await controller.load(); controller.addReputationTrackForm({});
+    unwrap(await controller.create({ label: "Multi standing", subject: domainUuid, audience: "guild", visibility: "public", reason: "Create",
+      rep_0_id: "test:standing-public", rep_0_label: "Public", rep_0_initialScore: "20", rep_0_decayEnabled: "on", rep_0_decayAmount: "5", rep_0_decayPeriod: "10",
+      rep_1_id: "test:standing-secret", rep_1_label: "secret-configuration-marker", rep_1_visibility: "secret" }));
+    const id = controller.selectedId!, detail: any = unwrap(await gm.diplomacy.reputation.query({ id }));
+    assert.equal(detail.tracks.length, 2); assert.equal(detail.tracks[0].lastDecayWorldTick, 100);
+    assert.equal(detail.tracks[0].score, 20);
+    f.time.tick = 105; unwrap(await gm.diplomacy.reputation.modify({ id, expectedRevision: 0, action: { kind: "decay", trackId: "test:standing-public" }, reason: "Early decay" }));
+    assert.equal((unwrap(await gm.diplomacy.reputation.query({ id })) as any).revision, 0);
+    f.time.tick = 110; unwrap(await gm.diplomacy.reputation.modify({ id, expectedRevision: 0, action: { kind: "decay", trackId: "test:standing-public" }, reason: "Decay" }));
+    assert.equal((unwrap(await gm.diplomacy.reputation.query({ id })) as any).tracks[0].score, 15);
+    const publicDetail: any = unwrap(await player.diplomacy.reputation.query({ id }));
+    assert.equal(publicDetail.tracks.length, 1); assert.equal(publicDetail.tracks[0].score, undefined);
+    assert.equal(JSON.stringify(publicDetail).includes("secret-configuration-marker"), false);
+    assert.equal(JSON.stringify(publicDetail).includes("lastDecayWorldTick"), false);
+  } finally { player.destroy(); gm.destroy(); }
+});
+test("G6 reputation configuration vertical: edit, same-ticket retry, no-op and reload preserve versions and one audit", async () => {
+  const f = fixture(), gm = f.make(), draft = reputationDraftFor(); let id = draft.id;
+  try {
+    await gm.initialize(); unwrap(await gm.diplomacy.reputation.create({ ...draft, reason: "Create" }));
+    unwrap(await gm.diplomacy.reputation.modify({ id, expectedRevision: 0, action: { kind: "adjust", trackId: "domain-manager:standing", delta: 30 }, reason: "Award" }));
+    const old: any = unwrap(await gm.diplomacy.reputation.query({ id })); f.time.tick = 100;
+    const policy = reputationPolicyFor(old, "domain-manager:standing", { label: "Configured", decay: { amount: 5, periodTicks: 10 } });
+    const ticket = unwrap(gm.diplomacy.commands.prepare("reputation:modify", { id, expectedRevision: 1,
+      action: { kind: "configure-track", trackId: "domain-manager:standing", policy, definitionVersion: 999 }, reason: "Configure" }));
+    assert.equal(unwrap(await gm.diplomacy.commands.execute(ticket)).status, "executed");
+    assert.equal(unwrap(await gm.diplomacy.commands.retry(ticket)).status, "executed");
+    const detail: any = unwrap(await gm.diplomacy.reputation.query({ id }));
+    assert.equal(detail.revision, 2); assert.equal(detail.tracks[0].definitionVersion, 2);
+    assert.equal(detail.tracks[0].lastDecayWorldTick, 100); assert.equal(detail.tracks[0].score, 30);
+    assert.deepEqual(detail.entries, old.entries); assert.deepEqual(detail.definitions[0], old.definitions[0]);
+    assert.equal(detail.configurationHistory.length, 1);
+    unwrap(await gm.diplomacy.reputation.modify({ id, expectedRevision: 2,
+      action: { kind: "configure-track", trackId: "domain-manager:standing", policy }, reason: "Identical" }));
+    assert.equal((unwrap(await gm.diplomacy.reputation.query({ id })) as any).revision, 2);
+  } finally { gm.destroy(); }
+  const reload = f.make(); try {
+    await reload.initialize(); const detail: any = unwrap(await reload.diplomacy.reputation.query({ id }));
+    assert.equal(detail.revision, 2); assert.equal(detail.configurationHistory.length, 1);
+    assert.equal(detail.tracks[0].definitionVersion, 2); assert.equal(detail.tracks[0].score, 30);
+  } finally { reload.destroy(); }
+});
+test("G6 reputation configuration vertical: concurrent edits of shared content allocate distinct immutable versions", async () => {
+  const f = fixture(), gm = f.make(), a = reputationDraftFor("A"), b = reputationDraftFor("B");
+  try {
+    await gm.initialize(); unwrap(await gm.diplomacy.reputation.create({ ...a, reason: "Create A" })); unwrap(await gm.diplomacy.reputation.create({ ...b, reason: "Create B" }));
+    const old: any = unwrap(await gm.diplomacy.reputation.query({ id: a.id }));
+    const results = await Promise.all([a, b].map((draft, i) => gm.diplomacy.reputation.modify({ id: draft.id, expectedRevision: 0,
+      action: { kind: "configure-track", trackId: "domain-manager:standing", policy: reputationPolicyFor(old, "domain-manager:standing", { label: "Version " + i }) }, reason: "Configure" })));
+    assert.ok(results.every(r => r.ok), JSON.stringify(results));
+    const after = await Promise.all([a, b].map(async draft => unwrap(await gm.diplomacy.reputation.query({ id: draft.id })) as any));
+    assert.deepEqual(after.map(d => d.tracks[0].definitionVersion).sort(), [2, 3]);
+    for (const d of after) { assert.deepEqual(d.definitions[0], old.definitions[0]); assert.equal(d.tracks[0].score, 0); }
+  } finally { gm.destroy(); }
+});
+test("G6 reputation configuration vertical: conflicting shared snapshots and fabricated creation audit are rejected", async () => {
+  const f = fixture(), gm = f.make(), a = reputationDraftFor("A"), b = reputationDraftFor("B");
+  try {
+    await gm.initialize(); unwrap(await gm.diplomacy.reputation.create({ ...a, reason: "Create" })); unwrap(await gm.diplomacy.reputation.create({ ...b, reason: "Create" }));
+    const definition: any = { id: "test:custom-track", version: 1, label: "Custom", minimum: 0, maximum: 100, baseline: 0,
+      visibility: "public", publicPresentation: "score", bands: [], decay: null };
+    unwrap(await gm.diplomacy.reputation.modify({ id: a.id, expectedRevision: 0, action: { kind: "add-track", definition, initialScore: 10 }, reason: "Add" }));
+    const rejected = await gm.diplomacy.reputation.modify({ id: b.id, expectedRevision: 0,
+      action: { kind: "add-track", definition: { ...definition, label: "Conflicting" }, initialScore: 10 }, reason: "Conflict" });
+    assert.equal(rejected.ok, false); if (!rejected.ok) assert.equal(rejected.error.code, "DM_DIPLOMACY_DEFINITION_CONFLICT");
+    const untouched: any = unwrap(await gm.diplomacy.reputation.query({ id: b.id })); assert.equal(untouched.revision, 0); assert.equal(untouched.tracks.length, 1);
+    const source: any = unwrap(await f.adapter.read("reputation", a.id)); const forged = structuredClone(source.data);
+    const id = "rep_00000000-0000-4000-8000-000000000123"; forged.record.id = id; forged.record.revision = 0;
+    const invalid = await gm.diplomacy.reputation.create({ id, data: forged, reason: "Fake prior configuration" });
+    assert.equal(invalid.ok, false);
+    assert.equal(await f.adapter.read("reputation", id), null);
+  } finally { gm.destroy(); }
+});
+test("G6 reputation configuration vertical: policy edits and probing secret track policies are GM-only", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player"), draft = reputationDraftFor();
+  try {
+    await gm.initialize(); unwrap(await gm.diplomacy.reputation.create({ ...draft, reason: "Create" }));
+    const detail: any = unwrap(await gm.diplomacy.reputation.query({ id: draft.id }));
+    const policy = reputationPolicyFor(detail, "domain-manager:standing", { label: "New" });
+    assert.equal((await player.diplomacy.reputation.modify({ id: draft.id, expectedRevision: 0, action: { kind: "configure-track", trackId: "domain-manager:standing", policy }, reason: "Denied" })).ok, false);
+    for (const trackId of ["domain-manager:standing", "test:unknown-hidden"]) {
+      const proposed = await player.diplomacy.proposals.submit({ id: "probe-" + trackId, intent: { kind: "reputation", mode: "modify",
+        id: draft.id, expectedRevision: 0, action: { kind: "configure-track", trackId, policy }, reason: "Probe policy" } });
+      assert.equal(proposed.ok, false); if (!proposed.ok) assert.equal(proposed.error.code, "DM_SECURITY_PERMISSION_DENIED");
+    }
+    assert.equal((unwrap(await gm.diplomacy.reputation.query({ id: draft.id })) as any).revision, 0);
+  } finally { player.destroy(); gm.destroy(); }
+});
+test("G6 reputation configuration vertical: proposed creation activates decay on approval, ignoring client clock", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player"), draft = reputationDraftFor(), data: any = draft.data;
+  data.definitions[0].decay = { amount: 1, periodTicks: 10 }; data.record.tracks[0].lastDecayWorldTick = 999;
+  try {
+    await gm.initialize(); unwrap(await player.diplomacy.proposals.submit({ id: "create-configured-standing",
+      intent: { kind: "reputation", mode: "create", id: draft.id, data, reason: "Create configured record" } }));
+    assert.equal((await gm.diplomacy.reputation.query({ id: draft.id })).ok, false);
+    f.time.tick = 100;
+    unwrap(await gm.diplomacy.proposals.decide({ id: "create-configured-standing", expectedRevision: 0, decision: "approve", reason: "Approved" }));
+    const detail: any = unwrap(await gm.diplomacy.reputation.query({ id: draft.id }));
+    assert.equal(detail.tracks[0].lastDecayWorldTick, 100); assert.equal(detail.revision, 0);
+  } finally { player.destroy(); gm.destroy(); }
+});

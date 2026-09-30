@@ -43,7 +43,8 @@ export function validateOwnerIntent(raw: unknown): Result<OwnerIntent> {
 /** Conservative dependency locks are rechecked against the actual semantic effect plan after fresh-read. */
 export function diplomacyIntentLocks(intent: OwnerIntent, o: OwnerCommandOptions): readonly string[] {
   const locks = new Set<string>([lockKey.diplomacy(intent.kind, intent.id)]);
-  if (intent.mode === "create") locks.add("diplomacy:catalog");
+  if (intent.mode === "create" || intent.kind === "reputation" && isRecord(intent.action)
+    && ["add-track", "configure-track"].includes(intent.action.kind as string)) locks.add("diplomacy:catalog");
   if (intent.kind === "territory" || intent.kind === "dispute") locks.add(lockKey.territoryGraph());
   const scan = (x: unknown): void => {
     if (Array.isArray(x)) { x.forEach(scan); return; } if (!isRecord(x)) return;
@@ -101,6 +102,15 @@ export async function prepareOwnerIntent(intent: OwnerIntent, ctx: Authenticated
         o.store.list("relation").map(e => (e.data as RelationOwnerData).state.relation));
       if (!unique.ok) return unique;
     }
+    if (intent.kind === "reputation") {
+      const next = data as import("../reputation/reputation-owner.js").ReputationOwnerData;
+      if (next.configurationHistory?.length) return failure("DM_REPUTATION_CREATE_INVALID", "New reputation cannot claim prior configuration events");
+      data = { ...next, record: { ...next.record, tracks: next.record.tracks.map(t => {
+        const d = next.definitions.find(d => d.id === t.definitionId && d.version === t.definitionVersion)!;
+        return { ...t, lastDecayWorldTick: d.decay ? o.worldTick() : null };
+      }) } };
+      const stamped = owner.validate(data, territories); if (!stamped.ok) return stamped; data = stamped.value;
+    }
     // Versioned Definition snapshots cannot conflict with already stored exact versions.
     const definitions = (d: any): readonly any[] => d.definitions ?? (d.definition ? [d.definition] : []);
     for (const definition of definitions(data)) for (const e of o.store.list(intent.kind)) for (const old of definitions(e.data))
@@ -127,8 +137,25 @@ export async function prepareOwnerIntent(intent: OwnerIntent, ctx: Authenticated
       const references = await validatePartyReferences(writes.flatMap(w => owner.parties(w.after.data)), o); if (!references.ok) return references;
       return ok({ writes, effects: [], result: { kind: "territory", id: intent.id, revision: writes.find(w => w.after.id === intent.id)?.after.revision ?? before.revision,
         changed: true, transferred: writes.map(w => ({ id: w.after.id, revision: w.after.revision })) } });
-    } else { const changed = owner.change(before.data, intent.action, c, territories); if (!changed.ok) return changed; data = changed.value; }
+    } else {
+      let effectiveAction: unknown = intent.action;
+      if (intent.kind === "reputation" && action.kind === "configure-track") {
+        let maxVersion = 0;
+        for (const e of o.store.list("reputation")) for (const d of (e.data as import("../reputation/reputation-owner.js").ReputationOwnerData).definitions)
+          if (d.id === action.trackId) maxVersion = Math.max(maxVersion, d.version);
+        if (maxVersion === Number.MAX_SAFE_INTEGER) return failure("DM_REPUTATION_VERSION_INVALID", "Definition version cannot be incremented");
+        effectiveAction = { ...action, definitionVersion: maxVersion + 1 };
+      }
+      const changed = owner.change(before.data, effectiveAction, c, territories); if (!changed.ok) return changed; data = changed.value; }
     const valid = owner.validate(data, territories); if (!valid.ok) return valid; data = valid.value; revision = owner.identity(data).revision;
+  }
+  // Configuration adds immutable content under the same catalog lock as creates.
+  if (intent.kind === "reputation") {
+    const next = data as import("../reputation/reputation-owner.js").ReputationOwnerData;
+    for (const d of next.definitions) for (const e of o.store.list("reputation"))
+      for (const old of (e.data as import("../reputation/reputation-owner.js").ReputationOwnerData).definitions)
+        if (d.id === old.id && d.version === old.version && canonicalJsonStringify(d) !== canonicalJsonStringify(old))
+          return failure("DM_DIPLOMACY_DEFINITION_CONFLICT", "Exact reputation definition version already has another snapshot", "conflict");
   }
   // Resolve referenced Domains through their owner, not a permissive Journal getter.
   const references = await validatePartyReferences(owner.parties(data), o); if (!references.ok) return references;

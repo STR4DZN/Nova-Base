@@ -4,6 +4,9 @@ import type { OwnerIntent } from "../../../diplomacy/owner-commands.js";
 import type { RelationPartyRef } from "../../../relations/types/relation-types.js";
 import { failure } from "../../../core/validation/value-validation.js";
 import { ok, type Result } from "../../../core/contracts/result.js";
+import { defaultReputationTrackFields, reputationTrackDefinitionFields, parseReputationTrackFields,
+  renderReputationTrackFields } from "./reputation-track-form.js";
+import type { ReputationTrackDefinition } from "../../../reputation/reputation-model.js";
 import { escapeHtml, escapeAttribute } from "../facilities/facility-view.js";
 export type DiplomacyTab = "relations" | "reputation" | "agreements" | "territory" | "disputes" | "proposals";
 const labels: Record<DiplomacyTab, string> = { relations: "Relações", reputation: "Reputação", agreements: "Acordos", territory: "Território", disputes: "Disputas", proposals: "Propostas" };
@@ -24,11 +27,13 @@ function table(title: string, rows: readonly any[], columns: readonly [string, (
 export class DiplomacyApplicationController {
   tab: DiplomacyTab = "relations"; offset = 0; search = ""; historyOffset = 0; selectedId: string | null = null;
   list: any = null; detail: any = null; error = ""; creating = false; preview: any = null;
+  reputationTrackCount = 1; reputationFormFields: Record<string, string> = {};
+  reputationConfigurationFields: Record<string, string> = {};
   #previewInput: string | null = null; #previewIntent: OwnerIntent | null = null;
   treeAxis: "locatedInUuid" | "administrativeParentUuid" | null = null; treeParent: string | null = null;
   constructor(readonly api: PublicDiplomacyApi) {}
-  selectTab(tab: DiplomacyTab): void { this.tab = tab; this.offset = 0; this.selectedId = null; this.detail = null; this.historyOffset = 0; this.creating = false; this.preview = null; }
-  select(id: string): void { this.selectedId = id; this.historyOffset = 0; this.creating = false; this.preview = null; }
+  selectTab(tab: DiplomacyTab): void { this.tab = tab; this.offset = 0; this.selectedId = null; this.detail = null; this.historyOffset = 0; this.creating = false; this.preview = null; this.reputationTrackCount = 1; this.reputationFormFields = {}; this.reputationConfigurationFields = {}; }
+  select(id: string): void { if (this.selectedId !== id) this.reputationConfigurationFields = {}; this.selectedId = id; this.historyOffset = 0; this.creating = false; this.preview = null; }
   async load(): Promise<Result<unknown>> {
     const queried = await this.api[this.tab].query({ offset: this.offset, limit: 30, search: this.search,
       ...(this.tab === "territory" && this.treeAxis ? { treeAxis: this.treeAxis, parentUuid: this.treeParent } : {}) });
@@ -39,6 +44,7 @@ export class DiplomacyApplicationController {
   }
   async create(fields: Record<string, string>): Promise<Result<unknown>> {
     if (this.tab === "proposals") return failure("DM_DIPLOMACY_INTENT_INVALID", "Selecione o tipo de registro para criar uma proposta.");
+    if (this.tab === "reputation") this.reputationFormFields = { ...fields };
     const parties = [fields.subject, fields.audience, ...fields.additionalParties?.split(",") ?? []].filter(Boolean).map(x => party(x.trim())), draft = createDiplomacyDraft(kinds[this.tab], fields.label, parties,
       fields.visibility as any, fields.territories?.split(",").map(x => x.trim()).filter(Boolean));
     if (this.tab === "relations" && fields.stancePolicy) {
@@ -53,10 +59,81 @@ export class DiplomacyApplicationController {
         catch { return this.capture(failure("DM_RELATION_STANCE_POLICY_INVALID", "As regras de postura precisam ser um JSON válido.")); }
       }
     }
+    if (this.tab === "reputation") {
+      const data = draft.data as any, definitions: ReputationTrackDefinition[] = [], tracks = [], ids = new Set<string>();
+      for (let i = 0; i < this.reputationTrackCount; i++) {
+        const prefix = `rep_${i}_`, defaults = Object.fromEntries(Object.entries(defaultReputationTrackFields(i)).map(([k, v]) => [prefix + k, v]));
+        const parsed = parseReputationTrackFields({ ...defaults, ...fields, [prefix + "decayEnabled"]: fields[prefix + "decayEnabled"] ?? "" }, prefix);
+        if (!parsed.ok) return this.capture(parsed);
+        const { definition, initialScore } = parsed.value;
+        if (ids.has(definition.id)) return this.capture(failure("DM_REPUTATION_TRACK_ALREADY_EXISTS", "Cada trilha precisa de um identificador diferente."));
+        ids.add(definition.id); definitions.push(definition);
+        tracks.push({ definitionId: definition.id, definitionVersion: definition.version, initialScore, score: initialScore, lastDecayWorldTick: null });
+      }
+      data.definitions = definitions; data.record.tracks = tracks;
+    }
     const intent: OwnerIntent = { kind: kinds[this.tab], mode: "create", id: draft.id, data: draft.data, reason: fields.reason };
     const result = this.list?.isGm ? await (this.api[this.tab] as PublicDiplomacyOwnerApi).create({ id: draft.id, data: draft.data, reason: fields.reason })
       : await this.api.proposals.submit({ id: crypto.randomUUID(), intent });
     this.capture(result); if (result.ok) { this.creating = false; if (this.list?.isGm) this.select(draft.id); } return result;
+  }
+  addReputationTrackForm(fields: Record<string, string>): void {
+    this.reputationFormFields = { ...fields }; this.reputationTrackCount += 1;
+  }
+  removeReputationTrackForm(index: number, fields: Record<string, string>): void {
+    if (this.reputationTrackCount <= 1 || index < 0 || index >= this.reputationTrackCount) return;
+    const next: Record<string, string> = {};
+    for (const [key, value] of Object.entries(fields)) {
+      const match = /^rep_(\d+)_(.+)$/.exec(key);
+      if (!match) next[key] = value;
+      else if (Number(match[1]) !== index) next[`rep_${Number(match[1]) > index ? Number(match[1]) - 1 : match[1]}_${match[2]}`] = value;
+    }
+    this.reputationTrackCount -= 1; this.reputationFormFields = next;
+  }
+  async configureReputationTrack(fields: Record<string, string>, existing: boolean): Promise<Result<unknown>> {
+    if (this.tab !== "reputation" || !this.detail || !this.list?.isGm)
+      return this.capture(failure("DM_SECURITY_PERMISSION_DENIED", "A configuração de trilhas existentes é feita pelo GM.", "permission"));
+    this.reputationConfigurationFields = { ...fields };
+    const track = this.detail.tracks.find((t: any) => t.definitionId === fields.trackId);
+    const definition = existing && track ? this.detail.definitions.find((d: any) => d.id === track.definitionId && d.version === track.definitionVersion) : undefined;
+    if (existing && !definition) return this.capture(failure("DM_REPUTATION_TRACK_UNAVAILABLE", "Selecione uma trilha existente."));
+    const parsed = parseReputationTrackFields(fields, "config_", definition ? { id: definition.id, version: definition.version, bandIds: definition.bands.map((b: any) => b.id) } : undefined);
+    if (!parsed.ok) return this.capture(parsed);
+    const { id: ignoredId, version: ignoredVersion, ...policy } = parsed.value.definition;
+    const action = existing ? { kind: "configure-track", trackId: definition.id, policy }
+      : { kind: "add-track", definition: parsed.value.definition, initialScore: parsed.value.initialScore };
+    const result = await this.api.reputation.modify({ id: this.detail.id, expectedRevision: this.detail.revision, action, reason: fields.reason });
+    this.capture(result); if (result.ok) this.reputationConfigurationFields = {}; return result;
+  }
+  reputationTrackForms(): string {
+    return Array.from({ length: this.reputationTrackCount }, (_, i) => {
+      const prefix = `rep_${i}_`, values = { ...defaultReputationTrackFields(i) };
+      for (const key of Object.keys(values)) if (Object.hasOwn(this.reputationFormFields, prefix + key)) values[key] = this.reputationFormFields[prefix + key];
+      return `<fieldset><legend>Trilha ${i + 1}</legend>${renderReputationTrackFields(prefix, values)}
+        ${this.reputationTrackCount > 1 ? `<button type="button" data-dm-reputation-remove="${i}">Remover esta trilha</button>` : ""}</fieldset>`;
+    }).join("") + '<button type="button" data-dm-reputation-add="true">Adicionar outra trilha</button>';
+  }
+  reputationConfigurationForms(): string {
+    if (!this.list?.isGm || !this.detail?.definitions) return "";
+    const render = (definition?: ReputationTrackDefinition) => {
+      const editing = !!definition, saved = this.reputationConfigurationFields;
+      const matches = editing ? saved.trackId === definition!.id : saved.trackId === "";
+      const values = editing ? reputationTrackDefinitionFields(definition!) : defaultReputationTrackFields();
+      if (matches) {
+        for (const key of Object.keys(values)) if (Object.hasOwn(saved, "config_" + key)) values[key] = saved["config_" + key];
+        values.decayEnabled = saved.config_decayEnabled ?? "";
+      }
+      const reason = matches ? saved.reason ?? "" : "";
+      return `<details ${matches && this.error ? "open" : ""}><summary>${editing ? `Configurar ${escapeHtml(definition!.label)}` : "Adicionar trilha"}</summary>
+        ${editing ? "<p>O intervalo preserva o histórico. Mudanças de política criam uma nova versão; alterações da decadência começam no tempo atual.</p>" : ""}
+        <form data-dm-form="${editing ? "reputation-configure" : "reputation-add-track"}">
+          <input type="hidden" name="trackId" value="${escapeAttribute(definition?.id ?? "")}">
+          ${renderReputationTrackFields("config_", values, editing)}
+          <label>Motivo auditável<input name="reason" required value="${escapeAttribute(reason)}"></label>
+          <button>${editing ? "Salvar configuração" : "Adicionar trilha"}</button></form></details>`;
+    };
+    return '<section><h3>Configuração das trilhas</h3>' + render()
+      + this.detail.tracks.map((t: any) => render(this.detail.definitions.find((d: any) => d.id === t.definitionId && d.version === t.definitionVersion))).join("") + "</section>";
   }
   buildAction(f: Record<string, string>): Result<unknown> {
     if (!this.detail || this.tab === "proposals") return failure("DM_DIPLOMACY_INTENT_INVALID", "Selecione um registro.");
@@ -155,14 +232,18 @@ export class DiplomacyApplicationController {
       ${this.tab !== "proposals" ? '<button type="button" data-dm-create="true">Novo registro</button>' : ""}</aside><main>${this.creating ? this.createForm() : this.detail ? this.inspector() : "<p>Selecione um registro para ver a explicação e o histórico.</p>"}</main></div></div>`;
   }
   createForm(): string {
-    const input = (name: string, label: string, required = true) => `<label>${label}<input name="${name}" ${required ? "required" : ""}></label>`;
+    const input = (name: string, label: string, required = true) => `<label>${label}<input name="${name}" value="${escapeAttribute(this.tab === "reputation" ? this.reputationFormFields[name] ?? "" : "")}" ${required ? "required" : ""}></label>`;
     return `<h2>Novo registro: ${labels[this.tab]}</h2><form data-dm-form="create">${input("label", "Nome")}${this.tab !== "territory" ? input("subject", "Parte / sujeito (UUID de Domínio ou Actor; nome para parte narrativa)") + input("audience", "Outra parte / audiência") : ""}
       ${this.tab !== "reputation" && this.tab !== "territory" ? input("additionalParties", "Outras partes, separadas por vírgula (opcional)", false) : ""}
       ${this.tab === "relations" ? '<label>Postura<select name="stancePolicy"><option value="derived">Derivada dos eixos</option><option value="manual">Manual</option><option value="none">Sem postura</option></select></label>' + input("stance", "Postura inicial (somente manual; opcional)", false)
-        + '<details><summary>Regras avançadas da postura derivada</summary><p>Regras avaliadas na ordem declarada. Cada regra usa id, label, visibility e conditions com axisId, minimum e maximum. Em branco usa confiança, neutralidade e desconfiança pelo eixo de confiança.</p><label>Regras (JSON)<textarea name="stanceRules"></textarea></label></details>' : ""}\n      ${this.tab === "disputes" ? input("territories", "UUIDs dos territórios, separados por vírgula") : ""}${this.visibilityField()}${input("reason", "Motivo auditável")}
+        + '<details><summary>Regras avançadas da postura derivada</summary><p>Regras avaliadas na ordem declarada. Cada regra usa id, label, visibility e conditions com axisId, minimum e maximum. Em branco usa confiança, neutralidade e desconfiança pelo eixo de confiança.</p><label>Regras (JSON)<textarea name="stanceRules"></textarea></label></details>' : ""}\n      ${this.tab === "reputation" ? this.reputationTrackForms() : ""}\n      ${this.tab === "disputes" ? input("territories", "UUIDs dos territórios, separados por vírgula") : ""}${this.visibilityField()}${input("reason", "Motivo auditável")}
       <button>${this.list?.isGm ? "Criar registro" : "Enviar proposta ao GM"}</button></form>`;
   }
-  visibilityField(): string { return '<label>Visibilidade<select name="visibility"><option value="public">Pública</option><option value="restricted">Participantes</option><option value="secret">GM</option></select></label>'; }
+  visibilityField(): string {
+    const selected = this.tab === "reputation" && this.creating ? this.reputationFormFields.visibility ?? "public" : "public";
+    return `<label>Visibilidade<select name="visibility">${[["public", "Pública"], ["restricted", "Participantes"], ["secret", "GM"]].map(([value, label]) =>
+      `<option value="${value}" ${selected === value ? "selected" : ""}>${label}</option>`).join("")}</select></label>`;
+  }
   inspector(): string {
     const d = this.detail; let blocks = `<h2>${escapeHtml(d.label ?? d.id)}</h2><p>Estado: ${escapeHtml(d.lifecycle ?? "active")} · revisão ${d.revision}</p>`;
     const columns: readonly [string, (x: any) => unknown][] = [["Parte", x => refLabel(x.ref ?? x.partyRef ?? x.claimantRef ?? x.beneficiaryRef ?? x)], ["Papel", x => x.role ?? x.claimType ?? x.rightType ?? "—"]];
@@ -177,7 +258,18 @@ export class DiplomacyApplicationController {
           ["Eixo", x => x.axisId], ["Base", x => x.base], ["Efetivo", x => x.effective]]);
     }
     if (d.scores) blocks += table("Eixos", d.scores, [["Eixo", x => x.axisId], ["Base", x => x.base], ["Efetivo", x => x.effective]]);
-    if (d.tracks) blocks += table("Reputação", d.tracks, [["Trilha", x => x.label ?? x.definitionId], ["Faixa / valor", x => x.band?.label ?? x.band ?? x.bandLabel ?? x.score ?? x.value ?? x.presentation]]);
+    if (d.tracks) {
+      blocks += table("Reputação", d.tracks, [["Trilha", x => x.label ?? x.definitionId], ["Faixa / valor", x => x.band?.label ?? x.band ?? x.bandLabel ?? x.score ?? x.value ?? x.presentation]]);
+      if (this.list?.isGm) {
+        blocks += table("Política e valores", d.tracks, [["Trilha", x => x.label], ["Valor", x => x.score], ["Inicial", x => x.initialScore],
+          ["Referência", x => x.baseline], ["Versão", x => x.definitionVersion],
+          ["Decadência", x => x.decay ? `${x.decay.amount} por ${x.decay.periodTicks} ticks; cursor ${x.lastDecayWorldTick}` : "Desativada"],
+          ["Visibilidade", x => x.visibility], ["Apresentação", x => x.publicPresentation]]);
+        blocks += table("Histórico de configuração", d.configurationHistory ?? [], [["Trilha", x => x.trackId], ["Mudança", x => x.kind],
+          ["Antes", x => x.beforeVersion], ["Depois", x => x.afterVersion], ["Motivo", x => x.reason], ["Momento", x => x.at]]);
+        blocks += this.reputationConfigurationForms();
+      }
+    }
     if (d.terms) blocks += table("Termos vigentes", d.terms, [["Termo", x => x.title], ["Descrição", x => x.text]]);
     if (d.proposals) blocks += table("Rodadas de termos", d.proposals, [["Proposta", x => x.id], ["Estado", x => x.lifecycle], ["Revisão", x => x.revision]]);
     if (d.obligations) blocks += table("Obrigações", d.obligations, [["Obrigação", x => x.id], ["Estado", x => x.lifecycle], ["Contestada", x => x.contested ? "Sim" : "Não"]]);
@@ -251,7 +343,9 @@ export class DiplomacyApplication extends BaseApp {
   _onRender(): void { const element = this.element; if (!element || this.#bound.has(element)) return; this.#bound.add(element);
     const fields = (form: HTMLFormElement): Record<string, string> => { const result: Record<string, string> = {}; new FormData(form).forEach((v, k) => { result[k] = String(v).trim(); }); return result; };
     element.addEventListener("click", async (e: Event) => { const button = (e.target as HTMLElement)?.closest?.("button"); if (!button) return;
-      if (button.dataset.dmTab) this.controller.selectTab(button.dataset.dmTab as DiplomacyTab);
+      if (button.dataset.dmReputationAdd) this.controller.addReputationTrackForm(fields(button.closest("form")!));
+      else if (button.dataset.dmReputationRemove !== undefined) this.controller.removeReputationTrackForm(Number(button.dataset.dmReputationRemove), fields(button.closest("form")!));
+      else if (button.dataset.dmTab) this.controller.selectTab(button.dataset.dmTab as DiplomacyTab);
       else if (button.dataset.dmId) this.controller.select(button.dataset.dmId);
       else if (button.dataset.dmPage) this.controller.offset = Math.max(0, this.controller.offset + Number(button.dataset.dmPage) * 30);
       else if (button.dataset.dmHistory) this.controller.historyOffset = Math.max(0, this.controller.historyOffset + Number(button.dataset.dmHistory) * 30);
@@ -266,6 +360,8 @@ export class DiplomacyApplication extends BaseApp {
     element.addEventListener("submit", async (e: SubmitEvent) => { const form = e.target as HTMLFormElement; if (!form.dataset.dmForm) return; e.preventDefault(); const data = fields(form);
       if (form.dataset.dmForm === "search") { this.controller.search = data.search; this.controller.offset = 0; }
       else if (form.dataset.dmForm === "create") await this.controller.create(data);
+      else if (form.dataset.dmForm === "reputation-add-track") await this.controller.configureReputationTrack(data, false);
+      else if (form.dataset.dmForm === "reputation-configure") await this.controller.configureReputationTrack(data, true);
       else if (form.dataset.dmForm === "change") await this.controller.change(data);
       else if (form.dataset.dmForm === "review") await this.controller.review((e.submitter as HTMLButtonElement).value as any, data.reason, data);
       await this.render(true);
