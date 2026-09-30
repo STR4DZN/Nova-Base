@@ -1,0 +1,94 @@
+{
+  "schemaVersion": 1,
+  "part": "G6 reputation track configuration UI",
+  "date": "2026-09-30",
+  "repository": "STR4DZN/Nova-Base",
+  "branch": "feat/g6-continuous",
+  "baseCommit": "18ad4f02fd1656d0a7f92664a336f8776580d859",
+  "validatedCommit": "3f04a5208aaf13beb2cbc4d00cc7fcca7dc83c16",
+  "execution": {
+    "environment": "GitHub Actions ubuntu-latest",
+    "nodeVersion": "22.23.3",
+    "workflow": ".github/workflows/g6-reputation-validation.yml",
+    "runId": 36767688723,
+    "jobId": 110065874459,
+    "runUrl": "https://github.com/STR4DZN/Nova-Base/actions/runs/36767688723",
+    "conclusion": "success",
+    "startedAt": "2026-09-30T19:43:50Z",
+    "completedAt": "2026-09-30T19:44:44Z"
+  },
+  "tests": {
+    "specific": {
+      "tests": 16,
+      "pass": 16,
+      "fail": 0,
+      "skipped": 0
+    },
+    "runtimeVertical": {
+      "tests": 38,
+      "pass": 38,
+      "fail": 0,
+      "skipped": 0,
+      "newTests": 6
+    },
+    "complete": {
+      "tests": 917,
+      "pass": 917,
+      "fail": 0,
+      "skipped": 0
+    },
+    "newTestsThisPart": 22
+  },
+  "checks": {
+    "typecheck": "PASS",
+    "build": "PASS",
+    "package": "PASS",
+    "validateRelease": "PASS"
+  },
+  "validationCorrections": [
+    {
+      "runId": 36766680557,
+      "head": "efdc83f3f025e8836e87730331f6480e8c9ccc6f",
+      "failure": "New integrated test incorrectly unwrapped adapter.read as Result",
+      "correction": "Read raw entity directly and assert presence; preserved conflict and forged-history assertions",
+      "fixCommit": "8dcafbf55d9080b86af20e5d4cbec909ac01957d"
+    },
+    {
+      "runId": 36767428367,
+      "head": "8dcafbf55d9080b86af20e5d4cbec909ac01957d",
+      "complete": {
+        "tests": 917,
+        "pass": 916,
+        "fail": 1
+      },
+      "failure": "Existing BUILD_STATE next action lacked literal Gate G6 required by documentation validator",
+      "correction": "Updated canonical next action without weakening validator; separated workflow concurrency group",
+      "fixCommit": "3f04a5208aaf13beb2cbc4d00cc7fcca7dc83c16"
+    }
+  ],
+  "artifact": {
+    "id": 11122515857,
+    "name": "g6-reputation-candidate",
+    "downloadUrl": "https://github.com/STR4DZN/Nova-Base/actions/runs/36767688723/artifacts/11122515857",
+    "sizeBytes": 797919,
+    "containerDigest": "sha256:5cf57fa5ed4b43125bdcc34a1ccc2cd046bbd6dde911361633eed92f5920fda2",
+    "digestScope": "GitHub uploaded artifact container containing evidence and installable module ZIP",
+    "expiresAt": "2026-10-14T19:44:40Z",
+    "installableZip": "dist/domain-manager-v0.0.8.zip"
+  },
+  "boundaries": {
+    "foundryRealExecuted": false,
+    "hostAndTransportDoubles": true,
+    "gateG6Accepted": false,
+    "gateG7Started": false,
+    "releasePublishedThisPart": false,
+    "stoppedAfterThisPart": true
+  },
+  "remaining": [
+    "Foundry UI/GM/Player/F5/transport/storage smoke",
+    "Advanced history filters and source breakdown",
+    "Composite integration with other G6 owners",
+    "General Scheduler in G8"
+  ],
+  "report": "docs/G6_REPUTATION_CONFIGURATION_REPORT.md"
+}

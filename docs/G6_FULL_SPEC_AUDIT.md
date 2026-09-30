@@ -4,6 +4,8 @@
 
 **Atualização por partes — postura:** resolver derivado por eixos/direções, postura manual auditada e UI concluídos nesta parte; 895/895 testes PASS, TypeScript/build/package PASS em GitHub Actions. Ver `docs/G6_STANCE_REPORT.md`. Não fecha as demais linhas do Gate.
 
+**Atualização por partes — configuração de reputação:** criação com múltiplas trilhas, faixas, privacidade, apresentação e decadência; adição/edição de políticas pelo GM com versões e histórico preservados. 917/917 testes PASS e TypeScript/build/package/validate:release PASS no GitHub Actions. Resultado e evidência em `docs/G6_REPUTATION_CONFIGURATION_REPORT.md` e `docs/evidence/G6_REPUTATION_CONFIGURATION_VALIDATION.json`. Não fecha as demais linhas do Gate.
+
 Data: 2026-09-30. Projeto: `STR4DZN/Nova-Base`, branch `feat/g6-continuous`. Escopo: Gate G6, sem iniciar G7. Esta auditoria substitui a interpretação anterior de que faltava apenas smoke para fechar todo o plano.
 
 **Veredito: não é possível confirmar 100% de implementação ou de homologação.** O núcleo dos quatro subsistemas existe, mas há funcionalidades previstas ainda ausentes/parciais e verificação real Foundry pendente. Esta revisão encontrou quatro defeitos concretos no núcleo, reproduziu cada um por teste, corrigiu-os e retestou. O candidato corrigido serve para smoke dos fluxos implementados; não é fechamento do Gate.
@@ -36,7 +38,7 @@ Não se calcula uma porcentagem por contagem de linhas: requisitos têm pesos e 
 |---|---|---|
 | G6.1 Definitions/instances | PARCIAL | `relations/types`, registry versionado, parties/scopes/axes/lifecycle e unicidade corrigida no comando. Postura derivada por eixos/direções, regras de Definition e edição manual auditada/UI implementadas e testadas nesta parte. Snapshots antigos derived sem regras permanecem explicitamente sem configuração; integrações compostas são pendência separada. |
 | G6.2 Modifiers/history | IMPLEMENTADO LOCAL | `relation-history.ts`: base separada, stacking, incidentes, reversão exata, expiração e histórico após término; testes unitários e verticais. Incidentes compostos com outras fontes não têm um fluxo geral público. |
-| G6.3 Reputation | PARCIAL | Tracks/audiences, entries, reversão, decadência e bandas funcionam. UI não configura múltiplos tracks/policies/decay; draft padrão possui decay null. |
+| G6.3 Reputation | PARCIAL | Tracks/audiences, entries, reversão, decadência e bandas funcionam. UI cria múltiplas trilhas e configura faixas, visibilidade, apresentação e decadência; GM adiciona trilhas/edita políticas com histórico e snapshots versionados. Filtros de histórico e integrações compostas permanecem pendentes; Scheduler pertence a G8. |
 | G6.4 Agreements | PARCIAL | Propose/counter/accept/reject/activate/amend/renew/expire têm modelo e testes. UI não oferece renew/expire-proposal e não mostra diff completo das rodadas. |
 | G6.5 Obligations/rights/grants | PARCIAL | Evidência, alegação, contestação, decisão e grant derivado; owner econômico real. Outros owners/term providers não têm extensão pública instalada; direitos sem capabilities não possuem consulta pública completa de effective rights. |
 | G6.6 Hierarchy | PARCIAL | Árvores/eixos, raízes, ciclos, revisões, preview puro e histórico. O preview público/UI não mostra toda a lista de impactos herdados calculada pelo modelo de hierarquia. |
@@ -53,7 +55,7 @@ As referências R08 abaixo são subseções do register congelado anexado ao Mas
 |---|---|---|
 | 1.1 | Definition/Instance, refs, multiparty, symmetry, scopes, lifecycle | IMPLEMENTADO LOCAL; integração com party providers externos é indisponível e rejeitada, sem execução fictícia. |
 | 1.2 | Axes, stance, modifiers | IMPLEMENTADO AUTOMATED: axes/ranges/modifiers, postura derivada por regras e direções, postura manual projetada/editável na UI, razões por eixos e sigilo. Configuração antiga sem regras permanece explícita; não houve migração silenciosa. |
-| 1.3 | Subject/audience, tracks, entries, decay, bands | IMPLEMENTADO LOCAL no modelo; configuração de tracks/decay por UI é parcial. |
+| 1.3 | Subject/audience, tracks, entries, decay, bands | IMPLEMENTADO AUTOMATED no modelo e na configuração pela UI; múltiplas trilhas, faixas, apresentação, privacidade e decay configuráveis, edição GM auditada e proposta de criação com tempo da aprovação. Smoke real pendente. |
 | 1.4 | Agreements independentes, terms e lifecycle | IMPLEMENTADO LOCAL para termos nativos; extensões via novos owners/providers são parciais. |
 | 1.5 | Ownership/admin/control/presence/influence/access; competing/secret claims | IMPLEMENTADO LOCAL; não escolhe vencedor nem exige força universal. |
 | 2.1 | Events/incidents, corrections, refs/time/effects | PARCIAL: append/reversal/modifiers funcionam; attribution contestada e incidente composto Relation→Reputation não têm fluxo completo. |
@@ -81,7 +83,7 @@ As referências R08 abaixo são subseções do register congelado anexado ao Mas
 | 4.8 | Occupation lifecycle, control/presence sem ownership automático | IMPLEMENTADO LOCAL no modelo/API; UI de occupation/withdrawal e policies é parcial. |
 | 4.9 | Secrets/intelligence/discovery/rumor | PARCIAL: visibility local e projeção antes do socket; Knowledge/discovery/rumor completos pertencem a G7. Sigilo do storage no servidor permanece pendente. |
 | 5.1 | Diplomacy Overview com mudanças/expiring/breaches/disputes/inbox | PARCIAL: navegação unificada existe; overview priorizado de atenção não existe. |
-| 5.2 | Reputation UI tracks/bands/GM breakdown/history/filtering | PARCIAL: tracks/bands/history básicos; falta configuração e breakdown completo de decay/sources/filtros. |
+| 5.2 | Reputation UI tracks/bands/GM breakdown/history/filtering | PARCIAL: configuração de múltiplas trilhas/faixas/policies/decay e breakdown GM de valores, versões e cursor implementados; histórico de configuração separado e projeção Player sanitizada. Faltam filtros avançados, breakdown completo de fontes e integração com atividade. |
 | 5.3 | Agreement dashboard/details/due/compliance/evidence/amendments/round diff | PARCIAL: dados básicos no DTO; UI não mostra due/compliance/evidence/amendments e diff de rounds de forma completa. |
 | 5.4 | Territory dashboard com claims/recognition/influence/rights/related aggregates | PARCIAL: claims/presence/influence/rights/occupation/links; recognition, disputes relacionados, Facilities/população e inherited effective state incompletos. |
 | 5.5 | Controller proposals/inbox/approve/reject/edit preserving original | PARCIAL: backend completo para intent suportado; GUI edita delta/revision, não qualquer proposta estruturada. |
@@ -158,7 +160,7 @@ Arquivos de produção alterados apenas no cluster G6: `diplomacy/owner-commands
 
 Prioridades antes de fechar G6:
 
-1. Completar stance/policies e suas projeções sem inventar thresholds universais; implementar/enquadrar templates versionados separados de Definitions.
+1. Completar razões compostas de stance com Agreements/Reputation/Disputes, sem inventar thresholds universais; implementar/enquadrar templates versionados separados de Definitions. Configuração de postura e de trilhas de reputação possuem relatórios próprios.
 2. Completar overview, detalhes/ações/formulários G6, diff de negotiation/review, recognition/links/influence/occupation, renewal, preview de impacts e fluxo público seguro de retry/status.
 3. Completar diagnostics/read models/consumer contracts necessários; resolver as lacunas de direitos/effects/integrations e os guards especializados de refs.
 4. Medir/corrigir scans/cache/memória nos fluxos quentes; cobrir cenários de escala e audiência suficientes, sem antecipar business dos gates seguintes.

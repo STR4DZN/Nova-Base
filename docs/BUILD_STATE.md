@@ -9,6 +9,16 @@
 - Schema Domain: `1`
 - Data de conclusão do Gate G5: `2026-09-21`
 
+## Parte G6 — Configuração das trilhas de reputação — 2026-09-30
+
+- Instrução atual: executar parte por parte, testar, registrar e parar. Esta tarefa cobre somente configuração de trilhas pela UI.
+- Criação com múltiplas trilhas, faixas, intervalo/baseline/valor inicial, visibilidade, apresentação e decadência opcional. GM adiciona trilhas e configura políticas de registro existente.
+- Versões globais livres sob catalog lock, snapshots e entries preservados, no-op/revisão, histórico de configuração e cursor ancorado no tempo da autoridade/aprovação. DTO Player sanitizado; configuração de políticas existentes é exclusiva do GM.
+- **917/917 testes PASS** (22 novos); específicos 16/16, verticais 38/38. TypeScript/build/package/validate:release PASS. Commit validado `3f04a5208aaf13beb2cbc4d00cc7fcca7dc83c16`; workflow `36767688723` SUCCESS.
+- Relatório: `docs/G6_REPUTATION_CONFIGURATION_REPORT.md`. Evidência: `docs/evidence/G6_REPUTATION_CONFIGURATION_VALIDATION.json`. ZIP/logs no artifact; nenhuma release publicada nesta parte.
+- Filtros/breakdown de fontes, integrações compostas, demais linhas G6 e verificação Foundry real continuam pendentes. Scheduler geral pertence a G8.
+- **PARAR AQUI.** Aguardar próxima parte; G6 parcial e G7 não iniciado.
+
 ## Parte G6 — Postura das relações — 2026-09-30
 
 - Instrução atual do usuário: executar parte por parte, testar, registrar e parar. Esta tarefa cobre somente postura das relações.
@@ -569,7 +579,7 @@ Candidata v0.0.8: 13 defeitos reproduzidos/corrigidos; 878/878 testes locais PAS
 
 ## Próxima ação canônica
 
-- **Gate G6 — Reputation: configuração de trilhas em validação**, após a aceitação do Gate G5. Esta parte cobre múltiplas trilhas, faixas, privacidade e decadência na UI, com edição auditada. Testes específicos e verticais PASS; suíte completa e pacote ainda em validação. Ao concluir, registrar e parar; aguardar escolha da próxima parte. Gate G6 permanece parcial; matriz em `docs/G6_FULL_SPEC_AUDIT.md`.
+- **Gate G6 — Reputation: configuração de trilhas concluída nesta parte**, após a aceitação do Gate G5. **917/917 testes PASS**, TypeScript/build/package/validate:release PASS. Relatório `docs/G6_REPUTATION_CONFIGURATION_REPORT.md`; evidência `docs/evidence/G6_REPUTATION_CONFIGURATION_VALIDATION.json`. **PARAR AQUI** e aguardar escolha da próxima parte pelo usuário. Gate G6 permanece parcial; smoke Foundry real e demais linhas da matriz continuam pendentes. Não iniciar G7.
 - Publicação solicitada pelo usuário em 2026-09-30 e concluída na conta verificada `STR4DZN/Nova-Base`, branch `feat/g6-continuous`. Workflow `36718651288` PASS; prerelease `v0.0.7` com manifest, ZIP e roteiro de teste disponíveis. Publicação não significa homologação do G6.
 - Gates G0–G5 aceitos pelo usuário; smoke da candidata G6 aprovado pelo usuário em 2026-09-30. G6 aguarda conclusão das pendências normativas antes da aceitação integral. **Não iniciar G7**.
 - Candidata G6 `0.0.7` publicada. Manifest: `https://github.com/STR4DZN/Nova-Base/releases/download/v0.0.7/module.json`. Manifest e ZIP públicos foram baixados e comparados byte a byte com os artefatos validados. Evidência: `docs/evidence/G6_RELEASE_PUBLICATION.json`.
