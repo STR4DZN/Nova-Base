@@ -569,7 +569,7 @@ Candidata v0.0.8: 13 defeitos reproduzidos/corrigidos; 878/878 testes locais PAS
 
 ## Próxima ação canônica
 
-- **Execução pausada ao concluir a parte de postura das relações** (895/895 PASS; relatório `docs/G6_STANCE_REPORT.md`). Aguardar escolha da próxima parte pelo usuário. G6 permanece parcial; matriz em `docs/G6_FULL_SPEC_AUDIT.md`. Smoke Foundry continua independente e não fecha recursos ausentes.
+- **Gate G6 — Reputation: configuração de trilhas em validação**, após a aceitação do Gate G5. Esta parte cobre múltiplas trilhas, faixas, privacidade e decadência na UI, com edição auditada. Testes específicos e verticais PASS; suíte completa e pacote ainda em validação. Ao concluir, registrar e parar; aguardar escolha da próxima parte. Gate G6 permanece parcial; matriz em `docs/G6_FULL_SPEC_AUDIT.md`.
 - Publicação solicitada pelo usuário em 2026-09-30 e concluída na conta verificada `STR4DZN/Nova-Base`, branch `feat/g6-continuous`. Workflow `36718651288` PASS; prerelease `v0.0.7` com manifest, ZIP e roteiro de teste disponíveis. Publicação não significa homologação do G6.
 - Gates G0–G5 aceitos pelo usuário; smoke da candidata G6 aprovado pelo usuário em 2026-09-30. G6 aguarda conclusão das pendências normativas antes da aceitação integral. **Não iniciar G7**.
 - Candidata G6 `0.0.7` publicada. Manifest: `https://github.com/STR4DZN/Nova-Base/releases/download/v0.0.7/module.json`. Manifest e ZIP públicos foram baixados e comparados byte a byte com os artefatos validados. Evidência: `docs/evidence/G6_RELEASE_PUBLICATION.json`.
