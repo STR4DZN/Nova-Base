@@ -1,0 +1,222 @@
+{
+  "date": "2026-10-01",
+  "part": "G6 territory links",
+  "branch": "feat/g6-continuous",
+  "validated_source_commit": "e0a0d44fd4a373cb80c17adccdea348e51a17bcc",
+  "scope": "TerritoryLink creation, visible paged destinations, operational status, Player proposal and structured GM review",
+  "local": {
+    "node": "24.19.0",
+    "specific": {
+      "tests": 17,
+      "pass": 17,
+      "fail": 0,
+      "skipped": 0
+    },
+    "runtime": {
+      "tests": 92,
+      "pass": 92,
+      "fail": 0,
+      "skipped": 0
+    },
+    "full": {
+      "tests": 1106,
+      "pass": 1106,
+      "fail": 0,
+      "skipped": 0
+    },
+    "new_tests": 30,
+    "typecheck": "PASS",
+    "build": "PASS",
+    "package": "PASS",
+    "validate_release": "PASS",
+    "zip": {
+      "path": "dist/domain-manager-v0.0.8.zip",
+      "sha256": "9009c0f5b09e3f68a55b25c7aa678934f8c097c8b35c5702bcf0398aa73c9d15"
+    }
+  },
+  "ci": {
+    "node": "22.23.3",
+    "os": "Ubuntu 24.04.5",
+    "workflow_run_id": 36889612860,
+    "url": "https://github.com/STR4DZN/Nova-Base/actions/runs/36889612860",
+    "job_id": 110461598746,
+    "conclusion": "success",
+    "counts": [
+      {
+        "tests": 17,
+        "pass": 17,
+        "fail": 0,
+        "skipped": 0
+      },
+      {
+        "tests": 92,
+        "pass": 92,
+        "fail": 0,
+        "skipped": 0
+      },
+      {
+        "tests": 1106,
+        "pass": 1106,
+        "fail": 0,
+        "skipped": 0
+      }
+    ],
+    "steps": [
+      {
+        "name": "Set up job",
+        "conclusion": "success"
+      },
+      {
+        "name": "Run actions/checkout@v4",
+        "conclusion": "success"
+      },
+      {
+        "name": "Run actions/setup-node@v4",
+        "conclusion": "success"
+      },
+      {
+        "name": "Install locked dependencies",
+        "conclusion": "success"
+      },
+      {
+        "name": "TypeScript and targeted link tests",
+        "conclusion": "success"
+      },
+      {
+        "name": "Complete regression and installable candidate validation",
+        "conclusion": "success"
+      },
+      {
+        "name": "Preserve evidence and reviewable candidate",
+        "conclusion": "success"
+      },
+      {
+        "name": "Post Run actions/setup-node@v4",
+        "conclusion": "success"
+      },
+      {
+        "name": "Post Run actions/checkout@v4",
+        "conclusion": "success"
+      },
+      {
+        "name": "Complete job",
+        "conclusion": "success"
+      }
+    ],
+    "triggered_workflows": [
+      {
+        "id": 36889612747,
+        "name": "Validate G6 diplomacy overview",
+        "head_sha": "e0a0d44fd4a373cb80c17adccdea348e51a17bcc",
+        "conclusion": "success",
+        "url": "https://github.com/STR4DZN/Nova-Base/actions/runs/36889612747"
+      },
+      {
+        "id": 36889612860,
+        "name": "Validate G6 territory links",
+        "head_sha": "e0a0d44fd4a373cb80c17adccdea348e51a17bcc",
+        "conclusion": "success",
+        "url": "https://github.com/STR4DZN/Nova-Base/actions/runs/36889612860"
+      },
+      {
+        "id": 36889612462,
+        "name": "Validate G6 agreement negotiation",
+        "head_sha": "e0a0d44fd4a373cb80c17adccdea348e51a17bcc",
+        "conclusion": "success",
+        "url": "https://github.com/STR4DZN/Nova-Base/actions/runs/36889612462"
+      },
+      {
+        "id": 36889612561,
+        "name": "Validate G6 reputation configuration",
+        "head_sha": "e0a0d44fd4a373cb80c17adccdea348e51a17bcc",
+        "conclusion": "success",
+        "url": "https://github.com/STR4DZN/Nova-Base/actions/runs/36889612561"
+      },
+      {
+        "id": 36889612610,
+        "name": "Validate G6 reputation history",
+        "head_sha": "e0a0d44fd4a373cb80c17adccdea348e51a17bcc",
+        "conclusion": "success",
+        "url": "https://github.com/STR4DZN/Nova-Base/actions/runs/36889612610"
+      },
+      {
+        "id": 36889612435,
+        "name": "Validate G6 relation stance",
+        "head_sha": "e0a0d44fd4a373cb80c17adccdea348e51a17bcc",
+        "conclusion": "success",
+        "url": "https://github.com/STR4DZN/Nova-Base/actions/runs/36889612435"
+      },
+      {
+        "id": 36889612770,
+        "name": "Validate G6 territory recognition",
+        "head_sha": "e0a0d44fd4a373cb80c17adccdea348e51a17bcc",
+        "conclusion": "success",
+        "url": "https://github.com/STR4DZN/Nova-Base/actions/runs/36889612770"
+      },
+      {
+        "id": 36889612506,
+        "name": "Validate G6 agreement inspector",
+        "head_sha": "e0a0d44fd4a373cb80c17adccdea348e51a17bcc",
+        "conclusion": "success",
+        "url": "https://github.com/STR4DZN/Nova-Base/actions/runs/36889612506"
+      },
+      {
+        "id": 36889612476,
+        "name": "Validate G6 agreement term editor",
+        "head_sha": "e0a0d44fd4a373cb80c17adccdea348e51a17bcc",
+        "conclusion": "success",
+        "url": "https://github.com/STR4DZN/Nova-Base/actions/runs/36889612476"
+      },
+      {
+        "id": 36889612323,
+        "name": "Validate G6 agreement dashboard",
+        "head_sha": "e0a0d44fd4a373cb80c17adccdea348e51a17bcc",
+        "conclusion": "success",
+        "url": "https://github.com/STR4DZN/Nova-Base/actions/runs/36889612323"
+      }
+    ],
+    "artifact": {
+      "id": 11175747351,
+      "name": "g6-territory-links-candidate",
+      "size_in_bytes": 881951,
+      "digest": "sha256:9ec94cde593860405d5b82e75025c95e87d7696efe19397da89ea139b37b73c8",
+      "expires_at": "2026-10-15T16:08:21Z",
+      "note": "Digest identifies the GitHub artifact container containing ZIP, logs and report; it is not the isolated installable ZIP hash."
+    },
+    "extracted_log": "docs/evidence/G6_TERRITORY_LINKS_CI_SUMMARY.log"
+  },
+  "reproduced_before_fix": {
+    "previous_runtime_tests_pass": 79,
+    "new_tests_fail": 3,
+    "defects": [
+      "Player proposal admitted inaccessible secret/restricted destinations",
+      "Player status proposal admitted secret link by guessed ID",
+      "GM revised private destination exposed through approved Player proposal"
+    ]
+  },
+  "verification": [
+    "Uniform missing/private/fenced destination admission",
+    "Fresh persisted source/link/destination audience",
+    "Visible restricted destination and private new request",
+    "Create-intent link admission",
+    "Audited creation/status with no economic or reciprocal effects",
+    "Player proposal and GM edited review preserve original identity",
+    "Stale draft/approval and explicit target revision",
+    "Exact ticket replay and reload",
+    "Pagination and pinned selection outside current page",
+    "Fenced destination approval blocked; rejection writes proposal only"
+  ],
+  "fixture_corrections": [
+    "Ledger comparison uses persisted snapshot rather than cloned class prototype",
+    "Input capture consolidated into one listener compatible with existing binding fixture"
+  ],
+  "limitations": [
+    "Foundry real deferred until G6 implementation block complete",
+    "Cost/capacity/dependencyRefs declarative; no route computation/economic operation/reciprocal link/transit rights",
+    "Existing owner supports addition and status updates, not editing all persisted link fields",
+    "Specialized dependency providers and remaining G6 integrations/diagnostics/scale stay partial"
+  ],
+  "release_published": false,
+  "g7_started": false,
+  "next_step": "Territorial influence forms with axes and modifiers"
+}

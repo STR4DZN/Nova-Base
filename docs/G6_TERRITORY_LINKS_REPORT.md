@@ -25,11 +25,13 @@ A projeção aprovada reavalia source/link/destino com estado fresco; quando ind
 
 ## Validação
 
-Local: **1106/1106 testes PASS**, 0 falhas/skips (30 novos: 17 de UI e 13 verticais). Específicos: 17/17; verticais: 92/92. TypeScript, build, package e validate:release PASS. Node local 24.19.0; CI pendente, configurado para Node 22 em Ubuntu. O workflow específico guarda logs e ZIP candidato, sem publicar release.
+Local: **1106/1106 testes PASS**, 0 falhas/skips (30 novos: 17 de UI e 13 verticais). Específicos: 17/17; verticais: 92/92. TypeScript, build, package e validate:release PASS. Node local 24.19.0; CI Node **22.23.3**, Ubuntu **24.04.5**, confirmado pelos logs. Commit validado `e0a0d44fd4a373cb80c17adccdea348e51a17bcc`; [workflow 36889612860](https://github.com/STR4DZN/Nova-Base/actions/runs/36889612860) **SUCCESS** e dez workflows aprovados para o mesmo commit. Job `110461598746`; contagens CI 17/17, 92/92 e 1106/1106, 0 falhas/skips. O workflow específico guarda logs e ZIP candidato, sem publicar release.
 
 Cenários incluem parsing/janelas/zero/dependências/HTML; drafts/revisão/review/bindings; criação/estados auditados; público/restrito/secreto/inexistente; mudança de visibilidade persistida; fences; concorrência; retries/reload; paginação/seleção preservada e ausência de efeitos econômicos/recíprocos.
 
 Dois ajustes de fixture foram necessários durante a regressão: comparar o snapshot do ledger em vez do protótipo de uma classe clonada; consolidar captura de input em um listener para manter o mock de bindings existente. Não são registrados como os três defeitos de segurança reproduzidos.
+
+Evidência permanente: `docs/evidence/G6_TERRITORY_LINKS_VALIDATION.json` e `docs/evidence/G6_TERRITORY_LINKS_CI_SUMMARY.log`. Artifact `g6-territory-links-candidate`, ID `11175747351`, expira em 2026-10-15; contém ZIP/logs/relatório. Digest do container: `sha256:9ec94cde593860405d5b82e75025c95e87d7696efe19397da89ea139b37b73c8`. SHA256 do ZIP instalável local: `9009c0f5b09e3f68a55b25c7aa678934f8c097c8b35c5702bcf0398aa73c9d15`. São hashes de objetos diferentes.
 
 ## Limites e próxima parte
 
