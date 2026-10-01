@@ -1,0 +1,32 @@
+{
+  "date": "2026-10-01",
+  "part": "G6 structured territorial rights grant and revocation forms",
+  "branch": "feat/g6-continuous",
+  "local": {
+    "node": "24.19.0",
+    "specific": 15,
+    "runtime": 184,
+    "full": 1288,
+    "new_tests": 29,
+    "fail": 0,
+    "skipped": 0,
+    "typecheck": "PASS",
+    "build": "PASS",
+    "package": "PASS",
+    "validate_release": "PASS",
+    "zip_sha256": "0d0cda11db08c0dfdb9a8a468d6e504fd37e41b41d250a956c2059e6e3714283"
+  },
+  "ci": {
+    "conclusion": "pending"
+  },
+  "foundry_real": "deferred until G6 complete",
+  "release_published": false,
+  "g7_started": false,
+  "next_step": "Safe command ticket/retry/status flow in diplomacy UI, preserving commandId on error/timeout",
+  "limitations": [
+    "Six canonical beneficiary types and 100 conditions in the structured editor",
+    "Conditions are typed declarations; arbitrary addon existence/audience and provider dependency locks are not resolved by this form",
+    "No general capability/access-policy enforcement or scale benchmark",
+    "UI recovery of unknown command outcome remains the next bounded task"
+  ]
+}

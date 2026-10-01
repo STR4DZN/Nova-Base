@@ -1,4 +1,6 @@
 import { territoryOccupationIntentVisible } from "./territory-occupation-visibility.js";
+import { territoryRightIntentVisible } from "./territory-right-visibility.js";
+import { cleanRightRef } from "../territory/territory-rights-view-model.js";
 import { ok, type Result } from "../core/contracts/result.js";
 import { failure, immutable, isJsonData, isRecord, isText, isTimestamp, revisionGuard } from "../core/validation/value-validation.js";
 import { createTransactionalHandler } from "../commands/command-registry.js";
@@ -61,6 +63,9 @@ export function registerDiplomacyProposals(o: OwnerCommandOptions): void {
       && !await territoryOccupationIntentVisible(intent, valid.value as TerritoryState, ctx, o, false))
       return failure("DM_TERRITORY_OCCUPATION_UNAVAILABLE", "Occupation reference unavailable", "not-found");
     // Validate the semantic proposal now; approval repeats this against freshly locked state.
+    if (!diplomacyViewerIsGm(ctx) && intent.kind === "territory"
+      && !await territoryRightIntentVisible(intent, valid.value as TerritoryState, ctx, o, false))
+      return failure("DM_TERRITORY_RIGHT_UNAVAILABLE", "Right reference unavailable", "not-found");
     const prepared = await prepareOwnerIntent(intent, ctx, o); if (!prepared.ok) return prepared;
     const data: DiplomacyProposal = { id: p.id, revision: 0, label: owner.identity(valid.value).label, visibility: "restricted", lifecycle: "pending",
       requesterUserId: ctx.senderUserId, createdAt: ctx.receivedAtReal, original: structuredClone(intent), decision: null };
@@ -88,6 +93,13 @@ export function registerDiplomacyProposals(o: OwnerCommandOptions): void {
     const approvedIntent = p.decision === "approve" ? (p.editedIntent ?? proposal.original) as OwnerIntent : null;
     if (approvedIntent && (approvedIntent.id !== proposal.original.id || approvedIntent.kind !== proposal.original.kind || approvedIntent.mode !== proposal.original.mode))
       return failure("DM_DIPLOMACY_PROPOSAL_INVALID", "Edited review must preserve target identity and operation mode");
+    if (approvedIntent && proposal.original.kind === "territory" && proposal.original.mode === "modify" && isRecord(proposal.original.action)
+      && ["right", "revoke-right"].includes(proposal.original.action.kind as string)) {
+      const original = proposal.original.action, edited = approvedIntent.action;
+      if (!isRecord(edited) || edited.kind !== original.kind || (original.kind === "revoke-right" ? edited.id !== original.id
+        : !isRecord(edited.value) || !isRecord(original.value) || edited.value.id !== original.value.id))
+        return failure("DM_DIPLOMACY_PROPOSAL_INVALID", "Right review must preserve action and local source identity");
+    }
     const prepared = approvedIntent ? await prepareOwnerIntent(approvedIntent, ctx, o) : ok({ writes: [], effects: [], result: null }); if (!prepared.ok) return prepared;
     const data: DiplomacyProposal = { ...proposal, revision: 1, lifecycle: approvedIntent ? "approved" : "rejected",
       decision: { reviewerUserId: ctx.senderUserId!, at: ctx.receivedAtReal, reason: p.reason, approvedIntent } };
@@ -133,6 +145,19 @@ export function registerDiplomacyProposals(o: OwnerCommandOptions): void {
           const source = await visibleTerritory(approved.id, ctx, o);
           if (!source || !await territoryOccupationIntentVisible(approved, source, ctx, o))
             return ok({ ...proposal, decision: { ...proposal.decision, approvedIntent: null } });
+        }
+        if (approved.kind === "territory" && (approved.mode === "create" || isRecord(approved.action) && ["right", "revoke-right"].includes(approved.action.kind as string))) {
+          const source = await visibleTerritory(approved.id, ctx, o);
+          if (!source || !await territoryRightIntentVisible(approved, source, ctx, o))
+            return ok({ ...proposal, decision: { ...proposal.decision, approvedIntent: null } });
+          if (approved.mode === "modify" && isRecord(approved.action) && approved.action.kind === "right") {
+            const r = approved.action.value as TerritoryState["rights"][number];
+            const cleanTyped = (ref: typeof r.sourceRef) => ({ type: ref.type, ...(ref.id !== undefined ? { id: ref.id } : {}), ...(ref.uuid !== undefined ? { uuid: ref.uuid } : {}) });
+            const value = { id: r.id, sourceRef: cleanTyped(r.sourceRef), beneficiaryRef: cleanRightRef(r.beneficiaryRef), rightType: r.rightType,
+              visibility: r.visibility, startsAtWorldTick: r.startsAtWorldTick, expiresAtWorldTick: r.expiresAtWorldTick,
+              inherited: r.inherited, revocable: r.revocable, active: r.active, conditionRefs: r.conditionRefs.map(cleanTyped), grants: [...r.grants] };
+            return ok({ ...proposal, decision: { ...proposal.decision, approvedIntent: { ...approved, action: { kind: "right", value } } } });
+          }
         }
         return ok({ ...proposal, decision: { ...proposal.decision, approvedIntent: redact(approved) } }); }
       const available = visible.filter(x => o.recovery.fenceRegistry.assertKeysAvailable([lockKey.diplomacy("proposal", x.id)]).ok);

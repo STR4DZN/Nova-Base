@@ -1,0 +1,223 @@
+npm warn Unknown env config "http-proxy". This will stop working in the next major version of npm.
+
+> domain-manager@0.0.8 test
+> node tests/run-tests.mjs g6-runtime-vertical.test.ts
+
+✔ review G6: public tickets retry the same intent once and status authenticates remote callers (40.617338ms)
+✔ review G6: dispute participation cannot disclose another territory's restricted claim (11.162428ms)
+✔ review G6: agreement creation cannot fabricate owner execution receipts (4.665672ms)
+✔ review G6: durable proposal replay remains bound to the original authenticated proposer after reload (9.338738ms)
+✔ G6.9 runtime: composed owners, immutable facade and durable semantic state survive reload (7.93583ms)
+✔ G6.9 runtime: authenticated remote sender cannot forge GM or inspect secrets (8.527994ms)
+✔ G6.9 runtime: durable command dedupe persists after process restart (4.756991ms)
+✔ G6.9 runtime: uncertain storage is fenced and recovered forward from durable intent (5.247506ms)
+✔ G6.9 runtime: shared location hierarchy rejects missing/cyclic parent through semantic command (7.074852ms)
+✔ G6.9 persistence: canonical journals have neutral names and deny public ownership (2.372012ms)
+✔ G6.9 proposals: controller proposes, GM edits and approves atomically, original survives reload (10.896321ms)
+✔ G6.9 proposals: stale approval fails closed and rejection preserves the request (12.594433ms)
+✔ G6.9 UI: draft forms create each owner through authority and open a paginated escaped inspector (24.848034ms)
+✔ G6.9 UI: territorial preview binds the confirmed payload and stale/edited fields require another preview (9.100106ms)
+✔ G6.9 agreements: real economic owner executes once on activation, remains once after suspend/resume and restart (66.742421ms)
+✔ G6.10 security: recovery journals deny observer access to secret before/after images (0.46958ms)
+✔ G6.10 recovery: partial batch transfer is isolated and completed without erasing competing claims (15.85073ms)
+✔ G6.10 recovery: divergent canonical state is never overwritten by automatic recovery (2.974952ms)
+✔ G6.10 grants: authority applies source visibility, conditions, scope and expiry before provenance (16.148764ms)
+✔ G6.10 tree and scale: indexed branches are independent and list pagination excludes secret counts (31.648991ms)
+✔ G6.10 security: public territory cannot expose private parent, target or unclassified metadata (5.63981ms)
+✔ G6.10 security: GM-only changes to a reviewed proposal stay on the authority (7.756555ms)
+✔ G6.10 effects: economic receipt is reconciled after lost parent-save response without paying twice (31.573215ms)
+✔ G6.10 effects: unavailable owner prevents activation before any canonical write (17.369044ms)
+✔ G6.10 obligations: due date only reports; explicit confirmed breach may apply owner consequence once (47.489664ms)
+✔ G6.10 reference guards: transfer cannot introduce a missing Domain, and embedded People parties require their owner record (3.284945ms)
+✔ G6 audit: authority enforces relation uniqueness policy and independent scopes (7.814974ms)
+✔ G6 audit: inherited treaty rights reach descendants without becoming global or copied truth (30.957557ms)
+✔ G6 audit: restricted territory access uses all participating party types consistently (7.709319ms)
+✔ G6 audit: public reputation and influence DTOs discard undeclared party metadata (5.429151ms)
+✔ G6 stance vertical: Player proposes a manual stance; GM approval, retry and reload preserve a single audit event (12.027409ms)
+✔ G6 stance vertical: secret temporary sources affect only GM classification through the real public API (5.381522ms)
+✔ G6 reputation configuration vertical: UI creates multiple tracks with an authority clock and private presentation (9.222079ms)
+✔ G6 reputation configuration vertical: edit, same-ticket retry, no-op and reload preserve versions and one audit (14.980784ms)
+✔ G6 reputation configuration vertical: concurrent edits of shared content allocate distinct immutable versions (10.265864ms)
+✔ G6 reputation configuration vertical: conflicting shared snapshots and fabricated creation audit are rejected (6.87854ms)
+✔ G6 reputation configuration vertical: policy edits and probing secret track policies are GM-only (2.737846ms)
+✔ G6 reputation configuration vertical: proposed creation activates decay on approval, ignoring client clock (5.21499ms)
+✔ G6 agreement negotiation vertical: UI deadline expires only at authority tick and resets initial lifecycle (9.737077ms)
+✔ G6 agreement negotiation vertical: manual UI renewal preserves terms/rights, exact ticket retry and reload (31.932571ms)
+✔ G6 agreement negotiation vertical: sanitized round diff and reset votes use real owner and survive reload (54.852471ms)
+✔ G6 agreement negotiation vertical: Player UI renewal waits for GM approval and records original intent (35.884741ms)
+✔ G6 agreement negotiation vertical: expired amendment keeps active terms and same expiration ticket is a no-op (49.776481ms)
+✔ G6 agreement negotiation vertical: UI amendment without reapproval receives unique audit ID (25.930811ms)
+✔ G6 agreement inspector vertical: authority clock drives read-only due/grace and reload preserves stored state (21.721963ms)
+✔ G6 agreement inspector vertical: Player selected evidence waits for GM and durable retry records once (42.961054ms)
+✔ G6 agreement inspector vertical: private snapshots/evidence stay absent after approved amendment and reload (98.637544ms)
+✔ G6 agreement inspector vertical: GM selected decision enforces stale revision and leaves consequences unapplied (41.199752ms)
+✔ G6 term editor vertical: proposal and counter retain multiple native snapshots and reset votes (45.733185ms)
+✔ G6 term editor vertical: Player amendment preserves secret canonical terms through GM approval and enactment/reload (95.731252ms)
+✔ G6 term editor vertical: authority rejects stale editor revision and retains complete draft (27.385158ms)
+✔ G6 term editor vertical: selected deletion in Player direct amendment retains secret terms and audits exact before/after (37.495462ms)
+✔ G6 term editor vertical: canonical selection rejects collisions/unknown IDs and exact ticket retry enacts one proposal (34.218655ms)
+✔ G6 dashboard runtime: authoritative public API filters all persisted lifecycle states and negotiation group (11.151735ms)
+✔ G6 dashboard runtime: authenticated participant, stranger and GM receive only authorized aggregate counts (6.282303ms)
+✔ G6 dashboard runtime: controller pages and search compose; reads preserve history across authority reload (19.889746ms)
+✔ G6 dashboard runtime: pending amendment and elapsed deadline leave registered active state unchanged (31.203669ms)
+✔ G6 reputation history runtime: authority filters real adjustments, exact reversal and configured decay using applied deltas (26.601122ms)
+✔ G6 reputation history runtime: authenticated Player/stranger cannot receive history or probe private sources/tracks (34.713969ms)
+✔ G6 reputation history runtime: GM controller uses independent pages, source drilldown and resets filters for another record (45.087221ms)
+✔ G6 reputation history runtime: filters and summaries rebuild after reload without changing canonical score, history or clock (27.969958ms)
+✔ G6 reputation history runtime: filters cannot enter list/other namespaces and exact-final entry page has no next button (786.065307ms)
+✔ G6 overview runtime: immutable public facade aggregates six owners with authenticated requester inbox (39.366271ms)
+✔ G6 overview runtime: restricted and secret records cannot affect Player counts or private search (8.980982ms)
+✔ G6 overview runtime: visible current obligations determine overdue and breach, without secret term counts (74.927093ms)
+✔ G6 overview runtime: recovery entity and graph fences exclude records and derivatives until recovery (5.274415ms)
+✔ G6 overview runtime: GM canonical changes and controller drilldown reload without owner mutation (5.291861ms)
+✔ G6 overview runtime: multiple pages retain search-scoped cards, expiry alerts and active lifecycle after reload (64.03403ms)
+✔ G6 overview runtime: public agreement restricted terms admit controllers, hide strangers and omit satisfied deadlines (27.216413ms)
+✔ G6 recognition security: guessed secret claim and missing claim produce the same rejection before proposal preparation (2.850244ms)
+✔ G6 recognition runtime: GM form registers three contextual positions and read-only window counts preserve claims (18.918631ms)
+✔ G6 recognition runtime: Player submits visible claim, GM UI edits context on approval without rewriting original (11.80367ms)
+✔ G6 recognition runtime: stale form and stale approval retain draft until explicit revision refresh (23.010184ms)
+✔ G6 recognition runtime: GM edited secret claim cannot leak through public approved recognition or proposal after reload (19.452527ms)
+✔ G6 recognition runtime: controller permissions and fresh party/reference validation block direct or unsupported mutations (5.990818ms)
+✔ G6 recognition runtime: exact submit/approval ticket replay appends one declaration and reload keeps request and history (11.872627ms)
+✔ G6 recognition runtime: unavailable fenced target disables approval but rejection touches only proposal owner (7.110065ms)
+✔ G6 recognition runtime: locked submit checks fresh persisted claim visibility instead of prior public index (2.914386ms)
+✔ G6 recognition runtime: approved projection refreshes persisted target privacy without canonical mutation (8.800789ms)
+✔ G6 links runtime: invisible and missing destination proposals have uniform rejection without writes (7.977764ms)
+✔ G6 links runtime: Player cannot update secret link by guessing its ID (10.618044ms)
+✔ G6 links runtime: GM revised private destination is hidden from approved Player proposal (16.936186ms)
+✔ G6 links runtime: GM UI creates declarative link and audited status changes without reciprocal or economic effects (48.873225ms)
+✔ G6 links runtime: Player GUI proposal and GM structured link/status reviews preserve original intent (30.206421ms)
+✔ G6 links runtime: fresh destination privacy blocks old selections and hides approved links after reload (17.88ms)
+✔ G6 links runtime: destination fence blocks create/status approval and rejection only closes proposal (28.984822ms)
+✔ G6 links runtime: stale draft and stale approval require explicit revision after review (31.054614ms)
+✔ G6 links runtime: exact link and status ticket retries stay once after reload (15.488996ms)
+✔ G6 links runtime: paged visible destinations pin selection outside current page without loading all details (235.607804ms)
+✔ G6 links runtime: controller-visible restricted destinations and secret requests stay private after approval (22.319209ms)
+✔ G6 links runtime: create-intent hidden destinations and fresh persisted secret links are rejected without writes (10.907184ms)
+✔ G6 links runtime: guessed fenced destination uses the same unavailable error as invisible and missing targets (8.155866ms)
+✔ G6 influence runtime: GUI creates axes, modifies separately and ends without ownership side effects (28.773222ms)
+✔ G6 influence runtime: Player proposal approval preserves source, and stranger cannot read request (8.571062ms)
+✔ G6 influence runtime: secret source and modifier IDs reject uniformly without writes (19.549301ms)
+✔ G6 influence runtime: exact ticket retry and reload preserve single event (5.595487ms)
+✔ G6 influence runtime: GM private edit redacts approved intent and fresh privacy change blocks guesses (11.3028ms)
+✔ G6 occupation privacy: invisible references rejected uniformly without proposal writes (3.751433ms)
+✔ G6 occupation privacy: hidden occupation IDs cannot be ended by Player (5.777679ms)
+✔ G6 occupation privacy: GM edit to private reference hides approved intent (8.006091ms)
+✔ G6 occupation runtime: GM UI records five states, expiry is read-only and ownership unchanged (44.777874ms)
+✔ G6 occupation runtime: Player proposal and structured GM edits preserve original and source identity (11.656737ms)
+✔ G6 occupation runtime: Player ending approved by GM preserves dependencies and repeat ending is no-op (21.399005ms)
+✔ G6 occupation runtime: historical dependencies stay linked without reactivating them (15.583287ms)
+✔ G6 occupation runtime: reference privacy is checked against persisted state despite old index (3.460949ms)
+✔ G6 occupation runtime: fresh privacy changes hide approved creation and ending intents (21.792138ms)
+✔ G6 occupation runtime: stale source draft and approval require explicit revision review (23.290546ms)
+✔ G6 occupation runtime: exact create/end ticket retries remain once after reload (11.079141ms)
+✔ G6 occupation runtime: fenced territory blocks approval, rejection only writes proposal (5.821073ms)
+✔ G6 occupation runtime: create intents validate inline references and private new declarations stay private (10.553984ms)
+✔ G6 occupation runtime: approved dependency turns private and end proposal admission stays uniform (9.938492ms)
+✔ G6 claims runtime: physical default preserves competing local and inherited claims with origin revisions (10.605011ms)
+✔ G6 claims runtime: administrative ancestry is independent and GM sees private claims only on selected path (11.977955ms)
+✔ G6 claims runtime: ancestor audience is evaluated independently of child controller (14.12635ms)
+✔ G6 claims runtime: hidden middle origin stops traversal even when grandparent is public (11.132176ms)
+✔ G6 claims runtime: changed persistent visibility and labels override the cached ancestor (12.401078ms)
+✔ G6 claims runtime: unavailable ancestor fences truncate only that lineage without exposing recovery metadata (8.710837ms)
+✔ G6 claims runtime: missing, corrupt and mismatched origins never fabricate inherited data (33.04869ms)
+✔ G6 claims runtime: cycles return local sources only and do not hang or repair storage (12.939859ms)
+✔ G6 claims runtime: authoritative clock observes inclusive starts and exclusive ends without mutations (12.692593ms)
+✔ G6 claims runtime: reparent changes derived origins while local claims and audited revisions remain native (12.200585ms)
+✔ G6 claims runtime: inherited IDs cannot become local recognition or occupation references (10.607135ms)
+✔ G6 claims runtime: reload recalculates derivation without storing projections or creating audit entries (10.48708ms)
+✔ G6 claim impact runtime: GM preview shows both axes and exact inherited before/after without any writes (11.253709ms)
+✔ G6 claim impact runtime: each changed axis includes only its target and actual descendants (21.05887ms)
+✔ G6 claim impact runtime: preview remains GM-only; authenticated Player or third party cannot forge access to secret sources (8.71098ms)
+✔ G6 claim impact runtime: ancestor mutation invalidates confirmation despite unchanged target revision (15.45677ms)
+✔ G6 claim impact runtime: unversioned persisted source visibility change invalidates old preview (12.600925ms)
+✔ G6 claim impact runtime: clock drift requires a new preview at the authoritative tick (19.643703ms)
+✔ G6 claim impact runtime: external unindexed territorial catalog addition invalidates snapshot (12.026807ms)
+✔ G6 claim impact runtime: no-op retains revisions and hierarchy audit with no affected axes (15.347006ms)
+✔ G6 claim impact runtime: root detachment writes only target hierarchy and recalculates descendants without copied claims (18.406033ms)
+✔ G6 claim impact runtime: ancestor recovery fence blocks new preview and old-snapshot confirmation (11.520365ms)
+✔ G6 claim impact runtime: corrupt, inconsistent or missing ancestry fails closed without preparing misleading impacts (29.598955ms)
+✔ G6 claim impact runtime: changed target revision cannot be bypassed with an old snapshot (19.11665ms)
+✔ G6 claim impact runtime: GM interface previews, preserves fields, confirms and keeps inherited changes derived (17.417455ms)
+✔ G6 claim impact runtime: exact confirmation ticket retries once despite later clock drift and reload (14.44448ms)
+✔ G6 claim impact runtime: Player reparent proposal remains immutable and needs a GM decision (14.626407ms)
+✔ G6 claim impact runtime: preview snapshot binds action and reason; same revision cannot silently reuse another plan (13.402106ms)
+✖ G6 rights forms runtime: guessed secret and missing local revocation targets are uniformly unavailable (11.508948ms)
+✔ G6 rights runtime: read-only physical rights preserve all origins, empty grants and local records (12.568714ms)
+✔ G6 rights runtime: right hierarchy is independent from claims and other axis (8.227561ms)
+✔ G6 rights runtime: source audience is independent of child, including restricted conditions (15.301204ms)
+✔ G6 rights runtime: hidden middle origin blocks parent rights and scoped treaty traversal (33.519367ms)
+✔ G6 rights runtime: inactive, inclusive start, exclusive expiry and condition states are derived at authority tick (12.267217ms)
+✔ G6 rights runtime: only literal true authorizes conditions; throws and missing providers fail closed (51.639371ms)
+✔ G6 rights runtime: conditions are memoized, sanitized and skipped outside visible eligible sources (40.289622ms)
+✔ G6 rights runtime: active treaty rights join territory sources while capability-only terms stay separate (46.170946ms)
+✔ G6 rights runtime: agreement and term audiences independently gate visibility (50.32111ms)
+✔ G6 rights runtime: treaty lifecycle, intersected windows and pending amendments retain truthful effective states (82.979971ms)
+✔ G6 rights runtime: fresh treaty edits and external additions override stale catalog and do not write (42.881955ms)
+✔ G6 rights runtime: missing, corrupt, incoherent and fenced agreements provide no derived rights (169.706814ms)
+✔ G6 rights runtime: unavailable territory ancestors and cycles truncate derived sources without repairing storage (49.925228ms)
+✔ G6 rights runtime: no-grant rights do not synthesize capabilities or modify economic state (37.42028ms)
+✔ G6 rights runtime: agreement conditions fail closed and source inactivity skips evaluation (44.859779ms)
+✔ G6 rights runtime: audited revocation refreshes derived status without deleting the source (12.281555ms)
+✔ G6 rights impact runtime: GM preview includes Territory and Agreement provenance for each physical descendant (265.602276ms)
+✔ G6 rights impact runtime: confirmation changes only primary hierarchy and inspector matches inherited preview (312.275296ms)
+✔ G6 rights impact runtime: Player and third party cannot preview or forge GM metadata (264.346434ms)
+✔ G6 rights impact runtime: source revocation invalidates reviewed rights with primary revision unchanged (318.178077ms)
+✔ G6 rights impact runtime: treaty suspension invalidates confirmation and fresh preview excludes its rights (315.287934ms)
+✔ G6 rights impact runtime: condition changes in either direction invalidate snapshot without source or clock drift (558.099283ms)
+✔ G6 rights impact runtime: clock boundary and missing condition provider affect rights but never grants or source writes (280.455117ms)
+✔ G6 rights impact runtime: fresh agreement payload, visibility and external additions invalidate stale catalog snapshot (827.095958ms)
+✔ G6 rights impact runtime: fenced, missing, corrupt or incoherent Agreement blocks incomplete review and confirmation (1329.885993ms)
+✔ G6 rights impact runtime: administrative-only changes and detach preserve independent physical derivation (288.930416ms)
+✔ G6 rights impact runtime: pending amendments invalidate the snapshot without replacing current rights (296.856091ms)
+✔ G6 rights impact runtime: exact command retry after reload does not recompute or write another hierarchy event (299.779407ms)
+✔ G6 rights impact runtime: UI renders both reviews and confirms with the same bounded snapshot (294.09694ms)
+✔ G6 rights impact runtime: ordinary Player hierarchy proposal remains immutable and requires GM decision (308.84294ms)
+✔ G6 rights impact runtime: Agreement writers wait until reviewed reparent commits under the shared catalog lock (351.088849ms)
+ℹ tests 171
+ℹ suites 0
+ℹ pass 170
+ℹ fail 1
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 10866.772919
+
+✖ failing tests:
+
+test at .test-build/g6-runtime-vertical.test.js:46339:1
+✖ G6 rights forms runtime: guessed secret and missing local revocation targets are uniformly unavailable (11.508948ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  true !== false
+  
+      at TestContext.<anonymous> (file:///workspace/scratch/25e6c2c1e4be/nova-base/.test-build/g6-runtime-vertical.test.js:46355:14)
+      at async Test.run (node:internal/test_runner/test:1389:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:960:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: true,
+    expected: false,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+node:internal/errors:985
+  const err = new Error(message);
+              ^
+
+Error: Command failed: /opt/codex/runtimes/codex-primary-runtime/dependencies/node/bin/node --test --test-concurrency=1 .test-build/g6-runtime-vertical.test.js
+    at genericNodeError (node:internal/errors:985:15)
+    at wrappedFn (node:internal/errors:539:14)
+    at checkExecSyncError (node:child_process:942:11)
+    at execFileSync (node:child_process:978:15)
+    at file:///workspace/scratch/25e6c2c1e4be/nova-base/tests/run-tests.mjs:53:3
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5) {
+  status: 1,
+  signal: null,
+  output: [ null, null, null ],
+  pid: 39,
+  stdout: null,
+  stderr: null
+}
+
+Node.js v24.19.0

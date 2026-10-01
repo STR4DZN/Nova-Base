@@ -1838,6 +1838,17 @@ test("G6 claim impact runtime: preview snapshot binds action and reason; same re
 const territorialRight = (id: string, patch = {}) => ({ id, sourceRef: { type: "manual", id: "gm" }, visibility: "public", startsAtWorldTick: 0,
   expiresAtWorldTick: null, beneficiaryRef: { type: "narrative", id: "guild" }, rightType: "domain-manager:entry", inherited: true,
   revocable: true, active: true, conditionRefs: [], grants: [], ...patch });
+test("G6 rights forms runtime: guessed secret and missing local revocation targets are uniformly unavailable", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player");
+  try { await gm.initialize(); const w = await rightsTerritories(gm), row: any = await f.adapter.read("territory", w.child);
+    row.data.rights.push(territorialRight("hidden-revocation-marker", { visibility: "secret" })); await f.adapter.write(row);
+    for (const id of ["hidden-revocation-marker", "missing-revocation"]) {
+      const before = await f.adapter.loadAll(), result = await player.diplomacy.proposals.submit({ id: `request-${id}`, intent: { kind: "territory", mode: "modify", id: w.child,
+        expectedRevision: 0, action: { kind: "revoke-right", id }, reason: "Propose revocation" } });
+      assert.equal(result.ok, false); if (!result.ok) assert.equal(result.error.code, "DM_TERRITORY_RIGHT_UNAVAILABLE"); assert.deepEqual(await f.adapter.loadAll(), before);
+    }
+  } finally { player.destroy(); gm.destroy(); }
+});
 async function rightsTerritories(r: ReturnType<typeof composeDomainManagerRuntime>) {
   const add = async (label: string, rights: any[], patch = {}, visibility = "public") => {
     const draft = createDiplomacyDraft("territory", label, [], visibility as any), data: any = draft.data;
@@ -2221,4 +2232,131 @@ test("G6 rights impact runtime: Agreement writers wait until reviewed reparent c
     assert.equal((unwrap(await gm.diplomacy.territory.query({ id: w.child })) as any).revision, 1);
     const source = (await rightsReport(gm, w.child)).entries.find((r: any) => r.origin.id === w.treaties[1].id); assert.equal(source.status, "source-inactive");
   } finally { release(); gm.destroy(); }
+});
+
+import { rightFields, parseRightFields } from "../../src/ui/domain-patterns/diplomacy/territory-right-form.js";
+async function rightFormWorld(gm: ReturnType<typeof composeDomainManagerRuntime>, rights: any[] = []) {
+  const draft = createDiplomacyDraft("territory", "Rights form", [{ type: "domain", uuid: domainUuid }], "public"), data: any = draft.data;
+  data.claims = [inheritedClaim("controller", { claimantRef: { type: "domain", uuid: domainUuid }, claimType: "domain-manager:control", inherited: false })];
+  data.rights = rights.map(r => structuredClone(r)); unwrap(await gm.diplomacy.territory.create({ ...draft, reason: "Create form territory" })); return draft.id;
+}
+const rightInput = (patch = {}) => ({ ...rightFields(), rightPartyRef: domainUuid, rightRevision: "0", reason: "Concessão auditada", ...patch });
+const rightAction = (id = "new-right", patch = {}) => unwrap(parseRightFields(rightInput(patch), 10, id, { type: "manual", id: "form-test" }));
+test("G6 rights forms runtime: GM structured grant persists declarations and condition/window read models without ledger effects", async () => {
+  const f = fixture(), gm = f.make(); let id: string;
+  try { await gm.initialize(); id = await rightFormWorld(gm); const c = new DiplomacyApplicationController(gm.diplomacy), ledgerBefore = await f.ledger.loadSnapshot();
+    c.selectTab("territory"); c.select(id); unwrap(await c.load()); unwrap(await c.submitRight(rightInput({ rightStarts: "0", rightExpires: "11", rightInherited: "true", rightConditionCount: "1", rightConditionType0: "policy", rightConditionMode0: "id", rightConditionValue0: "permit", rightGrants: "addon:trade\naddon:entry" })));
+    const row: any = await f.adapter.read("territory", id); assert.equal(row.revision, 1); assert.equal(row.data.rights.length, 1); const right = row.data.rights[0];
+    assert.equal(right.startsAtWorldTick, 0); assert.deepEqual(right.grants, ["addon:trade", "addon:entry"]); assert.equal(row.data.events[0].kind, "domain-manager:right"); assert.equal(row.data.events[0].reason, "Concessão auditada");
+    assert.equal((await rightsReport(gm, id)).entries[0].status, "conditions-unconfirmed"); f.time.tick = 11; assert.equal((await rightsReport(gm, id)).entries[0].status, "expired"); assert.deepEqual(await f.ledger.loadSnapshot(), ledgerBefore);
+  } finally { gm.destroy(); }
+  const reload = f.make(); try { await reload.initialize(); const d: any = unwrap(await reload.diplomacy.territory.query({ id: id! })); assert.equal(d.rights.length, 1); assert.equal(d.revision, 1); } finally { reload.destroy(); }
+});
+test("G6 rights forms runtime: Player grant is immutable pending intent; GM edits through structured review", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player");
+  try { await gm.initialize(); const id = await rightFormWorld(gm), before = await f.adapter.read("territory", id), c = new DiplomacyApplicationController(player.diplomacy);
+    c.selectTab("territory"); c.select(id); unwrap(await c.load()); unwrap(await c.submitRight(rightInput({ rightType: "addon:entry" }))); assert.deepEqual(await f.adapter.read("territory", id), before);
+    const proposals: any = unwrap(await gm.diplomacy.proposals.query()), proposalId = proposals.items[0].id, original: any = unwrap(await player.diplomacy.proposals.query({ id: proposalId }));
+    const review = new DiplomacyApplicationController(gm.diplomacy); review.selectTab("proposals"); review.select(proposalId); unwrap(await review.load());
+    unwrap(await review.review("approve", "GM reviewed", { ...rightInput({ rightType: "addon:trade", rightStarts: "0", rightRevocable: "false" }), rightReview: "on" }));
+    const proposal: any = unwrap(await player.diplomacy.proposals.query({ id: proposalId })); assert.deepEqual(proposal.original, original.original); assert.equal(proposal.decision.approvedIntent.action.value.id, original.original.action.value.id); assert.equal(proposal.decision.approvedIntent.action.value.rightType, "addon:trade");
+    const row: any = await f.adapter.read("territory", id); assert.equal(row.data.rights[0].revocable, false); assert.equal(row.data.rights[0].startsAtWorldTick, 0); assert.equal(row.data.events.length, 1);
+  } finally { player.destroy(); gm.destroy(); }
+});
+test("G6 rights forms runtime: Player revocation requires GM, retains full source and audits only active flag", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player");
+  try { await gm.initialize(); const right = territorialRight("local", { conditionRefs: [{ type: "policy", id: "permit" }], grants: ["addon:trade"] }), id = await rightFormWorld(gm, [right]), before = await f.adapter.read("territory", id), ledger = await f.ledger.loadSnapshot();
+    const c = new DiplomacyApplicationController(player.diplomacy); c.selectTab("territory"); c.select(id); unwrap(await c.load()); unwrap(await c.submitRight({ rightId: "local", rightRevision: "0", reason: "Revogar" }, true)); assert.deepEqual(await f.adapter.read("territory", id), before);
+    const proposals: any = unwrap(await gm.diplomacy.proposals.query()), review = new DiplomacyApplicationController(gm.diplomacy); review.selectTab("proposals"); review.select(proposals.items[0].id); unwrap(await review.load()); unwrap(await review.review("approve", "Revoked", { rightReview: "on", rightId: "substitution" }));
+    const row: any = await f.adapter.read("territory", id); assert.deepEqual(row.data.rights, [{ ...right, active: false }]); assert.equal(row.data.events.length, 1); assert.deepEqual(row.data.events[0].before, right); assert.deepEqual(row.data.events[0].after, { ...right, active: false }); assert.equal((await rightsReport(gm, id)).entries[0].status, "inactive"); assert.deepEqual(await f.ledger.loadSnapshot(), ledger);
+  } finally { player.destroy(); gm.destroy(); }
+});
+test("G6 rights forms runtime: approved secret grant is not returned to proposer and original stays unchanged", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player");
+  try { await gm.initialize(); const id = await rightFormWorld(gm), action = rightAction(), intent = { kind: "territory" as const, mode: "modify" as const, id, expectedRevision: 0, action, reason: "Request" };
+    unwrap(await player.diplomacy.proposals.submit({ id: "secret-right-review", intent })); const edited = structuredClone(intent); edited.action.value.visibility = "secret";
+    edited.action.value.grants = ["addon:secret-marker"]; unwrap(await gm.diplomacy.proposals.decide({ id: "secret-right-review", expectedRevision: 0, decision: "approve", reason: "GM", editedIntent: edited }));
+    const p: any = unwrap(await player.diplomacy.proposals.query({ id: "secret-right-review" })); assert.equal(p.decision.approvedIntent, null); assert.deepEqual(p.original, intent); assert.equal(JSON.stringify(p).includes("secret-marker"), false); assert.equal((unwrap(await gm.diplomacy.proposals.query({ id: p.id })) as any).decision.approvedIntent.action.value.visibility, "secret");
+  } finally { player.destroy(); gm.destroy(); }
+});
+test("G6 rights forms runtime: approved public right exposes canonical references without arbitrary source metadata", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player");
+  try { await gm.initialize(); const id = await rightFormWorld(gm), action = rightAction(), intent = { kind: "territory" as const, mode: "modify" as const, id, expectedRevision: 0, action, reason: "Request" };
+    unwrap(await player.diplomacy.proposals.submit({ id: "clean-right-review", intent })); const edited: any = structuredClone(intent);
+    edited.action.value.sourceRef.secretMetadata = "raw-source-marker"; edited.action.value.beneficiaryRef.extra = "raw-party-marker"; edited.action.value.conditionRefs = [{ type: "policy", id: "permit", extra: "raw-condition-marker" }]; edited.action.value.extra = "raw-right-marker";
+    unwrap(await gm.diplomacy.proposals.decide({ id: "clean-right-review", expectedRevision: 0, decision: "approve", reason: "GM", editedIntent: edited }));
+    const p: any = unwrap(await player.diplomacy.proposals.query({ id: "clean-right-review" })); assert.equal(JSON.stringify(p).includes("raw-"), false); assert.deepEqual(p.decision.approvedIntent.action.value.conditionRefs, [{ type: "policy", id: "permit" }]);
+  } finally { player.destroy(); gm.destroy(); }
+});
+test("G6 rights forms runtime: semantic GM review cannot substitute action kind or source identity", async () => {
+  for (const revoke of [false, true]) { const f = fixture(), gm = f.make(), player = f.make("player");
+    try { await gm.initialize(); const id = await rightFormWorld(gm, [territorialRight("local"), territorialRight("other")]), action = revoke ? { kind: "revoke-right", id: "local" } : rightAction(), intent = { kind: "territory" as const, mode: "modify" as const, id, expectedRevision: 0, action, reason: "Request" };
+      unwrap(await player.diplomacy.proposals.submit({ id: "identity-review", intent })); const before = await f.adapter.loadAll();
+      for (const changed of [revoke ? { kind: "revoke-right", id: "other" } : rightAction("substitution"), { kind: "end-claim", id: "claim-0" }]) {
+        const result = await gm.diplomacy.proposals.decide({ id: "identity-review", expectedRevision: 0, decision: "approve", reason: "GM", editedIntent: { ...intent, action: changed } }); assert.equal(result.ok, false); if (!result.ok) assert.equal(result.error.code, "DM_DIPLOMACY_PROPOSAL_INVALID"); assert.deepEqual(await f.adapter.loadAll(), before);
+      }
+    } finally { player.destroy(); gm.destroy(); }
+  }
+});
+test("G6 rights forms runtime: public revocation review is redacted after fresh source visibility drift or fence", async () => {
+  for (const mode of ["secret", "missing", "corrupt", "fence"]) { const f = fixture(), gm = f.make(), player = f.make("player");
+    try { await gm.initialize(); const id = await rightFormWorld(gm, [territorialRight("local")]); unwrap(await player.diplomacy.proposals.submit({ id: "fresh-right-review", intent: { kind: "territory", mode: "modify", id, expectedRevision: 0, action: { kind: "revoke-right", id: "local" }, reason: "Request" } }));
+      unwrap(await gm.diplomacy.proposals.decide({ id: "fresh-right-review", expectedRevision: 0, decision: "approve", reason: "GM" })); assert.ok((unwrap(await player.diplomacy.proposals.query({ id: "fresh-right-review" })) as any).decision.approvedIntent);
+      const row: any = await f.adapter.read("territory", id);
+      if (mode === "missing") await f.adapter.remove("territory", id); else if (mode === "fence") { const { lockKey } = await import("../../src/mutations/lock-keys.js"); gm.recovery.fenceRegistry.installFence({ transactionId: "right-fence", lockKeys: [lockKey.diplomacy("territory", id)], reason: "Recovery" }); }
+      else { if (mode === "secret") row.data.rights[0].visibility = "secret"; if (mode === "corrupt") row.data.rights[0].grants = [1]; await f.adapter.write(row); }
+      const before = await f.adapter.loadAll(), p: any = unwrap(await player.diplomacy.proposals.query({ id: "fresh-right-review" })); assert.equal(p.decision.approvedIntent, null); assert.deepEqual(await f.adapter.loadAll(), before);
+    } finally { player.destroy(); gm.destroy(); }
+  }
+});
+test("G6 rights forms runtime: source ID collision cannot probe a private right during Player grant admission", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player");
+  try { await gm.initialize(); const id = await rightFormWorld(gm, [territorialRight("hidden-grant-marker", { visibility: "secret" })]), before = await f.adapter.loadAll();
+    const result = await player.diplomacy.proposals.submit({ id: "collision", intent: { kind: "territory", mode: "modify", id, expectedRevision: 0, action: rightAction("hidden-grant-marker"), reason: "Request" } }); assert.equal(result.ok, false); if (!result.ok) assert.equal(result.error.code, "DM_TERRITORY_RIGHT_UNAVAILABLE"); assert.deepEqual(await f.adapter.loadAll(), before);
+  } finally { player.destroy(); gm.destroy(); }
+});
+test("G6 rights forms runtime: non-revocable and inactive local sources stay immutable on form failures", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player");
+  try { await gm.initialize(); const id = await rightFormWorld(gm, [territorialRight("permanent", { revocable: false }), territorialRight("inactive", { active: false })]), c = new DiplomacyApplicationController(gm.diplomacy);
+    c.selectTab("territory"); c.select(id); unwrap(await c.load()); const before = await f.adapter.loadAll();
+    for (const rightId of ["permanent", "inactive"]) assert.equal((await c.submitRight({ rightId, rightRevision: "0", reason: "Revogar" }, true)).ok, false);
+    const result = await player.diplomacy.proposals.submit({ id: "permanent-request", intent: { kind: "territory", mode: "modify", id, expectedRevision: 0, action: { kind: "revoke-right", id: "permanent" }, reason: "Request" } }); assert.equal(result.ok, false); if (!result.ok) assert.equal(result.error.code, "DM_TERRITORY_RIGHT_NOT_REVOCABLE"); assert.deepEqual(await f.adapter.loadAll(), before);
+  } finally { player.destroy(); gm.destroy(); }
+});
+test("G6 rights forms runtime: authority validates beneficiary existence; controllers cannot grant themselves control of an unrelated territory", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player"), stranger = f.make("stranger");
+  try { await gm.initialize(); const id = await rightFormWorld(gm), before = await f.adapter.loadAll();
+    for (const patch of [{ rightPartyRef: "JournalEntry.missing" }, { rightPartyType: "actor", rightPartyRef: "Actor.unavailable" }]) assert.equal((await gm.diplomacy.territory.modify({ id, expectedRevision: 0, action: rightAction("bad", patch), reason: "GM" })).ok, false);
+    assert.equal((await player.diplomacy.territory.modify({ id, expectedRevision: 0, action: rightAction(), reason: "Direct" })).ok, false);
+    assert.equal((await stranger.diplomacy.proposals.submit({ id: "stranger-request", intent: { kind: "territory", mode: "modify", id, expectedRevision: 0, action: rightAction(), reason: "Request" } })).ok, false);
+    assert.deepEqual(await f.adapter.loadAll(), before);
+    const draft = createDiplomacyDraft("territory", "Unrelated", [], "public"); unwrap(await gm.diplomacy.territory.create({ ...draft, reason: "Create unrelated" })); const afterCreate = await f.adapter.loadAll();
+    assert.equal((await player.diplomacy.proposals.submit({ id: "self-control", intent: { kind: "territory", mode: "modify", id: draft.id, expectedRevision: 0, action: rightAction(), reason: "Request" } })).ok, false); assert.deepEqual(await f.adapter.loadAll(), afterCreate);
+  } finally { stranger.destroy(); player.destroy(); gm.destroy(); }
+});
+test("G6 rights forms runtime: stale review blocks writes; rejection remains available with target recovery fence", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player");
+  try { await gm.initialize(); const id = await rightFormWorld(gm); unwrap(await player.diplomacy.proposals.submit({ id: "stale-right-request", intent: { kind: "territory", mode: "modify", id, expectedRevision: 0, action: rightAction(), reason: "Request" } }));
+    unwrap(await gm.diplomacy.territory.modify({ id, expectedRevision: 0, action: rightAction("other"), reason: "Concurrent" })); const before = await f.adapter.loadAll(); assert.equal((await gm.diplomacy.proposals.decide({ id: "stale-right-request", expectedRevision: 0, decision: "approve", reason: "GM" })).ok, false); assert.deepEqual(await f.adapter.loadAll(), before);
+    const { lockKey } = await import("../../src/mutations/lock-keys.js"); gm.recovery.fenceRegistry.installFence({ transactionId: "stale-right-fence", lockKeys: [lockKey.diplomacy("territory", id)], reason: "Recovery" });
+    const review = new DiplomacyApplicationController(gm.diplomacy); review.selectTab("proposals"); review.select("stale-right-request"); unwrap(await review.load()); assert.equal(review.rightReviewTarget, null); unwrap(await review.review("reject", "Unavailable", { rightReview: "on" })); assert.deepEqual(await f.adapter.read("territory", id), before.find(e => e.kind === "territory" && e.id === id));
+  } finally { player.destroy(); gm.destroy(); }
+});
+test("G6 rights forms runtime: exact grant and revocation tickets retry across reload without extra source or audit", async () => {
+  const f = fixture(), gm = f.make(); let id: string, grant: any, revoke: any;
+  try { await gm.initialize(); id = await rightFormWorld(gm); grant = unwrap(gm.diplomacy.commands.prepare("territory:modify", { id, expectedRevision: 0, action: rightAction(), reason: "Grant once" })); unwrap(await gm.diplomacy.commands.execute(grant));
+    revoke = unwrap(gm.diplomacy.commands.prepare("territory:modify", { id, expectedRevision: 1, action: { kind: "revoke-right", id: "new-right" }, reason: "Revoke once" })); unwrap(await gm.diplomacy.commands.execute(revoke));
+  } finally { gm.destroy(); }
+  const reload = f.make(); try { await reload.initialize(); const before = await f.adapter.loadAll(); unwrap(await reload.diplomacy.commands.retry(grant)); unwrap(await reload.diplomacy.commands.retry(revoke)); assert.deepEqual(await f.adapter.loadAll(), before);
+    const row: any = await f.adapter.read("territory", id!); assert.equal(row.revision, 2); assert.equal(row.data.rights.length, 1); assert.equal(row.data.events.length, 2); assert.equal(row.data.rights[0].active, false);
+  } finally { reload.destroy(); }
+});
+test("G6 rights forms runtime: inherited and Agreement rights never become local revocation choices or copies", async () => {
+  const f = fixture(), gm = f.make();
+  try { await gm.initialize(); const w = await rightsTerritories(gm), treaty = await prepareAgreement(gm, [rightTerm(w.child, "agreement-only")]); unwrap(await treaty.activate());
+    const c = new DiplomacyApplicationController(gm.diplomacy); c.selectTab("territory"); c.select(w.child); unwrap(await c.load()); const before = await f.adapter.loadAll();
+    assert.equal(c.detail.rights.some((r: any) => r.id === "agreement-only" || r.id === "root"), false);
+    for (const rightId of ["agreement-only", "root"]) assert.equal((await c.submitRight({ rightId, rightRevision: "0", reason: "Revogar" }, true)).ok, false); assert.deepEqual(await f.adapter.loadAll(), before);
+    assert.ok(c.detail.territoryRights.entries.some((r: any) => r.rightId === "agreement-only"));
+  } finally { gm.destroy(); }
 });

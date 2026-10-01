@@ -1,0 +1,62 @@
+Specific UI
+ℹ tests 15
+ℹ suites 0
+ℹ pass 15
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 145.583137
+Runtime vertical
+ℹ tests 184
+ℹ suites 0
+ℹ pass 184
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 11848.456572
+Complete regression
+ℹ tests 1288
+ℹ suites 0
+ℹ pass 1288
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 48308.222906
+typecheck
+npm warn Unknown env config "http-proxy". This will stop working in the next major version of npm.
+
+> domain-manager@0.0.8 typecheck
+> tsc --noEmit
+
+
+build
+npm warn Unknown env config "http-proxy". This will stop working in the next major version of npm.
+
+> domain-manager@0.0.8 build
+> node build.mjs
+
+
+package
+npm warn Unknown env config "http-proxy". This will stop working in the next major version of npm.
+
+> domain-manager@0.0.8 package
+> node scripts/package.mjs
+
+Package created: dist/domain-manager-v0.0.8.zip
+
+artifact
+npm warn Unknown env config "http-proxy". This will stop working in the next major version of npm.
+
+> domain-manager@0.0.8 validate:release
+> node scripts/validate-release.mjs
+
+Package validation passed
+Artifact validation passed
+Release URLs, versions and ZIP verified: v0.0.8
+
+ZIP SHA256: 0d0cda11db08c0dfdb9a8a468d6e504fd37e41b41d250a956c2059e6e3714283
+Node: 24.19.0
+Final local result: PASS; 0 failures and 0 skipped tests

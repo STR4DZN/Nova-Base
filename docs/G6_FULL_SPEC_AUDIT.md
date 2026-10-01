@@ -97,7 +97,7 @@ As referências R08 abaixo são subseções do register congelado anexado ao Mas
 | 3.3 | Contextual recognition | IMPLEMENTADO LOCAL no modelo/API/UI: posição, party/audience, claim admitido, visibilidade/janela e declaração sem legitimidade universal. |
 | 3.4 | Presence ≠ influence, axes/modifiers/decay | PARCIAL: fontes próprias funcionam; resolver composto Facilities/Agreements/Presence/Reputation não está integrado. |
 | 3.5 | Links: direction/status/cost/capacity/dependencies/secrecy | IMPLEMENTADO LOCAL no modelo/API; edição de links pela UI ausente. Route computation completa é explicitamente opcional. |
-| 3.6 | Rights de Agreement/policy/grant, duration/conditions/inheritance | PARCIAL: grants explicit/treaty e herança corrigida; consulta pública unificada de direitos territoriais/Agreement, inclusive sem grants, implementada com origem, janela, condições e audiência; nem todos os consumers aplicam access policy. |
+| 3.6 | Rights de Agreement/policy/grant, duration/conditions/inheritance | PARCIAL: grants explicit/treaty e herança corrigida; consulta pública unificada de direitos territoriais/Agreement, inclusive sem grants, implementada com origem, janela, condições e audiência; formulários próprios de concessão/revogação com declarações, propostas/revisão GM e proteção da fonte privada implementados; nem todos os consumers aplicam access policy. |
 | 3.7 | Transfer/lease/concession; history/batch/coordination | PARCIAL: transferência em lote pela API; UI transfere um alvo e não fornece seleção em lote. Lease/concession não alteram ownership e podem ser representados como rights. |
 | 3.8 | Inheritance derivada e reparent preview/impacts | PARCIAL: cálculo/auditoria e inspectores de claims/direitos, prévia GM de claims e direitos de Territory/Agreement antes/depois em alvo/descendentes, origens concorrentes, eixos e snapshot de catálogo/tick/condições implementados; demais impactos herdados e revisão estruturada de propostas de hierarquia continuam parciais. |
 | 3.9 | Facilities/People/Economy consumers | PARCIAL: Facility possui locationRef; transfer não transfere Facilities; faltam população territorial agregada, enforcement de build/access e flows territoriais completos. |
@@ -196,3 +196,9 @@ Prioridades antes de fechar G6:
 6. Consolidar as dependências posteriores e opções em uma matriz aprovada, sem reclassificar silenciosamente ausência como “concluído”.
 
 **Teste real no Foundry:** reservado para quando o bloco G6 estiver concluído, conforme instrução do usuário; os fluxos implementados são verificados automaticamente durante cada parte. **Pode declarar G6 100%/GATE_ACCEPTED:** não. Um smoke sem FAIL não comprova funcionalidades que o roteiro ainda não exercita nem itens ausentes do plano.
+
+## Parte G6 — Formulários de direitos — 2026-10-01
+
+Concessão/revogação estruturadas, propostas Player/revisão GM, fonte local e original preservados, razão/revisão/visibilidade/janela e declarações de condições/capacidades. Falha de admissão de revogação secreta reproduzida e corrigida; testes adversários adicionais para payload aprovado, referências, colisão de ID, políticas e fences. Relatório `docs/G6_TERRITORY_RIGHT_FORMS_REPORT.md` detalha causas, soluções e ajustes das fixtures.
+
+1288/1288 testes PASS (29 novos), específicos 15/15 e verticais 184/184; TypeScript/build/package/validate:release PASS localmente. GitHub Actions pendente. G6 permanece parcial: UI de ticket/retry/status, demais consumers/integrações, escala e Foundry real continuam pendentes. **PARAR AQUI**; Foundry real ao fim do bloco G6, sem iniciar G7.
