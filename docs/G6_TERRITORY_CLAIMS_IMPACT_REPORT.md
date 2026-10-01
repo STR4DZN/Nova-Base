@@ -32,7 +32,7 @@ Primeira suíte vertical: 137/139 PASS. O teste antigo permitia recuperar a pré
 
 ## Validação
 
-15 testes específicos de cálculo/contrato/UI/bindings e 139 verticais G6; **regressão final 1206/1206 PASS** (31 novos), zero falhas/skips. TypeScript/build/package/validate:release PASS localmente. GitHub Actions pendente; registrar resultado final em `docs/evidence/G6_TERRITORY_CLAIMS_IMPACT_VALIDATION.json`. Workflow próprio preserva logs e ZIP sem publicar release.
+15 testes específicos de cálculo/contrato/UI/bindings e 139 verticais G6; **regressão final 1206/1206 PASS** (31 novos), zero falhas/skips. TypeScript/build/package/validate:release PASS localmente. GitHub Actions PASS: commit `2500bf54969ff69870f951cc5201444035e6196a`, workflow `36909763757`; 14 workflows aprovados. Evidência: `docs/evidence/G6_TERRITORY_CLAIMS_IMPACT_VALIDATION.json`. Workflow próprio preserva logs e ZIP sem publicar release.
 
 Cobertura inclui GM/Player/terceiro e spoofing; privacidade da prévia GM; snapshot versus alteração do ancestral, visibilidade sem mudança de revisão, tick, catálogo externo, ação/motivo e revisão primária; fences/corrupção; no-op; detach para raiz; campos e HTML escapados; confirmação com snapshot; recarga/retry exato sem segunda auditoria; propostas Player imutáveis e aguardando decisão GM; ausência de cópias de claims e writes nos descendentes.
 

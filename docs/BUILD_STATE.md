@@ -13,7 +13,7 @@
 
 - Prévia GM de reparent apresenta pais antes/depois e claims recebidas/perdidas/mantidas no alvo e descendentes de cada eixo. Origem/ID distinguem fontes concorrentes; claims locais e registros dos descendentes são preservados.
 - Formulário conserva campos após render; edição invalida prévia. Snapshot canônico de catálogo/intenção/tick revalidado sob locks impede confirmar impactos antigos com alvo na mesma revisão; descoberta de catálogo externo, estado fresco e fences de fontes testados.
-- **1206/1206 testes PASS** (31 novos), específicos 15/15 e verticais 139/139; TypeScript/build/package/validate:release PASS localmente. CI pendente. Relatório `docs/G6_TERRITORY_CLAIMS_IMPACT_REPORT.md`; evidência `docs/evidence/G6_TERRITORY_CLAIMS_IMPACT_VALIDATION.json`. Nenhuma release publicada.
+- **1206/1206 testes PASS** (31 novos), específicos 15/15 e verticais 139/139; TypeScript/build/package/validate:release PASS localmente. GitHub Actions PASS: commit `2500bf54969ff69870f951cc5201444035e6196a`, workflow `36909763757`; 14 workflows aprovados. Relatório `docs/G6_TERRITORY_CLAIMS_IMPACT_REPORT.md`; evidência `docs/evidence/G6_TERRITORY_CLAIMS_IMPACT_VALIDATION.json`. Nenhuma release publicada.
 - **PARAR AQUI. Próximo passo:** exibir direitos territoriais efetivos no inspector, com origem, vigência e condições, distinguindo direito de concessão de capabilities; aguardar autorização. Foundry real ao fim do bloco G6. G6 parcial; G7 não iniciado.
 
 ## Parte G6 — Reivindicações herdadas no inspector — 2026-10-01
@@ -672,7 +672,7 @@ Candidata v0.0.8: 13 defeitos reproduzidos/corrigidos; 878/878 testes locais PAS
 
 ## Próxima ação canônica
 
-- **Gate G6 — Relations / Reputation / Agreements / Territory: prévia dos impactos nas claims herdadas implementada nesta parte**, após a aceitação do Gate G5. **1206/1206 testes PASS**, específicos 15/15 e verticais 139/139; TypeScript/build/package/validate:release PASS localmente. CI pendente. Relatório `docs/G6_TERRITORY_CLAIMS_IMPACT_REPORT.md`. **PARAR AQUI**. Próxima parte: exibir direitos territoriais efetivos no inspector, com origem, vigência e condições, distinguindo direito de concessão de capabilities; aguardar autorização. Foundry real somente após concluir o bloco G6. Gate G6 parcial; não iniciar G7.
+- **Gate G6 — Relations / Reputation / Agreements / Territory: prévia dos impactos nas claims herdadas implementada nesta parte**, após a aceitação do Gate G5. **1206/1206 testes PASS**, específicos 15/15 e verticais 139/139; TypeScript/build/package/validate:release PASS localmente. GitHub Actions PASS: commit `2500bf54969ff69870f951cc5201444035e6196a`, workflow `36909763757`; 14 workflows aprovados. Relatório `docs/G6_TERRITORY_CLAIMS_IMPACT_REPORT.md`. **PARAR AQUI**. Próxima parte: exibir direitos territoriais efetivos no inspector, com origem, vigência e condições, distinguindo direito de concessão de capabilities; aguardar autorização. Foundry real somente após concluir o bloco G6. Gate G6 parcial; não iniciar G7.
 
 ## G6.4–G6.5 — Acordos e obrigações — 2026-09-29
 

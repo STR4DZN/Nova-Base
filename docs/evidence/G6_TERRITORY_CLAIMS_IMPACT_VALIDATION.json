@@ -17,7 +17,91 @@
     "zip_sha256": "bde8cd42d7e16f8ad7f762be8c75d510aca4eb12638f5bbdb9b02ae8fb64b533"
   },
   "ci": {
-    "conclusion": "pending"
+    "node": "22.23.3",
+    "conclusion": "success",
+    "run_id": 36909763757,
+    "job_id": 110529208465,
+    "tests": [
+      15,
+      139,
+      1206
+    ],
+    "fail": 0,
+    "skipped": 0,
+    "workflows": [
+      {
+        "id": 36909763339,
+        "name": "Validate G6 reputation history",
+        "conclusion": "success"
+      },
+      {
+        "id": 36909763409,
+        "name": "Validate G6 agreement term editor",
+        "conclusion": "success"
+      },
+      {
+        "id": 36909763472,
+        "name": "Validate G6 territory influence",
+        "conclusion": "success"
+      },
+      {
+        "id": 36909763289,
+        "name": "Validate G6 territory links",
+        "conclusion": "success"
+      },
+      {
+        "id": 36909763444,
+        "name": "Validate G6 territory recognition",
+        "conclusion": "success"
+      },
+      {
+        "id": 36909763757,
+        "name": "Validate G6 territory claim impacts",
+        "conclusion": "success"
+      },
+      {
+        "id": 36909763611,
+        "name": "Validate G6 diplomacy overview",
+        "conclusion": "success"
+      },
+      {
+        "id": 36909763478,
+        "name": "Validate G6 relation stance",
+        "conclusion": "success"
+      },
+      {
+        "id": 36909763583,
+        "name": "Validate G6 territory occupation",
+        "conclusion": "success"
+      },
+      {
+        "id": 36909763408,
+        "name": "Validate G6 reputation configuration",
+        "conclusion": "success"
+      },
+      {
+        "id": 36909763514,
+        "name": "Validate G6 agreement inspector",
+        "conclusion": "success"
+      },
+      {
+        "id": 36909763635,
+        "name": "Validate G6 agreement dashboard",
+        "conclusion": "success"
+      },
+      {
+        "id": 36909763351,
+        "name": "Validate G6 agreement negotiation",
+        "conclusion": "success"
+      },
+      {
+        "id": 36909763400,
+        "name": "Validate G6 territory claims",
+        "conclusion": "success"
+      }
+    ],
+    "artifact_id": 11186415785,
+    "url": "https://github.com/STR4DZN/Nova-Base/actions/runs/36909763757"
   },
   "foundry_real": "deferred until G6 complete",
   "release_published": false,
@@ -29,5 +113,6 @@
     "Conservative full territorial catalog fingerprint; no scale benchmark",
     "No impact preview for rights or other inherited states in this part",
     "Structured GM review of hierarchy proposals deferred"
-  ]
+  ],
+  "validated_source_commit": "2500bf54969ff69870f951cc5201444035e6196a"
 }

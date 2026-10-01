@@ -2,7 +2,7 @@
 
 **Atualização v0.0.8:** revisão G0–G6 corrigiu 13 defeitos, com 878/878 testes locais PASS. Novo smoke necessário; detalhes/evidências em `docs/G0_G6_REVIEW.md`. As lacunas desta matriz continuam explícitas.
 
-**Atualização por partes — impactos nas reivindicações herdadas:** prévia GM de reparent com before/after por origem em alvo/descendentes dos dois eixos, campos preservados e confirmação vinculada ao catálogo/intenção/tick. 1206/1206 testes PASS, TypeScript/build/pacote PASS localmente; CI pendente. Relatório `docs/G6_TERRITORY_CLAIMS_IMPACT_REPORT.md`. Próxima parte: direitos territoriais efetivos no inspector. Foundry real ao fim do G6.
+**Atualização por partes — impactos nas reivindicações herdadas:** prévia GM de reparent com before/after por origem em alvo/descendentes dos dois eixos, campos preservados e confirmação vinculada ao catálogo/intenção/tick. 1206/1206 testes PASS, TypeScript/build/pacote PASS localmente e no CI (workflow `36909763757`, 14 workflows). Relatório `docs/G6_TERRITORY_CLAIMS_IMPACT_REPORT.md`. Próxima parte: direitos territoriais efetivos no inspector. Foundry real ao fim do G6.
 
 **Atualização por partes — reivindicações herdadas:** inspector com origem/revisão, distinção local/herdada e eixos físico/administrativo separados. Leitura fresca e audiência por origem, sem copiar registros. 1175/1175 testes PASS, TypeScript/build/pacote PASS localmente e no CI (workflow `36904323664`, 13 workflows). Relatório `docs/G6_TERRITORY_CLAIMS_REPORT.md`. Próxima parte: prévia dos impactos herdados de alterações hierárquicas. Foundry real ao fim do G6.
 
