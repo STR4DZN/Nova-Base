@@ -1,0 +1,194 @@
+{
+  "schemaVersion": 1,
+  "part": "G6 territory recognition forms, audience protection and structured GM review",
+  "localDate": "2026-10-01",
+  "timezone": "America/Sao_Paulo",
+  "repository": "STR4DZN/Nova-Base",
+  "branch": "feat/g6-continuous",
+  "baseCommit": "4cf7d25ca1c8ecb2455aba297c6b882217130277",
+  "implementationCommit": "4e5b8d8ffbff1673475e1f885ace3fd57aab1b84",
+  "validatedCommit": "50a6c1be955d541ce09d8030a40b898b9826d7a7",
+  "execution": {
+    "runId": 36869786902,
+    "jobId": 110394293264,
+    "runUrl": "https://github.com/STR4DZN/Nova-Base/actions/runs/36869786902",
+    "workflow": ".github/workflows/g6-territory-recognition-validation.yml",
+    "conclusion": "success",
+    "runner": "ubuntu-latest",
+    "nodeVersion": "22.23.3",
+    "startedAt": "2026-10-01T13:35:25Z",
+    "completedAt": "2026-10-01T13:36:20Z"
+  },
+  "tests": {
+    "specific": {
+      "tests": 17,
+      "pass": 17,
+      "fail": 0,
+      "skipped": 0
+    },
+    "runtimeVertical": {
+      "tests": 79,
+      "pass": 79,
+      "fail": 0,
+      "skipped": 0,
+      "newTests": 10
+    },
+    "complete": {
+      "tests": 1076,
+      "pass": 1076,
+      "fail": 0,
+      "skipped": 0
+    },
+    "newTestsThisPart": 27
+  },
+  "local": {
+    "nodeVersion": "24.19.0",
+    "typecheck": "PASS",
+    "specific": {
+      "tests": 17,
+      "pass": 17,
+      "fail": 0,
+      "skipped": 0
+    },
+    "runtimeVertical": {
+      "tests": 79,
+      "pass": 79,
+      "fail": 0,
+      "skipped": 0
+    },
+    "complete": {
+      "tests": 1076,
+      "pass": 1076,
+      "fail": 0,
+      "skipped": 0
+    },
+    "docsValidator": "PASS",
+    "build": "PASS",
+    "package": "PASS",
+    "validateRelease": "PASS",
+    "installableZipSha256": "cb7aa4cc6d095bb6c95cd2aac266fb55f913b4c0df75fd29ac2e89c79b12674b",
+    "fixtureCorrections": [
+      "Give each initial claim its own sourceRef object to obey strict CommandBus JSON payload rules",
+      "Call the parser directly with missing world tick instead of invoking a test helper default"
+    ]
+  },
+  "ciChecks": {
+    "typecheck": "PASS",
+    "build": "PASS",
+    "package": "PASS",
+    "validateRelease": "PASS"
+  },
+  "regressions": [
+    {
+      "case": "Guessed secret and nonexistent claim IDs",
+      "before": "Secret claim request incorrectly accepted",
+      "after": "Both uniformly rejected before semantic preparation; no writes"
+    },
+    {
+      "case": "Approval edited to a secret claim with public recognition",
+      "before": "Generic recursive visibility redaction did not admit referenced claim visibility (static review)",
+      "after": "GM-only data remains hidden in Player target and approved proposal, including reload"
+    },
+    {
+      "case": "Reject with fenced target",
+      "before": "DM_RECOVERY_SCOPE_BLOCKED despite zero target writes",
+      "after": "Reject locks/writes only proposal; target and fence unchanged"
+    },
+    {
+      "case": "Persisted claim changes public to secret after indexing",
+      "before": "Request accepted using old audience; approved projection still visible",
+      "after": "Locked submit and approved privacy projection fresh-read validated territory data"
+    }
+  ],
+  "relatedWorkflows": [
+    {
+      "runId": 36869786726,
+      "workflow": ".github/workflows/g6-reputation-validation.yml",
+      "conclusion": "success"
+    },
+    {
+      "runId": 36869786902,
+      "workflow": ".github/workflows/g6-territory-recognition-validation.yml",
+      "conclusion": "success"
+    },
+    {
+      "runId": 36869787032,
+      "workflow": ".github/workflows/g6-stance-validation.yml",
+      "conclusion": "success"
+    },
+    {
+      "runId": 36869786746,
+      "workflow": ".github/workflows/g6-agreement-dashboard-validation.yml",
+      "conclusion": "success"
+    },
+    {
+      "runId": 36869786913,
+      "workflow": ".github/workflows/g6-agreement-negotiation-validation.yml",
+      "conclusion": "success"
+    },
+    {
+      "runId": 36869786797,
+      "workflow": ".github/workflows/g6-reputation-history-validation.yml",
+      "conclusion": "success"
+    },
+    {
+      "runId": 36869786722,
+      "workflow": ".github/workflows/g6-diplomacy-overview-validation.yml",
+      "conclusion": "success"
+    },
+    {
+      "runId": 36869786753,
+      "workflow": ".github/workflows/g6-agreement-term-editor-validation.yml",
+      "conclusion": "success"
+    },
+    {
+      "runId": 36869786603,
+      "workflow": ".github/workflows/g6-agreement-inspector-validation.yml",
+      "conclusion": "success"
+    }
+  ],
+  "artifact": {
+    "id": 11166422300,
+    "name": "g6-territory-recognition-candidate",
+    "url": "https://github.com/STR4DZN/Nova-Base/actions/runs/36869786902/artifacts/11166422300",
+    "sizeBytes": 869558,
+    "containerDigest": "sha256:9def45aaccc8bc2b17b954206ec938b99994ba86ce87be70e978ad97961e232a",
+    "createdAt": "2026-10-01T13:36:17Z",
+    "expiresAt": "2026-10-15T13:36:16Z",
+    "retentionDays": 14,
+    "containerDigestIsInstallableZipHash": false
+  },
+  "scope": {
+    "positions": [
+      "positive",
+      "negative",
+      "unknown"
+    ],
+    "partyTypes": [
+      "domain",
+      "actor",
+      "narrative",
+      "populationGroup",
+      "operationalGroup",
+      "notable"
+    ],
+    "creation": "GM owner mutation; Player Controller semantic request in authority inbox",
+    "review": "GM edits admitted claim, recognizing party, position, visibility and validity; original immutable, record ID/sourceRef preserved",
+    "clocks": "Authority world tick; zero valid; end exclusive; safe integers",
+    "privacy": "Audience before selection/counts/preparation, current persisted cross-target visibility in approved projection",
+    "drafts": "Retained during errors in current application session; reset on entity/tab switch or explicit reset",
+    "readOnlyCards": true,
+    "noAutomaticLegitimacy": true,
+    "noClaimOrRightEffectsFromRecognition": true,
+    "exactSubmitApprovalTicketRetry": "One proposal and one declaration across authority reload",
+    "updateOrEndExistingDeclaration": "Not supported by current owner; bulk update example is optional",
+    "namespacedProviders": "Future integrations, not implemented by this part",
+    "scale": "No real Foundry scale benchmark"
+  },
+  "foundryRealTestPerformed": false,
+  "foundryRealTestScheduled": "Only after the whole G6 implementation block",
+  "releasePublished": false,
+  "gateG6Accepted": false,
+  "gateG7Started": false,
+  "nextPart": "Territory link forms with visible destinations and operational status"
+}

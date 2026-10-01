@@ -30,13 +30,16 @@ A correção de locks aplica-se às rejeições de propostas do inbox: a transa�
 - **17/17 específicos** e **79/79 verticais** PASS (dez novos verticais).
 - **TypeScript, build, package e validate:release PASS** localmente no código final, Node 24.19.0.
 - SHA256 do ZIP local validado: `cb7aa4cc6d095bb6c95cd2aac266fb55f913b4c0df75fd29ac2e89c79b12674b`.
-- Validação independente no GitHub Actions pendente do commit desta parte.
+- Commit de código validado: `50a6c1be955d541ce09d8030a40b898b9826d7a7`; implementação inicial `4e5b8d8ffbff1673475e1f885ace3fd57aab1b84`. A correção final de fresh-read faz parte da candidata validada.
+- Workflow [36869786902](https://github.com/STR4DZN/Nova-Base/actions/runs/36869786902), job `110394293264`: **SUCCESS**, Ubuntu + Node 22.23.3. Os nove workflows acionados no código final concluíram com SUCCESS. CI confirma 17/17 específicos, 79/79 verticais, 1076/1076 na regressão completa e typecheck/build/package/validate:release.
+- [ZIP v0.0.8 e logs](https://github.com/STR4DZN/Nova-Base/actions/runs/36869786902/artifacts/11166422300), artifact `g6-territory-recognition-candidate`, retenção de 14 dias. Hash do container: `sha256:9def45aaccc8bc2b17b954206ec938b99994ba86ce87be70e978ad97961e232a` (não é o hash isolado do ZIP instalável).
+- Evidência permanente: `docs/evidence/G6_TERRITORY_RECOGNITION_VALIDATION.json` e `docs/evidence/G6_TERRITORY_RECOGNITION_CI_SUMMARY.log`.
 
 Na revisão final, a audiência de submit e do conteúdo aprovado passou a usar estado persistido atualizado; dois testes reproduziram o índice desatualizado. Os campos de origem People e visibilidade/vigência foram agrupados em detalhes avançados, conforme §6.2; expandem para dados preenchidos/People. A regressão completa do código final passou novamente.
 
 Cobertura específica: posições, seis tipos de parte, rejeição de Users/UUIDs/contextos inválidos, ticks/limites, somente claims admitidos, roundtrip de campos, estados temporais, projeção antes de contagem, escaping, empty state, rotas GM/Player, ID estável, revisão antiga, rascunho/reset/falha de leitura, edição GM original imutável e binding de aplicação.
 
-Cobertura vertical com owners/CommandBus/transporte reais e host simulado: claim secreto/inexistente uniforme, três posições e vigência, Controller→inbox→GM edit/approve, stranger, stale envio/decisão, recarga e approved target privado, existência de partes, replay exato submit/approve e rejeição com alvo fenced sem tocar owner; alteração externa de visibility antes de submit/projeção aprovada.
+Cobertura vertical com owners e CommandBus de produção, transporte em memória e host simulado: claim secreto/inexistente uniforme, três posições e vigência, Controller→inbox→GM edit/approve, stranger, stale envio/decisão, recarga e approved target privado, existência de partes, replay exato submit/approve e rejeição com alvo fenced sem tocar owner; alteração externa de visibility antes de submit/projeção aprovada.
 
 O primeiro fixture de runtime reutilizava a mesma referência sourceRef em três claims e foi rejeitado pelo contrato estrito de payload JSON do CommandBus; foi corrigido com objetos distintos antes de reproduzir o bug de audiência. Um teste de clock ausente acionava o default do helper de teste em vez de enviar undefined ao parser; a chamada foi corrigida. Typecheck passou desde a primeira execução. Nenhum desses ajustes enfraquece validators de produção.
 

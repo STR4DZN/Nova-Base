@@ -1,0 +1,36 @@
+G6 territory recognition validation — extracted GitHub Actions evidence
+Repository: STR4DZN/Nova-Base
+Code commit: 50a6c1be955d541ce09d8030a40b898b9826d7a7
+Workflow: .github/workflows/g6-territory-recognition-validation.yml
+Run: 36869786902 (success)
+Job: 110394293264 (success)
+Artifact container: 11166422300 sha256:9def45aaccc8bc2b17b954206ec938b99994ba86ce87be70e978ad97961e232a
+Following lines are preserved from decoded job logs. Test runs in order: recognition-specific, runtime vertical, complete regression.
+
+2026-10-01T13:35:33.2305302Z node: v22.23.3
+2026-10-01T13:35:35.4146202Z > domain-manager@0.0.8 typecheck
+2026-10-01T13:35:35.4146603Z > tsc --noEmit
+2026-10-01T13:35:40.8320173Z # tests 17
+2026-10-01T13:35:40.8329780Z # pass 17
+2026-10-01T13:35:40.8330296Z # fail 0
+2026-10-01T13:35:40.8330761Z # cancelled 0
+2026-10-01T13:35:40.8331222Z # skipped 0
+2026-10-01T13:35:40.8331656Z # todo 0
+2026-10-01T13:35:43.7615229Z # tests 79
+2026-10-01T13:35:43.7615676Z # pass 79
+2026-10-01T13:35:43.7615850Z # fail 0
+2026-10-01T13:35:43.7616032Z # cancelled 0
+2026-10-01T13:35:43.7616258Z # skipped 0
+2026-10-01T13:35:43.7616439Z # todo 0
+2026-10-01T13:36:15.2173453Z # tests 1076
+2026-10-01T13:36:15.2174051Z # pass 1076
+2026-10-01T13:36:15.2174359Z # fail 0
+2026-10-01T13:36:15.2174650Z # cancelled 0
+2026-10-01T13:36:15.2174984Z # skipped 0
+2026-10-01T13:36:15.2175277Z # todo 0
+2026-10-01T13:36:15.3270917Z > domain-manager@0.0.8 build
+2026-10-01T13:36:15.5868041Z > domain-manager@0.0.8 package
+2026-10-01T13:36:16.0284054Z > domain-manager@0.0.8 validate:release
+2026-10-01T13:36:16.0610375Z Package validation passed
+2026-10-01T13:36:16.1402071Z Artifact validation passed
+2026-10-01T13:36:16.1491214Z Release URLs, versions and ZIP verified: v0.0.8
