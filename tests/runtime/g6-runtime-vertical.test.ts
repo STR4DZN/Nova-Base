@@ -1277,3 +1277,20 @@ test("G6 recognition runtime: unavailable fenced target disables approval but re
     gm.recovery.fenceRegistry.removeFence("recognition-block"); assert.deepEqual(unwrap(await gm.diplomacy.territory.query({ id })), before);
   } finally { player.destroy(); gm.destroy(); }
 });
+test("G6 recognition runtime: locked submit checks fresh persisted claim visibility instead of prior public index", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player");
+  try { await gm.initialize(); const id = await recognitionTerritory(gm); assert.equal((unwrap(await player.diplomacy.territory.query({ id })) as any).claims.some((c: any) => c.id === "visible-claim"), true);
+    const row: any = await f.adapter.read("territory", id); row.data.claims[0].visibility = "secret"; await f.adapter.write(row); const before = await f.adapter.loadAll();
+    const result = await player.diplomacy.proposals.submit({ id: "recognition-after-visibility-edit", intent: { kind: "territory", mode: "modify", id, expectedRevision: 0, action: recognitionAction(), reason: "Formerly visible claim" } });
+    assert.equal(result.ok, false); if (!result.ok) assert.equal(result.error.code, "DM_TERRITORY_RECOGNITION_UNAVAILABLE"); assert.deepEqual(await f.adapter.loadAll(), before);
+  } finally { player.destroy(); gm.destroy(); }
+});
+test("G6 recognition runtime: approved projection refreshes persisted target privacy without canonical mutation", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player");
+  try { await gm.initialize(); const id = await recognitionTerritory(gm); unwrap(await player.diplomacy.proposals.submit({ id: "recognition-current-privacy", intent: { kind: "territory", mode: "modify", id, expectedRevision: 0, action: recognitionAction(), reason: "Visible request" } }));
+    unwrap(await gm.diplomacy.proposals.decide({ id: "recognition-current-privacy", expectedRevision: 0, decision: "approve", reason: "Explicit approval" }));
+    assert.ok((unwrap(await player.diplomacy.proposals.query({ id: "recognition-current-privacy" })) as any).decision.approvedIntent);
+    const row: any = await f.adapter.read("territory", id); row.data.claims[0].visibility = "secret"; await f.adapter.write(row); const before = await f.adapter.loadAll();
+    const p: any = unwrap(await player.diplomacy.proposals.query({ id: "recognition-current-privacy" })); assert.equal(p.lifecycle, "approved"); assert.equal(p.decision.approvedIntent, null); assert.deepEqual(await f.adapter.loadAll(), before);
+  } finally { player.destroy(); gm.destroy(); }
+});

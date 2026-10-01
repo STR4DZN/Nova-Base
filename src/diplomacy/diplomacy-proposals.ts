@@ -36,7 +36,7 @@ export function registerDiplomacyProposals(o: OwnerCommandOptions): void {
     if (!diplomacyViewerIsGm(ctx) && intent.kind === "reputation" && intent.mode === "modify"
       && isRecord(intent.action) && ["add-track", "configure-track"].includes(intent.action.kind as string))
       return failure("DM_SECURITY_PERMISSION_DENIED", "Existing reputation policy configuration requires the GM", "permission");
-    const owner = DIPLOMACY_OWNERS[intent.kind], existing = intent.mode === "modify" ? o.store.get(intent.kind, intent.id) : null;
+    const owner = DIPLOMACY_OWNERS[intent.kind], existing = intent.mode === "modify" ? await o.store.freshRead(intent.kind, intent.id) : null;
     if (intent.mode === "modify" && !existing) return failure("DM_DIPLOMACY_NOT_FOUND", "Entity unavailable", "not-found");
     const source = existing?.data ?? intent.data, valid = owner.validate(source, o.store.list("territory").map(e => e.data as any));
     if (!valid.ok) return valid;
@@ -104,11 +104,12 @@ export function registerDiplomacyProposals(o: OwnerCommandOptions): void {
         };
         const approved = proposal.decision.approvedIntent;
         if (approved.kind === "territory" && approved.mode === "modify" && isRecord(approved.action) && approved.action.kind === "recognition") {
-          const row = o.store.get("territory", approved.id);
           const available = o.recovery.fenceRegistry.assertKeysAvailable([lockKey.diplomacy("territory", approved.id), lockKey.territoryGraph()]);
-          const controls = row && await diplomacyViewerControls(ctx, DIPLOMACY_OWNERS.territory.parties(row.data), o.domains, o.controllers);
+          const row = available.ok ? await o.store.freshRead("territory", approved.id) : null;
+          const valid = row ? DIPLOMACY_OWNERS.territory.validate(row.data, []) : null;
+          const controls = valid?.ok && await diplomacyViewerControls(ctx, DIPLOMACY_OWNERS.territory.parties(valid.value), o.domains, o.controllers);
           const canSee = (v: string) => v === "public" || v === "restricted" && !!controls;
-          const state = row && available.ok ? projectTerritoryState(row.data as TerritoryState, canSee) : null;
+          const state = valid?.ok ? projectTerritoryState(valid.value as TerritoryState, canSee) : null;
           const value = approved.action.value;
           if (!state || !isRecord(value) || !canSee(value.visibility as string) || !state.claims.some(c => c.id === value.claimId))
             return ok({ ...proposal, decision: { ...proposal.decision, approvedIntent: null } });
