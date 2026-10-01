@@ -29,7 +29,7 @@ function fixture(adapter = new InMemoryDiplomacyStorageAdapter(), transactions =
       getCurrentUserId: () => user, getPreferredUserId: () => "gm" }, { authorityUserId: "gm", authorityEpoch: 1, initialized: true }) } as any,
     transport: new InMemoryCommandTransport({ currentUserId: user, getAuthorityUserId: () => "gm" }, hub),
     diplomacyStorageAdapter: adapter, transactionStorageAdapter: transactions, ledgerStorageAdapter: ledger, worldTick: () => time.tick });
-  return { make, adapter, transactions, time };
+  return { make, adapter, transactions, time, ledger };
 }
 function relation(id = "rel_00000000-0000-4000-8000-000000000001", visibility = "public") {
   return { definition: { id: "test:relation", version: 1, label: "Relation", symmetry: "symmetric", minParties: 2, maxParties: null,
@@ -1292,5 +1292,161 @@ test("G6 recognition runtime: approved projection refreshes persisted target pri
     assert.ok((unwrap(await player.diplomacy.proposals.query({ id: "recognition-current-privacy" })) as any).decision.approvedIntent);
     const row: any = await f.adapter.read("territory", id); row.data.claims[0].visibility = "secret"; await f.adapter.write(row); const before = await f.adapter.loadAll();
     const p: any = unwrap(await player.diplomacy.proposals.query({ id: "recognition-current-privacy" })); assert.equal(p.lifecycle, "approved"); assert.equal(p.decision.approvedIntent, null); assert.deepEqual(await f.adapter.loadAll(), before);
+  } finally { player.destroy(); gm.destroy(); }
+});
+
+async function linkTerritories(gm: ReturnType<typeof composeDomainManagerRuntime>) {
+  const source = await recognitionTerritory(gm), ids: Record<string, string> = {};
+  for (const visibility of ["public", "restricted", "secret"]) {
+    const draft = createDiplomacyDraft("territory", `Destination ${visibility}`, [], visibility as any);
+    unwrap(await gm.diplomacy.territory.create({ ...draft, reason: "Destination" })); ids[visibility] = draft.id;
+  }
+  return { source, ...ids };
+}
+function linkAction(targetTerritoryUuid: string, patch: any = {}) {
+  return { kind: "link", value: { id: crypto.randomUUID(), sourceRef: { type: "manual", id: "test-link" }, visibility: "public", startsAtWorldTick: 0, expiresAtWorldTick: null,
+    targetTerritoryUuid, linkType: "domain-manager:road", direction: "both", status: "operational", cost: null, capacity: null, dependencyRefs: [], ...patch } };
+}
+test("G6 links runtime: invisible and missing destination proposals have uniform rejection without writes", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player");
+  try { await gm.initialize(); const ids = await linkTerritories(gm), before = await f.adapter.loadAll(), errors: string[] = [];
+    for (const target of [ids.secret, ids.restricted, "JournalEntry.missing"]) {
+      const result = await player.diplomacy.proposals.submit({ id: crypto.randomUUID(), intent: { kind: "territory", mode: "modify", id: ids.source, expectedRevision: 0, action: linkAction(target), reason: "Guess destination" } });
+      assert.equal(result.ok, false); if (!result.ok) errors.push(result.error.code);
+    }
+    assert.deepEqual(errors, Array(3).fill("DM_TERRITORY_LINK_UNAVAILABLE")); assert.deepEqual(await f.adapter.loadAll(), before);
+  } finally { player.destroy(); gm.destroy(); }
+});
+test("G6 links runtime: Player cannot update secret link by guessing its ID", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player");
+  try { await gm.initialize(); const ids = await linkTerritories(gm); unwrap(await gm.diplomacy.territory.modify({ id: ids.source, expectedRevision: 0, action: linkAction(ids.public, { id: "hidden-link-marker", visibility: "secret" }), reason: "Private road" }));
+    const before = await f.adapter.loadAll(), errors: string[] = [];
+    for (const id of ["hidden-link-marker", "missing-link"]) {
+      const result = await player.diplomacy.proposals.submit({ id: crypto.randomUUID(), intent: { kind: "territory", mode: "modify", id: ids.source, expectedRevision: 1, action: { kind: "update-link", id, status: "closed" }, reason: "Guess link" } });
+      assert.equal(result.ok, false); if (!result.ok) errors.push(result.error.code);
+    }
+    assert.deepEqual(errors, ["DM_TERRITORY_LINK_UNAVAILABLE", "DM_TERRITORY_LINK_UNAVAILABLE"]); assert.deepEqual(await f.adapter.loadAll(), before);
+  } finally { player.destroy(); gm.destroy(); }
+});
+test("G6 links runtime: GM revised private destination is hidden from approved Player proposal", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player");
+  try { await gm.initialize(); const ids = await linkTerritories(gm), intent = { kind: "territory", mode: "modify", id: ids.source, expectedRevision: 0, action: linkAction(ids.public), reason: "Road" };
+    unwrap(await player.diplomacy.proposals.submit({ id: "link-private-review", intent }));
+    unwrap(await gm.diplomacy.proposals.decide({ id: "link-private-review", expectedRevision: 0, decision: "approve", reason: "Private destination", editedIntent: { ...intent, action: linkAction(ids.secret) } }));
+    const p: any = unwrap(await player.diplomacy.proposals.query({ id: "link-private-review" })); assert.equal(p.decision.approvedIntent, null); assert.equal(JSON.stringify(p).includes(ids.secret), false);
+    assert.equal((unwrap(await player.diplomacy.territory.query({ id: ids.source })) as any).links.length, 0);
+  } finally { player.destroy(); gm.destroy(); }
+});
+function linkUiFields(target: string, patch = {}) { return { linkTarget: target, linkType: "domain-manager:road", linkDirection: "both", linkStatus: "operational", linkVisibility: "public", linkStarts: "", linkExpires: "", linkCost: "", linkCapacity: "", linkDependencies: "", linkRevision: "0", reason: "Road", ...patch }; }
+test("G6 links runtime: GM UI creates declarative link and audited status changes without reciprocal or economic effects", async () => {
+  const f = fixture(), gm = f.make();
+  try { await gm.initialize(); const ids = await linkTerritories(gm), ui = new DiplomacyApplicationController(gm.diplomacy); ui.selectTab("territory"); ui.select(ids.source); unwrap(await ui.load());
+    const destinationBefore: any = unwrap(await gm.diplomacy.territory.query({ id: ids.public })), ledgerBefore = await f.ledger.loadSnapshot();
+    unwrap(await ui.submitLink(linkUiFields(ids.public, { linkDirection: "outbound", linkCost: "0", linkCapacity: "5", linkDependencies: JSON.stringify([{ type: "facility", id: "bridge" }]), linkStarts: "0", linkExpires: "20" })));
+    unwrap(await ui.load()); const l = ui.detail.links[0]; assert.equal(l.direction, "outbound"); assert.equal(l.cost, 0); assert.equal(l.capacity, 5); assert.equal(l.startsAtWorldTick, 0); assert.equal(ui.detail.events.length, 1);
+    for (const [i, status] of ["limited", "closed", "destroyed", "operational"].entries()) { unwrap(await ui.submitLink({ linkId: l.id, linkStatus: status, linkRevision: String(i + 1), reason: "Operational decision" }, true)); unwrap(await ui.load()); assert.equal(ui.detail.links[0].status, status); }
+    assert.equal(ui.detail.revision, 5); assert.equal(ui.detail.events.length, 5); assert.deepEqual(unwrap(await gm.diplomacy.territory.query({ id: ids.public })), destinationBefore); assert.deepEqual(await f.ledger.loadSnapshot(), ledgerBefore);
+    const before = await f.adapter.loadAll(); f.time.tick = 20; unwrap(await ui.load()); assert.ok(ui.render().includes("0 operacional · 0 limitada")); assert.ok(ui.render().includes("Expirada")); assert.deepEqual(await f.adapter.loadAll(), before);
+  } finally { gm.destroy(); }
+});
+test("G6 links runtime: Player GUI proposal and GM structured link/status reviews preserve original intent", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player"), stranger = f.make("stranger");
+  try { await gm.initialize(); const ids = await linkTerritories(gm), ui = new DiplomacyApplicationController(player.diplomacy); ui.selectTab("territory"); ui.select(ids.source); unwrap(await ui.load());
+    assert.equal(ui.linkDestinations.some(d => d.id === ids.secret || d.id === ids.restricted || d.id === ids.source), false); assert.equal(ui.render().includes(ids.secret), false);
+    unwrap(await ui.submitLink(linkUiFields(ids.public))); const p: any = unwrap(await player.diplomacy.proposals.query()), pid = p.items[0].id, original: any = unwrap(await player.diplomacy.proposals.query({ id: pid }));
+    assert.equal((unwrap(await gm.diplomacy.territory.query({ id: ids.source })) as any).links.length, 0); assert.equal((await stranger.diplomacy.proposals.query({ id: pid })).ok, false);
+    const review = new DiplomacyApplicationController(gm.diplomacy); review.selectTab("proposals"); review.select(pid); unwrap(await review.load()); assert.ok(review.render().includes("Revisar ligação territorial"));
+    unwrap(await review.review("approve", "Reviewed road", { ...linkUiFields(ids.public, { linkCapacity: "3", linkStatus: "limited" }), linkReview: "on" })); const approved: any = unwrap(await player.diplomacy.proposals.query({ id: pid }));
+    assert.deepEqual(approved.original, original.original); assert.equal(approved.decision.approvedIntent.action.value.id, original.original.action.value.id); assert.equal(approved.decision.approvedIntent.action.value.capacity, 3);
+    unwrap(await ui.load()); const link = ui.detail.links[0]; unwrap(await ui.submitLink({ linkId: link.id, linkStatus: "closed", linkRevision: "1", reason: "Closure" }, true));
+    const pending: any = unwrap(await player.diplomacy.proposals.query()); const sid = pending.items.find((x: any) => x.lifecycle === "pending").id; review.select(sid); unwrap(await review.load());
+    unwrap(await review.review("approve", "GM closure", { linkReview: "on", linkStatus: "destroyed" })); unwrap(await ui.load()); assert.equal(ui.detail.links[0].status, "destroyed");
+  } finally { stranger.destroy(); player.destroy(); gm.destroy(); }
+});
+test("G6 links runtime: fresh destination privacy blocks old selections and hides approved links after reload", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player"); let source = "";
+  try { await gm.initialize(); const ids = await linkTerritories(gm); source = ids.source;
+    unwrap(await player.diplomacy.proposals.submit({ id: "link-privacy", intent: { kind: "territory", mode: "modify", id: source, expectedRevision: 0, action: linkAction(ids.public), reason: "Road" } })); unwrap(await gm.diplomacy.proposals.decide({ id: "link-privacy", expectedRevision: 0, decision: "approve", reason: "Accept" }));
+    assert.equal((unwrap(await player.diplomacy.territory.query({ id: source })) as any).links.length, 1);
+    const row: any = await f.adapter.read("territory", ids.public); row.data.territory.visibility = "secret"; await f.adapter.write(row); const before = await f.adapter.loadAll();
+    const p: any = unwrap(await player.diplomacy.proposals.query({ id: "link-privacy" })); assert.equal(p.decision.approvedIntent, null); assert.equal((unwrap(await player.diplomacy.territory.query({ id: source })) as any).links.length, 0);
+    const result = await player.diplomacy.proposals.submit({ id: "old-destination", intent: { kind: "territory", mode: "modify", id: source, expectedRevision: 1, action: linkAction(ids.public), reason: "Old selection" } }); assert.equal(result.ok, false); if (!result.ok) assert.equal(result.error.code, "DM_TERRITORY_LINK_UNAVAILABLE"); assert.deepEqual(await f.adapter.loadAll(), before);
+  } finally { player.destroy(); gm.destroy(); }
+  const reload = f.make(), player2 = f.make("player"); try { await reload.initialize(); const before = await f.adapter.loadAll(); assert.equal((unwrap(await player2.diplomacy.proposals.query({ id: "link-privacy" })) as any).decision.approvedIntent, null); assert.equal((unwrap(await player2.diplomacy.territory.query({ id: source })) as any).links.length, 0); assert.deepEqual(await f.adapter.loadAll(), before); }
+  finally { player2.destroy(); reload.destroy(); }
+});
+test("G6 links runtime: destination fence blocks create/status approval and rejection only closes proposal", async () => {
+  const { lockKey } = await import("../../src/mutations/lock-keys.js"); const f = fixture(), gm = f.make(), player = f.make("player");
+  try { await gm.initialize(); const ids = await linkTerritories(gm), action = linkAction(ids.public);
+    unwrap(await player.diplomacy.proposals.submit({ id: "link-fence", intent: { kind: "territory", mode: "modify", id: ids.source, expectedRevision: 0, action, reason: "Road" } })); const before = await f.adapter.read("territory", ids.source);
+    gm.recovery.fenceRegistry.installFence({ transactionId: "dest-fence", lockKeys: [lockKey.diplomacy("territory", ids.public)], reason: "Needs recovery" });
+    assert.equal((await gm.diplomacy.proposals.decide({ id: "link-fence", expectedRevision: 0, decision: "approve", reason: "Blocked" })).ok, false);
+    assert.equal((await gm.diplomacy.territory.modify({ id: ids.source, expectedRevision: 0, action, reason: "Blocked" })).ok, false);
+    unwrap(await gm.diplomacy.proposals.decide({ id: "link-fence", expectedRevision: 0, decision: "reject", reason: "Unavailable route" })); assert.deepEqual(await f.adapter.read("territory", ids.source), before);
+    gm.recovery.fenceRegistry.removeFence("dest-fence"); unwrap(await gm.diplomacy.territory.modify({ id: ids.source, expectedRevision: 0, action, reason: "Create" }));
+    unwrap(await player.diplomacy.proposals.submit({ id: "status-fence", intent: { kind: "territory", mode: "modify", id: ids.source, expectedRevision: 1, action: { kind: "update-link", id: action.value.id, status: "closed" }, reason: "Closure" } }));
+    gm.recovery.fenceRegistry.installFence({ transactionId: "dest-fence", lockKeys: [lockKey.diplomacy("territory", ids.public)], reason: "Needs recovery" }); assert.equal((unwrap(await player.diplomacy.territory.query({ id: ids.source })) as any).links.length, 0);
+    assert.equal((await gm.diplomacy.proposals.decide({ id: "status-fence", expectedRevision: 0, decision: "approve", reason: "Blocked" })).ok, false); unwrap(await gm.diplomacy.proposals.decide({ id: "status-fence", expectedRevision: 0, decision: "reject", reason: "Reject" }));
+  } finally { player.destroy(); gm.destroy(); }
+});
+test("G6 links runtime: stale draft and stale approval require explicit revision after review", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player");
+  try { await gm.initialize(); const ids = await linkTerritories(gm), ui = new DiplomacyApplicationController(player.diplomacy); ui.selectTab("territory"); ui.select(ids.source); unwrap(await ui.load());
+    unwrap(await gm.diplomacy.territory.modify({ id: ids.source, expectedRevision: 0, action: { kind: "contest-claim", id: "visible-claim" }, reason: "Concurrent" }));
+    assert.equal((await ui.submitLink(linkUiFields(ids.public))).ok, false); unwrap(await ui.load()); assert.equal(ui.territoryLinkFields.linkRevision, "0"); assert.equal((await ui.submitLink(linkUiFields(ids.public))).ok, false); ui.resetLinkDrafts(); unwrap(await ui.submitLink(linkUiFields(ids.public, { linkRevision: "1" })));
+    const p: any = unwrap(await player.diplomacy.proposals.query()), pid = p.items[0].id; unwrap(await gm.diplomacy.territory.modify({ id: ids.source, expectedRevision: 1, action: { kind: "contest-claim", id: "restricted-claim" }, reason: "Another" }));
+    const review = new DiplomacyApplicationController(gm.diplomacy); review.selectTab("proposals"); review.select(pid); unwrap(await review.load()); const fields = { ...linkUiFields(ids.public, { linkStatus: "limited" }), linkReview: "on" };
+    assert.equal((await review.review("approve", "Stale", fields)).ok, false); assert.equal(review.linkReviewFields.linkStatus, "limited"); unwrap(await review.review("approve", "After reviewing current state", { ...fields, targetRevision: "2" })); assert.equal((unwrap(await gm.diplomacy.territory.query({ id: ids.source })) as any).revision, 3);
+  } finally { player.destroy(); gm.destroy(); }
+});
+test("G6 links runtime: exact link and status ticket retries stay once after reload", async () => {
+  const f = fixture(), gm = f.make(); let source = "", create: any, status: any;
+  try { await gm.initialize(); const ids = await linkTerritories(gm); source = ids.source; const action = linkAction(ids.public);
+    create = unwrap(gm.diplomacy.commands.prepare("territory:modify", { id: source, expectedRevision: 0, action, reason: "Create once" })); unwrap(await gm.diplomacy.commands.execute(create)); unwrap(await gm.diplomacy.commands.retry(create));
+    status = unwrap(gm.diplomacy.commands.prepare("territory:modify", { id: source, expectedRevision: 1, action: { kind: "update-link", id: action.value.id, status: "limited" }, reason: "Update once" })); unwrap(await gm.diplomacy.commands.execute(status)); unwrap(await gm.diplomacy.commands.retry(status));
+    const d: any = unwrap(await gm.diplomacy.territory.query({ id: source })); assert.equal(d.links.length, 1); assert.equal(d.events.length, 2); assert.equal(d.revision, 2);
+  } finally { gm.destroy(); }
+  const reload = f.make(); try { await reload.initialize(); const before = await f.adapter.loadAll(); unwrap(await reload.diplomacy.commands.retry(create)); unwrap(await reload.diplomacy.commands.retry(status)); const d: any = unwrap(await reload.diplomacy.territory.query({ id: source })); assert.equal(d.links[0].status, "limited"); assert.equal(d.events.length, 2); assert.deepEqual(await f.adapter.loadAll(), before); } finally { reload.destroy(); }
+});
+test("G6 links runtime: paged visible destinations pin selection outside current page without loading all details", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player");
+  try { await gm.initialize(); const ids = await linkTerritories(gm);
+    for (let i = 0; i < 32; i++) { const d = createDiplomacyDraft("territory", `Public destination ${i}`, [], "public"); unwrap(await gm.diplomacy.territory.create({ ...d, reason: "Destination" })); }
+    const ui = new DiplomacyApplicationController(player.diplomacy); ui.selectTab("territory"); ui.select(ids.source); unwrap(await ui.load()); assert.equal(ui.linkDestinationPage.items.length, 30); assert.equal(ui.linkDestinationPage.total, 34);
+    ui.territoryLinkFields = linkUiFields(ids.public); ui.linkDestinationOffset = 30; unwrap(await ui.load()); assert.equal(ui.linkDestinationPage.items.length, 4); assert.ok(ui.linkDestinations.some(d => d.id === ids.public)); assert.equal(ui.territoryLinkFields.linkTarget, ids.public);
+    ui.applyDestinationSearch("Public destination 31"); unwrap(await ui.load()); assert.equal(ui.linkDestinationPage.total, 1); assert.equal(ui.linkDestinationOffset, 0); assert.equal(ui.linkDestinations.length, 2); assert.equal(ui.render().includes(ids.secret), false);
+  } finally { player.destroy(); gm.destroy(); }
+});
+test("G6 links runtime: controller-visible restricted destinations and secret requests stay private after approval", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player"), stranger = f.make("stranger");
+  try { await gm.initialize(); const ids = await linkTerritories(gm), d = createDiplomacyDraft("territory", "Controlled restricted destination", [], "restricted"), state: any = d.data;
+    state.claims = [{ id: "destination-claim", sourceRef: { type: "manual", id: "gm" }, visibility: "restricted", startsAtWorldTick: 0, expiresAtWorldTick: null, claimantRef: { type: "domain", uuid: domainUuid }, claimType: "domain-manager:ownership", lifecycle: "active", contested: false, strength: null, inherited: false }];
+    unwrap(await gm.diplomacy.territory.create({ ...d, data: state, reason: "Controlled destination" }));
+    const ui = new DiplomacyApplicationController(player.diplomacy); ui.selectTab("territory"); ui.select(ids.source); unwrap(await ui.load()); assert.ok(ui.linkDestinations.some(x => x.id === d.id));
+    unwrap(await ui.submitLink(linkUiFields(d.id, { linkVisibility: "secret" }))); const proposals: any = unwrap(await player.diplomacy.proposals.query()), pid = proposals.items[0].id;
+    unwrap(await gm.diplomacy.proposals.decide({ id: pid, expectedRevision: 0, decision: "approve", reason: "GM private road" }));
+    const p: any = unwrap(await player.diplomacy.proposals.query({ id: pid })); assert.equal(p.decision.approvedIntent, null); assert.equal(p.original.action.value.targetTerritoryUuid, d.id);
+    assert.equal((unwrap(await player.diplomacy.territory.query({ id: ids.source })) as any).links.length, 0); assert.equal((await stranger.diplomacy.territory.query({ id: d.id })).ok, false);
+    const before = await f.adapter.loadAll(); for (const target of [ids.source, "JournalEntry.missing"]) assert.equal((await gm.diplomacy.territory.modify({ id: ids.source, expectedRevision: 1, action: linkAction(target), reason: "Invalid destination" })).ok, false); assert.deepEqual(await f.adapter.loadAll(), before);
+  } finally { stranger.destroy(); player.destroy(); gm.destroy(); }
+});
+test("G6 links runtime: create-intent hidden destinations and fresh persisted secret links are rejected without writes", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player");
+  try { await gm.initialize(); const ids = await linkTerritories(gm), d = createDiplomacyDraft("territory", "Proposed region", [], "public"), state: any = d.data;
+    const source: any = unwrap(await gm.diplomacy.territory.query({ id: ids.source })); state.claims = structuredClone(source.claims); state.links = [linkAction(ids.secret).value];
+    const before = await f.adapter.loadAll(), proposal = await player.diplomacy.proposals.submit({ id: "hidden-create-link", intent: { kind: "territory", mode: "create", id: d.id, data: state, reason: "Guess hidden target" } });
+    assert.equal(proposal.ok, false); if (!proposal.ok) assert.equal(proposal.error.code, "DM_TERRITORY_LINK_UNAVAILABLE"); assert.deepEqual(await f.adapter.loadAll(), before);
+    const action = linkAction(ids.public); unwrap(await gm.diplomacy.territory.modify({ id: ids.source, expectedRevision: 0, action, reason: "Public link" }));
+    const row: any = await f.adapter.read("territory", ids.source); row.data.links[0].visibility = "secret"; await f.adapter.write(row); const privateBefore = await f.adapter.loadAll();
+    const result = await player.diplomacy.proposals.submit({ id: "formerly-public-link", intent: { kind: "territory", mode: "modify", id: ids.source, expectedRevision: 1, action: { kind: "update-link", id: action.value.id, status: "closed" }, reason: "Former selection" } });
+    assert.equal(result.ok, false); if (!result.ok) assert.equal(result.error.code, "DM_TERRITORY_LINK_UNAVAILABLE"); assert.deepEqual(await f.adapter.loadAll(), privateBefore);
+  } finally { player.destroy(); gm.destroy(); }
+});
+test("G6 links runtime: guessed fenced destination uses the same unavailable error as invisible and missing targets", async () => {
+  const { lockKey } = await import("../../src/mutations/lock-keys.js"); const f = fixture(), gm = f.make(), player = f.make("player");
+  try { await gm.initialize(); const ids = await linkTerritories(gm); gm.recovery.fenceRegistry.installFence({ transactionId: "private-destination-fence", lockKeys: [lockKey.diplomacy("territory", ids.secret), lockKey.diplomacy("territory", ids.public)], reason: "Private recovery reason" });
+    const before = await f.adapter.loadAll(), errors: any[] = [];
+    for (const target of [ids.secret, ids.public, "JournalEntry.missing"]) { const result = await player.diplomacy.proposals.submit({ id: crypto.randomUUID(), intent: { kind: "territory", mode: "modify", id: ids.source, expectedRevision: 0, action: linkAction(target), reason: "Unavailable selection" } }); assert.equal(result.ok, false); if (!result.ok) errors.push(result.error); }
+    assert.equal(errors.length, 3); assert.ok(errors.every(e => e.code === "DM_TERRITORY_LINK_UNAVAILABLE")); assert.deepEqual(errors[0], errors[1]); assert.deepEqual(errors[1], errors[2]); assert.equal(JSON.stringify(errors).includes("Private recovery reason"), false); assert.deepEqual(await f.adapter.loadAll(), before);
   } finally { player.destroy(); gm.destroy(); }
 });

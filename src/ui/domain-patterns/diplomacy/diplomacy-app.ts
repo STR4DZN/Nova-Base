@@ -22,6 +22,7 @@ import { parseReputationHistoryFields, reputationHistoryFields, renderReputation
 import { validateDiplomacyOverviewQuery, type DiplomacyOverviewFilter } from "../../../diplomacy/diplomacy-overview.js";
 import { renderDiplomacyOverview } from "./diplomacy-overview-view.js";
 import { parseRecognitionFields, recognitionFields, renderRecognitionFields, renderRecognitionRequest, renderTerritoryRecognitions } from "./territory-recognition-form.js";
+import { linkFields, parseLinkFields, parseLinkStatus, renderLinkFields, renderLinkStatusFields, renderLinkRequest, renderTerritoryLinks, type LinkDestination } from "./territory-link-form.js";
 export type DiplomacyTab = "overview" | "relations" | "reputation" | "agreements" | "territory" | "disputes" | "proposals";
 const labels: Record<DiplomacyTab, string> = { overview: "Painel geral", relations: "Relações", reputation: "Reputação", agreements: "Acordos", territory: "Território", disputes: "Disputas", proposals: "Propostas" };
 const kinds: Record<Exclude<DiplomacyTab, "proposals" | "overview">, OwnerIntent["kind"]> = { relations: "relation", reputation: "reputation", agreements: "agreement", territory: "territory", disputes: "dispute" };
@@ -48,6 +49,9 @@ export class DiplomacyApplicationController {
   reputationSourceOffset = 0;
   territoryRecognitionFields: Record<string, string> = {}; recognitionReviewFields: Record<string, string> = {};
   recognitionReviewTarget: any = null; #recognitionDraftId: string | null = null;
+  territoryLinkFields: Record<string, string> = {}; territoryLinkStatusFields: Record<string, string> = {}; linkReviewFields: Record<string, string> = {};
+  linkReviewTarget: any = null; linkDestinations: LinkDestination[] = []; linkDestinationPage: any = null;
+  linkDestinationSearch = ""; linkDestinationOffset = 0; linkDestinationError = ""; #linkDraftId: string | null = null;
   agreementFormFields: Record<string, string> = {};
   agreementLifecycle: AgreementLifecycleFilter | "" = "";
   agreementTermEditor: { kind: AgreementTermEditorKind; agreementId: string; revision: number; proposalId: string | null;
@@ -58,7 +62,7 @@ export class DiplomacyApplicationController {
   #previewInput: string | null = null; #previewIntent: OwnerIntent | null = null;
   treeAxis: "locatedInUuid" | "administrativeParentUuid" | null = null; treeParent: string | null = null;
   constructor(readonly api: PublicDiplomacyApi) {}
-  selectTab(tab: DiplomacyTab): void { this.resetRecognitionDraft(); this.recognitionReviewFields = {}; this.recognitionReviewTarget = null; this.tab = tab; this.list = null; this.overviewFilter = "all"; this.expiryHorizonTicks = 10; this.recentHours = 24; this.offset = 0; this.selectedId = null; this.detail = null; this.historyOffset = 0; this.creating = false; this.preview = null; this.reputationTrackCount = 1; this.reputationFormFields = {}; this.reputationConfigurationFields = {}; this.resetReputationHistory(); this.agreementLifecycle = ""; this.agreementFormFields = {}; this.cancelAgreementTermEditor(); }
+  selectTab(tab: DiplomacyTab): void { this.resetLinkContext(); this.resetRecognitionDraft(); this.recognitionReviewFields = {}; this.recognitionReviewTarget = null; this.tab = tab; this.list = null; this.overviewFilter = "all"; this.expiryHorizonTicks = 10; this.recentHours = 24; this.offset = 0; this.selectedId = null; this.detail = null; this.historyOffset = 0; this.creating = false; this.preview = null; this.reputationTrackCount = 1; this.reputationFormFields = {}; this.reputationConfigurationFields = {}; this.resetReputationHistory(); this.agreementLifecycle = ""; this.agreementFormFields = {}; this.cancelAgreementTermEditor(); }
   private resetReputationHistory(): void {
     this.reputationHistoryFilter = {}; this.reputationHistoryFormFields = {}; this.reputationSourceOffset = 0;
   }
@@ -91,7 +95,7 @@ export class DiplomacyApplicationController {
     this.search = value; this.offset = 0;
     if (this.tab === "agreements") this.resetAgreementSelection();
   }
-  select(id: string): void { if (this.selectedId !== id) { this.resetRecognitionDraft(); this.recognitionReviewFields = {}; this.recognitionReviewTarget = null; this.reputationConfigurationFields = {}; this.resetReputationHistory(); this.agreementFormFields = {}; this.cancelAgreementTermEditor(); } this.selectedId = id; this.historyOffset = 0; this.creating = false; this.preview = null; }
+  select(id: string): void { if (this.selectedId !== id) { this.resetLinkContext(); this.resetRecognitionDraft(); this.recognitionReviewFields = {}; this.recognitionReviewTarget = null; this.reputationConfigurationFields = {}; this.resetReputationHistory(); this.agreementFormFields = {}; this.cancelAgreementTermEditor(); } this.selectedId = id; this.historyOffset = 0; this.creating = false; this.preview = null; }
   applyOverviewFilter(filter: unknown, expiryHorizonTicks = this.expiryHorizonTicks, recentHours = this.recentHours): Result<unknown> {
     if (this.tab !== "overview") return this.capture(failure("DM_DIPLOMACY_OVERVIEW_QUERY_INVALID", "Abra o painel geral."));
     const valid = validateDiplomacyOverviewQuery({ filter, expiryHorizonTicks, recentHours }); if (!valid.ok) return this.capture(valid);
@@ -110,8 +114,28 @@ export class DiplomacyApplicationController {
       return this.capture(failure("DM_DIPLOMACY_INTENT_INVALID", "Selecione um território disponível."));
     return this.change({ ...fields, kind: "recognition" });
   }
+  resetLinkDrafts(): void { this.territoryLinkFields = {}; this.territoryLinkStatusFields = {}; this.#linkDraftId = null; }
+  private resetLinkContext(): void { this.resetLinkDrafts(); this.linkReviewFields = {}; this.linkReviewTarget = null; this.linkDestinations = []; this.linkDestinationPage = null; this.linkDestinationSearch = ""; this.linkDestinationOffset = 0; this.linkDestinationError = ""; }
+  async submitLink(fields: Record<string, string>, status = false): Promise<Result<unknown>> {
+    if (this.tab !== "territory" || !this.detail || this.selectedId !== this.detail.id)
+      return this.capture(failure("DM_DIPLOMACY_INTENT_INVALID", "Selecione um território disponível."));
+    return this.change({ ...fields, kind: status ? "update-link" : "link" });
+  }
+  applyDestinationSearch(search: string): void { this.linkDestinationSearch = search.trim(); this.linkDestinationOffset = 0; }
+  async loadLinkDestinations(sourceId: string): Promise<void> {
+    this.linkDestinations = []; this.linkDestinationPage = null; this.linkDestinationError = "";
+    const page = await this.api.territory.query({ offset: this.linkDestinationOffset, limit: 30, search: this.linkDestinationSearch });
+    if (!page.ok) { this.linkDestinationError = "Destinos indisponíveis. Atualize a consulta antes de enviar."; return; }
+    this.linkDestinationPage = page.value; this.linkDestinations = (page.value as any).items.filter((d: LinkDestination) => d.id !== sourceId);
+    const target = this.tab === "proposals" ? this.linkReviewFields.linkTarget ?? this.detail?.original.action?.value?.targetTerritoryUuid : this.territoryLinkFields.linkTarget;
+    if (target && target !== sourceId && !this.linkDestinations.some(d => d.id === target)) {
+      const selected = await this.api.territory.query({ id: target, historyLimit: 0 });
+      if (selected.ok) this.linkDestinations.push({ id: (selected.value as any).id, label: (selected.value as any).label });
+      else this.linkDestinationError = "Destino anterior indisponível. Escolha outro destino visível.";
+    }
+  }
   async load(): Promise<Result<unknown>> {
-    this.recognitionReviewTarget = null;
+    this.recognitionReviewTarget = null; this.linkReviewTarget = null; this.linkDestinations = []; this.linkDestinationPage = null;
     if (this.tab === "overview") {
       const result = await this.api.overview.query({ offset: this.offset, limit: 30, search: this.search, filter: this.overviewFilter,
         expiryHorizonTicks: this.expiryHorizonTicks, recentHours: this.recentHours });
@@ -131,6 +155,13 @@ export class DiplomacyApplicationController {
         if (target.ok) this.recognitionReviewTarget = target.value;
         else this.error = "O território está indisponível para revisão. É possível rejeitar ou atualizar a consulta.";
       }
+    }
+    if (this.tab === "territory" && this.detail) await this.loadLinkDestinations(this.detail.id);
+    if (this.tab === "proposals" && this.list?.isGm && this.detail?.lifecycle === "pending" && this.detail.original.kind === "territory"
+      && this.detail.original.mode === "modify" && ["link", "update-link"].includes(this.detail.original.action?.kind)) {
+      const target = await this.api.territory.query({ id: this.detail.original.id, historyLimit: 0 });
+      if (target.ok) { this.linkReviewTarget = target.value; if (this.detail.original.action.kind === "link") await this.loadLinkDestinations(this.detail.original.id); }
+      else this.error = "O território está indisponível para revisão. É possível rejeitar ou atualizar a consulta.";
     }
     return ok(this.list);
   }
@@ -308,6 +339,13 @@ export class DiplomacyApplicationController {
       return ok({ kind });
     }
     if (this.tab === "disputes") return ok({ kind, lifecycle: f.lifecycle, outcomeRef: f.outcome ? { type: "manual-outcome", id: f.outcome } : null });
+    if (kind === "link" || kind === "update-link") {
+      const revision = f.linkRevision === undefined ? d.revision : f.linkRevision.trim() ? Number(f.linkRevision) : NaN;
+      if (!isTimestamp(revision) || revision !== d.revision) return failure("DM_REVISION_CONFLICT", "O território mudou. Preserve o rascunho ou limpe-o para usar a revisão atual.", "conflict");
+      if (!isText(f.reason?.trim())) return failure("DM_TERRITORY_LINK_REASON_INVALID", "Informe um motivo auditável.");
+      return kind === "update-link" ? parseLinkStatus(f, d.links ?? []) : parseLinkFields(f, d.id, this.linkDestinations, d.worldTick ?? this.list?.worldTick,
+        this.#linkDraftId ??= crypto.randomUUID(), { type: "manual", id: "diplomacy-link-form" });
+    }
     if (kind === "recognition") {
       const revision = f.recognitionRevision === undefined ? d.revision : f.recognitionRevision.trim() ? Number(f.recognitionRevision) : NaN;
       if (!isTimestamp(revision) || revision !== d.revision)
@@ -391,6 +429,8 @@ export class DiplomacyApplicationController {
     this.#agreementTermPreviewInput = JSON.stringify(fields); return this.capture(ok(undefined));
   }
   async change(fields: Record<string, string>, previewOnly = false): Promise<Result<unknown>> {
+    if (this.tab === "territory" && fields.kind === "link") this.territoryLinkFields = { ...fields };
+    if (this.tab === "territory" && fields.kind === "update-link") this.territoryLinkStatusFields = { ...fields };
     if (this.tab === "territory" && fields.kind === "recognition") this.territoryRecognitionFields = { ...fields };
     if (this.tab === "agreements") {
       if (fields.termEditor === "on" && this.agreementTermEditor) this.agreementTermEditor.fields = { ...fields };
@@ -400,7 +440,7 @@ export class DiplomacyApplicationController {
     if (this.tab === "agreements" && fields.termEditor === "on" && this.#agreementTermPreviewInput !== JSON.stringify(fields))
       return this.capture(failure("DM_AGREEMENT_TERM_PREVIEW_REQUIRED", "Confira as alterações dos termos antes de enviar."));
     let intent: OwnerIntent = { kind: kinds[this.tab as Exclude<DiplomacyTab, "proposals" | "overview">], mode: "modify", id: this.detail.id,
-      expectedRevision: fields.termEditor === "on" ? this.agreementTermEditor!.revision : this.detail.revision, action: built.value, reason: fields.kind === "recognition" ? fields.reason.trim() : fields.reason };
+      expectedRevision: fields.termEditor === "on" ? this.agreementTermEditor!.revision : this.detail.revision, action: built.value, reason: ["recognition", "link", "update-link"].includes(fields.kind) ? fields.reason.trim() : fields.reason };
     if (previewOnly) { const result = await this.api.previewTerritory(intent as any); this.capture(result);
       if (result.ok) { this.preview = result.value; this.#previewInput = JSON.stringify(fields); this.#previewIntent = intent; } else this.preview = null; return result; }
     if (this.tab === "territory" && ["transfer", "reparent"].includes(fields.kind) && this.list?.isGm
@@ -409,10 +449,24 @@ export class DiplomacyApplicationController {
     if (this.preview && this.#previewIntent && this.#previewInput === JSON.stringify(fields)) intent = this.#previewIntent;
     const result = this.list?.isGm ? await (this.api[this.tab] as PublicDiplomacyOwnerApi).modify(intent as any)
       : await this.api.proposals.submit({ id: crypto.randomUUID(), intent });
-    this.capture(result); if (result.ok) { this.preview = null; if (this.tab === "territory" && fields.kind === "recognition") this.resetRecognitionDraft(); if (this.tab === "agreements") { this.agreementFormFields = {}; if (fields.termEditor === "on") this.cancelAgreementTermEditor(); } } return result;
+    this.capture(result); if (result.ok) { this.preview = null; if (this.tab === "territory" && fields.kind === "link") { this.territoryLinkFields = {}; this.#linkDraftId = null; } if (this.tab === "territory" && fields.kind === "update-link") this.territoryLinkStatusFields = {}; if (this.tab === "territory" && fields.kind === "recognition") this.resetRecognitionDraft(); if (this.tab === "agreements") { this.agreementFormFields = {}; if (fields.termEditor === "on") this.cancelAgreementTermEditor(); } } return result;
   }
   async review(decision: "approve" | "reject", reason: string, fields: Record<string, string> = {}): Promise<Result<unknown>> {
     let editedIntent: OwnerIntent | undefined;
+    if (fields.linkReview === "on") {
+      this.linkReviewFields = { ...fields }; reason = reason?.trim();
+      if (!isText(reason)) return this.capture(failure("DM_TERRITORY_LINK_REASON_INVALID", "Informe o motivo da decisão."));
+      if (decision === "approve") {
+        const original = this.detail?.original;
+        if (!this.list?.isGm || this.tab !== "proposals" || original?.kind !== "territory" || original.mode !== "modify"
+          || !["link", "update-link"].includes(original.action?.kind) || !this.linkReviewTarget)
+          return this.capture(failure("DM_TERRITORY_LINK_UNAVAILABLE", "Atualize o território antes de aprovar.", "not-found"));
+        const parsed = original.action.kind === "update-link" ? parseLinkStatus({ ...fields, linkId: original.action.id }, this.linkReviewTarget.links)
+          : parseLinkFields(fields, original.id, this.linkDestinations, this.linkReviewTarget.worldTick, original.action.value.id, original.action.value.sourceRef);
+        if (!parsed.ok) return this.capture(parsed);
+        editedIntent = { ...structuredClone(original), action: parsed.value };
+      }
+    }
     if (fields.recognitionReview === "on") {
       this.recognitionReviewFields = { ...fields };
       reason = reason.trim();
@@ -442,7 +496,7 @@ export class DiplomacyApplicationController {
         editedIntent = { ...editedIntent!, expectedRevision: revision };
       }
     }
-    const result = await this.api.proposals.decide({ id: this.detail.id, expectedRevision: this.detail.revision, decision, reason, ...(editedIntent ? { editedIntent } : {}) }); this.capture(result); if (result.ok) this.recognitionReviewFields = {}; return result;
+    const result = await this.api.proposals.decide({ id: this.detail.id, expectedRevision: this.detail.revision, decision, reason, ...(editedIntent ? { editedIntent } : {}) }); this.capture(result); if (result.ok) { this.recognitionReviewFields = {}; this.linkReviewFields = {}; } return result;
   }
   capture<T>(result: Result<T>): Result<T> { this.error = result.ok ? "" : result.error.message; return result; }
   render(): string {
@@ -514,7 +568,8 @@ export class DiplomacyApplicationController {
       for (const [key, name] of [["claims", "Reivindicações"], ["presence", "Presença"], ["rights", "Direitos"], ["occupations", "Ocupações"]]) blocks += table(name, d[key] ?? [], [...columns, ["Estado", x => x.lifecycle ?? (x.active ? "active" : "inactive")]]);
       blocks += renderTerritoryRecognitions(d, d.worldTick ?? this.list?.worldTick, Boolean(this.list?.isGm), this.territoryRecognitionFields);
       blocks += table("Influência efetiva", d.effectiveInfluence ?? [], [["Parte", x => refLabel(x.partyRef)], ["Eixo", x => x.axisId], ["Valor", x => x.value]]);
-      blocks += table("Ligações", d.links ?? [], [["Destino", x => x.targetTerritoryUuid], ["Direção", x => x.direction], ["Estado", x => x.status]]);
+      blocks += renderTerritoryLinks(d, d.worldTick ?? this.list?.worldTick, Boolean(this.list?.isGm), this.linkDestinations, this.linkDestinationPage,
+        this.linkDestinationSearch, this.territoryLinkFields, this.territoryLinkStatusFields, this.linkDestinationError);
     }
     if (this.tab === "proposals") {
       blocks += `<h3>Pedido original</h3><p>${escapeHtml(d.original.kind)} · ${escapeHtml(d.original.mode)} · ${escapeHtml(d.original.id)}</p><p>${escapeHtml(d.original.reason)}</p>
@@ -522,6 +577,12 @@ export class DiplomacyApplicationController {
       const a = d.original.action;
       if (a) blocks += `<p>Ação solicitada: ${escapeHtml(a.kind)} · revisão esperada: ${d.original.expectedRevision}</p>`
         + table("Alteração solicitada", a.deltas ?? (a.delta !== undefined ? [{ axisId: a.trackId, value: a.delta }] : []), [["Eixo", x => x.axisId], ["Alteração", x => x.value]]);
+      if (["link", "update-link"].includes(a?.kind)) {
+        blocks += renderLinkRequest(a);
+        const approved = d.decision?.approvedIntent?.action;
+        if (["link", "update-link"].includes(approved?.kind)) blocks += renderLinkRequest(approved, "Ligação aprovada");
+        else if (d.lifecycle === "approved" && !d.decision?.approvedIntent) blocks += "<p>O conteúdo revisado não está disponível nesta visão.</p>";
+      }
       if (a?.kind === "recognition" && a.value) blocks += renderRecognitionRequest(a.value);
       if ((d.decision?.approvedIntent?.action as any)?.kind === "recognition" && (d.decision.approvedIntent.action as any).value)
         blocks += renderRecognitionRequest((d.decision.approvedIntent.action as any).value, "Reconhecimento aprovado");
@@ -536,6 +597,15 @@ export class DiplomacyApplicationController {
           <label>Revisão atual do alvo (opcional; aceitar após conferir outra edição)<input name="targetRevision" type="number" min="0" step="1" value="${escapeAttribute(f.targetRevision ?? "")}"></label>
           <label>Motivo da decisão<input name="reason" required value="${escapeAttribute(f.reason ?? "")}"></label>
           <button name="decision" value="approve" ${this.recognitionReviewTarget ? "" : "disabled"}>Aprovar reconhecimento</button><button name="decision" value="reject" formnovalidate>Rejeitar</button></form>`;
+      } else if (this.list?.isGm && d.lifecycle === "pending" && d.original.kind === "territory" && ["link", "update-link"].includes(a?.kind)) {
+        const f: Record<string, string> = { ...(a.kind === "link" ? linkFields(a.value) : { linkId: a.id, linkStatus: a.status }), ...this.linkReviewFields };
+        blocks += `<h3>Revisar ligação territorial</h3><p>Pedido original preservado. Revisão solicitada: ${d.original.expectedRevision}; atual: ${this.linkReviewTarget?.revision ?? "indisponível"}.</p>`;
+        if (a.kind === "link" && this.linkReviewTarget) blocks += `<form data-dm-form="link-destinations"><label>Buscar destinos<input name="destinationSearch" value="${escapeAttribute(this.linkDestinationSearch)}"></label><button>Buscar</button></form><button type="button" data-dm-link-page="-1" ${this.linkDestinationOffset === 0 ? "disabled" : ""}>Destinos anteriores</button><button type="button" data-dm-link-page="1" ${!this.linkDestinationPage || this.linkDestinationOffset + 30 >= this.linkDestinationPage.total ? "disabled" : ""}>Próximos destinos</button><p>${escapeHtml(this.linkDestinationError)}</p>`;
+        const available = this.linkReviewTarget && (a.kind === "update-link" || this.linkDestinationPage);
+        blocks += `<form data-dm-form="review"><input type="hidden" name="linkReview" value="on">
+          ${available ? a.kind === "link" ? renderLinkFields(this.linkDestinations, f) : renderLinkStatusFields(this.linkReviewTarget.links.filter((l: any) => l.id === a.id), f) : "<p>Território ou destinos indisponíveis para aprovação. Atualize ou rejeite o pedido.</p>"}
+          <label>Revisão atual do alvo (opcional após conferir outra edição)<input name="targetRevision" type="number" min="0" step="1" value="${escapeAttribute(f.targetRevision ?? "")}"></label>
+          <label>Motivo da decisão<input name="reason" required value="${escapeAttribute(f.reason ?? "")}"></label><button name="decision" value="approve" ${available ? "" : "disabled"}>Aprovar ligação</button><button name="decision" value="reject" formnovalidate>Rejeitar</button></form>`;
       } else if (this.list?.isGm && d.lifecycle === "pending") blocks += '<form data-dm-form="review"><label>Alteração revisada (incidente de um eixo ou ajuste de reputação; opcional)<input name="amount" type="number" step="1"></label><label>Revisão atual do alvo (se estiver aceitando uma mudança após outra edição; opcional)<input name="targetRevision" type="number" min="0" step="1"></label><label>Motivo<input name="reason" required></label><button name="decision" value="approve">Aprovar</button><button name="decision" value="reject">Rejeitar</button></form>';
       return blocks;
     }
@@ -631,8 +701,12 @@ export class DiplomacyApplication extends BaseApp {
   _onRender(): void { const element = this.element; if (!element || this.#bound.has(element)) return; this.#bound.add(element);
     const fields = (form: HTMLFormElement): Record<string, string> => { const result: Record<string, string> = {}; new FormData(form).forEach((v, k) => { result[k] = form.dataset.dmForm === "agreement-terms" ? String(v) : String(v).trim(); }); return result; };
     element.addEventListener("input", (e: Event) => {
-      const form = (e.target as HTMLElement)?.closest?.('form[data-dm-form="agreement-terms"]') as HTMLFormElement | null;
-      if (form) {
+      const form = (e.target as HTMLElement)?.closest?.('form') as HTMLFormElement | null;
+      if (!form) return;
+      if (form.dataset.dmForm === "territory-link") this.controller.territoryLinkFields = fields(form);
+      else if (form.dataset.dmForm === "territory-link-status") this.controller.territoryLinkStatusFields = fields(form);
+      else if (form.dataset.dmForm === "review" && form.querySelector('[name="linkReview"]')) this.controller.linkReviewFields = fields(form);
+      else if (form.dataset.dmForm === "agreement-terms") {
         this.controller.updateAgreementTermEditor(fields(form));
         const preview = element.querySelector?.("[data-dm-term-preview-result]");
         if (preview) preview.textContent = "Os campos mudaram. Confira novamente a prévia antes de enviar.";
@@ -651,6 +725,8 @@ export class DiplomacyApplication extends BaseApp {
       else if (button.dataset.dmReputationSourceTrack !== undefined) this.controller.filterReputationSource(button.dataset.dmReputationSourceTrack,
         button.dataset.dmReputationSourceType!, button.dataset.dmReputationSourceKind!, button.dataset.dmReputationSourceRef!);
       else if (button.dataset.dmReputationSourcePage) this.controller.reputationSourceOffset = Math.max(0, this.controller.reputationSourceOffset + Number(button.dataset.dmReputationSourcePage) * 30);
+      else if (button.dataset.dmLinkReset) this.controller.resetLinkDrafts();
+      else if (button.dataset.dmLinkPage) this.controller.linkDestinationOffset = Math.max(0, this.controller.linkDestinationOffset + Number(button.dataset.dmLinkPage) * 30);
       else if (button.dataset.dmRecognitionReset) this.controller.resetRecognitionDraft();
       else if (button.dataset.dmTermOpen) this.controller.openAgreementTermEditor(button.dataset.dmTermOpen as AgreementTermEditorKind, button.dataset.dmTermSource);
       else if (button.dataset.dmTermAdd) this.controller.addAgreementTerm(fields(button.closest("form")!));
@@ -679,6 +755,9 @@ export class DiplomacyApplication extends BaseApp {
       else if (form.dataset.dmForm === "overview-filter") this.controller.applyOverviewFilter(data.filter, data.expiryHorizonTicks?.trim() ? Number(data.expiryHorizonTicks) : NaN, data.recentHours?.trim() ? Number(data.recentHours) : NaN);
       else if (form.dataset.dmForm === "agreement-state") this.controller.selectAgreementLifecycle(data.agreementLifecycle);
       else if (form.dataset.dmForm === "create") await this.controller.create(data);
+      else if (form.dataset.dmForm === "link-destinations") this.controller.applyDestinationSearch(data.destinationSearch);
+      else if (form.dataset.dmForm === "territory-link") await this.controller.submitLink(data);
+      else if (form.dataset.dmForm === "territory-link-status") await this.controller.submitLink(data, true);
       else if (form.dataset.dmForm === "territory-recognition") await this.controller.submitRecognition(data);
       else if (form.dataset.dmForm === "reputation-add-track") await this.controller.configureReputationTrack(data, false);
       else if (form.dataset.dmForm === "reputation-configure") await this.controller.configureReputationTrack(data, true);

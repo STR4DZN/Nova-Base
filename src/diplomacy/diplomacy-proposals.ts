@@ -7,6 +7,7 @@ import { diplomacyMutationDefinition } from "./diplomacy-mutation.js";
 import { DIPLOMACY_OWNERS, diplomacyIntentLocks, prepareOwnerIntent, validateOwnerIntent, type OwnerIntent, type OwnerCommandOptions } from "./owner-commands.js";
 import { diplomacyViewerControls, diplomacyViewerIsGm } from "./diplomacy-permissions.js";
 import { projectTerritoryState, type TerritoryState } from "../territory/territory-state.js";
+import { territoryLinkIntentVisible, visibleTerritory } from "./territory-link-visibility.js";
 import { validateDiplomacyQuery } from "./diplomacy-query.js";
 export interface DiplomacyProposal {
   readonly id: string; readonly revision: number; readonly label: string; readonly visibility: "restricted";
@@ -28,8 +29,10 @@ export function validateDiplomacyProposal(raw: unknown): Result<DiplomacyProposa
 export function registerDiplomacyProposals(o: OwnerCommandOptions): void {
   const submitSchema = (p: unknown) => isRecord(p) && isText(p.id) && validateOwnerIntent(p.intent).ok
     ? ok(p) : failure("DM_DIPLOMACY_PROPOSAL_INVALID", "Proposal needs a stable ID and semantic intent");
+  // Player admission holds source/graph locks; outgoing link fences are checked after audience admission,
+  // so a guessed invisible destination cannot reveal its recovery status through the lock error.
   const submit = diplomacyMutationDefinition("proposal", o, ctx => [lockKey.diplomacy("proposal", ctx.command.payload.id),
-    ...diplomacyIntentLocks(ctx.command.payload.intent, o)], async fresh => {
+    ...diplomacyIntentLocks(ctx.command.payload.intent, o, diplomacyViewerIsGm(ctx))], async fresh => {
     const ctx = fresh.context, p = ctx.command.payload, intent = p.intent as OwnerIntent;
     if (fresh.entity) return failure("DM_DIPLOMACY_ALREADY_EXISTS", "Proposal already exists", "conflict");
     if (!ctx.senderUserId) return failure("DM_SECURITY_PERMISSION_DENIED", "Authenticated proposer required", "permission");
@@ -50,6 +53,9 @@ export function registerDiplomacyProposals(o: OwnerCommandOptions): void {
       if (!isRecord(value) || !claims.some(c => c.id === value.claimId))
         return failure("DM_TERRITORY_RECOGNITION_UNAVAILABLE", "Recognition target unavailable", "not-found");
     }
+    if (!diplomacyViewerIsGm(ctx) && intent.kind === "territory"
+      && !await territoryLinkIntentVisible(intent, valid.value as TerritoryState, ctx, o, false))
+      return failure("DM_TERRITORY_LINK_UNAVAILABLE", "Link reference unavailable", "not-found");
     // Validate the semantic proposal now; approval repeats this against freshly locked state.
     const prepared = await prepareOwnerIntent(intent, ctx, o); if (!prepared.ok) return prepared;
     const data: DiplomacyProposal = { id: p.id, revision: 0, label: owner.identity(valid.value).label, visibility: "restricted", lifecycle: "pending",
@@ -112,6 +118,11 @@ export function registerDiplomacyProposals(o: OwnerCommandOptions): void {
           const state = valid?.ok ? projectTerritoryState(valid.value as TerritoryState, canSee) : null;
           const value = approved.action.value;
           if (!state || !isRecord(value) || !canSee(value.visibility as string) || !state.claims.some(c => c.id === value.claimId))
+            return ok({ ...proposal, decision: { ...proposal.decision, approvedIntent: null } });
+        }
+        if (approved.kind === "territory" && (approved.mode === "create" || isRecord(approved.action) && ["link", "update-link"].includes(approved.action.kind as string))) {
+          const source = await visibleTerritory(approved.id, ctx, o);
+          if (!source || !await territoryLinkIntentVisible(approved, source, ctx, o))
             return ok({ ...proposal, decision: { ...proposal.decision, approvedIntent: null } });
         }
         return ok({ ...proposal, decision: { ...proposal.decision, approvedIntent: redact(approved) } }); }

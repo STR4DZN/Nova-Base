@@ -41,7 +41,7 @@ export function validateOwnerIntent(raw: unknown): Result<OwnerIntent> {
   return ok(raw as unknown as OwnerIntent);
 }
 /** Conservative dependency locks are rechecked against the actual semantic effect plan after fresh-read. */
-export function diplomacyIntentLocks(intent: OwnerIntent, o: OwnerCommandOptions): readonly string[] {
+export function diplomacyIntentLocks(intent: OwnerIntent, o: OwnerCommandOptions, includeLinkTargets = true): readonly string[] {
   const locks = new Set<string>([lockKey.diplomacy(intent.kind, intent.id)]);
   if (intent.mode === "create" || intent.kind === "reputation" && isRecord(intent.action)
     && ["add-track", "configure-track"].includes(intent.action.kind as string)) locks.add("diplomacy:catalog");
@@ -56,6 +56,12 @@ export function diplomacyIntentLocks(intent: OwnerIntent, o: OwnerCommandOptions
   scan(intent); scan(o.store.get(intent.kind, intent.id)?.data);
   if (intent.kind === "territory" && isRecord(intent.action) && Array.isArray(intent.action.targets))
     for (const t of intent.action.targets) if (isRecord(t) && isText(t.territoryUuid)) locks.add(lockKey.diplomacy("territory", t.territoryUuid));
+  if (intent.kind === "territory" && includeLinkTargets) {
+    const action = intent.action as any, prior = o.store.get("territory", intent.id)?.data as TerritoryState | undefined;
+    const links = intent.mode === "create" ? (intent.data as TerritoryState)?.links ?? []
+      : action?.kind === "link" ? [action.value] : action?.kind === "update-link" ? prior?.links.filter(l => l.id === action.id) ?? [] : [];
+    for (const link of links) if (isRecord(link) && isText(link.targetTerritoryUuid)) locks.add(lockKey.diplomacy("territory", link.targetTerritoryUuid));
+  }
   return [...locks].sort();
 }
 function mutationContext(ctx: AuthenticatedCommandContext, revision: number, o: OwnerCommandOptions, reason: string): DiplomacyOwnerContext {
@@ -162,6 +168,11 @@ export async function prepareOwnerIntent(intent: OwnerIntent, ctx: Authenticated
   if (intent.kind === "territory") {
     const candidate = data as TerritoryState, all = [...territories.filter(s => s.territory.uuid !== intent.id), candidate];
     const graph = validateTerritoryGraph(all.map(s => s.territory)); if (!graph.ok) return graph;
+    const action = intent.action as any, referencedLinks = intent.mode === "create" ? candidate.links
+      : action?.kind === "link" ? candidate.links.filter(l => l.id === action.value?.id)
+      : action?.kind === "update-link" ? candidate.links.filter(l => l.id === action.id) : [];
+    const available = o.recovery.fenceRegistry.assertKeysAvailable(referencedLinks.map(l => lockKey.diplomacy("territory", l.targetTerritoryUuid)));
+    if (!available.ok) return available;
     if (candidate.links.some(l => !all.some(s => s.territory.uuid === l.targetTerritoryUuid))) return failure("DM_TERRITORY_LINK_TARGET_MISSING", "Link target unavailable", "not-found");
   }
   const effects: AgreementOwnerOperation[] = [];

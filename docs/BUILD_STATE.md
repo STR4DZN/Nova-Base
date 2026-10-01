@@ -9,6 +9,13 @@
 - Schema Domain: `1`
 - Data de conclusão do Gate G5: `2026-09-21`
 
+## Parte G6 — Ligações territoriais — 2026-10-01
+
+- Escopo: criação/lista/resumo de ligações, destinos visíveis com busca paginada e alteração de estado; propostas/revisão GM preservando pedido original. Foundry real ao fim do bloco G6.
+- Corrigidos três defeitos reproduzidos: destinos privados admitidos no submit Player; alteração de link secreto por ID; destino privado exposto na aprovação revisada. Estado fresco, audiência/fences uniformes, locks source/graph/dependências e projeção aprovada sanitizada. Declarações não executam rota/dependências/recursos nem concedem trânsito.
+- Rascunhos vinculados à revisão e preservados em erro; seleção fora da página por consulta individual; revisão estruturada e rejeição independente. **1106/1106 testes PASS** (30 novos), específicos 17/17 e verticais 92/92. TypeScript/build/package/validate:release PASS localmente; CI pendente. Relatório `docs/G6_TERRITORY_LINKS_REPORT.md`. Nenhuma release publicada.
+- **PARAR AQUI. Próximo passo:** formulários de influência territorial, com eixos e modificadores; aguardar autorização. G6 parcial; G7 não iniciado.
+
 ## Parte G6 — Reconhecimento territorial — 2026-10-01
 
 - Escopo: formulário contextual, resumo/lista sanitizados, claims visíveis, seis tipos de parte, posições/janelas e proposta/revisão GM sem reescrever pedido original. Concluir, validar automaticamente, registrar e parar. Foundry real ao fim do bloco G6.
@@ -637,7 +644,7 @@ Candidata v0.0.8: 13 defeitos reproduzidos/corrigidos; 878/878 testes locais PAS
 
 ## Próxima ação canônica
 
-- **Gate G6 — Relations / Reputation / Agreements / Territory: formulários de reconhecimento territorial implementados nesta parte**, após a aceitação do Gate G5. **1076/1076 testes PASS** (27 novos), específicos 17/17 e verticais 79/79. TypeScript/build/package/validate:release PASS localmente e no GitHub Actions. Commit validado `50a6c1be955d541ce09d8030a40b898b9826d7a7`; workflow `36869786902` SUCCESS (nove workflows PASS). Evidência `docs/evidence/G6_TERRITORY_RECOGNITION_VALIDATION.json`. Relatório `docs/G6_TERRITORY_RECOGNITION_REPORT.md`; ZIP/logs no artifact `g6-territory-recognition-candidate` da candidata v0.0.8. **PARAR AQUI**. Próxima parte: formulários de ligações territoriais, com destinos visíveis e estado operacional; aguardar autorização. Teste real no Foundry somente após concluir o bloco G6, conforme instrução. Gate G6 permanece parcial; não iniciar G7.
+- **Gate G6 — Relations / Reputation / Agreements / Territory: formulários de ligações territoriais implementados nesta parte**, após a aceitação do Gate G5. **1106/1106 testes PASS** (30 novos), específicos 17/17 e verticais 92/92. TypeScript/build/package/validate:release PASS localmente; CI pendente. Relatório `docs/G6_TERRITORY_LINKS_REPORT.md`. **PARAR AQUI**. Próxima parte: formulários de influência territorial, com eixos e modificadores; aguardar autorização. Teste real no Foundry somente após concluir o bloco G6, conforme instrução. Gate G6 permanece parcial; não iniciar G7.
 
 ## G6.4–G6.5 — Acordos e obrigações — 2026-09-29
 

@@ -9,6 +9,7 @@ import type { RecoveryService } from "../mutations/recovery-service.js";
 import { diplomacyViewerControls, diplomacyViewerIsGm } from "./diplomacy-permissions.js";
 import { lockKey } from "../mutations/lock-keys.js";
 import { isJournalEntryUuid } from "../core/identity/refs.js";
+import { validateTerritoryState } from "../territory/territory-state.js";
 import { territoryOwner } from "../territory/territory-owner.js";
 import { isAgreementLifecycleFilter, matchesAgreementLifecycle, summarizeAgreementLifecycles,
   type AgreementLifecycleFilter } from "../agreements/agreement-dashboard.js";
@@ -50,8 +51,10 @@ export async function queryDiplomacyOwner(ctx: AuthenticatedCommandContext<Diplo
   const offset = p.offset ?? 0, limit = p.limit ?? 30; let count = 0;
   const agreementStates: AgreementLifecycle[] = [];
   const territoryVisible = async (uuid: string): Promise<boolean> => {
-    const row = store.get("territory", uuid); if (!row) return false;
-    const state = row.data as import("../territory/territory-state.js").TerritoryState;
+    if (!recovery.fenceRegistry.assertKeysAvailable([lockKey.diplomacy("territory", uuid), lockKey.territoryGraph()]).ok) return false;
+    const row = await store.freshRead("territory", uuid); if (!row) return false;
+    const valid = validateTerritoryState(row.data); if (!valid.ok) return false;
+    const state = valid.value;
     return isGm || state.territory.visibility === "public" || state.territory.visibility === "restricted"
       && await diplomacyViewerControls(ctx, territoryOwner.parties(state), domains, controllers);
   };
