@@ -6,6 +6,8 @@
 
 **Atualização por partes — configuração de reputação:** criação com múltiplas trilhas, faixas, privacidade, apresentação e decadência; adição/edição de políticas pelo GM com versões e histórico preservados. 917/917 testes PASS e TypeScript/build/package/validate:release PASS no GitHub Actions. Resultado e evidência em `docs/G6_REPUTATION_CONFIGURATION_REPORT.md` e `docs/evidence/G6_REPUTATION_CONFIGURATION_VALIDATION.json`. Não fecha as demais linhas do Gate.
 
+**Atualização por partes — negociação de acordos:** renovação manual, prazos/expiração de propostas e snapshots/diff sanitizados entre rodadas implementados na UI. 938/938 testes PASS, TypeScript/build/package/validate:release PASS local e CI. Relatório `docs/G6_AGREEMENT_NEGOTIATION_REPORT.md`. Próxima parte: inspector de obrigações/vencimentos/compliance/evidências/emendas. Teste real no Foundry reservado para o fim do bloco G6, conforme instrução do usuário.
+
 Data: 2026-09-30. Projeto: `STR4DZN/Nova-Base`, branch `feat/g6-continuous`. Escopo: Gate G6, sem iniciar G7. Esta auditoria substitui a interpretação anterior de que faltava apenas smoke para fechar todo o plano.
 
 **Veredito: não é possível confirmar 100% de implementação ou de homologação.** O núcleo dos quatro subsistemas existe, mas há funcionalidades previstas ainda ausentes/parciais e verificação real Foundry pendente. Esta revisão encontrou quatro defeitos concretos no núcleo, reproduziu cada um por teste, corrigiu-os e retestou. O candidato corrigido serve para smoke dos fluxos implementados; não é fechamento do Gate.
@@ -39,7 +41,7 @@ Não se calcula uma porcentagem por contagem de linhas: requisitos têm pesos e 
 | G6.1 Definitions/instances | PARCIAL | `relations/types`, registry versionado, parties/scopes/axes/lifecycle e unicidade corrigida no comando. Postura derivada por eixos/direções, regras de Definition e edição manual auditada/UI implementadas e testadas nesta parte. Snapshots antigos derived sem regras permanecem explicitamente sem configuração; integrações compostas são pendência separada. |
 | G6.2 Modifiers/history | IMPLEMENTADO LOCAL | `relation-history.ts`: base separada, stacking, incidentes, reversão exata, expiração e histórico após término; testes unitários e verticais. Incidentes compostos com outras fontes não têm um fluxo geral público. |
 | G6.3 Reputation | PARCIAL | Tracks/audiences, entries, reversão, decadência e bandas funcionam. UI cria múltiplas trilhas e configura faixas, visibilidade, apresentação e decadência; GM adiciona trilhas/edita políticas com histórico e snapshots versionados. Filtros de histórico e integrações compostas permanecem pendentes; Scheduler pertence a G8. |
-| G6.4 Agreements | PARCIAL | Propose/counter/accept/reject/activate/amend/renew/expire têm modelo e testes. UI não oferece renew/expire-proposal e não mostra diff completo das rodadas. |
+| G6.4 Agreements | PARCIAL | Propose/counter/accept/reject/activate/amend/renew/expire têm modelo e testes. UI oferece renovação manual, prazo/expiração de propostas, snapshots e diff sanitizado completo entre rodadas. Dashboard, inspector de obrigações/vencimentos/compliance/evidências/emendas e editor completo de múltiplos termos ainda parciais. |
 | G6.5 Obligations/rights/grants | PARCIAL | Evidência, alegação, contestação, decisão e grant derivado; owner econômico real. Outros owners/term providers não têm extensão pública instalada; direitos sem capabilities não possuem consulta pública completa de effective rights. |
 | G6.6 Hierarchy | PARCIAL | Árvores/eixos, raízes, ciclos, revisões, preview puro e histórico. O preview público/UI não mostra toda a lista de impactos herdados calculada pelo modelo de hierarquia. |
 | G6.7 Claims/presence/influence/access | PARCIAL | Modelos e comandos de claims/recognition/presence/influence/rights/links/occupation/dispute existem. Algumas ações e breakdowns só são alcançáveis por API; dashboard não cobre tudo. |
@@ -63,7 +65,7 @@ As referências R08 abaixo são subseções do register congelado anexado ao Mas
 | 2.3 | Derived Relation state/stance e reasons sanitizados | PARCIAL: scores e resolver de postura por axes/modifiers têm razões sanitizadas e direções; combinação com agreements/reputation/disputes continua pendente. |
 | 2.4 | Obligation lifecycle/requirements/evidence | IMPLEMENTADO LOCAL para declarações, refs e decisões; receipts externos não são resolvidos automaticamente em todos os owners. |
 | 2.5 | Partial/alleged/contested breach, grace, consequences | PARCIAL: decisões e consequences econômicas funcionam; consequences públicas de Relation/Reputation/Rights não estão integradas como owners. |
-| 2.6 | Proposal rounds, counter, amendments, renewal/expiry | IMPLEMENTADO LOCAL no modelo; renew e expire-proposal não estão na UI. |
+| 2.6 | Proposal rounds, counter, amendments, renewal/expiry | IMPLEMENTADO AUTOMATED no modelo e UI para renovação manual, prazo/expiração de proposta, negociação e diff de rodadas. Emenda sem reapproval recebe ID auditável. Scheduler/renovação automática geral pertencem a G8; editor completo de múltiplos termos e Foundry real continuam pendentes. |
 | 3.1 | Territory/location hierarchy, roots, revision, optional geography | IMPLEMENTADO LOCAL; não cria árvore paralela de Locations. |
 | 3.2 | Ownership ≠ administration ≠ control | IMPLEMENTADO LOCAL e testado com fontes coexistentes. |
 | 3.3 | Contextual recognition | IMPLEMENTADO LOCAL no modelo/API; criação/consulta de recognition na UI é parcial. |
@@ -84,7 +86,7 @@ As referências R08 abaixo são subseções do register congelado anexado ao Mas
 | 4.9 | Secrets/intelligence/discovery/rumor | PARCIAL: visibility local e projeção antes do socket; Knowledge/discovery/rumor completos pertencem a G7. Sigilo do storage no servidor permanece pendente. |
 | 5.1 | Diplomacy Overview com mudanças/expiring/breaches/disputes/inbox | PARCIAL: navegação unificada existe; overview priorizado de atenção não existe. |
 | 5.2 | Reputation UI tracks/bands/GM breakdown/history/filtering | PARCIAL: configuração de múltiplas trilhas/faixas/policies/decay e breakdown GM de valores, versões e cursor implementados; histórico de configuração separado e projeção Player sanitizada. Faltam filtros avançados, breakdown completo de fontes e integração com atividade. |
-| 5.3 | Agreement dashboard/details/due/compliance/evidence/amendments/round diff | PARCIAL: dados básicos no DTO; UI não mostra due/compliance/evidence/amendments e diff de rounds de forma completa. |
+| 5.3 | Agreement dashboard/details/due/compliance/evidence/amendments/round diff | PARCIAL: snapshots/ofertas/votos/duração/diff sanitizado de rounds e ações de renovação/expiração disponíveis. Dashboard por estado e inspector completo de vencimentos/compliance/evidências/emendas permanecem pendentes. |
 | 5.4 | Territory dashboard com claims/recognition/influence/rights/related aggregates | PARCIAL: claims/presence/influence/rights/occupation/links; recognition, disputes relacionados, Facilities/população e inherited effective state incompletos. |
 | 5.5 | Controller proposals/inbox/approve/reject/edit preserving original | PARCIAL: backend completo para intent suportado; GUI edita delta/revision, não qualquer proposta estruturada. |
 | 5.6 | Existing authority/revisions/concurrent acceptance/batch | IMPLEMENTADO LOCAL; servidor Socketlib/failover real exige smoke. |
@@ -92,7 +94,7 @@ As referências R08 abaixo são subseções do register congelado anexado ao Mas
 | 5.8 | Content export/packs/migrations preserving ambiguity/history | DEPENDÊNCIA POSTERIOR: infraestruturas gerais G10; não há importer/exporter/migrations específicos G6 completos. Definitions versionadas não substituem isso. |
 | 5.9 | Diagnostics de broken refs/orphans/expired grants/leakage + repair preview | PARCIAL: validators, erros e fences existem; relatório de integridade G6 e repair preview dedicados ausentes. |
 | 6.1 | Stable/versioned/world/private reusable diplomatic templates | AUSENTE: `createDiplomacyDraft` é factory de draft, não template persistido/versionado/importável. |
-| 6.2 | Quick create + advanced hidden fields/editor/preview | PARCIAL: criação e validação existem; formulário de ação exibe muitos campos juntos, editor avançado e preservation de input não estão completos. |
+| 6.2 | Quick create + advanced hidden fields/editor/preview | PARCIAL: criação/validação e preservação de input para reputação/configuração e ações de acordos implementadas; formulário geral ainda exibe muitos campos juntos e editor avançado completo de vários termos permanece pendente. |
 | 6.3 | Bulk normal pipeline + preview/targets/child receipts | PARCIAL: API de transferência em lote e intent durável; UI e operações bulk genéricas não existem. Exemplos adicionais de bulk não são obrigação universal. |
 | 6.4 | Notifications/Activity Feed | AUSENTE como feed unificado; histories locais não equivalem ao read model de notificações priorizadas. |
 | 6.5 | Optional advisories sem mutation/crisis automática | DEPENDÊNCIA POSTERIOR/OPCIONAL; não implementado, não simulado. |
@@ -161,10 +163,10 @@ Arquivos de produção alterados apenas no cluster G6: `diplomacy/owner-commands
 Prioridades antes de fechar G6:
 
 1. Completar razões compostas de stance com Agreements/Reputation/Disputes, sem inventar thresholds universais; implementar/enquadrar templates versionados separados de Definitions. Configuração de postura e de trilhas de reputação possuem relatórios próprios.
-2. Completar overview, detalhes/ações/formulários G6, diff de negotiation/review, recognition/links/influence/occupation, renewal, preview de impacts e fluxo público seguro de retry/status.
+2. Completar overview, inspector de acordos (obrigações/vencimentos/compliance/evidências/emendas), editor completo de termos/review, demais detalhes/ações/formulários G6, recognition/links/influence/occupation, preview de impacts e fluxo público seguro de retry/status. Renovação manual/expiração de propostas e diff de rodadas possuem relatório próprio.
 3. Completar diagnostics/read models/consumer contracts necessários; resolver as lacunas de direitos/effects/integrations e os guards especializados de refs.
 4. Medir/corrigir scans/cache/memória nos fluxos quentes; cobrir cenários de escala e audiência suficientes, sem antecipar business dos gates seguintes.
 5. Executar o roteiro no servidor Foundry real com GM/Player/F5/failover e confirmar que flags canônicas não chegam ao Player. Se chegarem, corrigir armazenamento/sanitização antes de qualquer homologação.
 6. Consolidar as dependências posteriores e opções em uma matriz aprovada, sem reclassificar silenciosamente ausência como “concluído”.
 
-**Pode testar agora:** sim, o candidato corrigido permite smoke dos fluxos implementados em um mundo de testes. **Pode declarar G6 100%/GATE_ACCEPTED:** não. Um smoke sem FAIL não comprova funcionalidades que o roteiro ainda não exercita nem itens ausentes do plano.
+**Teste real no Foundry:** reservado para quando o bloco G6 estiver concluído, conforme instrução do usuário; os fluxos implementados são verificados automaticamente durante cada parte. **Pode declarar G6 100%/GATE_ACCEPTED:** não. Um smoke sem FAIL não comprova funcionalidades que o roteiro ainda não exercita nem itens ausentes do plano.

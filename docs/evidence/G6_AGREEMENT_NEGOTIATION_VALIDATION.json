@@ -1,0 +1,109 @@
+{
+  "schemaVersion": 1,
+  "part": "G6 agreement negotiation UI",
+  "localDate": "2026-09-30",
+  "timezone": "America/Sao_Paulo",
+  "repository": "STR4DZN/Nova-Base",
+  "branch": "feat/g6-continuous",
+  "baseCommit": "bac1668c3e1e6a4105e1f7139d126b1de90faff3",
+  "validatedCommit": "ad54ca355eda1c525c38a1489db2200cf9e846cb",
+  "execution": {
+    "runId": 36800171829,
+    "jobId": 110172500981,
+    "runUrl": "https://github.com/STR4DZN/Nova-Base/actions/runs/36800171829",
+    "workflow": ".github/workflows/g6-agreement-negotiation-validation.yml",
+    "conclusion": "success",
+    "runner": "ubuntu-latest",
+    "nodeVersion": "22.23.3",
+    "startedAt": "2026-10-01T01:14:52Z",
+    "completedAt": "2026-10-01T01:15:40Z"
+  },
+  "tests": {
+    "specific": {
+      "tests": 15,
+      "pass": 15,
+      "fail": 0,
+      "skipped": 0
+    },
+    "runtimeVertical": {
+      "tests": 44,
+      "pass": 44,
+      "fail": 0,
+      "skipped": 0,
+      "newTests": 6
+    },
+    "complete": {
+      "tests": 938,
+      "pass": 938,
+      "fail": 0,
+      "skipped": 0
+    },
+    "newTestsThisPart": 21
+  },
+  "local": {
+    "nodeVersion": "24.19.0",
+    "typecheck": "PASS",
+    "complete": {
+      "tests": 938,
+      "pass": 938,
+      "fail": 0,
+      "skipped": 0
+    },
+    "build": "PASS",
+    "package": "PASS",
+    "validateRelease": "PASS",
+    "initialComplete": {
+      "tests": 938,
+      "pass": 937,
+      "fail": 1
+    },
+    "initialFailure": "Updated canonical next action omitted Relations/Reputation/Territory required by the documentation validator",
+    "correction": "Restored complete Gate G6 scope, preserved validator, reran complete suite"
+  },
+  "ciChecks": {
+    "typecheck": "PASS",
+    "build": "PASS",
+    "package": "PASS",
+    "validateRelease": "PASS"
+  },
+  "artifact": {
+    "id": 11135348160,
+    "name": "g6-agreement-negotiation-candidate",
+    "downloadUrl": "https://github.com/STR4DZN/Nova-Base/actions/runs/36800171829/artifacts/11135348160",
+    "sizeBytes": 806794,
+    "containerDigest": "sha256:633c2ab597c9ed38ae089007cfaa59b504b3fbd3196809799045dd37a5f0c3e7",
+    "digestScope": "GitHub artifact container with evidence and installable ZIP",
+    "expiresAt": "2026-10-15T01:15:37Z",
+    "installableZip": "dist/domain-manager-v0.0.8.zip"
+  },
+  "covered": [
+    "manual renewal via existing pipeline",
+    "proposal deadline distinct from agreement duration",
+    "expiry by authority tick and exact proposal revision",
+    "round snapshots and sanitized full comparison",
+    "secret-only changes absent from visible comparison",
+    "unknown explicit proposal ID rejected",
+    "GM amendment without reapproval audited",
+    "failed form preservation and escaped rendering",
+    "Player proposal and GM approval",
+    "ticket retry/reload without duplicate events"
+  ],
+  "boundaries": {
+    "foundryRealExecuted": false,
+    "hostAndTransportDoubles": true,
+    "foundryDeferredUntilG6BlockComplete": true,
+    "gateG6Accepted": false,
+    "gateG7Started": false,
+    "releasePublishedThisPart": false,
+    "stoppedAfterThisPart": true
+  },
+  "nextPart": "Agreement inspector: due dates, compliance, evidence and amendment history",
+  "remaining": [
+    "dashboard by lifecycle",
+    "complete obligation/compliance/evidence/amendment inspector",
+    "complete multiple-term editor",
+    "other G6 owners/providers/integrations/scale",
+    "real Foundry validation after G6 implementation"
+  ],
+  "report": "docs/G6_AGREEMENT_NEGOTIATION_REPORT.md"
+}

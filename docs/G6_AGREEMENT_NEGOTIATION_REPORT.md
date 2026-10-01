@@ -19,7 +19,17 @@ Nenhum Scheduler, serviço de negociação paralelo, transporte ou armazenamento
 
 ## Validação
 
-15 testes específicos e 6 verticais novos; resultado final pendente. TypeScript, 15/15 específicos e 44/44 verticais passaram localmente com owners reais e host/transporte simulados. Suíte completa, build/package e validação de ZIP serão registrados após execução.
+- **938/938 testes PASS**, 0 FAIL, 0 skipped; 21 testes novos nesta parte.
+- **15/15 específicos** e **44/44 verticais** (6 novos) PASS.
+- TypeScript, build, package e validate:release: **PASS**, localmente (Node 24.19.0) e no GitHub Actions (Ubuntu + Node 22.23.3).
+- Commit de código validado: `ad54ca355eda1c525c38a1489db2200cf9e846cb`.
+- Workflow [36800171829](https://github.com/STR4DZN/Nova-Base/actions/runs/36800171829), job `110172500981`: **SUCCESS**.
+- [ZIP v0.0.8 e logs](https://github.com/STR4DZN/Nova-Base/actions/runs/36800171829/artifacts/11135348160), artifact `g6-agreement-negotiation-candidate`, retenção de 14 dias. Hash do container de evidências: `sha256:633c2ab597c9ed38ae089007cfaa59b504b3fbd3196809799045dd37a5f0c3e7` (não é o hash isolado do ZIP instalável).
+- Evidência permanente: `docs/evidence/G6_AGREEMENT_NEGOTIATION_VALIDATION.json` e `docs/evidence/G6_AGREEMENT_NEGOTIATION_CI_SUMMARY.log`.
+
+A primeira execução completa local teve 937 PASS/1 FAIL: a seção de próxima ação citava só Agreements, mas o validador documental exige também Relations/Reputation/Territory. O registro foi corrigido sem enfraquecer o teste, e a suíte completa foi repetida. No preparo dos testes verticais, foram corrigidos três erros de fixture (assinatura da consulta de capabilities, campo items da lista e referência compartilhada que o envelope JSON rejeita); as asserções de negócio permaneceram.
+
+Os testes usam owners reais com host/transporte simulados. Não há execução de UI/Documentos/socket em servidor Foundry real nesta parte; conforme instrução do usuário, essa execução fica para o encerramento do bloco G6. Nenhuma release foi publicada.
 
 ## Limites e próxima parte
 

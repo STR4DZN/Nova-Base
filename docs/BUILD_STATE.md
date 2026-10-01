@@ -9,6 +9,16 @@
 - Schema Domain: `1`
 - Data de conclusão do Gate G5: `2026-09-21`
 
+## Parte G6 — Negociação de acordos pela UI — 2026-09-30
+
+- Escopo autorizado: renovação manual, prazo/expiração de propostas e comparação entre rodadas; implementar, testar automaticamente, registrar e parar. Teste real no Foundry somente depois de concluir o bloco G6.
+- Operações via owner/pipeline existentes; Player envia proposta ao GM. Prazo de aceitação separado da duração dos termos; relógio da autoridade decide expiração. ID explícito inválido não usa fallback.
+- Snapshots/ofertas/votos/duração e diff antes/depois para todos os termos recebidos no DTO, calculado após filtro de audiência. Formulários preservados após falha; emenda sem reapproval recebe audit ID.
+- **938/938 testes PASS** (21 novos), específicos 15/15 e verticais 44/44. TypeScript/build/package/validate:release PASS localmente e no GitHub Actions. Commit validado `ad54ca355eda1c525c38a1489db2200cf9e846cb`; workflow `36800171829` SUCCESS.
+- Relatório: `docs/G6_AGREEMENT_NEGOTIATION_REPORT.md`. Evidência: `docs/evidence/G6_AGREEMENT_NEGOTIATION_VALIDATION.json`. ZIP/logs no artifact; nenhuma release publicada nesta parte.
+- Dashboard, inspector completo de vencimentos/compliance/evidências/emendas, editor completo de vários termos e demais linhas G6 continuam parciais.
+- **PARAR AQUI. Próximo passo:** inspector dos acordos, aguardando autorização. G6 parcial; G7 não iniciado.
+
 ## Parte G6 — Configuração das trilhas de reputação — 2026-09-30
 
 - Instrução atual: executar parte por parte, testar, registrar e parar. Esta tarefa cobre somente configuração de trilhas pela UI.
@@ -579,7 +589,7 @@ Candidata v0.0.8: 13 defeitos reproduzidos/corrigidos; 878/878 testes locais PAS
 
 ## Próxima ação canônica
 
-- **Gate G6 — Relations / Reputation / Agreements / Territory: negociação de acordos pela UI em validação**, após a aceitação do Gate G5. Escopo atual: renovação manual, prazo/expiração de propostas e comparação entre rodadas sanitizadas. Testes específicos e verticais PASS; suíte completa/pacote em validação. Registrar e parar ao concluir. Teste real no Foundry somente após concluir o bloco G6, conforme decisão do usuário. A próxima parte será o inspector de acordos: vencimentos, compliance, evidências e emendas. Não iniciar G7.
+- **Gate G6 — Relations / Reputation / Agreements / Territory: negociação de acordos pela UI concluída nesta parte**, após a aceitação do Gate G5. **938/938 testes PASS**, TypeScript/build/package/validate:release PASS. Relatório `docs/G6_AGREEMENT_NEGOTIATION_REPORT.md`; evidência `docs/evidence/G6_AGREEMENT_NEGOTIATION_VALIDATION.json`. **PARAR AQUI**. Próxima parte: inspector de acordos — vencimentos, compliance, evidências e emendas; aguardar autorização do usuário. Teste real no Foundry somente após concluir o bloco G6, conforme instrução. Gate G6 permanece parcial; não iniciar G7.
 - Publicação solicitada pelo usuário em 2026-09-30 e concluída na conta verificada `STR4DZN/Nova-Base`, branch `feat/g6-continuous`. Workflow `36718651288` PASS; prerelease `v0.0.7` com manifest, ZIP e roteiro de teste disponíveis. Publicação não significa homologação do G6.
 - Gates G0–G5 aceitos pelo usuário; smoke da candidata G6 aprovado pelo usuário em 2026-09-30. G6 aguarda conclusão das pendências normativas antes da aceitação integral. **Não iniciar G7**.
 - Candidata G6 `0.0.7` publicada. Manifest: `https://github.com/STR4DZN/Nova-Base/releases/download/v0.0.7/module.json`. Manifest e ZIP públicos foram baixados e comparados byte a byte com os artefatos validados. Evidência: `docs/evidence/G6_RELEASE_PUBLICATION.json`.
