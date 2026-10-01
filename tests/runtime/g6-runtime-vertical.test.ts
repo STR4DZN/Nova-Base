@@ -716,3 +716,82 @@ test("G6 agreement negotiation vertical: UI amendment without reapproval receive
     assert.equal(ui.detail.lifecycle, "active"); assert.equal(ui.detail.proposals.length, 1);
   } finally { gm.destroy(); }
 });
+
+const inspectorObligation = (id = "tribute", payload = {}, visibility = "public") => ({ id, type: "domain-manager:obligation", title: id,
+  text: "Pay tribute", visibility, partyIds: ["party-0", "party-1"], payload: { kind: "domain-manager:payment", obligatedPartyId: "party-0",
+    beneficiaryPartyId: "party-1", dueAtWorldTick: 20, graceTicks: 5, overduePolicy: "report", requirementRef: { type: "resource", id: "test:coin" }, consequences: [], ...payload } });
+test("G6 agreement inspector vertical: authority clock drives read-only due/grace and reload preserves stored state", async () => {
+  const f = fixture(), gm = f.make(); let id = "", revision = 0;
+  try {
+    await gm.initialize(); const a = await prepareAgreement(gm, [inspectorObligation()]); id = a.id; unwrap(await a.activate());
+    const before: any = unwrap(await gm.diplomacy.agreements.query({ id })); revision = before.revision;
+    f.time.tick = 25; const atEnd: any = unwrap(await gm.diplomacy.agreements.query({ id })); assert.equal(atEnd.obligations[0].compliance.pastGrace, false);
+    f.time.tick = 26; const ui = new DiplomacyApplicationController(gm.diplomacy); ui.selectTab("agreements"); ui.select(id); unwrap(await ui.load());
+    assert.equal(ui.detail.worldTick, 26); assert.equal(ui.detail.obligations[0].lifecycle, "pending"); assert.equal(ui.detail.obligations[0].compliance.lifecycle, "due");
+    assert.ok(ui.inspector().includes("Tolerância ultrapassada")); assert.ok(ui.inspector().includes("confirmado: Não"));
+    const after: any = unwrap(await gm.diplomacy.agreements.query({ id })); assert.equal(after.revision, revision); assert.equal(after.lifecycle, "active"); assert.deepEqual(after.history, before.history);
+  } finally { gm.destroy(); }
+  const reload = f.make(); try { await reload.initialize(); const d: any = unwrap(await reload.diplomacy.agreements.query({ id }));
+    assert.equal(d.revision, revision); assert.equal(d.obligations[0].lifecycle, "pending"); assert.equal(d.obligations[0].compliance.pastGrace, true); assert.equal(d.obligations[0].deadline.graceEndsAtWorldTick, "25");
+  } finally { reload.destroy(); }
+});
+test("G6 agreement inspector vertical: Player selected evidence waits for GM and durable retry records once", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player"); let id = "", ticket: any;
+  try {
+    await gm.initialize(); const a = await prepareAgreement(gm, [inspectorObligation()]); id = a.id; unwrap(await a.activate());
+    const ui = new DiplomacyApplicationController(player.diplomacy); ui.selectTab("agreements"); ui.select(id); unwrap(await ui.load());
+    const revision = ui.detail.revision, obligationId = ui.detail.obligations[0].id; unwrap(ui.selectAgreementObligation(obligationId));
+    assert.ok(ui.inspector().includes("Selecionar obrigação para proposta ao GM"));
+    unwrap(await ui.change({ ...ui.agreementFormFields, outcome: "payment-receipt", text: "Payment claimed", position: "contest", visibility: "public", reason: "Please review" }));
+    const pending: any = unwrap(await gm.diplomacy.agreements.query({ id })); assert.equal(pending.revision, revision); assert.deepEqual(pending.obligations[0].evidence, []);
+    const inbox: any = unwrap(await gm.diplomacy.proposals.query({})), request: any = unwrap(await gm.diplomacy.proposals.query({ id: inbox.items[0].id }));
+    assert.equal(request.original.action.obligationId, obligationId); assert.equal(request.original.action.expectedObligationRevision, 0);
+    ticket = unwrap(gm.diplomacy.commands.prepare("diplomacy:decide-proposal", { id: request.id, expectedRevision: request.revision, decision: "approve", reason: "Receipt reviewed" }));
+    unwrap(await gm.diplomacy.commands.execute(ticket)); unwrap(await gm.diplomacy.commands.retry(ticket)); unwrap(await ui.load());
+    assert.equal(ui.detail.obligations[0].evidence.length, 1); assert.equal(ui.detail.obligations[0].lifecycle, "pending"); assert.equal(ui.detail.obligations[0].compliance.contested, true);
+    assert.ok(ui.inspector().includes("Payment claimed")); assert.deepEqual(ui.detail.obligations[0].events, []);
+  } finally { player.destroy(); gm.destroy(); }
+  const reload = f.make(); try { await reload.initialize(); unwrap(await reload.diplomacy.commands.retry(ticket)); const d: any = unwrap(await reload.diplomacy.agreements.query({ id }));
+    assert.equal(d.obligations[0].evidence.length, 1); assert.equal(d.obligations[0].events.length, 1); assert.equal(d.obligations[0].events[0].reason, "Please review");
+  } finally { reload.destroy(); }
+});
+test("G6 agreement inspector vertical: private snapshots/evidence stay absent after approved amendment and reload", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player"); let id = "";
+  try {
+    await gm.initialize(); const a = await prepareAgreement(gm, [inspectorObligation(), inspectorObligation("PRIVATE_OBLIGATION", {}, "secret")]); id = a.id; unwrap(await a.activate());
+    let d: any = unwrap(await gm.diplomacy.agreements.query({ id }));
+    unwrap(await a.modify({ kind: "obligation", obligationId: d.obligations[0].id, expectedObligationRevision: 0,
+      action: { kind: "evidence", evidence: { id: "PRIVATE_EVIDENCE", ref: { type: "evidence", id: "PRIVATE_RECEIPT" }, statement: "PRIVATE_STATEMENT", position: "support", visibility: "secret", at: 0 } } }));
+    unwrap(await a.modify({ kind: "amend", proposalId: "edited-offer", partyId: "party-0", terms: [inspectorObligation("tribute", { dueAtWorldTick: 80 })],
+      duration: { startsAtWorldTick: 10, expiresAtWorldTick: 150 }, proposalExpiresAtWorldTick: null }));
+    for (const [revision, partyId] of ["party-0", "party-1"].entries()) unwrap(await a.modify({ kind: "accept", proposalId: "edited-offer", expectedProposalRevision: revision, partyId }));
+    unwrap(await a.modify({ kind: "activate", proposalId: "edited-offer", expectedProposalRevision: 2, amendmentId: "deadline-edit" }));
+    f.time.tick = 30; d = unwrap(await gm.diplomacy.agreements.query({ id })); assert.equal(d.obligations.length, 3); assert.equal(d.amendments[0].proposalId, "edited-offer");
+    assert.equal(d.amendments[0].comparison.duration.before.expiresAtWorldTick, 100); assert.equal(d.amendments[0].comparison.duration.after.expiresAtWorldTick, 150);
+    const ui = new DiplomacyApplicationController(player.diplomacy); ui.selectTab("agreements"); ui.select(id); unwrap(await ui.load());
+    assert.equal(ui.detail.obligations.length, 2); assert.equal(ui.detail.obligations[0].compliance.applicable, false); assert.equal(ui.detail.obligations[1].compliance.applicable, true);
+    assert.equal(JSON.stringify(ui.detail).includes("PRIVATE_"), false); assert.equal(ui.inspector().includes("PRIVATE_"), false); assert.deepEqual(ui.detail.amendments, []);
+    assert.ok(ui.inspector().includes("Vencimento: 20")); assert.ok(ui.inspector().includes("Vencimento: 80"));
+    const gmUi = new DiplomacyApplicationController(gm.diplomacy); gmUi.selectTab("agreements"); gmUi.select(id); unwrap(await gmUi.load());
+    assert.ok(gmUi.inspector().includes("Alterações aplicadas pela emenda")); assert.ok(gmUi.inspector().includes("Proposta edited-offer"));
+  } finally { player.destroy(); gm.destroy(); }
+  const reload = f.make(), p = f.make("player"); try { await reload.initialize(); const d: any = unwrap(await p.diplomacy.agreements.query({ id }));
+    assert.equal(d.obligations[0].termSnapshot.payload.dueAtWorldTick, 20); assert.equal(d.obligations[1].termSnapshot.payload.dueAtWorldTick, 80); assert.equal(JSON.stringify(d).includes("PRIVATE_"), false);
+  } finally { p.destroy(); reload.destroy(); }
+});
+test("G6 agreement inspector vertical: GM selected decision enforces stale revision and leaves consequences unapplied", async () => {
+  const f = fixture(), gm = f.make();
+  try {
+    await gm.initialize(); const a = await prepareAgreement(gm, [inspectorObligation("tribute", { consequences: [structuredClone(economicOperation)] })]); unwrap(await a.activate());
+    const ui = new DiplomacyApplicationController(gm.diplomacy); ui.selectTab("agreements"); ui.select(a.id); unwrap(await ui.load());
+    unwrap(ui.selectAgreementObligation(ui.detail.obligations[0].id)); const stale = ui.detail.revision;
+    const d: any = unwrap(await gm.diplomacy.agreements.query({ id: a.id })); unwrap(await a.modify({ kind: "obligation", obligationId: d.obligations[0].id, expectedObligationRevision: 0, action: { kind: "allege" } }));
+    assert.equal((await ui.change({ kind: "obligation:decide", obligationId: d.obligations[0].id, lifecycle: "breached", reason: "Stale decision" })).ok, false);
+    assert.equal(ui.detail.revision, stale); assert.equal(ui.agreementFormFields.reason, "Stale decision");
+    unwrap(await ui.load()); unwrap(await ui.change({ kind: "obligation:decide", obligationId: d.obligations[0].id, lifecycle: "breached", reason: "Confirmed by GM" })); unwrap(await ui.load());
+    assert.equal(ui.detail.lifecycle, "active"); assert.equal(ui.detail.obligations[0].compliance.confirmedBreach, true); assert.ok(ui.inspector().includes("Confirmed by GM"));
+    assert.ok(ui.inspector().includes("economy:adjust"));
+    const stored = [...f.adapter.state.values()].find(e => e.kind === "agreement" && e.id === a.id)!;
+    assert.deepEqual((stored.data as any).executedOperations, []);
+  } finally { gm.destroy(); }
+});

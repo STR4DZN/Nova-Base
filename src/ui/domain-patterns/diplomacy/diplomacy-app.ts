@@ -9,6 +9,7 @@ import { defaultReputationTrackFields, reputationTrackDefinitionFields, parseRep
 import type { ReputationTrackDefinition } from "../../../reputation/reputation-model.js";
 import { escapeHtml, escapeAttribute } from "../facilities/facility-view.js";
 import { renderAgreementNegotiation } from "./agreement-negotiation-view.js";
+import { renderAgreementObligations, renderAgreementAmendments, renderAgreementDuration } from "./agreement-inspector-view.js";
 export type DiplomacyTab = "relations" | "reputation" | "agreements" | "territory" | "disputes" | "proposals";
 const labels: Record<DiplomacyTab, string> = { relations: "Relações", reputation: "Reputação", agreements: "Acordos", territory: "Território", disputes: "Disputas", proposals: "Propostas" };
 const kinds: Record<Exclude<DiplomacyTab, "proposals">, OwnerIntent["kind"]> = { relations: "relation", reputation: "reputation", agreements: "agreement", territory: "territory", disputes: "dispute" };
@@ -172,6 +173,7 @@ export class DiplomacyApplicationController {
       if (kind === "expire-proposal") return ok({ kind, proposalId: p.id, expectedProposalRevision: p.revision });
       if (kind.startsWith("obligation:")) {
         const o = d.obligations?.find((x: any) => x.id === f.obligationId), nested = kind.slice(11);
+        if (!o) return failure("DM_AGREEMENT_OBLIGATION_NOT_FOUND", "Selecione uma obrigação disponível.", "not-found");
         return ok({ kind: "obligation", obligationId: o?.id, expectedObligationRevision: o?.revision,
           action: nested === "evidence" ? { kind: nested, evidence: { id: crypto.randomUUID(), ref: { type: "evidence", id: f.outcome }, statement: f.text,
             position: f.position || "support", visibility: f.visibility, at: 0 } } : nested === "decide" ? { kind: nested, lifecycle: f.lifecycle } : { kind: nested },
@@ -207,6 +209,13 @@ export class DiplomacyApplicationController {
     if (kind === "transfer") return ok({ kind, targets: [{ territoryUuid: d.id, expectedRevision: d.revision, supersedeClaimIds: [f.sourceId],
       newClaim: { ...source, claimantRef: party(f.beneficiary), claimType: "domain-manager:ownership", lifecycle: "active", contested: false, strength: null, inherited: false } }] });
     return ok({ kind, id: f.sourceId });
+  }
+  selectAgreementObligation(id: string): Result<void> {
+    if (this.tab !== "agreements" || !this.detail?.obligations?.some((o: any) => o.id === id))
+      return this.capture(failure("DM_AGREEMENT_OBLIGATION_NOT_FOUND", "Selecione uma obrigação disponível.", "not-found"));
+    this.agreementFormFields = { ...this.agreementFormFields, obligationId: id,
+      kind: this.agreementFormFields.kind?.startsWith("obligation:") ? this.agreementFormFields.kind : "obligation:evidence" };
+    return ok(undefined);
   }
   async change(fields: Record<string, string>, previewOnly = false): Promise<Result<unknown>> {
     if (this.tab === "agreements") this.agreementFormFields = { ...fields };
@@ -290,10 +299,13 @@ export class DiplomacyApplicationController {
     }
     if (d.terms) blocks += table("Termos vigentes", d.terms, [["Termo", x => x.title], ["Descrição", x => x.text]]);
     if (this.tab === "agreements") {
-      blocks += `<p>Duração vigente: início ${d.duration.startsAtWorldTick ?? "na ativação"}; fim ${d.duration.expiresAtWorldTick ?? "sem limite"}. Relógio atual: ${this.list?.worldTick ?? 0}.</p>`;
-      blocks += renderAgreementNegotiation(d.proposals ?? [], d.parties, this.list?.worldTick ?? 0, Boolean(this.list?.isGm), this.agreementFormFields);
+      const worldTick = d.worldTick ?? this.list?.worldTick ?? 0;
+      blocks += renderAgreementDuration(d.duration, worldTick);
+      blocks += renderAgreementObligations(d.obligations ?? [], d.parties, worldTick, Boolean(this.list?.isGm));
+      blocks += renderAgreementAmendments(d.amendments ?? [], Boolean(this.list?.isGm));
+      blocks += renderAgreementNegotiation(d.proposals ?? [], d.parties, worldTick, Boolean(this.list?.isGm), this.agreementFormFields);
     }
-    if (d.obligations) blocks += table("Obrigações", d.obligations, [["Obrigação", x => x.id], ["Estado", x => x.lifecycle], ["Contestada", x => x.contested ? "Sim" : "Não"]]);
+    if (d.obligations && this.tab !== "agreements") blocks += table("Obrigações", d.obligations, [["Obrigação", x => x.id], ["Estado", x => x.lifecycle], ["Contestada", x => x.contested ? "Sim" : "Não"]]);
     if (d.territory) { blocks += `<p>Propriedade, administração, controle e presença possuem registros independentes. Transferências preservam as reivindicações concorrentes.</p>
       <p>Localização: ${escapeHtml(d.territory.locatedInUuid ?? "raiz")} · hierarquia administrativa: ${escapeHtml(d.territory.administrativeParentUuid ?? "raiz")}</p>`;
       if (this.treeAxis) blocks += `<button type="button" data-dm-children="${escapeAttribute(d.id)}">Abrir filhos neste ramo</button>`;
@@ -381,6 +393,7 @@ export class DiplomacyApplication extends BaseApp {
     element.addEventListener("click", async (e: Event) => { const button = (e.target as HTMLElement)?.closest?.("button"); if (!button) return;
       if (button.dataset.dmReputationAdd) this.controller.addReputationTrackForm(fields(button.closest("form")!));
       else if (button.dataset.dmReputationRemove !== undefined) this.controller.removeReputationTrackForm(Number(button.dataset.dmReputationRemove), fields(button.closest("form")!));
+      else if (button.dataset.dmObligation) this.controller.selectAgreementObligation(button.dataset.dmObligation);
       else if (button.dataset.dmTab) this.controller.selectTab(button.dataset.dmTab as DiplomacyTab);
       else if (button.dataset.dmId) this.controller.select(button.dataset.dmId);
       else if (button.dataset.dmPage) this.controller.offset = Math.max(0, this.controller.offset + Number(button.dataset.dmPage) * 30);

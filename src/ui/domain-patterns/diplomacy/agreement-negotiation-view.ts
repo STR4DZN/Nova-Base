@@ -5,18 +5,18 @@ type Round = AgreementProposalRound & { readonly comparison?: AgreementNegotiati
 type Proposal = Omit<AgreementProposal, "rounds"> & { readonly rounds: readonly Round[] };
 const tick = (x: number | null) => x === null ? "Sem limite" : String(x);
 function duration(d: AgreementDuration): string { return `Início: ${d.startsAtWorldTick === null ? "Na ativação" : d.startsAtWorldTick}; fim: ${tick(d.expiresAtWorldTick)}`; }
-function term(t: AgreementTerm | null): string {
+export function renderAgreementTerm(t: AgreementTerm | null): string {
   if (!t) return "<p>Ausente neste snapshot.</p>";
   return `<p><strong>${escapeHtml(t.title)}</strong> · ${escapeHtml(t.id)} · ${escapeHtml(t.type)}</p>
     <p>${escapeHtml(t.text ?? "Sem descrição")}</p><p>Visibilidade: ${escapeHtml(t.visibility)}; partes: ${escapeHtml(t.partyIds.join(", ") || "Todas")}</p>
     <details><summary>Dados do termo</summary><pre>${escapeHtml(JSON.stringify(t.payload, null, 2))}</pre></details>`;
 }
-function difference(d: AgreementNegotiationDifference): string {
+export function renderAgreementDifference(d: AgreementNegotiationDifference, title = "Comparação com a rodada anterior"): string {
   const names = { added: "Adicionado", removed: "Removido", changed: "Alterado" };
   const fields: Record<string, string> = { type: "Tipo", title: "Título", text: "Descrição", visibility: "Visibilidade", partyIds: "Partes", payload: "Dados do termo" };
-  return `<section><h5>Comparação com a rodada anterior</h5>${d.terms.length ? d.terms.map(x =>
+  return `<section><h5>${escapeHtml(title)}</h5>${d.terms.length ? d.terms.map(x =>
     `<details><summary>${names[x.kind]}: ${escapeHtml((x.after ?? x.before)!.title)}</summary>
-      <p>Campos: ${escapeHtml(x.changedFields.map(k => fields[k] ?? k).join(", ") || "Termo completo")}</p><h6>Antes</h6>${term(x.before)}<h6>Depois</h6>${term(x.after)}</details>`).join("")
+      <p>Campos: ${escapeHtml(x.changedFields.map(k => fields[k] ?? k).join(", ") || "Termo completo")}</p><h6>Antes</h6>${renderAgreementTerm(x.before)}<h6>Depois</h6>${renderAgreementTerm(x.after)}</details>`).join("")
     : "<p>Sem alterações nos termos visíveis.</p>"}
     ${d.orderChanged ? "<p>Ordem dos termos visíveis alterada.</p>" : ""}
     <p>Duração ${d.duration.changed ? "alterada" : "preservada"}: antes ${escapeHtml(duration(d.duration.before))}; depois ${escapeHtml(duration(d.duration.after))}.</p></section>`;
@@ -35,6 +35,6 @@ export function renderAgreementNegotiation(proposals: readonly Proposal[], parti
       ${p.rounds.map(r => `<details><summary>Rodada ${r.round} · ofertada por ${escapeHtml(party(r.offeredByPartyId))}</summary>
         <p>Momento: ${r.at}; ${escapeHtml(duration(r.duration))}.</p>
         <p>Aceitaram: ${escapeHtml(r.acceptedPartyIds.map(party).join(", ") || "Ninguém")}; rejeitaram: ${escapeHtml(r.rejectedPartyIds.map(party).join(", ") || "Ninguém")}.</p>
-        <h4>Termos desta rodada</h4>${r.terms.length ? r.terms.map(term).join("") : "<p>Nenhum termo visível nesta rodada.</p>"}
-        ${r.comparison ? difference(r.comparison) : "<p>Primeira oferta; sem rodada anterior.</p>"}</details>`).join("")}</details>`).join("") : "<p>Nenhuma proposta de termos.</p>"}</section>`;
+        <h4>Termos desta rodada</h4>${r.terms.length ? r.terms.map(renderAgreementTerm).join("") : "<p>Nenhum termo visível nesta rodada.</p>"}
+        ${r.comparison ? renderAgreementDifference(r.comparison) : "<p>Primeira oferta; sem rodada anterior.</p>"}</details>`).join("")}</details>`).join("") : "<p>Nenhuma proposta de termos.</p>"}</section>`;
 }
