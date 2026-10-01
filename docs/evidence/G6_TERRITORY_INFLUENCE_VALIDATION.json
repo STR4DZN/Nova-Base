@@ -1,0 +1,23 @@
+{
+  "date": "2026-10-01",
+  "part": "G6 territorial influence forms",
+  "branch": "feat/g6-continuous",
+  "local": {
+    "node": "24.19.0",
+    "specific": 14,
+    "runtime": 97,
+    "full": 1125,
+    "fail": 0,
+    "skipped": 0,
+    "typecheck": "PASS",
+    "build": "PASS",
+    "package": "PASS",
+    "validate_release": "PASS",
+    "zip_sha256": "5c721db91c76f1ec45d9c5fa5a50c727d821d91387b0a32fcc02d3e71b7b65b9"
+  },
+  "ci": "pending",
+  "foundry_real": "deferred until G6 complete",
+  "release_published": false,
+  "g7_started": false,
+  "next_step": "Territorial occupation forms with visible presence/control references and audited ending"
+}

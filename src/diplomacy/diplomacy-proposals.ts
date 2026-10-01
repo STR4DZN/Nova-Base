@@ -120,7 +120,7 @@ export function registerDiplomacyProposals(o: OwnerCommandOptions): void {
           if (!state || !isRecord(value) || !canSee(value.visibility as string) || !state.claims.some(c => c.id === value.claimId))
             return ok({ ...proposal, decision: { ...proposal.decision, approvedIntent: null } });
         }
-        if (approved.kind === "territory" && (approved.mode === "create" || isRecord(approved.action) && ["link", "update-link"].includes(approved.action.kind as string))) {
+        if (approved.kind === "territory" && (approved.mode === "create" || isRecord(approved.action) && ["link", "update-link", "influence", "add-influence-modifier", "end-influence", "end-influence-modifier"].includes(approved.action.kind as string))) {
           const source = await visibleTerritory(approved.id, ctx, o);
           if (!source || !await territoryLinkIntentVisible(approved, source, ctx, o))
             return ok({ ...proposal, decision: { ...proposal.decision, approvedIntent: null } });

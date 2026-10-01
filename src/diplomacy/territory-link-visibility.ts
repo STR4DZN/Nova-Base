@@ -28,5 +28,16 @@ export async function territoryLinkIntentVisible(intent: OwnerIntent, source: Te
     const link = source.links.find(l => l.id === action.id);
     if (!link || !canSee(link.visibility) || !await visibleTerritory(link.targetTerritoryUuid, ctx, o)) return false;
   }
+  if (isRecord(action) && ["influence", "add-influence-modifier", "end-influence", "end-influence-modifier"].includes(action.kind as string)) {
+    if (action.kind === "influence") {
+      const value = action.value;
+      if (!isRecord(value) || checkDeclaredVisibility && !canSee(value.visibility as string)) return false;
+    } else {
+      const target = source.influence.find(i => i.id === action.id);
+      if (!target || !canSee(target.visibility)) return false;
+      if (action.kind === "end-influence-modifier" && !target.modifiers.some(m => m.id === action.modifierId && canSee(m.visibility))) return false;
+      if (action.kind === "add-influence-modifier" && checkDeclaredVisibility && (!isRecord(action.value) || !canSee(action.value.visibility as string))) return false;
+    }
+  }
   return true;
 }

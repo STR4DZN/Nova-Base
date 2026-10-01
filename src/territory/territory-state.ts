@@ -131,6 +131,9 @@ export type TerritoryAction =
   | { readonly kind: "recognition"; readonly value: ClaimRecognition }
   | { readonly kind: "presence"; readonly value: TerritoryPresence }
   | { readonly kind: "influence"; readonly value: TerritoryInfluence }
+  | { readonly kind: "add-influence-modifier"; readonly id: string; readonly value: InfluenceModifier }
+  | { readonly kind: "end-influence-modifier"; readonly id: string; readonly modifierId: string }
+  | { readonly kind: "end-influence"; readonly id: string }
   | { readonly kind: "right"; readonly value: TerritoryRight }
   | { readonly kind: "link"; readonly value: TerritoryLink }
   | { readonly kind: "occupation"; readonly value: TerritoryOccupation }
@@ -144,7 +147,24 @@ export function changeTerritoryState(s: TerritoryState, c: TerritoryChangeContex
     || !isTimestamp(c.at) || c.at < s.territory.updatedAt || !isTimestamp(c.worldTick) || !isText(c.reason) || !refList(c.sourceRefs) || !c.sourceRefs.length)
     return failure("DM_TERRITORY_CHANGE_INVALID", "Invalid territorial audit context");
   let next: TerritoryState = structuredClone(s), before: unknown = null, after: unknown = null, id: string;
-  if ("value" in action) {
+  if (["add-influence-modifier", "end-influence-modifier", "end-influence"].includes(action.kind)) {
+    const a = action as Extract<TerritoryAction, { kind: "add-influence-modifier" | "end-influence-modifier" | "end-influence" }>;
+    id = a.id;
+    const target = s.influence.find(i => i.id === id);
+    if (!target) return failure("DM_TERRITORY_INFLUENCE_UNAVAILABLE", "Influence unavailable", "not-found");
+    before = target;
+    if (a.kind === "add-influence-modifier") {
+      if (!target.active) return failure("DM_TERRITORY_INFLUENCE_INACTIVE", "Inactive influence cannot receive a new modifier", "conflict");
+      if (!sourceValid(a.value) || target.modifiers.some(m => m.id === a.value.id)) return failure("DM_TERRITORY_SOURCE_INVALID", "Invalid or duplicate influence modifier");
+      after = { ...target, modifiers: [...target.modifiers, a.value] };
+    } else if (a.kind === "end-influence-modifier") {
+      const modifier = target.modifiers.find(m => m.id === a.modifierId);
+      if (!modifier) return failure("DM_TERRITORY_INFLUENCE_UNAVAILABLE", "Influence modifier unavailable", "not-found");
+      after = { ...target, modifiers: target.modifiers.map(m => m.id === a.modifierId ? { ...m, active: false } : m) };
+    } else after = { ...target, active: false };
+    if (JSON.stringify(before) === JSON.stringify(after)) return ok(s);
+    next = { ...next, influence: s.influence.map(i => i.id === id ? after as TerritoryInfluence : i) };
+  } else if ("value" in action) {
     const collection = collectionFor[action.kind] as TerritorySourceCollection; const list: readonly TerritorialSource[] = s[collection];
     if (!collection || !sourceValid(action.value) || list.some(x => x.id === action.value.id)) return failure("DM_TERRITORY_SOURCE_INVALID", "Source ID already exists or malformed source");
     id = action.value.id; after = action.value; next = { ...next, [collection]: [...list, action.value] };
