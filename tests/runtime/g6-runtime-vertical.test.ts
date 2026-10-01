@@ -614,3 +614,105 @@ test("G6 reputation configuration vertical: proposed creation activates decay on
     assert.equal(detail.tracks[0].lastDecayWorldTick, 100); assert.equal(detail.revision, 0);
   } finally { player.destroy(); gm.destroy(); }
 });
+
+test("G6 agreement negotiation vertical: UI deadline expires only at authority tick and resets initial lifecycle", async () => {
+  const f = fixture(), gm = f.make(), draft = createDiplomacyDraft("agreement", "Offer", [{ type: "domain", uuid: domainUuid }, { type: "narrative", id: "guild" }], "public");
+  try {
+    await gm.initialize(); unwrap(await gm.diplomacy.agreements.create({ ...draft, reason: "Create" }));
+    const ui = new DiplomacyApplicationController(gm.diplomacy); ui.selectTab("agreements"); ui.select(draft.id); unwrap(await ui.load());
+    unwrap(await ui.change({ kind: "propose", partyId: "party-0", title: "Initial", text: "Full offer", visibility: "public", proposalExpires: "25", expires: "100", reason: "Negotiate" }));
+    unwrap(await ui.load()); const proposal = ui.detail.proposals[0]; assert.equal(proposal.expiresAtWorldTick, 25); assert.equal(proposal.rounds[0].duration.expiresAtWorldTick, 100);
+    const rev = ui.detail.revision; ui.list.worldTick = 25;
+    assert.equal((await ui.change({ kind: "expire-proposal", sourceId: proposal.id, reason: "Too early" })).ok, false);
+    assert.equal((unwrap(await gm.diplomacy.agreements.query({ id: draft.id })) as any).revision, rev);
+    f.time.tick = 25; unwrap(await ui.load()); unwrap(await ui.change({ kind: "expire-proposal", sourceId: proposal.id, reason: "Deadline" })); unwrap(await ui.load());
+    assert.equal(ui.detail.lifecycle, "draft"); assert.equal(ui.detail.proposals[0].lifecycle, "expired"); assert.equal(ui.detail.history.filter((e: any) => e.kind === "expire-proposal").length, 1);
+    assert.ok(ui.inspector().includes("Rodada 1"));
+  } finally { gm.destroy(); }
+});
+test("G6 agreement negotiation vertical: manual UI renewal preserves terms/rights, exact ticket retry and reload", async () => {
+  const f = fixture(), gm = f.make(); let id = "", ticket: any;
+  const term = { id: "grant", type: "domain-manager:capability", title: "Access", text: null, visibility: "public", partyIds: ["party-0", "party-1"],
+    payload: { beneficiaryPartyId: "party-0", capabilityIds: ["test:renewed-access"], scopeRef: null, conditionRefs: [] } };
+  try {
+    await gm.initialize(); const a = await prepareAgreement(gm, [term]); id = a.id; unwrap(await a.activate());
+    const ui = new DiplomacyApplicationController(gm.diplomacy); ui.selectTab("agreements"); ui.select(id); unwrap(await ui.load());
+    const action = unwrap(ui.buildAction({ kind: "renew", renewExpires: "200" }));
+    ticket = unwrap(gm.diplomacy.commands.prepare("agreements:modify", { id, expectedRevision: ui.detail.revision, action, reason: "Extend manually" }));
+    unwrap(await gm.diplomacy.commands.execute(ticket)); unwrap(await gm.diplomacy.commands.retry(ticket));
+    const after: any = unwrap(await gm.diplomacy.agreements.query({ id })); assert.equal(after.duration.expiresAtWorldTick, 200); assert.equal(after.duration.startsAtWorldTick, 10);
+    assert.deepEqual(after.terms, [term]); assert.equal(after.history.filter((e: any) => e.kind === "renew").length, 1);
+    assert.equal((await gm.diplomacy.agreements.modify({ id, expectedRevision: ui.detail.revision, action, reason: "Stale" })).ok, false);
+    f.time.tick = 150; const caps: any = unwrap(await gm.diplomacy.capabilities(domainUuid));
+    assert.ok(JSON.stringify(caps).includes("test:renewed-access"));
+  } finally { gm.destroy(); }
+  const reload = f.make(); try { await reload.initialize(); unwrap(await reload.diplomacy.commands.retry(ticket));
+    const after: any = unwrap(await reload.diplomacy.agreements.query({ id })); assert.equal(after.duration.expiresAtWorldTick, 200); assert.equal(after.history.filter((e: any) => e.kind === "renew").length, 1);
+  } finally { reload.destroy(); }
+});
+test("G6 agreement negotiation vertical: sanitized round diff and reset votes use real owner and survive reload", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player"); let id = "";
+  const term = { id: "visible", type: "domain-manager:narrative", title: "Visible", text: "Old", visibility: "public", partyIds: ["party-0", "party-1"], payload: {} };
+  const secret = { ...structuredClone(term), id: "private-negotiation", title: "PRIVATE_NEGOTIATION_MARKER", visibility: "secret" };
+  try {
+    await gm.initialize(); const a = await prepareAgreement(gm, [term, secret]); id = a.id;
+    // The accepted round is activated before negotiating an amendment.
+    unwrap(await a.activate()); unwrap(await a.modify({ kind: "amend", proposalId: "amend-offer", partyId: "party-0", terms: [term, secret], duration: { startsAtWorldTick: 10, expiresAtWorldTick: 100 }, proposalExpiresAtWorldTick: 50 }));
+    unwrap(await a.modify({ kind: "accept", proposalId: "amend-offer", expectedProposalRevision: 0, partyId: "party-0" }));
+    unwrap(await a.modify({ kind: "counter", proposalId: "amend-offer", expectedProposalRevision: 1, partyId: "party-1", terms: [{ ...term, text: "New" }, { ...secret, text: "PRIVATE_CHANGE_MARKER" }], duration: { startsAtWorldTick: 10, expiresAtWorldTick: 120 } }));
+    const g: any = unwrap(await gm.diplomacy.agreements.query({ id })); const p: any = unwrap(await player.diplomacy.agreements.query({ id }));
+    assert.equal(g.proposals[1].rounds[1].comparison.terms.length, 2); assert.equal(p.proposals[1].rounds[1].comparison.terms.length, 1);
+    assert.deepEqual(p.proposals[1].rounds[1].acceptedPartyIds, []); assert.equal(p.proposals[1].rounds[0].acceptedPartyIds.length, 1);
+    assert.equal(p.proposals[1].rounds[1].comparison.terms[0].before.text, "Old"); assert.equal(p.proposals[1].rounds[1].comparison.terms[0].after.text, "New");
+    assert.equal(JSON.stringify(p).includes("PRIVATE_"), false); assert.equal(JSON.stringify(p).includes("private-negotiation"), false);
+    assert.deepEqual(p.terms[0], term); assert.equal(p.duration.expiresAtWorldTick, 100);
+    const ui = new DiplomacyApplicationController(player.diplomacy); ui.selectTab("agreements"); ui.select(id); unwrap(await ui.load());
+    assert.ok(ui.inspector().includes("Comparação com a rodada anterior")); assert.equal(ui.inspector().includes("PRIVATE_"), false);
+  } finally { player.destroy(); gm.destroy(); }
+  const reload = f.make(); try { await reload.initialize(); const d: any = unwrap(await reload.diplomacy.agreements.query({ id })); assert.equal(d.proposals[1].rounds.length, 2); assert.equal(d.proposals[1].rounds[1].comparison.terms.length, 2);
+  } finally { reload.destroy(); }
+});
+test("G6 agreement negotiation vertical: Player UI renewal waits for GM approval and records original intent", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player");
+  try {
+    await gm.initialize(); const a = await prepareAgreement(gm, []); unwrap(await a.activate());
+    const ui = new DiplomacyApplicationController(player.diplomacy); ui.selectTab("agreements"); ui.select(a.id); unwrap(await ui.load());
+    const rev = ui.detail.revision; unwrap(await ui.change({ kind: "renew", renewExpires: "200", reason: "Please extend" }));
+    assert.equal((unwrap(await gm.diplomacy.agreements.query({ id: a.id })) as any).revision, rev);
+    const inbox: any = unwrap(await gm.diplomacy.proposals.query({})); const request: any = unwrap(await gm.diplomacy.proposals.query({ id: inbox.items[0].id }));
+    assert.equal(request.original.action.automatic, false); assert.equal(request.original.action.expiresAtWorldTick, 200);
+    unwrap(await gm.diplomacy.proposals.decide({ id: request.id, expectedRevision: request.revision, decision: "approve", reason: "GM approved" }));
+    const d: any = unwrap(await gm.diplomacy.agreements.query({ id: a.id })); assert.equal(d.duration.expiresAtWorldTick, 200); assert.equal(d.history.filter((e: any) => e.kind === "renew").length, 1);
+  } finally { player.destroy(); gm.destroy(); }
+});
+test("G6 agreement negotiation vertical: expired amendment keeps active terms and same expiration ticket is a no-op", async () => {
+  const f = fixture(), gm = f.make();
+  const term = { id: "current", type: "domain-manager:narrative", title: "Current", text: null, visibility: "public", partyIds: ["party-0", "party-1"], payload: {} };
+  try {
+    await gm.initialize(); const a = await prepareAgreement(gm, [term]); unwrap(await a.activate());
+    unwrap(await a.modify({ kind: "amend", proposalId: "expired-amendment", partyId: "party-0", terms: [{ ...term, title: "Not active" }], duration: { startsAtWorldTick: 10, expiresAtWorldTick: 200 }, proposalExpiresAtWorldTick: 20 }));
+    const before: any = unwrap(await gm.diplomacy.agreements.query({ id: a.id })); f.time.tick = 20;
+    const ui = new DiplomacyApplicationController(gm.diplomacy); ui.selectTab("agreements"); ui.select(a.id); unwrap(await ui.load());
+    const action = unwrap(ui.buildAction({ kind: "expire-proposal", sourceId: "expired-amendment" }));
+    const ticket = unwrap(gm.diplomacy.commands.prepare("agreements:modify", { id: a.id, expectedRevision: ui.detail.revision, action, reason: "Deadline" }));
+    unwrap(await gm.diplomacy.commands.execute(ticket)); unwrap(await gm.diplomacy.commands.retry(ticket)); unwrap(await ui.load());
+    assert.equal(ui.detail.lifecycle, "active"); assert.deepEqual(ui.detail.terms, before.terms); assert.deepEqual(ui.detail.duration, before.duration);
+    const rev = ui.detail.revision; unwrap(await ui.change({ kind: "expire-proposal", sourceId: "expired-amendment", reason: "Already expired" })); unwrap(await ui.load()); assert.equal(ui.detail.revision, rev);
+    assert.equal(ui.detail.history.filter((e: any) => e.kind === "expire-proposal").length, 1);
+  } finally { gm.destroy(); }
+});
+test("G6 agreement negotiation vertical: UI amendment without reapproval receives unique audit ID", async () => {
+  const f = fixture(), gm = f.make(), draft = createDiplomacyDraft("agreement", "Direct amendment", [{ type: "domain", uuid: domainUuid }, { type: "narrative", id: "guild" }], "public");
+  const data: any = draft.data; data.definition.amendmentRequiresApproval = false;
+  try {
+    await gm.initialize(); unwrap(await gm.diplomacy.agreements.create({ id: draft.id, data, reason: "Create" }));
+    const ui = new DiplomacyApplicationController(gm.diplomacy); ui.selectTab("agreements"); ui.select(draft.id); unwrap(await ui.load());
+    unwrap(await ui.change({ kind: "propose", partyId: "party-0", title: "Original", expires: "100", visibility: "public", reason: "Offer" })); unwrap(await ui.load());
+    for (const partyId of ["party-0", "party-1"]) { unwrap(await ui.change({ kind: "accept", partyId, reason: "Accept" })); unwrap(await ui.load()); }
+    unwrap(await ui.change({ kind: "activate", reason: "Enact" })); unwrap(await ui.load());
+    unwrap(await ui.change({ kind: "amend", partyId: "party-0", title: "Changed", expires: "200", visibility: "public", reason: "GM amended" })); unwrap(await ui.load());
+    assert.equal(ui.detail.terms[0].title, "Changed"); assert.equal(ui.detail.amendments.length, 1); assert.ok(ui.detail.amendments[0].id);
+    assert.equal(ui.detail.amendments[0].beforeTerms[0].title, "Original"); assert.equal(ui.detail.amendments[0].afterTerms[0].title, "Changed");
+    assert.equal(ui.detail.lifecycle, "active"); assert.equal(ui.detail.proposals.length, 1);
+  } finally { gm.destroy(); }
+});

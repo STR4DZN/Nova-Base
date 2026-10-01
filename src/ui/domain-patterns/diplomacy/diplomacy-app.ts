@@ -8,13 +8,14 @@ import { defaultReputationTrackFields, reputationTrackDefinitionFields, parseRep
   renderReputationTrackFields } from "./reputation-track-form.js";
 import type { ReputationTrackDefinition } from "../../../reputation/reputation-model.js";
 import { escapeHtml, escapeAttribute } from "../facilities/facility-view.js";
+import { renderAgreementNegotiation } from "./agreement-negotiation-view.js";
 export type DiplomacyTab = "relations" | "reputation" | "agreements" | "territory" | "disputes" | "proposals";
 const labels: Record<DiplomacyTab, string> = { relations: "Relações", reputation: "Reputação", agreements: "Acordos", territory: "Território", disputes: "Disputas", proposals: "Propostas" };
 const kinds: Record<Exclude<DiplomacyTab, "proposals">, OwnerIntent["kind"]> = { relations: "relation", reputation: "reputation", agreements: "agreement", territory: "territory", disputes: "dispute" };
 const actions: Record<Exclude<DiplomacyTab, "proposals">, readonly [string, string][]> = {
   relations: [["incident", "Registrar incidente / reversão"], ["modifier", "Adicionar modificador temporário"], ["end-modifier", "Encerrar modificador"], ["end", "Encerrar relação"], ["stance", "Definir / limpar postura manual"]],
   reputation: [["adjust", "Ajustar reputação"], ["decay", "Aplicar decadência configurada"]],
-  agreements: [["propose", "Propor termos"], ["amend", "Propor emenda"], ["counter", "Contrapropor termos"], ["accept", "Aceitar proposta de termos"], ["reject", "Rejeitar termos"], ["activate", "Ativar termos aceitos"], ["suspend", "Suspender"], ["resume", "Retomar"], ["breach", "Registrar quebra"], ["expire", "Expirar"], ["terminate", "Encerrar"], ["obligation:evidence", "Adicionar evidência"], ["obligation:allege", "Alegar descumprimento"], ["obligation:contest", "Contestar alegação"], ["obligation:decide", "Decidir obrigação"]],
+  agreements: [["propose", "Propor termos"], ["amend", "Propor emenda"], ["counter", "Contrapropor termos"], ["accept", "Aceitar proposta de termos"], ["reject", "Rejeitar termos"], ["activate", "Ativar termos aceitos"], ["suspend", "Suspender"], ["resume", "Retomar"], ["breach", "Registrar quebra"], ["expire", "Expirar acordo"], ["renew", "Renovar acordo"], ["expire-proposal", "Expirar proposta de termos"], ["terminate", "Encerrar"], ["obligation:evidence", "Adicionar evidência"], ["obligation:allege", "Alegar descumprimento"], ["obligation:contest", "Contestar alegação"], ["obligation:decide", "Decidir obrigação"]],
   territory: [["claim", "Adicionar reivindicação"], ["presence", "Registrar presença"], ["right", "Conceder direito"], ["reparent", "Alterar hierarquia"], ["transfer", "Transferir reivindicação de propriedade"], ["end-claim", "Encerrar reivindicação"], ["contest-claim", "Contestar reivindicação"], ["revoke-right", "Revogar direito"]],
   disputes: [["decide", "Registrar decisão de disputa"]]
 };
@@ -29,11 +30,12 @@ export class DiplomacyApplicationController {
   list: any = null; detail: any = null; error = ""; creating = false; preview: any = null;
   reputationTrackCount = 1; reputationFormFields: Record<string, string> = {};
   reputationConfigurationFields: Record<string, string> = {};
+  agreementFormFields: Record<string, string> = {};
   #previewInput: string | null = null; #previewIntent: OwnerIntent | null = null;
   treeAxis: "locatedInUuid" | "administrativeParentUuid" | null = null; treeParent: string | null = null;
   constructor(readonly api: PublicDiplomacyApi) {}
-  selectTab(tab: DiplomacyTab): void { this.tab = tab; this.offset = 0; this.selectedId = null; this.detail = null; this.historyOffset = 0; this.creating = false; this.preview = null; this.reputationTrackCount = 1; this.reputationFormFields = {}; this.reputationConfigurationFields = {}; }
-  select(id: string): void { if (this.selectedId !== id) this.reputationConfigurationFields = {}; this.selectedId = id; this.historyOffset = 0; this.creating = false; this.preview = null; }
+  selectTab(tab: DiplomacyTab): void { this.tab = tab; this.offset = 0; this.selectedId = null; this.detail = null; this.historyOffset = 0; this.creating = false; this.preview = null; this.reputationTrackCount = 1; this.reputationFormFields = {}; this.reputationConfigurationFields = {}; this.agreementFormFields = {}; }
+  select(id: string): void { if (this.selectedId !== id) { this.reputationConfigurationFields = {}; this.agreementFormFields = {}; } this.selectedId = id; this.historyOffset = 0; this.creating = false; this.preview = null; }
   async load(): Promise<Result<unknown>> {
     const queried = await this.api[this.tab].query({ offset: this.offset, limit: 30, search: this.search,
       ...(this.tab === "territory" && this.treeAxis ? { treeAxis: this.treeAxis, parentUuid: this.treeParent } : {}) });
@@ -152,7 +154,22 @@ export class DiplomacyApplicationController {
     }
     if (this.tab === "reputation") return ok({ kind, trackId: f.axis, delta: n, ...(f.reversalOf ? { reversalOf: f.reversalOf } : {}) });
     if (this.tab === "agreements") {
-      const p = d.proposals?.find((x: any) => x.id === f.sourceId) ?? d.proposals?.at(-1);
+      const p = f.sourceId ? d.proposals?.find((x: any) => x.id === f.sourceId)
+        : d.proposals?.find((x: any) => ["open", "accepted"].includes(x.lifecycle)) ?? d.proposals?.at(-1);
+      if (["counter", "accept", "reject", "activate", "expire-proposal"].includes(kind) && !p)
+        return failure("DM_AGREEMENT_PROPOSAL_NOT_FOUND", "Selecione uma proposta de termos existente.", "not-found");
+      const parseTick = (value: string | undefined): number | null => value?.trim() ? Number(value) : null;
+      const expires = parseTick(f.expires), deadline = parseTick(f.proposalExpires), starts = parseTick(f.starts);
+      if (["propose", "amend", "counter"].includes(kind) && [expires, deadline, starts].some(x => x !== null && (!Number.isSafeInteger(x) || x < 0)))
+        return failure("DM_AGREEMENT_DURATION_INVALID", "Prazos e início precisam ser ticks inteiros não negativos.");
+      if (kind === "renew") {
+        const until = parseTick(f.renewExpires);
+        if (until === null || !Number.isSafeInteger(until) || until <= (this.list?.worldTick ?? 0)
+          || !["active", "breached"].includes(d.lifecycle) || d.duration?.expiresAtWorldTick == null || until <= d.duration.expiresAtWorldTick)
+          return failure("DM_AGREEMENT_RENEWAL_INVALID", "Renovação manual precisa estender o prazo de um acordo ativo ou em quebra com duração finita.");
+        return ok({ kind: "renew", expiresAtWorldTick: until, automatic: false });
+      }
+      if (kind === "expire-proposal") return ok({ kind, proposalId: p.id, expectedProposalRevision: p.revision });
       if (kind.startsWith("obligation:")) {
         const o = d.obligations?.find((x: any) => x.id === f.obligationId), nested = kind.slice(11);
         return ok({ kind: "obligation", obligationId: o?.id, expectedObligationRevision: o?.revision,
@@ -172,9 +189,9 @@ export class DiplomacyApplicationController {
             dueAtWorldTick: f.due ? Number(f.due) : null, graceTicks: Number(f.grace || "0"), overduePolicy: "report", requirementRef: { type: "resource", id: f.resource },
             consequences: f.consequence === "on" ? [operation] : [] }
           : type === "owner-operation" ? { operations: [operation] } : {};
-        return ok({ kind, proposalId: kind === "counter" ? p?.id : crypto.randomUUID(), ...(kind === "counter" ? { expectedProposalRevision: p?.revision } : { proposalExpiresAtWorldTick: null }), partyId: f.partyId,
+        return ok({ kind, proposalId: kind === "counter" ? p?.id : crypto.randomUUID(), ...(kind === "counter" ? { expectedProposalRevision: p?.revision } : { proposalExpiresAtWorldTick: deadline, ...(kind === "amend" ? { amendmentId: crypto.randomUUID() } : {}) }), partyId: f.partyId,
           terms: [{ id: crypto.randomUUID(), type: `domain-manager:${type}`, title: f.title, text: f.text || null, visibility: f.visibility,
-            partyIds: d.parties.map((p: any) => p.id), payload }], duration: { startsAtWorldTick: null, expiresAtWorldTick: f.expires ? Number(f.expires) : null } });
+            partyIds: d.parties.map((p: any) => p.id), payload }], duration: { startsAtWorldTick: starts, expiresAtWorldTick: expires } });
       }
       if (["accept", "reject", "activate"].includes(kind)) return ok({ kind, proposalId: p?.id, expectedProposalRevision: p?.revision, ...(kind !== "activate" ? { partyId: f.partyId } : { amendmentId: crypto.randomUUID() }) });
       return ok({ kind });
@@ -192,6 +209,7 @@ export class DiplomacyApplicationController {
     return ok({ kind, id: f.sourceId });
   }
   async change(fields: Record<string, string>, previewOnly = false): Promise<Result<unknown>> {
+    if (this.tab === "agreements") this.agreementFormFields = { ...fields };
     const built = this.buildAction(fields); if (!built.ok) { this.capture(built); return built; }
     let intent: OwnerIntent = { kind: kinds[this.tab as Exclude<DiplomacyTab, "proposals">], mode: "modify", id: this.detail.id,
       expectedRevision: this.detail.revision, action: built.value, reason: fields.reason };
@@ -203,7 +221,7 @@ export class DiplomacyApplicationController {
     if (this.preview && this.#previewIntent && this.#previewInput === JSON.stringify(fields)) intent = this.#previewIntent;
     const result = this.list?.isGm ? await (this.api[this.tab] as PublicDiplomacyOwnerApi).modify(intent as any)
       : await this.api.proposals.submit({ id: crypto.randomUUID(), intent });
-    this.capture(result); if (result.ok) this.preview = null; return result;
+    this.capture(result); if (result.ok) { this.preview = null; if (this.tab === "agreements") this.agreementFormFields = {}; } return result;
   }
   async review(decision: "approve" | "reject", reason: string, fields: Record<string, string> = {}): Promise<Result<unknown>> {
     let editedIntent: OwnerIntent | undefined;
@@ -271,7 +289,10 @@ export class DiplomacyApplicationController {
       }
     }
     if (d.terms) blocks += table("Termos vigentes", d.terms, [["Termo", x => x.title], ["Descrição", x => x.text]]);
-    if (d.proposals) blocks += table("Rodadas de termos", d.proposals, [["Proposta", x => x.id], ["Estado", x => x.lifecycle], ["Revisão", x => x.revision]]);
+    if (this.tab === "agreements") {
+      blocks += `<p>Duração vigente: início ${d.duration.startsAtWorldTick ?? "na ativação"}; fim ${d.duration.expiresAtWorldTick ?? "sem limite"}. Relógio atual: ${this.list?.worldTick ?? 0}.</p>`;
+      blocks += renderAgreementNegotiation(d.proposals ?? [], d.parties, this.list?.worldTick ?? 0, Boolean(this.list?.isGm), this.agreementFormFields);
+    }
     if (d.obligations) blocks += table("Obrigações", d.obligations, [["Obrigação", x => x.id], ["Estado", x => x.lifecycle], ["Contestada", x => x.contested ? "Sim" : "Não"]]);
     if (d.territory) { blocks += `<p>Propriedade, administração, controle e presença possuem registros independentes. Transferências preservam as reivindicações concorrentes.</p>
       <p>Localização: ${escapeHtml(d.territory.locatedInUuid ?? "raiz")} · hierarquia administrativa: ${escapeHtml(d.territory.administrativeParentUuid ?? "raiz")}</p>`;
@@ -296,7 +317,7 @@ export class DiplomacyApplicationController {
     return blocks + this.actionForm();
   }
   actionForm(): string {
-    const d = this.detail, input = (name: string, label: string) => `<label>${label}<input name="${name}"></label>`;
+    const d = this.detail, input = (name: string, label: string) => `<label>${label}<input name="${name}" ${this.tab === "agreements" && ["starts", "expires", "proposalExpires", "renewExpires"].includes(name) ? 'type="number" step="1" min="0"' : ""}></label>`;
     const choices = actions[this.tab as Exclude<DiplomacyTab, "proposals">].filter(([key]) => key !== "stance" || d.stancePolicy === "manual").map(([key, label]) => `<option value="${key}">${label}</option>`).join("");
     let fields = "";
     if (this.tab === "relations" || this.tab === "reputation") {
@@ -310,7 +331,8 @@ export class DiplomacyApplicationController {
     } else if (this.tab === "agreements") fields = `<label>Parte<select name="partyId">${d.parties.map((p: any) => `<option value="${escapeAttribute(p.id)}">${escapeHtml(refLabel(p.ref))}</option>`).join("")}</select></label>
       <label>Beneficiário<select name="beneficiaryPartyId">${d.parties.map((p: any) => `<option value="${escapeAttribute(p.id)}">${escapeHtml(refLabel(p.ref))}</option>`).join("")}</select></label>
       <label>Tipo de termo<select name="termType"><option value="narrative">Narrativo</option><option value="capability">Capacidade</option><option value="right">Direito territorial</option><option value="obligation">Obrigação</option><option value="owner-operation">Ajuste econômico na ativação</option></select></label>
-      ${input("title", "Título do novo termo")}<label>Texto / evidência<textarea name="text"></textarea></label>${input("sourceId", "ID da proposta de termos (em branco usa a mais recente)")}${input("expires", "Expiração no relógio do mundo (opcional)")}${this.visibilityField()}
+      ${input("title", "Título do novo termo")}<label>Texto / evidência<textarea name="text"></textarea></label><label>Proposta de termos<select name="sourceId"><option value="">Proposta em negociação / mais recente</option>${(d.proposals ?? []).map((p: any) => `<option value="${escapeAttribute(p.id)}">${escapeHtml(p.id)} · ${escapeHtml(p.lifecycle)} · rev. ${p.revision}</option>`).join("")}</select></label>
+      ${input("starts", "Início dos termos em ticks (em branco: na ativação)")}${input("expires", "Fim dos termos em ticks (opcional)")}${input("proposalExpires", "Prazo para aceitar nova proposta / emenda em ticks (opcional)")}${input("renewExpires", "Novo fim do acordo para renovação manual (ticks)")}${this.visibilityField()}
       ${input("grants", "Capacidades, separadas por vírgula")}${input("territories", "UUID do território do direito / escopo")}${input("rightType", "Tipo de direito (ex.: domain-manager:entry)")}<label><input type="checkbox" name="inherited">Direito herdável</label>
       ${input("beneficiary", "UUID do Domínio para ajuste econômico")}${input("resource", "Recurso econômico (ex.: domain-manager:treasury)")}${input("amount", "Ajuste econômico inteiro")}${input("due", "Vencimento da obrigação (relógio do mundo)")}${input("grace", "Tolerância em ticks")}<label><input type="checkbox" name="consequence">Declarar o ajuste como consequência da obrigação</label>
       <label>Obrigação<select name="obligationId">${(d.obligations ?? []).map((o: any) => `<option value="${escapeAttribute(o.id)}">${escapeHtml(o.id)} · ${escapeHtml(o.lifecycle)}</option>`).join("")}</select></label>
@@ -321,10 +343,24 @@ export class DiplomacyApplicationController {
       <label><input type="checkbox" name="inherited">Herdar direito pela localização</label>${input("starts", "Início no relógio do mundo (para transferência: momento atual)")}${input("expires", "Expiração (opcional)")}${this.visibilityField()}
       ${input("physical", "UUID do novo pai físico (em branco: raiz)")}${input("administrative", "UUID do novo pai administrativo (em branco: raiz)")}`;
     else fields = `<label>Decisão<select name="lifecycle">${["latent", "active", "escalated", "frozen", "settled", "abandoned", "superseded"].map(x => `<option>${x}</option>`).join("")}</select></label>${input("outcome", "Referência do resultado explícito do GM")}`;
-    return `<h3>${this.list?.isGm ? "Ação" : "Propor mudança ao GM"}</h3><form data-dm-form="change"><label>Operação<select name="kind">${choices}</select></label>${fields}<label>Motivo<input name="reason" required></label>
+    const html = `<h3>${this.list?.isGm ? "Ação" : "Propor mudança ao GM"}</h3><form data-dm-form="change"><label>Operação<select name="kind">${choices}</select></label>${fields}<label>Motivo<input name="reason" required></label>
       ${this.tab === "territory" && this.list?.isGm ? '<button type="button" data-dm-preview="true">Conferir prévia</button>' : ""}<button>${this.list?.isGm ? "Confirmar ação" : "Enviar proposta"}</button></form>
       ${this.preview ? `<p role="status">Prévia validada: ${this.preview.changes.length} território(s). Nenhuma propriedade de instalação será alterada.</p>` : ""}`;
+    return this.tab === "agreements" ? restoreAgreementFields(html, this.agreementFormFields) : html;
   }
+}
+function restoreAgreementFields(html: string, fields: Record<string, string>): string {
+  return html.replace(/<input\b[^>]*>/g, tag => {
+    const key = /name="([^"]+)"/.exec(tag)?.[1]; if (!key || fields[key] === undefined) return tag;
+    if (tag.includes('type="checkbox"')) return fields[key] === "on" ? tag.replace(/>$/, " checked>") : tag;
+    return tag.replace(/>$/, ` value="${escapeAttribute(fields[key])}">`);
+  }).replace(/<textarea name="([^"]+)">[^<]*<\/textarea>/g, (tag, key) => fields[key] === undefined ? tag
+    : `<textarea name="${key}">${escapeHtml(fields[key])}</textarea>`)
+    .replace(/<select name="([^"]+)">([\s\S]*?)<\/select>/g, (tag, key, options) => fields[key] === undefined ? tag
+      : `<select name="${key}">${options.replace(/<option([^>]*)>([^<]*)<\/option>/g, (option: string, attrs: string, text: string) => {
+        const value = /value="([^"]*)"/.exec(attrs)?.[1] ?? text;
+        return `<option${attrs}${value === escapeAttribute(fields[key]) ? " selected" : ""}>${text}</option>`;
+      })}</select>`);
 }
 class HeadlessApplication {
   element: any = null;
@@ -338,7 +374,7 @@ export class DiplomacyApplication extends BaseApp {
   readonly controller: DiplomacyApplicationController; readonly #bound = new WeakSet<object>();
   constructor(options: { api: PublicDiplomacyApi }) { super(options); this.controller = new DiplomacyApplicationController(options.api); }
   async _prepareContext(): Promise<unknown> { await this.controller.load(); return {}; }
-  _renderHTML(): string { return `<style>.dm-diplomacy-app .dm-diplomacy-columns{display:grid;grid-template-columns:240px 1fr;gap:16px}.dm-diplomacy-app aside button,.dm-diplomacy-app label{display:block;margin:6px 0}.dm-diplomacy-app table{width:100%;text-align:left;border-collapse:collapse}.dm-diplomacy-app td,.dm-diplomacy-app th{padding:6px;border-bottom:1px solid #7775}.dm-diplomacy-app input,.dm-diplomacy-app textarea{max-width:100%}.dm-diplomacy-app [role=alert]{color:#b3261e}</style>${this.controller.render()}`; }
+  _renderHTML(): string { return `<style>.dm-diplomacy-app .dm-diplomacy-columns{display:grid;grid-template-columns:240px 1fr;gap:16px}.dm-diplomacy-app aside button,.dm-diplomacy-app label{display:block;margin:6px 0}.dm-diplomacy-app table{width:100%;text-align:left;border-collapse:collapse}.dm-diplomacy-app td,.dm-diplomacy-app th{padding:6px;border-bottom:1px solid #7775}.dm-diplomacy-app input,.dm-diplomacy-app textarea{max-width:100%}.dm-diplomacy-app pre{white-space:pre-wrap;overflow-wrap:anywhere}.dm-diplomacy-app [role=alert]{color:#b3261e}</style>${this.controller.render()}`; }
   _replaceHTML(html: string, content: HTMLElement): void { content.innerHTML = html; }
   _onRender(): void { const element = this.element; if (!element || this.#bound.has(element)) return; this.#bound.add(element);
     const fields = (form: HTMLFormElement): Record<string, string> => { const result: Record<string, string> = {}; new FormData(form).forEach((v, k) => { result[k] = String(v).trim(); }); return result; };
@@ -362,7 +398,7 @@ export class DiplomacyApplication extends BaseApp {
       else if (form.dataset.dmForm === "create") await this.controller.create(data);
       else if (form.dataset.dmForm === "reputation-add-track") await this.controller.configureReputationTrack(data, false);
       else if (form.dataset.dmForm === "reputation-configure") await this.controller.configureReputationTrack(data, true);
-      else if (form.dataset.dmForm === "change") await this.controller.change(data);
+      else if (form.dataset.dmForm === "change" || form.dataset.dmForm === "agreement-expire-proposal") await this.controller.change(data);
       else if (form.dataset.dmForm === "review") await this.controller.review((e.submitter as HTMLButtonElement).value as any, data.reason, data);
       await this.render(true);
     });

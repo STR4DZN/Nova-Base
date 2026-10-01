@@ -4,6 +4,7 @@ import { historyWindow, type DiplomacyOwner } from "../diplomacy/owner-contract.
 import { AgreementTermRegistry, changeAgreement, validateAgreementDefinition, type AgreementDefinition, type AgreementAction } from "./agreement-model.js";
 import { registerAgreementTermOwners, validateAgreementState, initializeAgreementObligations, changeObligation, resolveAgreementCompliance,
   type AgreementState, type ObligationAction } from "./agreement-obligations.js";
+import { compareAgreementSnapshots } from "./agreement-negotiation.js";
 export interface AgreementOwnerData { readonly definition: AgreementDefinition; readonly state: AgreementState; readonly executedOperations?: readonly string[]; }
 export function agreementTermRegistry(): AgreementTermRegistry { const registry = new AgreementTermRegistry(); registerAgreementTermOwners(registry); registry.freeze(); return registry; }
 export const agreementOwner: DiplomacyOwner = {
@@ -43,7 +44,11 @@ export const agreementOwner: DiplomacyOwner = {
     return ok({ id: a.id, label: a.label, revision: a.revision, lifecycle: a.lifecycle, parties: a.parties, duration: a.duration, terms,
       obligations: visibleObligations.map(o => ({ ...o, evidence: o.evidence.filter(e => c.canSee(e.visibility)), events: c.isGm ? historyWindow(o.events, c) : [] })),
       compliance: compliance.value.filter(row => visibleObligations.some(o => o.id === row.obligationId)),
-      proposals: a.proposals.map(p => ({ ...p, rounds: p.rounds.map(r => ({ ...r, terms: r.terms.filter(t => c.canSee(t.visibility)) })) })),
+      proposals: a.proposals.map(p => {
+        const rounds = p.rounds.map(r => ({ ...r, terms: r.terms.filter(t => c.canSee(t.visibility)) }));
+        return { ...p, rounds: rounds.map((r, i) => ({ ...r, comparison: i === 0 ? null
+          : compareAgreementSnapshots(rounds[i - 1].terms, r.terms, rounds[i - 1].duration, r.duration) })) };
+      }),
       amendments: c.isGm ? historyWindow(a.amendments, c) : [], history: c.isGm ? historyWindow(a.events, c) : [],
       ...(c.isGm ? { definition: d } : {}) });
   }
