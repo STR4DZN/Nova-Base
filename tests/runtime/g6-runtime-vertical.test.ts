@@ -34,7 +34,7 @@ async function claimsTerritories(r: ReturnType<typeof composeDomainManagerRuntim
     { locatedInUuid: physical, administrativeParentUuid: administrative });
   return { root, physical, administrative, child, add };
 }
-function fixture(adapter = new InMemoryDiplomacyStorageAdapter(), transactions = new InMemoryTransactionStorageAdapter()) {
+function fixture(adapter = new InMemoryDiplomacyStorageAdapter(), transactions = new InMemoryTransactionStorageAdapter(), conditions?: (ref: import("../../src/core/identity/refs.js").TypedRef) => boolean) {
   const record = { schemaVersion: 1, revision: 0, definition: { identity: { aliases: [], summary: "Test", description: "Test" },
     classification: { kind: "base", scale: "small", tags: [] }, hierarchy: { parentDomainUuid: null },
     capabilities: { enabled: ["domain-manager:domain", "domain-manager:economy"], config: { "domain-manager:domain": { controllers: ["player"] } } } }, state: { lifecycle: "active" },
@@ -49,7 +49,7 @@ function fixture(adapter = new InMemoryDiplomacyStorageAdapter(), transactions =
     authority: { service: new PrimaryAuthorityService({ getUsers: () => [{ id: "gm", isGM: true, active: true }, { id: user, isGM: user === "gm", active: true }],
       getCurrentUserId: () => user, getPreferredUserId: () => "gm" }, { authorityUserId: "gm", authorityEpoch: 1, initialized: true }) } as any,
     transport: new InMemoryCommandTransport({ currentUserId: user, getAuthorityUserId: () => "gm" }, hub),
-    diplomacyStorageAdapter: adapter, transactionStorageAdapter: transactions, ledgerStorageAdapter: ledger, worldTick: () => time.tick });
+    diplomacyStorageAdapter: adapter, transactionStorageAdapter: transactions, ledgerStorageAdapter: ledger, worldTick: () => time.tick, diplomacyConditionSatisfied: conditions });
   return { make, adapter, transactions, time, ledger };
 }
 function relation(id = "rel_00000000-0000-4000-8000-000000000001", visibility = "public") {
@@ -1833,4 +1833,205 @@ test("G6 claim impact runtime: preview snapshot binds action and reason; same re
       const result = await gm.diplomacy.territory.modify({ ...input, ...patch, previewSnapshot: preview.previewSnapshot }); assert.equal(result.ok, false); if (!result.ok) assert.equal(result.error.code, "DM_TERRITORY_PREVIEW_STALE"); }
     assert.deepEqual(await f.adapter.loadAll(), before);
   } finally { gm.destroy(); }
+});
+
+const territorialRight = (id: string, patch = {}) => ({ id, sourceRef: { type: "manual", id: "gm" }, visibility: "public", startsAtWorldTick: 0,
+  expiresAtWorldTick: null, beneficiaryRef: { type: "narrative", id: "guild" }, rightType: "domain-manager:entry", inherited: true,
+  revocable: true, active: true, conditionRefs: [], grants: [], ...patch });
+async function rightsTerritories(r: ReturnType<typeof composeDomainManagerRuntime>) {
+  const add = async (label: string, rights: any[], patch = {}, visibility = "public") => {
+    const draft = createDiplomacyDraft("territory", label, [], visibility as any), data: any = draft.data;
+    data.rights = rights.map(right => structuredClone(right)); Object.assign(data.territory, patch); unwrap(await r.diplomacy.territory.create({ ...draft, reason: "Create rights source" })); return draft.id;
+  };
+  const root = await add("Rights root", [territorialRight("root")]);
+  const physical = await add("Rights physical", [territorialRight("same"), territorialRight("no-propagation", { inherited: false }),
+    territorialRight("private-right-marker", { visibility: "restricted" }), territorialRight("secret-right-marker", { visibility: "secret" })], { locatedInUuid: root });
+  const administrative = await add("Rights administrative", [territorialRight("admin")]);
+  const child = await add("Rights child", [territorialRight("same", { inherited: false, beneficiaryRef: { type: "domain", uuid: domainUuid } }),
+    territorialRight("local-private-right", { visibility: "restricted", beneficiaryRef: { type: "domain", uuid: domainUuid } })],
+    { locatedInUuid: physical, administrativeParentUuid: administrative });
+  return { root, physical, administrative, child, add };
+}
+const rightTerm = (territoryUuid: string, id = "same", payload = {}, visibility = "public") => ({ id, type: "domain-manager:right", title: "Right", text: null,
+  partyIds: ["party-0"], visibility, payload: { beneficiaryPartyId: "party-0", territoryUuid, rightType: "domain-manager:trade", startsAtWorldTick: null,
+    expiresAtWorldTick: null, inherited: true, revocable: true, conditionRefs: [], grants: [], ...payload } });
+const rightsReport = async (r: ReturnType<typeof composeDomainManagerRuntime>, id: string, patch = {}) =>
+  (unwrap(await r.publicApi.diplomacy.territory.query({ id, ...patch })) as any).territoryRights;
+test("G6 rights runtime: read-only physical rights preserve all origins, empty grants and local records", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player");
+  try { await gm.initialize(); const ids = await rightsTerritories(gm), before = await f.adapter.loadAll();
+    const d: any = unwrap(await player.publicApi.diplomacy.territory.query({ id: ids.child }));
+    assert.deepEqual(d.territoryRights.entries.map((r: any) => [r.origin.id, r.rightId, r.inherited]), [[ids.child, "same", false], [ids.child, "local-private-right", false], [ids.physical, "same", true], [ids.root, "root", true]]);
+    assert.equal(d.territoryRights.effectiveCount, 4); assert.equal(d.territoryRights.axis, "locatedInUuid"); assert.equal(d.territoryRights.worldTick, 10);
+    assert.ok(d.territoryRights.entries.every((r: any) => r.grants.length === 0 && r.status === "effective")); assert.equal(d.rights.length, 2);
+    assert.equal(d.territoryRights.entries[2].origin.revision, 0); assert.equal(d.territoryRights.entries[2].sourceTerritoryLabel, "Rights physical");
+    assert.deepEqual(await f.adapter.loadAll(), before);
+    assert.equal((await gm.diplomacy.territory.modify({ id: ids.child, expectedRevision: 0, action: { kind: "revoke-right", id: "root" }, reason: "Wrong origin" })).ok, false);
+    assert.deepEqual(await f.adapter.loadAll(), before);
+  } finally { player.destroy(); gm.destroy(); }
+});
+test("G6 rights runtime: right hierarchy is independent from claims and other axis", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player");
+  try { await gm.initialize(); const ids = await rightsTerritories(gm);
+    const d: any = unwrap(await player.diplomacy.territory.query({ id: ids.child, rightInheritanceAxis: "administrativeParentUuid", claimInheritanceAxis: "locatedInUuid" }));
+    assert.equal(d.claimInheritanceAxis, "locatedInUuid"); assert.deepEqual(d.territoryRights.entries.map((r: any) => r.rightId), ["same", "local-private-right", "admin"]);
+    assert.equal((await player.diplomacy.territory.query({ id: ids.child, rightInheritanceAxis: "both" as any })).ok, false);
+  } finally { player.destroy(); gm.destroy(); }
+});
+test("G6 rights runtime: source audience is independent of child, including restricted conditions", async () => {
+  const calls: string[] = [], f = fixture(undefined, undefined, ref => { calls.push(ref.id!); return true; }), gm = f.make(), player = f.make("player"), stranger = f.make("stranger");
+  try { await gm.initialize(); const ids = await rightsTerritories(gm), row: any = await f.adapter.read("territory", ids.physical);
+    row.data.rights[2].conditionRefs = [{ type: "requirement", id: "private-condition-marker" }]; await f.adapter.write(row);
+    assert.equal(JSON.stringify(await rightsReport(player, ids.child)).includes("private-right-marker"), false); assert.deepEqual(calls, []);
+    assert.equal(JSON.stringify(await rightsReport(stranger, ids.child)).includes("local-private-right"), false);
+    row.data.rights[2].beneficiaryRef = { type: "domain", uuid: domainUuid }; await f.adapter.write(row);
+    assert.ok((await rightsReport(player, ids.child)).entries.some((r: any) => r.rightId === "private-right-marker")); assert.deepEqual(calls, ["private-condition-marker"]);
+    assert.equal(JSON.stringify(await rightsReport(player, ids.child)).includes("secret-right-marker"), false);
+    assert.equal(JSON.stringify(await rightsReport(stranger, ids.child)).includes("private-right-marker"), false);
+    assert.ok((await rightsReport(gm, ids.child)).entries.some((r: any) => r.rightId === "secret-right-marker"));
+  } finally { stranger.destroy(); player.destroy(); gm.destroy(); }
+});
+test("G6 rights runtime: hidden middle origin blocks parent rights and scoped treaty traversal", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player");
+  try { await gm.initialize(); const ids = await rightsTerritories(gm), treaty = await prepareAgreement(gm, [rightTerm(ids.root)]); unwrap(await treaty.activate());
+    const row: any = await f.adapter.read("territory", ids.physical); row.data.territory.visibility = "secret"; row.data.territory.label = "hidden-right-origin"; await f.adapter.write(row);
+    const d: any = unwrap(await player.diplomacy.territory.query({ id: ids.child })); assert.equal(d.territory.locatedInUuid, null); assert.equal(d.territoryRights.entries.length, 2);
+    for (const marker of [ids.physical, ids.root, treaty.id, "hidden-right-origin"]) assert.equal(JSON.stringify(d).includes(marker), false);
+    assert.ok((await rightsReport(gm, ids.child)).entries.some((r: any) => r.origin.id === treaty.id));
+  } finally { player.destroy(); gm.destroy(); }
+});
+test("G6 rights runtime: inactive, inclusive start, exclusive expiry and condition states are derived at authority tick", async () => {
+  const f = fixture(), gm = f.make();
+  try { await gm.initialize(); const ids = await rightsTerritories(gm), id = await ids.add("Timing", [territorialRight("now", { startsAtWorldTick: 10, expiresAtWorldTick: 11 }),
+    territorialRight("future", { startsAtWorldTick: 11 }), territorialRight("expired", { expiresAtWorldTick: 10 }), territorialRight("inactive", { active: false }),
+    territorialRight("conditional", { conditionRefs: [{ type: "requirement", id: "check" }] })]);
+    const before = await f.adapter.loadAll(), result = await rightsReport(gm, id, { worldTick: 999, conditionSatisfied: true });
+    assert.equal(result.worldTick, 10); assert.deepEqual(result.entries.map((r: any) => r.status), ["effective", "scheduled", "expired", "inactive", "conditions-unconfirmed"]);
+    assert.equal(result.entries[4].conditions[0].confirmed, false); f.time.tick = 11;
+    assert.deepEqual((await rightsReport(gm, id)).entries.slice(0, 2).map((r: any) => r.status), ["expired", "effective"]); assert.deepEqual(await f.adapter.loadAll(), before);
+  } finally { gm.destroy(); }
+});
+test("G6 rights runtime: only literal true authorizes conditions; throws and missing providers fail closed", async () => {
+  for (const [provider, expected] of [[undefined, false], [() => false, false], [() => "yes" as any, false], [() => { throw Error("private-provider-error"); }, false], [() => true, true]] as const) {
+    const f = fixture(undefined, undefined, provider), gm = f.make();
+    try { await gm.initialize(); const ids = await rightsTerritories(gm), id = await ids.add("Conditional", [territorialRight("conditional", { conditionRefs: [{ type: "requirement", id: "check" }] })]);
+      const result = await rightsReport(gm, id); assert.equal(result.entries[0].status, expected ? "effective" : "conditions-unconfirmed");
+      assert.equal(JSON.stringify(result).includes("private-provider-error"), false);
+    } finally { gm.destroy(); }
+  }
+});
+test("G6 rights runtime: conditions are memoized, sanitized and skipped outside visible eligible sources", async () => {
+  const calls: any[] = [], f = fixture(undefined, undefined, ref => { calls.push(ref); return true; }), gm = f.make(), player = f.make("player");
+  try { await gm.initialize(); const ids = await rightsTerritories(gm), ref = { type: "requirement", id: "shared", privateMetadata: "secret-ref-marker" };
+    const id = await ids.add("Conditions", [territorialRight("a", { conditionRefs: [ref] }), territorialRight("b", { conditionRefs: [ref] }),
+      territorialRight("future", { startsAtWorldTick: 11, conditionRefs: [{ type: "requirement", id: "future" }] }), territorialRight("expired", { expiresAtWorldTick: 10, conditionRefs: [{ type: "requirement", id: "expired" }] }),
+      territorialRight("inactive", { active: false, conditionRefs: [{ type: "requirement", id: "inactive" }] }), territorialRight("hidden", { visibility: "secret", conditionRefs: [{ type: "requirement", id: "hidden" }] })]);
+    const treaty = await prepareAgreement(gm, [rightTerm(id, "condition-treaty", { conditionRefs: [ref] })]); unwrap(await treaty.activate()); calls.length = 0;
+    const result = await rightsReport(player, id); assert.deepEqual(calls, [{ type: "requirement", id: "shared" }]); assert.equal(JSON.stringify(result).includes("secret-ref-marker"), false);
+    assert.deepEqual(result.entries.filter((r: any) => ["scheduled", "expired", "inactive"].includes(r.status)).map((r: any) => r.conditions[0].confirmed), [null, null, null]);
+  } finally { player.destroy(); gm.destroy(); }
+});
+test("G6 rights runtime: active treaty rights join territory sources while capability-only terms stay separate", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player");
+  try { await gm.initialize(); const ids = await rightsTerritories(gm), treaty = await prepareAgreement(gm, [rightTerm(ids.physical), rightTerm(ids.physical, "own-only", { inherited: false }),
+    rightTerm(ids.administrative, "admin-treaty"), { id: "capability-only", type: "domain-manager:capability", title: "Capability", text: null, partyIds: ["party-0"], visibility: "public",
+      payload: { beneficiaryPartyId: "party-0", capabilityIds: ["test:construction"], scopeRef: null, conditionRefs: [] } }]);
+    assert.equal((await rightsReport(player, ids.child)).entries.some((r: any) => r.origin.id === treaty.id), false); unwrap(await treaty.activate());
+    const before = await f.adapter.loadAll(), result = await rightsReport(player, ids.child), a = result.entries.filter((r: any) => r.origin.kind === "agreement");
+    assert.equal(a.length, 1); assert.equal(a[0].rightId, "same"); assert.equal(a[0].status, "effective"); assert.equal(a[0].inherited, true); assert.deepEqual(a[0].grants, []);
+    assert.equal(a[0].origin.id, treaty.id); assert.equal(a[0].origin.revision, 4); assert.equal(a[0].sourceTerritoryUuid, ids.physical); assert.equal(a[0].sourceTerritoryRevision, 0);
+    assert.equal((await rightsReport(player, ids.child, { rightInheritanceAxis: "administrativeParentUuid" })).entries.find((r: any) => r.origin.kind === "agreement").rightId, "admin-treaty");
+    assert.deepEqual(await f.adapter.loadAll(), before);
+  } finally { player.destroy(); gm.destroy(); }
+});
+test("G6 rights runtime: agreement and term audiences independently gate visibility", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player"), stranger = f.make("stranger");
+  try { await gm.initialize(); const ids = await rightsTerritories(gm), treaty = await prepareAgreement(gm, [rightTerm(ids.child, "public-term"), rightTerm(ids.child, "restricted-term-marker", {}, "restricted"), rightTerm(ids.child, "secret-term-marker", {}, "secret")]); unwrap(await treaty.activate());
+    assert.ok((await rightsReport(player, ids.child)).entries.some((r: any) => r.rightId === "restricted-term-marker")); assert.equal(JSON.stringify(await rightsReport(stranger, ids.child)).includes("restricted-term-marker"), false);
+    assert.equal(JSON.stringify(await rightsReport(player, ids.child)).includes("secret-term-marker"), false);
+    const row: any = await f.adapter.read("agreement", treaty.id); row.data.state.agreement.parties[0].ref = { type: "narrative", id: "other" }; await f.adapter.write(row);
+    assert.equal(JSON.stringify(await rightsReport(player, ids.child)).includes("restricted-term-marker"), false);
+    row.data.state.agreement.visibility = "restricted"; await f.adapter.write(row); assert.equal(JSON.stringify(await rightsReport(player, ids.child)).includes(treaty.id), false);
+    row.data.state.agreement.visibility = "secret"; await f.adapter.write(row); assert.equal(JSON.stringify(await rightsReport(player, ids.child)).includes(treaty.id), false);
+    assert.ok((await rightsReport(gm, ids.child)).entries.some((r: any) => r.rightId === "secret-term-marker"));
+  } finally { stranger.destroy(); player.destroy(); gm.destroy(); }
+});
+test("G6 rights runtime: treaty lifecycle, intersected windows and pending amendments retain truthful effective states", async () => {
+  const f = fixture(undefined, undefined, () => true), gm = f.make();
+  try { await gm.initialize(); const ids = await rightsTerritories(gm), treaty = await prepareAgreement(gm, [rightTerm(ids.child, "current", { startsAtWorldTick: 10, expiresAtWorldTick: 20 }),
+    rightTerm(ids.child, "future", { startsAtWorldTick: 11, conditionRefs: [{ type: "requirement", id: "future" }] }), rightTerm(ids.child, "expired", { expiresAtWorldTick: 10 })]); unwrap(await treaty.activate());
+    const row: any = await f.adapter.read("agreement", treaty.id); row.data.state.agreement.duration = { startsAtWorldTick: 5, expiresAtWorldTick: 15 }; await f.adapter.write(row);
+    const states = () => rightsReport(gm, ids.child).then(r => r.entries.filter((e: any) => e.origin.kind === "agreement"));
+    let entries = await states(); assert.deepEqual(entries.map((r: any) => r.status), ["effective", "scheduled", "expired"]); assert.equal(entries[0].startsAtWorldTick, 10); assert.equal(entries[0].expiresAtWorldTick, 15); assert.equal(entries[1].conditions[0].confirmed, null);
+    unwrap(await treaty.modify({ kind: "amend", proposalId: "pending-right", partyId: "party-0", terms: [rightTerm(ids.child, "not-active")], duration: { startsAtWorldTick: null, expiresAtWorldTick: null }, proposalExpiresAtWorldTick: null }));
+    entries = await states(); assert.equal(entries[0].rightId, "current"); assert.equal(entries.some((r: any) => r.rightId === "not-active"), false);
+    unwrap(await treaty.modify({ kind: "suspend" })); assert.ok((await states()).every((r: any) => r.status === "source-inactive"));
+    unwrap(await treaty.modify({ kind: "resume" })); assert.equal((await states())[0].status, "effective"); f.time.tick = 15; assert.equal((await states())[0].status, "expired");
+  } finally { gm.destroy(); }
+});
+test("G6 rights runtime: fresh treaty edits and external additions override stale catalog and do not write", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player");
+  try { await gm.initialize(); const ids = await rightsTerritories(gm), treaty = await prepareAgreement(gm, [rightTerm(ids.child)]); unwrap(await treaty.activate()); await rightsReport(player, ids.child);
+    const row: any = await f.adapter.read("agreement", treaty.id); row.data.state.agreement.label = "Fresh treaty label"; row.data.state.agreement.terms[0].payload.grants = ["test:fresh-capability"]; await f.adapter.write(row);
+    let result = await rightsReport(player, ids.child); assert.equal(result.entries.find((r: any) => r.origin.kind === "agreement").origin.label, "Fresh treaty label"); assert.deepEqual(result.entries.find((r: any) => r.origin.kind === "agreement").grants, ["test:fresh-capability"]);
+    const external = structuredClone(row); external.id = "agreement_external_rights"; external.data.state.agreement.id = external.id; await f.adapter.write(external);
+    const before = await f.adapter.loadAll(); result = await rightsReport(player, ids.child); assert.ok(result.entries.some((r: any) => r.origin.id === external.id)); assert.deepEqual(await f.adapter.loadAll(), before);
+    row.data.state.agreement.visibility = "secret"; await f.adapter.write(row); assert.equal(JSON.stringify(await rightsReport(player, ids.child)).includes(treaty.id), false);
+  } finally { player.destroy(); gm.destroy(); }
+});
+test("G6 rights runtime: missing, corrupt, incoherent and fenced agreements provide no derived rights", async () => {
+  for (const mode of ["missing", "corrupt", "identity", "revision", "fence"]) {
+    const f = fixture(), gm = f.make(), player = f.make("player");
+    try { await gm.initialize(); const ids = await rightsTerritories(gm), treaty = await prepareAgreement(gm, [rightTerm(ids.child)]); unwrap(await treaty.activate());
+      if (mode === "missing") await f.adapter.remove("agreement", treaty.id);
+      else if (mode === "fence") { const { lockKey } = await import("../../src/mutations/lock-keys.js"); gm.recovery.fenceRegistry.installFence({ transactionId: "private-right-fence", lockKeys: [lockKey.diplomacy("agreement", treaty.id)], reason: "secret-reason" }); }
+      else { const row: any = await f.adapter.read("agreement", treaty.id); if (mode === "corrupt") row.data.state.agreement.terms[0].payload.rightType = 123;
+        if (mode === "identity") row.data.state.agreement.id = "wrong-id"; if (mode === "revision") row.data.state.agreement.revision += 1; await f.adapter.write(row); }
+      const before = await f.adapter.loadAll(), result = await rightsReport(player, ids.child); assert.equal(result.entries.some((r: any) => r.origin.kind === "agreement"), false);
+      for (const marker of [treaty.id, "private-right-fence", "secret-reason"]) assert.equal(JSON.stringify(result).includes(marker), false); assert.deepEqual(await f.adapter.loadAll(), before);
+    } finally { player.destroy(); gm.destroy(); }
+  }
+});
+test("G6 rights runtime: unavailable territory ancestors and cycles truncate derived sources without repairing storage", async () => {
+  for (const mode of ["missing", "corrupt", "identity", "revision", "fence", "cycle"]) {
+    const f = fixture(), gm = f.make(), player = f.make("player");
+    try { await gm.initialize(); const ids = await rightsTerritories(gm);
+      if (mode === "missing") await f.adapter.remove("territory", ids.physical);
+      else if (mode === "fence") { const { lockKey } = await import("../../src/mutations/lock-keys.js"); gm.recovery.fenceRegistry.installFence({ transactionId: "rights-source-fence", lockKeys: [lockKey.diplomacy("territory", ids.physical)], reason: "Unavailable" }); }
+      else { const row: any = await f.adapter.read("territory", mode === "cycle" ? ids.root : ids.physical);
+        if (mode === "corrupt") row.data.rights = "broken"; if (mode === "identity") row.data.territory.uuid = ids.administrative;
+        if (mode === "revision") row.data.territory.revision += 1; if (mode === "cycle") row.data.territory.locatedInUuid = ids.child; await f.adapter.write(row); }
+      const before = await f.adapter.loadAll(), result = await rightsReport(player, ids.child); assert.equal(result.entries.length, 2); assert.ok(result.entries.every((r: any) => !r.inherited)); assert.deepEqual(await f.adapter.loadAll(), before);
+    } finally { player.destroy(); gm.destroy(); }
+  }
+});
+test("G6 rights runtime: no-grant rights do not synthesize capabilities or modify economic state", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player");
+  try { await gm.initialize(); const ids = await rightsTerritories(gm), treaty = await prepareAgreement(gm, [rightTerm(ids.child)]); unwrap(await treaty.activate());
+    const before = await f.adapter.loadAll(), domainBefore = unwrap(await gm.domains.read("domainG6")), ledgerBefore = await f.ledger.loadSnapshot();
+    const result = await rightsReport(player, ids.child); assert.ok(result.entries.some((r: any) => r.origin.kind === "agreement" && r.status === "effective" && !r.grants.length));
+    const caps: any = unwrap(await player.diplomacy.capabilities(domainUuid, ids.child));
+    assert.equal(JSON.stringify(caps).includes("domain-manager:entry"), false); assert.equal(JSON.stringify(caps).includes("domain-manager:trade"), false);
+    assert.deepEqual(await f.adapter.loadAll(), before); assert.deepEqual(unwrap(await gm.domains.read("domainG6")), domainBefore); assert.deepEqual(await f.ledger.loadSnapshot(), ledgerBefore);
+  } finally { player.destroy(); gm.destroy(); }
+});
+test("G6 rights runtime: agreement conditions fail closed and source inactivity skips evaluation", async () => {
+  let calls = 0, satisfied = false;
+  const f = fixture(undefined, undefined, () => { calls++; return satisfied; }), gm = f.make();
+  try { await gm.initialize(); const ids = await rightsTerritories(gm), treaty = await prepareAgreement(gm, [rightTerm(ids.child, "conditional-treaty", { conditionRefs: [{ type: "requirement", id: "permit" }] })]); unwrap(await treaty.activate()); calls = 0;
+    const row = async () => (await rightsReport(gm, ids.child)).entries.find((r: any) => r.origin.kind === "agreement");
+    assert.equal((await row()).status, "conditions-unconfirmed"); assert.equal(calls, 1); satisfied = true;
+    assert.equal((await row()).status, "effective"); unwrap(await treaty.modify({ kind: "suspend" })); calls = 0;
+    const suspended = await row(); assert.equal(suspended.status, "source-inactive"); assert.equal(suspended.conditions[0].confirmed, null); assert.equal(calls, 0);
+  } finally { gm.destroy(); }
+});
+test("G6 rights runtime: audited revocation refreshes derived status without deleting the source", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player");
+  try { await gm.initialize(); const ids = await rightsTerritories(gm);
+    unwrap(await gm.diplomacy.territory.modify({ id: ids.physical, expectedRevision: 0, reason: "Revoke source right", action: { kind: "revoke-right", id: "same" } }));
+    const d: any = unwrap(await player.diplomacy.territory.query({ id: ids.child })), source = d.territoryRights.entries.find((r: any) => r.origin.id === ids.physical && r.rightId === "same");
+    assert.equal(source.status, "inactive"); assert.equal(source.origin.revision, 1); assert.equal(d.rights.length, 2); assert.equal(d.revision, 0);
+    const origin: any = unwrap(await gm.diplomacy.territory.query({ id: ids.physical })); assert.equal(origin.rights.length, 4); assert.equal(origin.events.length, 1);
+    assert.equal(d.territoryRights.entries.find((r: any) => r.origin.id === ids.child && r.rightId === "same").status, "effective");
+  } finally { player.destroy(); gm.destroy(); }
 });

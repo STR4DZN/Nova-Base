@@ -1,3 +1,4 @@
+import { renderTerritoryRights } from "./territory-rights-view.js";
 import { CLAIM_INHERITANCE_AXES, renderTerritoryClaims } from "./territory-claims-view.js";
 import { renderTerritoryPreview } from "./territory-claims-preview.js";
 import { isTerritoryPreviewSnapshot } from "../../../diplomacy/territory-preview-snapshot.js";
@@ -67,6 +68,7 @@ export class DiplomacyApplicationController {
   #previewInput: string | null = null; #previewIntent: OwnerIntent | null = null;
   treeAxis: "locatedInUuid" | "administrativeParentUuid" | null = null; treeParent: string | null = null;
   claimInheritanceAxis: "locatedInUuid" | "administrativeParentUuid" = "locatedInUuid";
+  rightInheritanceAxis: "locatedInUuid" | "administrativeParentUuid" = "locatedInUuid";
   territoryHierarchyFields: Record<string, string> = {};
   updateTerritoryHierarchyDraft(fields: Record<string, string>): void {
     if (this.tab !== "territory") return;
@@ -81,8 +83,18 @@ export class DiplomacyApplicationController {
     if (this.tab !== "territory" || !this.detail?.effectiveClaims?.some((r: any) => r.sourceTerritoryUuid === id)) return this.capture(failure("DM_DIPLOMACY_NOT_FOUND", "Selecione uma origem visível.", "not-found"));
     this.select(id); this.detail = null; return this.capture(ok(undefined));
   }
+  applyRightInheritanceAxis(axis: string): Result<void> {
+    if (this.tab !== "territory" || !CLAIM_INHERITANCE_AXES.some(([key]) => key === axis)) return this.capture(failure("DM_DIPLOMACY_QUERY_INVALID", "Selecione uma hierarquia territorial válida."));
+    this.rightInheritanceAxis = axis as typeof this.rightInheritanceAxis; this.detail = null; return this.capture(ok(undefined));
+  }
+  openRightOrigin(kind: string, id: string): Result<void> {
+    if (this.tab !== "territory" || !this.detail?.territoryRights?.entries?.some((r: any) => r.origin.kind === kind && r.origin.id === id))
+      return this.capture(failure("DM_DIPLOMACY_NOT_FOUND", "Selecione uma origem visível.", "not-found"));
+    if (kind === "agreement") this.selectTab("agreements");
+    this.select(id); this.detail = null; return this.capture(ok(undefined));
+  }
   constructor(readonly api: PublicDiplomacyApi) {}
-  selectTab(tab: DiplomacyTab): void { this.territoryHierarchyFields = {}; this.claimInheritanceAxis = "locatedInUuid"; this.resetOccupationContext(); this.resetInfluenceDrafts(); this.resetLinkContext(); this.resetRecognitionDraft(); this.recognitionReviewFields = {}; this.recognitionReviewTarget = null; this.tab = tab; this.list = null; this.overviewFilter = "all"; this.expiryHorizonTicks = 10; this.recentHours = 24; this.offset = 0; this.selectedId = null; this.detail = null; this.historyOffset = 0; this.creating = false; this.preview = null; this.reputationTrackCount = 1; this.reputationFormFields = {}; this.reputationConfigurationFields = {}; this.resetReputationHistory(); this.agreementLifecycle = ""; this.agreementFormFields = {}; this.cancelAgreementTermEditor(); }
+  selectTab(tab: DiplomacyTab): void { this.territoryHierarchyFields = {}; this.claimInheritanceAxis = "locatedInUuid"; this.rightInheritanceAxis = "locatedInUuid"; this.resetOccupationContext(); this.resetInfluenceDrafts(); this.resetLinkContext(); this.resetRecognitionDraft(); this.recognitionReviewFields = {}; this.recognitionReviewTarget = null; this.tab = tab; this.list = null; this.overviewFilter = "all"; this.expiryHorizonTicks = 10; this.recentHours = 24; this.offset = 0; this.selectedId = null; this.detail = null; this.historyOffset = 0; this.creating = false; this.preview = null; this.reputationTrackCount = 1; this.reputationFormFields = {}; this.reputationConfigurationFields = {}; this.resetReputationHistory(); this.agreementLifecycle = ""; this.agreementFormFields = {}; this.cancelAgreementTermEditor(); }
   private resetReputationHistory(): void {
     this.reputationHistoryFilter = {}; this.reputationHistoryFormFields = {}; this.reputationSourceOffset = 0;
   }
@@ -188,7 +200,7 @@ export class DiplomacyApplicationController {
       ...(this.tab === "territory" && this.treeAxis ? { treeAxis: this.treeAxis, parentUuid: this.treeParent } : {}) });
     if (!queried.ok) { this.error = queried.error.message; if (this.tab === "agreements" || this.tab === "reputation" || this.tab === "territory" || this.tab === "proposals") { this.list = null; this.detail = null; } return queried; } this.list = queried.value;
     if (this.selectedId) { const detail = await this.api[this.tab].query({ id: this.selectedId, historyOffset: this.historyOffset, historyLimit: 30,
-      ...(this.tab === "territory" ? { claimInheritanceAxis: this.claimInheritanceAxis } : {}),
+      ...(this.tab === "territory" ? { claimInheritanceAxis: this.claimInheritanceAxis, rightInheritanceAxis: this.rightInheritanceAxis } : {}),
       ...(this.tab === "reputation" && this.list?.isGm ? { ...(Object.keys(this.reputationHistoryFilter).length ? { reputationHistory: this.reputationHistoryFilter } : {}),
         reputationSourceOffset: this.reputationSourceOffset, reputationSourceLimit: 30 } : {}) });
       if (!detail.ok) { this.error = detail.error.message; this.detail = null; return detail; } this.detail = detail.value;
@@ -656,8 +668,9 @@ export class DiplomacyApplicationController {
     if (d.territory) { blocks += `<p>Propriedade, administração, controle e presença possuem registros independentes. Transferências preservam as reivindicações concorrentes.</p>
       <p>Localização: ${escapeHtml(d.territory.locatedInUuid ?? "raiz")} · hierarquia administrativa: ${escapeHtml(d.territory.administrativeParentUuid ?? "raiz")}</p>`;
       if (this.treeAxis) blocks += `<button type="button" data-dm-children="${escapeAttribute(d.id)}">Abrir filhos neste ramo</button>`;
-      for (const [key, name] of [["claims", "Reivindicações locais (registros)"], ["presence", "Presença"], ["rights", "Direitos"]]) blocks += table(name, d[key] ?? [], [...columns, ["Estado", x => x.lifecycle ?? (x.active ? "active" : "inactive")]]);
+      for (const [key, name] of [["claims", "Reivindicações locais (registros)"], ["presence", "Presença"], ["rights", "Direitos locais (registros)"]]) blocks += table(name, d[key] ?? [], [...columns, ["Estado", x => x.lifecycle ?? (x.active ? "active" : "inactive")]]);
       blocks += renderTerritoryClaims(d.effectiveClaims ?? [], d.claimInheritanceAxis ?? this.claimInheritanceAxis, d.worldTick ?? this.list?.worldTick);
+      if (d.territoryRights) blocks += renderTerritoryRights(d.territoryRights);
       blocks += renderTerritoryOccupations(d, d.worldTick ?? this.list?.worldTick, Boolean(this.list?.isGm), this.occupationDraft, this.occupationEndDraft);
       blocks += renderTerritoryRecognitions(d, d.worldTick ?? this.list?.worldTick, Boolean(this.list?.isGm), this.territoryRecognitionFields);
       blocks += renderTerritoryInfluence(d, d.worldTick ?? this.list?.worldTick, Boolean(this.list?.isGm), this.influenceDrafts.influence ?? {}, this.influenceDrafts["add-influence-modifier"] ?? {}, this.influenceDrafts["end-influence"] ?? this.influenceDrafts["end-influence-modifier"] ?? {});
@@ -869,6 +882,7 @@ export class DiplomacyApplication extends BaseApp {
       else if (button.dataset.dmId) this.controller.select(button.dataset.dmId);
       else if (button.dataset.dmPage) this.controller.offset = Math.max(0, this.controller.offset + Number(button.dataset.dmPage) * 30);
       else if (button.dataset.dmHistory) this.controller.historyOffset = Math.max(0, this.controller.historyOffset + Number(button.dataset.dmHistory) * 30);
+      else if (button.dataset.dmRightOrigin) this.controller.openRightOrigin(button.dataset.dmRightKind ?? "", button.dataset.dmRightOrigin);
       else if (button.dataset.dmClaimOrigin) this.controller.openClaimOrigin(button.dataset.dmClaimOrigin);
       else if (button.dataset.dmOccupationReviewReset) this.controller.resetOccupationReviewReferences(fields(button.closest("form")!));
       else if (button.dataset.dmOccupationReset) this.controller.resetOccupationDrafts();
@@ -893,6 +907,7 @@ export class DiplomacyApplication extends BaseApp {
       else if (form.dataset.dmForm === "link-destinations") this.controller.applyDestinationSearch(data.destinationSearch);
       else if (form.dataset.dmForm === "territory-link") await this.controller.submitLink(data);
       else if (form.dataset.dmForm === "territory-link-status") await this.controller.submitLink(data, true);
+      else if (form.dataset.dmForm === "right-inheritance") this.controller.applyRightInheritanceAxis(data.rightInheritanceAxis);
       else if (form.dataset.dmForm === "claim-inheritance") this.controller.applyClaimInheritanceAxis(data.claimInheritanceAxis);
       else if (form.dataset.dmForm === "territory-occupation") await this.controller.submitOccupation(data);
       else if (form.dataset.dmForm === "territory-occupation-end") await this.controller.submitOccupation(data, true);

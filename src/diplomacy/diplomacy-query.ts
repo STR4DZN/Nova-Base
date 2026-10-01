@@ -1,4 +1,6 @@
 import { queryVisibleTerritoryClaims } from "./territory-claims-query.js";
+import { queryTerritoryRights } from "./territory-rights-query.js";
+import type { TypedRef } from "../core/identity/refs.js";
 import { ok, type Result } from "../core/contracts/result.js";
 import { failure, isRecord, isTimestamp } from "../core/validation/value-validation.js";
 import type { AuthenticatedCommandContext } from "../commands/authenticated-command-context.js";
@@ -21,6 +23,7 @@ export interface DiplomacyQuery {
   readonly historyOffset?: number; readonly historyLimit?: number;
   readonly parentUuid?: string | null; readonly treeAxis?: "locatedInUuid" | "administrativeParentUuid";
   readonly claimInheritanceAxis?: "locatedInUuid" | "administrativeParentUuid";
+  readonly rightInheritanceAxis?: "locatedInUuid" | "administrativeParentUuid";
   readonly agreementLifecycle?: AgreementLifecycleFilter;
   readonly reputationHistory?: ReputationHistoryFilter;
   readonly reputationSourceOffset?: number; readonly reputationSourceLimit?: number;
@@ -37,6 +40,8 @@ export function validateDiplomacyQuery(raw: unknown, kind?: DiplomacyKind): Resu
     return failure("DM_DIPLOMACY_QUERY_INVALID", "Invalid query pagination or agreement state filter");
   if (raw.claimInheritanceAxis !== undefined && (kind !== "territory" || raw.id === undefined || !["locatedInUuid", "administrativeParentUuid"].includes(raw.claimInheritanceAxis as string)))
     return failure("DM_DIPLOMACY_QUERY_INVALID", "Claim inheritance axis requires a territory detail query");
+  if (raw.rightInheritanceAxis !== undefined && (kind !== "territory" || raw.id === undefined || !["locatedInUuid", "administrativeParentUuid"].includes(raw.rightInheritanceAxis as string)))
+    return failure("DM_DIPLOMACY_QUERY_INVALID", "Right inheritance axis requires a territory detail query");
   if (["reputationHistory", "reputationSourceOffset", "reputationSourceLimit"].some(k => raw[k] !== undefined)) {
     if (kind !== "reputation" || raw.id === undefined
       || raw.reputationSourceOffset !== undefined && !isTimestamp(raw.reputationSourceOffset)
@@ -48,7 +53,7 @@ export function validateDiplomacyQuery(raw: unknown, kind?: DiplomacyKind): Resu
 }
 export async function queryDiplomacyOwner(ctx: AuthenticatedCommandContext<DiplomacyQuery>, kind: DiplomacyKind, owner: DiplomacyOwner,
   store: DiplomacyEntityStore, domains: DomainReadRepository, controllers: DomainControllerProvider, recovery: RecoveryService,
-  worldTick: number): Promise<Result<unknown>> {
+  worldTick: number, conditionSatisfied?: (ref: TypedRef) => boolean): Promise<Result<unknown>> {
   const isGm = diplomacyViewerIsGm(ctx), p = ctx.command.payload;
   const rows = p.id ? [kind === "territory" ? await store.freshRead(kind, p.id) : store.get(kind, p.id)].filter(x => x !== null) : kind === "territory" && Object.hasOwn(p, "parentUuid")
     ? store.children(p.parentUuid ?? null, p.treeAxis ?? "locatedInUuid") : store.list(kind), visible: unknown[] = [];
@@ -95,7 +100,10 @@ export async function queryDiplomacyOwner(ctx: AuthenticatedCommandContext<Diplo
         const claims = await queryVisibleTerritoryClaims(row.data as import("../territory/territory-state.js").TerritoryState, axis, worldTick,
           ctx, store, domains, controllers, recovery);
         if (!claims.ok) return claims;
-        projected = { ...projected, claimInheritanceAxis: axis, effectiveClaims: claims.value };
+        const rights = await queryTerritoryRights(row.data as import("../territory/territory-state.js").TerritoryState,
+          p.rightInheritanceAxis ?? "locatedInUuid", worldTick, ctx, store, domains, controllers, recovery, conditionSatisfied);
+        if (!rights.ok) return rights;
+        projected = { ...projected, claimInheritanceAxis: axis, effectiveClaims: claims.value, territoryRights: rights.value };
       }
       if (!isGm && kind === "territory") {
         const t = projected.territory, links = [];

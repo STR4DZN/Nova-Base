@@ -1,0 +1,32 @@
+{
+  "date": "2026-10-01",
+  "part": "G6 effective territory rights inspector",
+  "branch": "feat/g6-continuous",
+  "local": {
+    "node": "24.19.0",
+    "specific": 9,
+    "runtime": 155,
+    "full": 1231,
+    "new_tests": 25,
+    "fail": 0,
+    "skipped": 0,
+    "typecheck": "PASS",
+    "build": "PASS",
+    "package": "PASS",
+    "validate_release": "PASS",
+    "zip_sha256": "1c29e22f7a10078d20565746b44779f16f947593af303787fac411313eb30c0f"
+  },
+  "ci": {
+    "conclusion": "pending"
+  },
+  "foundry_real": "deferred until G6 complete",
+  "release_published": false,
+  "g7_started": false,
+  "next_step": "Preview inherited rights impacts when changing territorial hierarchy, including Territory and Agreement sources",
+  "limitations": [
+    "Visible and available context only",
+    "No general access-policy enforcement in all consumers",
+    "Existing capability query contract remains unchanged",
+    "No scale benchmark or external provider extension"
+  ]
+}

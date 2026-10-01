@@ -245,6 +245,6 @@ export function registerOwnerCommands(o: OwnerCommandOptions): void {
         handler: createTransactionalHandler(o.coordinator, definition) });
     }
     o.registry.register({ type: `${namespace}:query`, visibility: "public", schemaValidator: raw => validateDiplomacyQuery(raw, kind),
-      handler: ctx => queryDiplomacyOwner(ctx, kind, owner, o.store, o.domains, o.controllers, o.recovery, o.worldTick()) });
+      handler: ctx => queryDiplomacyOwner(ctx, kind, owner, o.store, o.domains, o.controllers, o.recovery, o.worldTick(), o.conditionSatisfied) });
   }
 }

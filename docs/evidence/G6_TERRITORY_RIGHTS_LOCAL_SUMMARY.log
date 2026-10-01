@@ -1,0 +1,9 @@
+G6 effective territory rights inspector — 2026-10-01
+Node 24.19.0
+TypeScript: PASS
+Specific UI/schema/controller/bindings: 9/9 PASS, fail 0, skip 0
+G6 runtime: 155/155 PASS, fail 0, skip 0
+Complete regression: 1231/1231 PASS, fail 0, skip 0
+Build/package/validate:release: PASS (v0.0.8)
+Local ZIP SHA256: 1c29e22f7a10078d20565746b44779f16f947593af303787fac411313eb30c0f
+No release published. Foundry real deferred until G6 complete.
