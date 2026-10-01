@@ -1,0 +1,30 @@
+Validated source commit: 8755c84f67fd060bd8076d607075d49dcc5ef6e1
+Validated source tree: 23a7d2695f9b31dcec97d351d0d1a489f3acd3b4
+Branch: feat/g6-continuous
+Workflow: https://github.com/STR4DZN/Nova-Base/actions/runs/36936742142
+Job ID: 110618658303
+Node: 22.23.3
+Targeted tests: 15 PASS; runtime: 184 PASS; complete regression: 1288 PASS
+Failures: 0; skipped: 0
+TypeScript/build/package/validate:release: PASS
+Candidate artifact ID: 11198097938
+Artifact container digest: sha256:c0e3d7fb4d0b834770085facc089c0df1d328193302dcf0c0e55e01f6c84b75c
+Container digest is not the installable ZIP SHA256. Local ZIP digest is recorded separately.
+Workflows:
+36936741669 Validate G6 territory occupation: success
+36936741613 Validate G6 territory rights impacts: success
+36936741643 Validate G6 reputation history: success
+36936741606 Validate G6 agreement term editor: success
+36936741612 Validate G6 relation stance: success
+36936741638 Validate G6 territory claims: success
+36936741716 Validate G6 territory rights: success
+36936742142 Validate G6 territory right forms: success
+36936741605 Validate G6 agreement negotiation: success
+36936741610 Validate G6 territory recognition: success
+36936741629 Validate G6 territory claim impacts: success
+36936741590 Validate G6 reputation configuration: success
+36936741743 Validate G6 diplomacy overview: success
+36936741652 Validate G6 agreement inspector: success
+36936741600 Validate G6 territory links: success
+36936741706 Validate G6 agreement dashboard: success
+36936741691 Validate G6 territory influence: success

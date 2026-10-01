@@ -31,7 +31,7 @@ Somente o primeiro achado tem reprodução sobre o código anterior. Os demais f
 
 ## Validação
 
-**1288/1288 testes PASS** (29 novos), específicos 15/15 e verticais 184/184; zero falhas/skips. TypeScript/build/package/validate:release PASS localmente. GitHub Actions pendente de persistência/verificação. Evidência canônica: `docs/evidence/G6_TERRITORY_RIGHT_FORMS_VALIDATION.json`. Workflow próprio preserva logs, relatório e ZIP da candidata 0.0.8, sem publicar release.
+**1288/1288 testes PASS** (29 novos), específicos 15/15 e verticais 184/184; zero falhas/skips. TypeScript/build/package/validate:release PASS localmente. GitHub Actions PASS: commit `8755c84f67fd060bd8076d607075d49dcc5ef6e1`, workflow `36936742142`; 17 workflows aprovados. Evidência canônica: `docs/evidence/G6_TERRITORY_RIGHT_FORMS_VALIDATION.json`. Workflow próprio preserva logs, relatório e ZIP da candidata 0.0.8, sem publicar release.
 
 Cobertura inclui beneficiários/janelas/flags/tipos customizados, condições ID/UUID, namespaces/duplicatas, escaping, bindings de adicionar/remover, rascunhos/revisões, propostas e revisão GM, revogação auditada, privacidade/fences, partes inexistentes, controle antes da mudança, recarga e retry exato dos tickets existentes. Testes usam os owners, transporte e armazenamento compostos reais com doubles de host; não são homologação Foundry real.
 

@@ -13,7 +13,7 @@
 
 - Concessão estruturada: seis beneficiários canônicos, tipo/flags, condições ID/UUID, capacidades declaradas, visibilidade e vigência. Revogação somente de direito local visível/ativo/revogável, preservando fonte e histórico.
 - Propostas Player/revisão GM preservam original/identidade e revisão; rejeição independente do alvo. Falha de revogação secreta reproduzida e corrigida; projeção fresca/sanitizada, colisão privada de ID e substituição de ação/fonte protegidas.
-- 1288/1288 testes PASS (29 novos), específicos 15/15 e verticais 184/184; TypeScript/build/package/validate:release PASS localmente. GitHub Actions pendente. Relatório `docs/G6_TERRITORY_RIGHT_FORMS_REPORT.md`; evidência `docs/evidence/G6_TERRITORY_RIGHT_FORMS_VALIDATION.json`. Nenhuma release publicada.
+- 1288/1288 testes PASS (29 novos), específicos 15/15 e verticais 184/184; TypeScript/build/package/validate:release PASS localmente. GitHub Actions PASS: commit `8755c84f67fd060bd8076d607075d49dcc5ef6e1`, workflow `36936742142`; 17 workflows aprovados. Relatório `docs/G6_TERRITORY_RIGHT_FORMS_REPORT.md`; evidência `docs/evidence/G6_TERRITORY_RIGHT_FORMS_VALIDATION.json`. Nenhuma release publicada.
 - **PARAR AQUI. Próximo passo:** fluxo seguro de ticket/retry/status na interface de diplomacia, preservando commandId após erro/timeout e evitando reaplicar mutações com novo ID; aguardar autorização. Foundry real ao fim do bloco G6. G6 parcial; G7 não iniciado.
 
 ## Parte G6 — Prévia dos impactos nos direitos herdados — 2026-10-01
@@ -693,7 +693,7 @@ Candidata v0.0.8: 13 defeitos reproduzidos/corrigidos; 878/878 testes locais PAS
 
 ## Próxima ação canônica
 
-- **Gate G6 — Relations / Reputation / Agreements / Territory: formulários de concessão/revogação de direitos implementados nesta parte**, após a aceitação do Gate G5. 1288/1288 testes PASS (29 novos), específicos 15/15 e verticais 184/184; TypeScript/build/package/validate:release PASS localmente. GitHub Actions pendente. Relatório `docs/G6_TERRITORY_RIGHT_FORMS_REPORT.md`. **PARAR AQUI**. Próxima parte: fluxo seguro de ticket/retry/status na interface de diplomacia, preservando commandId após erro/timeout e evitando reaplicar mutações com novo ID; aguardar autorização. Foundry real somente após concluir o bloco G6. Gate G6 parcial; não iniciar G7.
+- **Gate G6 — Relations / Reputation / Agreements / Territory: formulários de concessão/revogação de direitos implementados nesta parte**, após a aceitação do Gate G5. 1288/1288 testes PASS (29 novos), específicos 15/15 e verticais 184/184; TypeScript/build/package/validate:release PASS localmente. GitHub Actions PASS: commit `8755c84f67fd060bd8076d607075d49dcc5ef6e1`, workflow `36936742142`; 17 workflows aprovados. Relatório `docs/G6_TERRITORY_RIGHT_FORMS_REPORT.md`. **PARAR AQUI**. Próxima parte: fluxo seguro de ticket/retry/status na interface de diplomacia, preservando commandId após erro/timeout e evitando reaplicar mutações com novo ID; aguardar autorização. Foundry real somente após concluir o bloco G6. Gate G6 parcial; não iniciar G7.
 
 ## G6.4–G6.5 — Acordos e obrigações — 2026-09-29
 
