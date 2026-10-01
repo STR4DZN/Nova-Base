@@ -26,7 +26,7 @@ A validação inicial apontou tipagem da coleção de campos de revisão: anota�
 
 ## Testes e resultado
 
-16 testes específicos de UI e 111 testes verticais G6; **regressão final 1155/1155 PASS** (30 novos), zero falhas/skips. TypeScript/build/package/validate:release PASS localmente; CI pendente. Evidência: `docs/evidence/G6_TERRITORY_OCCUPATION_VALIDATION.json`. Workflow específico guarda logs e ZIP sem publicar release.
+16 testes específicos de UI e 111 testes verticais G6; **regressão final 1155/1155 PASS** (30 novos), zero falhas/skips. TypeScript/build/package/validate:release PASS localmente; GitHub Actions PASS: commit `7746af52868005dcaf54ca791c3e12eaaddc8d2e`, workflow `36899199164`; 12 workflows aprovados. Evidência: `docs/evidence/G6_TERRITORY_OCCUPATION_VALIDATION.json`. Workflow específico guarda logs e ZIP sem publicar release.
 
 Cobertura: estados/partes/namespace de controle/listas/duplicatas/janelas/zero/inteiros seguros; histórico sem reativar dependências; HTML escapado; ausência de referência privada nas opções; drafts/revisão/reset; binding multi-select; GM/Player/terceiro; revisão editada e original imutável; alvo de encerramento fixo; expiração sem mutação; fenced approval/reject; retry exato e recarga; create intents; estado persistido versus índice antigo.
 

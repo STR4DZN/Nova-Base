@@ -2,7 +2,7 @@
 
 **Atualização v0.0.8:** revisão G0–G6 corrigiu 13 defeitos, com 878/878 testes locais PASS. Novo smoke necessário; detalhes/evidências em `docs/G0_G6_REVIEW.md`. As lacunas desta matriz continuam explícitas.
 
-**Atualização por partes — ocupação territorial:** criação/encerramento, referências visíveis multi-select, estados/vigência e revisão GM estruturada implementados. Três defeitos de privacidade reproduzidos/corrigidos. Transições intermediárias/policies continuam parciais. Relatório `docs/G6_TERRITORY_OCCUPATION_REPORT.md`. Próxima parte: reivindicações herdadas no inspector. Foundry real ao fim do G6.
+**Atualização por partes — ocupação territorial:** criação/encerramento, referências visíveis multi-select, estados/vigência e revisão GM estruturada implementados. Três defeitos de privacidade reproduzidos/corrigidos. Transições intermediárias/policies continuam parciais. 1155/1155 testes PASS, TypeScript/build/pacote PASS localmente e no CI (workflow `36899199164`, 12 workflows). Relatório `docs/G6_TERRITORY_OCCUPATION_REPORT.md`. Próxima parte: reivindicações herdadas no inspector. Foundry real ao fim do G6.
 
 **Atualização por partes — influência territorial:** formulário multi-eixos/decadência/modificadores, cálculos visíveis por eixo e encerramento auditado implementados; propostas Player e proteção de fontes/modificadores secretos. Aprovação genérica existente; editor estruturado da proposta GM permanece pendente. 1125/1125 testes PASS, TypeScript/build/pacote PASS localmente e no CI (workflow `36896312954`, 11 workflows). Relatório `docs/G6_TERRITORY_INFLUENCE_REPORT.md`. Próxima parte: formulários de ocupação territorial. Foundry real ao fim do G6.
 

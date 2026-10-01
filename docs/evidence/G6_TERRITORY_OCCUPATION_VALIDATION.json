@@ -26,7 +26,83 @@
       "Private reference exposed in GM-edited approval"
     ]
   },
-  "ci": "pending",
+  "ci": {
+    "node": "22.23.3",
+    "conclusion": "success",
+    "run_id": 36899199164,
+    "job_id": 110493800026,
+    "tests": [
+      16,
+      111,
+      1155
+    ],
+    "fail": 0,
+    "skipped": 0,
+    "workflows": [
+      {
+        "id": 36899199043,
+        "name": "Validate G6 reputation history",
+        "conclusion": "success"
+      },
+      {
+        "id": 36899199131,
+        "name": "Validate G6 agreement inspector",
+        "conclusion": "success"
+      },
+      {
+        "id": 36899199183,
+        "name": "Validate G6 diplomacy overview",
+        "conclusion": "success"
+      },
+      {
+        "id": 36899199003,
+        "name": "Validate G6 territory links",
+        "conclusion": "success"
+      },
+      {
+        "id": 36899199105,
+        "name": "Validate G6 territory influence",
+        "conclusion": "success"
+      },
+      {
+        "id": 36899199125,
+        "name": "Validate G6 agreement negotiation",
+        "conclusion": "success"
+      },
+      {
+        "id": 36899199005,
+        "name": "Validate G6 agreement term editor",
+        "conclusion": "success"
+      },
+      {
+        "id": 36899199066,
+        "name": "Validate G6 reputation configuration",
+        "conclusion": "success"
+      },
+      {
+        "id": 36899199090,
+        "name": "Validate G6 territory recognition",
+        "conclusion": "success"
+      },
+      {
+        "id": 36899198903,
+        "name": "Validate G6 agreement dashboard",
+        "conclusion": "success"
+      },
+      {
+        "id": 36899199164,
+        "name": "Validate G6 territory occupation",
+        "conclusion": "success"
+      },
+      {
+        "id": 36899199028,
+        "name": "Validate G6 relation stance",
+        "conclusion": "success"
+      }
+    ],
+    "artifact_id": 11180442821,
+    "url": "https://github.com/STR4DZN/Nova-Base/actions/runs/36899199164"
+  },
   "foundry_real": "deferred until G6 complete",
   "release_published": false,
   "g7_started": false,
@@ -34,5 +110,6 @@
   "limitations": [
     "No transitions between intermediate states of existing occupations",
     "No automatic occupation policies; dependencies and ownership independent"
-  ]
+  ],
+  "validated_source_commit": "7746af52868005dcaf54ca791c3e12eaaddc8d2e"
 }
