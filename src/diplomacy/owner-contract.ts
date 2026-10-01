@@ -2,6 +2,7 @@ import type { Result } from "../core/contracts/result.js";
 import type { RelationPartyRef, RelationVisibility } from "../relations/types/relation-types.js";
 import type { TypedRef } from "../core/identity/refs.js";
 import type { TerritoryState } from "../territory/territory-state.js";
+import type { ReputationHistoryFilter } from "../reputation/reputation-history.js";
 export interface DiplomacyOwnerContext {
   readonly expectedRevision: number; readonly eventId: string; readonly at: number; readonly worldTick: number;
   readonly reason: string; readonly sourceRefs: readonly TypedRef[];
@@ -9,6 +10,8 @@ export interface DiplomacyOwnerContext {
 export interface DiplomacyViewerContext {
   readonly isGm: boolean; readonly at: number; readonly worldTick: number; readonly canSee: (v: RelationVisibility) => boolean;
   readonly historyOffset: number; readonly historyLimit: number;
+  readonly reputationHistory?: ReputationHistoryFilter;
+  readonly reputationSourceOffset?: number; readonly reputationSourceLimit?: number;
 }
 export interface DiplomacyOwner {
   validate(data: unknown, territories: readonly TerritoryState[]): Result<unknown>;

@@ -13,11 +13,14 @@ import { territoryOwner } from "../territory/territory-owner.js";
 import { isAgreementLifecycleFilter, matchesAgreementLifecycle, summarizeAgreementLifecycles,
   type AgreementLifecycleFilter } from "../agreements/agreement-dashboard.js";
 import { AGREEMENT_LIFECYCLES, type AgreementLifecycle } from "../agreements/agreement-model.js";
+import { validateReputationHistoryFilter, type ReputationHistoryFilter } from "../reputation/reputation-history.js";
 export interface DiplomacyQuery {
   readonly id?: string; readonly offset?: number; readonly limit?: number; readonly search?: string;
   readonly historyOffset?: number; readonly historyLimit?: number;
   readonly parentUuid?: string | null; readonly treeAxis?: "locatedInUuid" | "administrativeParentUuid";
   readonly agreementLifecycle?: AgreementLifecycleFilter;
+  readonly reputationHistory?: ReputationHistoryFilter;
+  readonly reputationSourceOffset?: number; readonly reputationSourceLimit?: number;
 }
 export function validateDiplomacyQuery(raw: unknown, kind?: DiplomacyKind): Result<DiplomacyQuery> {
   if (!isRecord(raw) || (raw.id !== undefined && (typeof raw.id !== "string" || !raw.id))
@@ -29,6 +32,13 @@ export function validateDiplomacyQuery(raw: unknown, kind?: DiplomacyKind): Resu
     || (raw.treeAxis !== undefined && !["locatedInUuid", "administrativeParentUuid"].includes(raw.treeAxis as string))
     || (raw.agreementLifecycle !== undefined && (kind !== "agreement" || raw.id !== undefined || !isAgreementLifecycleFilter(raw.agreementLifecycle))))
     return failure("DM_DIPLOMACY_QUERY_INVALID", "Invalid query pagination or agreement state filter");
+  if (["reputationHistory", "reputationSourceOffset", "reputationSourceLimit"].some(k => raw[k] !== undefined)) {
+    if (kind !== "reputation" || raw.id === undefined
+      || raw.reputationSourceOffset !== undefined && !isTimestamp(raw.reputationSourceOffset)
+      || raw.reputationSourceLimit !== undefined && (!isTimestamp(raw.reputationSourceLimit) || raw.reputationSourceLimit < 1 || raw.reputationSourceLimit > 100))
+      return failure("DM_DIPLOMACY_QUERY_INVALID", "Reputation history filters require a reputation detail query and valid pages");
+    if (raw.reputationHistory !== undefined) { const filters = validateReputationHistoryFilter(raw.reputationHistory); if (!filters.ok) return filters; }
+  }
   return ok(raw as DiplomacyQuery);
 }
 export async function queryDiplomacyOwner(ctx: AuthenticatedCommandContext<DiplomacyQuery>, kind: DiplomacyKind, owner: DiplomacyOwner,
@@ -64,7 +74,8 @@ export async function queryDiplomacyOwner(ctx: AuthenticatedCommandContext<Diplo
     if (count++ < offset || visible.length >= limit) continue;
     if (p.id) {
       const detail = owner.project(row.data, { isGm, canSee, at: ctx.receivedAtReal, worldTick,
-        historyOffset: p.historyOffset ?? 0, historyLimit: p.historyLimit ?? 30 });
+        historyOffset: p.historyOffset ?? 0, historyLimit: p.historyLimit ?? 30,
+        ...(kind === "reputation" ? { reputationHistory: p.reputationHistory, reputationSourceOffset: p.reputationSourceOffset, reputationSourceLimit: p.reputationSourceLimit } : {}) });
       if (!detail.ok) return detail;
       let projected: any = detail.value;
       if (!isGm && kind === "territory") {

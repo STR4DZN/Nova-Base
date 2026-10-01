@@ -17,6 +17,8 @@ import { compareAgreementSnapshots, type AgreementNegotiationDifference } from "
 import { renderAgreementDifference } from "./agreement-negotiation-view.js";
 import { isAgreementLifecycleFilter, type AgreementLifecycleFilter } from "../../../agreements/agreement-dashboard.js";
 import { renderAgreementDashboard, renderAgreementListItem } from "./agreement-dashboard-view.js";
+import type { ReputationHistoryFilter } from "../../../reputation/reputation-history.js";
+import { parseReputationHistoryFields, reputationHistoryFields, renderReputationHistory } from "./reputation-history-view.js";
 export type DiplomacyTab = "relations" | "reputation" | "agreements" | "territory" | "disputes" | "proposals";
 const labels: Record<DiplomacyTab, string> = { relations: "Relações", reputation: "Reputação", agreements: "Acordos", territory: "Território", disputes: "Disputas", proposals: "Propostas" };
 const kinds: Record<Exclude<DiplomacyTab, "proposals">, OwnerIntent["kind"]> = { relations: "relation", reputation: "reputation", agreements: "agreement", territory: "territory", disputes: "dispute" };
@@ -38,6 +40,8 @@ export class DiplomacyApplicationController {
   list: any = null; detail: any = null; error = ""; creating = false; preview: any = null;
   reputationTrackCount = 1; reputationFormFields: Record<string, string> = {};
   reputationConfigurationFields: Record<string, string> = {};
+  reputationHistoryFilter: ReputationHistoryFilter = {}; reputationHistoryFormFields: Record<string, string> = {};
+  reputationSourceOffset = 0;
   agreementFormFields: Record<string, string> = {};
   agreementLifecycle: AgreementLifecycleFilter | "" = "";
   agreementTermEditor: { kind: AgreementTermEditorKind; agreementId: string; revision: number; proposalId: string | null;
@@ -48,7 +52,25 @@ export class DiplomacyApplicationController {
   #previewInput: string | null = null; #previewIntent: OwnerIntent | null = null;
   treeAxis: "locatedInUuid" | "administrativeParentUuid" | null = null; treeParent: string | null = null;
   constructor(readonly api: PublicDiplomacyApi) {}
-  selectTab(tab: DiplomacyTab): void { this.tab = tab; this.offset = 0; this.selectedId = null; this.detail = null; this.historyOffset = 0; this.creating = false; this.preview = null; this.reputationTrackCount = 1; this.reputationFormFields = {}; this.reputationConfigurationFields = {}; this.agreementLifecycle = ""; this.agreementFormFields = {}; this.cancelAgreementTermEditor(); }
+  selectTab(tab: DiplomacyTab): void { this.tab = tab; this.offset = 0; this.selectedId = null; this.detail = null; this.historyOffset = 0; this.creating = false; this.preview = null; this.reputationTrackCount = 1; this.reputationFormFields = {}; this.reputationConfigurationFields = {}; this.resetReputationHistory(); this.agreementLifecycle = ""; this.agreementFormFields = {}; this.cancelAgreementTermEditor(); }
+  private resetReputationHistory(): void {
+    this.reputationHistoryFilter = {}; this.reputationHistoryFormFields = {}; this.reputationSourceOffset = 0;
+  }
+  applyReputationHistory(fields: Record<string, string>): Result<unknown> {
+    if (this.tab !== "reputation" || !this.detail || !this.list?.isGm)
+      return this.capture(failure("DM_SECURITY_PERMISSION_DENIED", "O histórico detalhado de reputação é exclusivo do GM.", "permission"));
+    this.reputationHistoryFormFields = { ...fields };
+    const parsed = parseReputationHistoryFields(fields); if (!parsed.ok) return this.capture(parsed);
+    if (parsed.value.trackId && !this.detail.tracks.some((t: any) => t.definitionId === parsed.value.trackId))
+      return this.capture(failure("DM_REPUTATION_TRACK_UNAVAILABLE", "Selecione uma trilha deste registro."));
+    this.reputationHistoryFilter = parsed.value; this.historyOffset = 0; this.reputationSourceOffset = 0;
+    return this.capture(ok({}));
+  }
+  filterReputationSource(trackId: string, sourceType: string, sourceKind: string, sourceRef: string): Result<unknown> {
+    if (!trackId || !sourceType || !sourceRef || !["id", "uuid"].includes(sourceKind))
+      return this.capture(failure("DM_REPUTATION_HISTORY_FILTER_INVALID", "Selecione uma fonte registrada válida."));
+    return this.applyReputationHistory({ ...reputationHistoryFields(this.reputationHistoryFilter), trackId, sourceType, sourceKind, sourceRef });
+  }
   private resetAgreementSelection(): void {
     this.offset = 0; this.selectedId = null; this.detail = null; this.historyOffset = 0; this.list = null;
     this.creating = false; this.preview = null; this.agreementFormFields = {}; this.cancelAgreementTermEditor();
@@ -63,13 +85,15 @@ export class DiplomacyApplicationController {
     this.search = value; this.offset = 0;
     if (this.tab === "agreements") this.resetAgreementSelection();
   }
-  select(id: string): void { if (this.selectedId !== id) { this.reputationConfigurationFields = {}; this.agreementFormFields = {}; this.cancelAgreementTermEditor(); } this.selectedId = id; this.historyOffset = 0; this.creating = false; this.preview = null; }
+  select(id: string): void { if (this.selectedId !== id) { this.reputationConfigurationFields = {}; this.resetReputationHistory(); this.agreementFormFields = {}; this.cancelAgreementTermEditor(); } this.selectedId = id; this.historyOffset = 0; this.creating = false; this.preview = null; }
   async load(): Promise<Result<unknown>> {
     const queried = await this.api[this.tab].query({ offset: this.offset, limit: 30, search: this.search,
       ...(this.tab === "agreements" && this.agreementLifecycle ? { agreementLifecycle: this.agreementLifecycle } : {}),
       ...(this.tab === "territory" && this.treeAxis ? { treeAxis: this.treeAxis, parentUuid: this.treeParent } : {}) });
-    if (!queried.ok) { this.error = queried.error.message; if (this.tab === "agreements") { this.list = null; this.detail = null; } return queried; } this.list = queried.value;
-    if (this.selectedId) { const detail = await this.api[this.tab].query({ id: this.selectedId, historyOffset: this.historyOffset, historyLimit: 30 });
+    if (!queried.ok) { this.error = queried.error.message; if (this.tab === "agreements" || this.tab === "reputation") { this.list = null; this.detail = null; } return queried; } this.list = queried.value;
+    if (this.selectedId) { const detail = await this.api[this.tab].query({ id: this.selectedId, historyOffset: this.historyOffset, historyLimit: 30,
+      ...(this.tab === "reputation" && this.list?.isGm ? { ...(Object.keys(this.reputationHistoryFilter).length ? { reputationHistory: this.reputationHistoryFilter } : {}),
+        reputationSourceOffset: this.reputationSourceOffset, reputationSourceLimit: 30 } : {}) });
       if (!detail.ok) { this.error = detail.error.message; this.detail = null; return detail; } this.detail = detail.value; }
     return ok(this.list);
   }
@@ -435,6 +459,8 @@ export class DiplomacyApplicationController {
       return blocks;
     }
     const history = d.history ?? d.entries ?? d.events ?? [];
+    if (this.tab === "reputation") return blocks + (this.list?.isGm ? renderReputationHistory(d, this.reputationHistoryFormFields)
+      : "<p>O histórico detalhado e as fontes são exclusivos do GM. Esta visão segue a apresentação configurada para cada trilha.</p>") + this.actionForm();
     blocks += table("Histórico visível", history, [["Evento", x => x.kind], ["Explicação", x => x.reason ?? x.summary], ["Momento", x => x.at]]);
     blocks += `<button type="button" data-dm-history="-1" ${this.historyOffset === 0 ? "disabled" : ""}>Histórico anterior</button><button type="button" data-dm-history="1" ${history.length < 30 ? "disabled" : ""}>Próximo histórico</button>`;
     return blocks + this.actionForm();
@@ -519,7 +545,7 @@ export class DiplomacyApplication extends BaseApp {
   readonly controller: DiplomacyApplicationController; readonly #bound = new WeakSet<object>();
   constructor(options: { api: PublicDiplomacyApi }) { super(options); this.controller = new DiplomacyApplicationController(options.api); }
   async _prepareContext(): Promise<unknown> { await this.controller.load(); return {}; }
-  _renderHTML(): string { return `<style>.dm-diplomacy-app .dm-diplomacy-columns{display:grid;grid-template-columns:240px 1fr;gap:16px}.dm-diplomacy-app aside button,.dm-diplomacy-app label{display:block;margin:6px 0}.dm-diplomacy-app table{width:100%;text-align:left;border-collapse:collapse}.dm-diplomacy-app td,.dm-diplomacy-app th{padding:6px;border-bottom:1px solid #7775}.dm-diplomacy-app input,.dm-diplomacy-app textarea{max-width:100%}.dm-diplomacy-app pre{white-space:pre-wrap;overflow-wrap:anywhere}.dm-diplomacy-app [role=alert]{color:#b3261e}.dm-diplomacy-app .dm-agreement-summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px}.dm-diplomacy-app .dm-agreement-summary strong{display:block;font-size:1.4em}.dm-diplomacy-app .dm-agreement-summary [aria-pressed=true]{outline:2px solid currentColor}</style>${this.controller.render()}`; }
+  _renderHTML(): string { return `<style>.dm-diplomacy-app .dm-diplomacy-columns{display:grid;grid-template-columns:240px 1fr;gap:16px}.dm-diplomacy-app aside button,.dm-diplomacy-app label{display:block;margin:6px 0}.dm-diplomacy-app table{width:100%;text-align:left;border-collapse:collapse}.dm-diplomacy-app td,.dm-diplomacy-app th{padding:6px;border-bottom:1px solid #7775}.dm-diplomacy-app input,.dm-diplomacy-app textarea{max-width:100%}.dm-diplomacy-app pre{white-space:pre-wrap;overflow-wrap:anywhere}.dm-diplomacy-app [role=alert]{color:#b3261e}.dm-diplomacy-app .dm-agreement-summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px}.dm-diplomacy-app .dm-agreement-summary strong{display:block;font-size:1.4em}.dm-diplomacy-app .dm-agreement-summary [aria-pressed=true]{outline:2px solid currentColor}.dm-diplomacy-app .dm-reputation-history-table{overflow-x:auto;max-width:100%}.dm-diplomacy-app .dm-reputation-history-table td{overflow-wrap:anywhere}.dm-diplomacy-app main{min-width:0}</style>${this.controller.render()}`; }
   _replaceHTML(html: string, content: HTMLElement): void { content.innerHTML = html; }
   _onRender(): void { const element = this.element; if (!element || this.#bound.has(element)) return; this.#bound.add(element);
     const fields = (form: HTMLFormElement): Record<string, string> => { const result: Record<string, string> = {}; new FormData(form).forEach((v, k) => { result[k] = form.dataset.dmForm === "agreement-terms" ? String(v) : String(v).trim(); }); return result; };
@@ -540,6 +566,10 @@ export class DiplomacyApplication extends BaseApp {
     element.addEventListener("click", async (e: Event) => { const button = (e.target as HTMLElement)?.closest?.("button"); if (!button) return;
       if (button.dataset.dmReputationAdd) this.controller.addReputationTrackForm(fields(button.closest("form")!));
       else if (button.dataset.dmReputationRemove !== undefined) this.controller.removeReputationTrackForm(Number(button.dataset.dmReputationRemove), fields(button.closest("form")!));
+      else if (button.dataset.dmReputationHistoryClear) this.controller.applyReputationHistory(reputationHistoryFields());
+      else if (button.dataset.dmReputationSourceTrack !== undefined) this.controller.filterReputationSource(button.dataset.dmReputationSourceTrack,
+        button.dataset.dmReputationSourceType!, button.dataset.dmReputationSourceKind!, button.dataset.dmReputationSourceRef!);
+      else if (button.dataset.dmReputationSourcePage) this.controller.reputationSourceOffset = Math.max(0, this.controller.reputationSourceOffset + Number(button.dataset.dmReputationSourcePage) * 30);
       else if (button.dataset.dmTermOpen) this.controller.openAgreementTermEditor(button.dataset.dmTermOpen as AgreementTermEditorKind, button.dataset.dmTermSource);
       else if (button.dataset.dmTermAdd) this.controller.addAgreementTerm(fields(button.closest("form")!));
       else if (button.dataset.dmTermRemove !== undefined) this.controller.removeAgreementTerm(Number(button.dataset.dmTermRemove), fields(button.closest("form")!));
@@ -566,6 +596,7 @@ export class DiplomacyApplication extends BaseApp {
       else if (form.dataset.dmForm === "create") await this.controller.create(data);
       else if (form.dataset.dmForm === "reputation-add-track") await this.controller.configureReputationTrack(data, false);
       else if (form.dataset.dmForm === "reputation-configure") await this.controller.configureReputationTrack(data, true);
+      else if (form.dataset.dmForm === "reputation-history") this.controller.applyReputationHistory(data);
       else if (form.dataset.dmForm === "change" || form.dataset.dmForm === "agreement-expire-proposal" || form.dataset.dmForm === "agreement-terms") await this.controller.change(data);
       else if (form.dataset.dmForm === "review") await this.controller.review((e.submitter as HTMLButtonElement).value as any, data.reason, data);
       await this.render(true);

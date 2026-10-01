@@ -4,6 +4,7 @@ import { historyWindow, type DiplomacyOwner } from "../diplomacy/owner-contract.
 import { changeReputationConfiguration, validateReputationConfigurationHistory, type ReputationConfigurationEvent } from "./reputation-configuration.js";
 import { ReputationTrackRegistry, validateReputationRecord, adjustReputation, decayReputation, projectReputation,
   type ReputationRecord, type ReputationTrackDefinition } from "./reputation-model.js";
+import { projectReputationHistory } from "./reputation-history.js";
 export interface ReputationOwnerData { readonly definitions: readonly ReputationTrackDefinition[]; readonly record: ReputationRecord; readonly configurationHistory?: readonly ReputationConfigurationEvent[]; }
 export function reputationRegistry(definitions: readonly ReputationTrackDefinition[]): Result<ReputationTrackRegistry> {
   const registry = new ReputationTrackRegistry(); for (const d of definitions) { const r = registry.register(d); if (!r.ok) return r; } registry.freeze(); return ok(registry);
@@ -35,12 +36,16 @@ export const reputationOwner: DiplomacyOwner = {
   project(data, c) {
     const { definitions, record } = data as ReputationOwnerData, registry = reputationRegistry(definitions); if (!registry.ok) return registry;
     const p = projectReputation(record, registry.value, c.isGm, c.canSee); if (!p.ok) return p;
-    return c.isGm ? ok({ ...(p.value as ReputationRecord), entries: historyWindow(record.entries, c), definitions,
+    if (!c.isGm) return c.reputationHistory !== undefined || c.reputationSourceOffset !== undefined || c.reputationSourceLimit !== undefined
+      ? failure("DM_SECURITY_PERMISSION_DENIED", "O histórico detalhado de reputação é exclusivo do GM.", "permission")
+      : ok({ ...(p.value as object), revision: record.revision });
+    const history = projectReputationHistory(record, c.reputationHistory, c.historyOffset, c.historyLimit, c.reputationSourceOffset, c.reputationSourceLimit);
+    if (!history.ok) return history;
+    return ok({ ...(p.value as ReputationRecord), ...history.value, definitions,
       configurationHistory: historyWindow((data as ReputationOwnerData).configurationHistory ?? [], c),
       tracks: record.tracks.map(t => { const d = registry.value.get(t.definitionId, t.definitionVersion)!;
         return { ...t, label: d.label, band: d.bands.find(b => t.score >= b.minimum && t.score <= b.maximum)?.label ?? null,
           minimum: d.minimum, maximum: d.maximum, baseline: d.baseline, visibility: d.visibility,
-          publicPresentation: d.publicPresentation, decay: d.decay }; }) })
-      : ok({ ...(p.value as object), revision: record.revision });
+          publicPresentation: d.publicPresentation, decay: d.decay }; }) });
   }
 };

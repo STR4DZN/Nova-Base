@@ -9,6 +9,14 @@
 - Schema Domain: `1`
 - Data de conclusão do Gate G5: `2026-09-21`
 
+## Parte G6 — Filtros e fontes do histórico de reputação — 2026-10-01
+
+- Escopo: filtros por trilha/tipo/fonte/ID ou UUID/ticks e breakdown GM de todos os lançamentos filtrados antes de paginação; concluir, validar automaticamente, registrar e parar. Foundry real ao fim do bloco G6.
+- Entradas e fontes com páginas/totais independentes. Deltas aplicados, antes/depois, reversões, decadência, razões e momentos; somas exatas BigInt em strings, sem mistura de escalas/trilhas. Valores atuais e histórico canônico não são alterados.
+- GM-only no owner e consulta de detalhe; Player/stranger sem histórico/fontes/contagens e probing uniforme. UI preserva campos inválidos, reseta páginas na aplicação/drilldown e limpa filtros ao trocar registro/aba.
+- **1025/1025 testes PASS** (26 novos), específicos 21/21 e verticais 62/62. TypeScript/build/package/validate:release PASS localmente; CI desta parte pendente. Relatório `docs/G6_REPUTATION_HISTORY_REPORT.md`; workflow dedicado e ZIP candidata v0.0.8. Nenhuma release publicada.
+- **PARAR AQUI. Próximo passo:** painel geral da diplomacia com pendências e alertas; aguardar autorização. G6 parcial; G7 não iniciado.
+
 ## Parte G6 — Dashboard dos acordos por estado — 2026-10-01
 
 - Escopo desta parte: dashboard e filtros de ciclo de vida; concluir, validar automaticamente, registrar e parar. Foundry real somente ao fim do bloco G6.
@@ -613,7 +621,7 @@ Candidata v0.0.8: 13 defeitos reproduzidos/corrigidos; 878/878 testes locais PAS
 
 ## Próxima ação canônica
 
-- **Gate G6 — Relations / Reputation / Agreements / Territory: dashboard dos acordos por estado/filtros implementado nesta parte**, após a aceitação do Gate G5. **999/999 testes PASS**, TypeScript/build/package/validate:release PASS localmente e no GitHub Actions. Commit validado `d56323e3bcf3012573db243b3d9f0e7dc3c107fd`; workflow `36854669271` SUCCESS. Evidência `docs/evidence/G6_AGREEMENT_DASHBOARD_VALIDATION.json`. Relatório `docs/G6_AGREEMENT_DASHBOARD_REPORT.md`. **PARAR AQUI**. Próxima parte: filtros e detalhamento das fontes no histórico de reputação; aguardar autorização. Teste real no Foundry somente após concluir o bloco G6, conforme instrução. Gate G6 permanece parcial; não iniciar G7.
+- **Gate G6 — Relations / Reputation / Agreements / Territory: filtros e fontes do histórico de reputação implementados nesta parte**, após a aceitação do Gate G5. **1025/1025 testes PASS** (26 novos), específicos 21/21 e verticais 62/62. TypeScript/build/package/validate:release PASS localmente; CI desta parte pendente. Relatório `docs/G6_REPUTATION_HISTORY_REPORT.md`. **PARAR AQUI**. Próxima parte: painel geral da diplomacia com pendências e alertas; aguardar autorização. Teste real no Foundry somente após concluir o bloco G6, conforme instrução. Gate G6 permanece parcial; não iniciar G7.
 - Publicação solicitada pelo usuário em 2026-09-30 e concluída na conta verificada `STR4DZN/Nova-Base`, branch `feat/g6-continuous`. Workflow `36718651288` PASS; prerelease `v0.0.7` com manifest, ZIP e roteiro de teste disponíveis. Publicação não significa homologação do G6.
 - Gates G0–G5 aceitos pelo usuário; smoke da candidata G6 aprovado pelo usuário em 2026-09-30. G6 aguarda conclusão das pendências normativas antes da aceitação integral. **Não iniciar G7**.
 - Candidata G6 `0.0.7` publicada. Manifest: `https://github.com/STR4DZN/Nova-Base/releases/download/v0.0.7/module.json`. Manifest e ZIP públicos foram baixados e comparados byte a byte com os artefatos validados. Evidência: `docs/evidence/G6_RELEASE_PUBLICATION.json`.

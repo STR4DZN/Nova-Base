@@ -975,3 +975,94 @@ test("G6 dashboard runtime: pending amendment and elapsed deadline leave registe
     unwrap(await p.modify({ kind: "expire" })); const expired: any = unwrap(await gm.diplomacy.agreements.query({ agreementLifecycle: "expired" })); assert.equal(expired.total, 1);
   } finally { gm.destroy(); }
 });
+
+test("G6 reputation history runtime: authority filters real adjustments, exact reversal and configured decay using applied deltas", async () => {
+  const f = fixture(), gm = f.make(), draft = reputationDraftFor();
+  try { await gm.initialize(); unwrap(await gm.diplomacy.reputation.create({ ...draft, reason: "Create standing" }));
+    let d: any = unwrap(await gm.diplomacy.reputation.query({ id: draft.id }));
+    unwrap(await gm.diplomacy.reputation.modify({ id: draft.id, expectedRevision: d.revision, action: { kind: "configure-track", trackId: "domain-manager:standing",
+      policy: reputationPolicyFor(d, "domain-manager:standing", { decay: { amount: 5, periodTicks: 10 } }) }, reason: "Enable decay" }));
+    const modify = async (action: any) => { const current: any = unwrap(await gm.diplomacy.reputation.query({ id: draft.id }));
+      return gm.diplomacy.reputation.modify({ id: draft.id, expectedRevision: current.revision, action, reason: "Audited change" }); };
+    d = unwrap(await gm.diplomacy.reputation.query({ id: draft.id }));
+    const ticket = unwrap(gm.diplomacy.commands.prepare("reputation:modify", { id: draft.id, expectedRevision: d.revision,
+      action: { kind: "adjust", trackId: "domain-manager:standing", delta: 230 }, reason: "Clamp to policy range" }));
+    unwrap(await gm.diplomacy.commands.execute(ticket)); unwrap(await gm.diplomacy.commands.retry(ticket));
+    d = unwrap(await gm.diplomacy.reputation.query({ id: draft.id })); assert.equal(d.entries[0].delta, 100); const original = d.entries[0].id;
+    f.time.tick = 20; unwrap(await modify({ kind: "decay", trackId: "domain-manager:standing" }));
+    unwrap(await modify({ kind: "adjust", trackId: "domain-manager:standing", delta: -100, reversalOf: original }));
+    f.time.tick = 30; unwrap(await modify({ kind: "decay", trackId: "domain-manager:standing" }));
+    const before = await f.adapter.loadAll();
+    const all: any = unwrap(await gm.diplomacy.reputation.query({ id: draft.id })); assert.equal(all.tracks[0].score, 0); assert.equal(all.reputationHistory.total, 4);
+    assert.deepEqual(all.reputationHistory.byKind, { adjustment: 1, reversal: 1, decay: 2 }); assert.equal(all.configurationHistory.length, 1);
+    const source: any = unwrap(await gm.diplomacy.reputation.query({ id: draft.id, reputationHistory: { source: { type: "command", id: ticket.commandId } } }));
+    assert.equal(source.reputationHistory.total, 1); assert.equal(source.reputationHistory.sources.items[0].gains, "100"); assert.equal(source.entries[0].delta, 100);
+    const decay: any = unwrap(await gm.diplomacy.reputation.query({ id: draft.id, reputationHistory: { trackId: "domain-manager:standing", kind: "decay", fromWorldTick: 20, toWorldTick: 30 } }));
+    assert.equal(decay.reputationHistory.total, 2); assert.deepEqual(decay.entries.map((e: any) => e.delta), [-5, 5]); assert.equal(decay.tracks[0].score, 0);
+    const reversal: any = unwrap(await gm.diplomacy.reputation.query({ id: draft.id, reputationHistory: { kind: "reversal" } }));
+    assert.equal(reversal.entries[0].reversalOf, original); assert.equal(reversal.reputationHistory.sources.items[0].losses, "-100");
+    assert.deepEqual(await f.adapter.loadAll(), before);
+  } finally { gm.destroy(); }
+});
+async function seedReputationHistory(adapter: InMemoryDiplomacyStorageAdapter) {
+  const { reputationOwner } = await import("../../src/reputation/reputation-owner.js"), draft = reputationDraftFor(); let data: any = draft.data;
+  const change = (action: any, source: any, tick: number) => { data = unwrap(reputationOwner.change(data, action, {
+    expectedRevision: data.record.revision, eventId: crypto.randomUUID(), at: data.record.updatedAt + 1, worldTick: tick, sourceRefs: [source], reason: "Seed canonical history" }, [])); };
+  for (let i = 0; i < 65; i++) change({ kind: "adjust", trackId: "domain-manager:standing", delta: i % 2 ? -1 : 1 }, { type: "mission", id: String(i % 35) }, i);
+  const extra = { ...data.definitions[0], id: "test:private-history", version: 1, label: "private-history-track-marker", visibility: "secret", publicPresentation: "hidden" };
+  change({ kind: "add-track", definition: extra, initialScore: 0 }, { type: "manual", id: "gm" }, 65);
+  change({ kind: "adjust", trackId: extra.id, delta: 5 }, { type: "mission", uuid: "JournalEntry.privateHistorySource" }, 66);
+  await adapter.write({ schemaVersion: 1, kind: "reputation", id: draft.id, revision: data.record.revision, data, receipts: [] });
+  return draft.id;
+}
+test("G6 reputation history runtime: authenticated Player/stranger cannot receive history or probe private sources/tracks", async () => {
+  const f = fixture(), id = await seedReputationHistory(f.adapter), gm = f.make(), player = f.make("player"), stranger = f.make("stranger");
+  try { await gm.initialize();
+    for (const viewer of [player, stranger]) { const d: any = unwrap(await viewer.diplomacy.reputation.query({ id })); assert.equal(d.tracks.length, 1);
+      assert.equal(d.entries, undefined); assert.equal(d.reputationHistory, undefined); assert.equal(d.tracks[0].score, undefined);
+      assert.equal(JSON.stringify(d).includes("private-history"), false); assert.equal(JSON.stringify(d).includes("privateHistorySource"), false);
+      const known = await viewer.diplomacy.reputation.query({ id, reputationHistory: { trackId: "domain-manager:standing" } }), hidden = await viewer.diplomacy.reputation.query({ id, reputationHistory: { trackId: "test:private-history" } });
+      assert.deepEqual(known, hidden); assert.equal(known.ok, false);
+      const source = await viewer.diplomacy.reputation.query({ id, reputationHistory: { source: { type: "mission", uuid: "JournalEntry.privateHistorySource" } } });
+      assert.deepEqual(known, source); assert.equal((await viewer.diplomacy.reputation.query({ id, reputationSourceOffset: 0 })).ok, false);
+    }
+    const privateTrack: any = unwrap(await gm.diplomacy.reputation.query({ id, reputationHistory: { trackId: "test:private-history", source: { type: "mission", uuid: "JournalEntry.privateHistorySource" } } }));
+    assert.equal(privateTrack.reputationHistory.total, 1); assert.equal(privateTrack.reputationHistory.sources.items[0].net, "5");
+  } finally { stranger.destroy(); player.destroy(); gm.destroy(); }
+});
+test("G6 reputation history runtime: GM controller uses independent pages, source drilldown and resets filters for another record", async () => {
+  const f = fixture(), id = await seedReputationHistory(f.adapter), gm = f.make(), c = new DiplomacyApplicationController(gm.diplomacy);
+  try { await gm.initialize(); c.selectTab("reputation"); c.select(id); unwrap(await c.load());
+    unwrap(c.applyReputationHistory({ trackId: "domain-manager:standing", kind: "", sourceType: "", sourceKind: "id", sourceRef: "", from: "", to: "" })); unwrap(await c.load());
+    assert.equal(c.detail.entries.length, 30); assert.equal(c.detail.reputationHistory.total, 65); assert.equal(c.detail.reputationHistory.sources.total, 35);
+    c.historyOffset = 60; c.reputationSourceOffset = 30; unwrap(await c.load()); assert.equal(c.detail.entries.length, 5); assert.equal(c.detail.reputationHistory.sources.items.length, 5);
+    const source = c.detail.reputationHistory.sources.items[0]; unwrap(c.filterReputationSource(source.trackId, source.source.type, "id", source.source.id)); unwrap(await c.load());
+    assert.equal(c.historyOffset, 0); assert.equal(c.reputationSourceOffset, 0); assert.equal(c.detail.reputationHistory.sources.total, 1);
+    assert.ok(c.render().includes("Ver lançamentos desta fonte"));
+    const other = reputationDraftFor("Other standing"); unwrap(await gm.diplomacy.reputation.create({ ...other, reason: "Create other" })); c.select(other.id); unwrap(await c.load());
+    assert.deepEqual(c.reputationHistoryFilter, {}); assert.equal(c.detail.reputationHistory.total, 0); assert.ok(c.render().includes("Nenhum lançamento nesta página/filtro"));
+  } finally { gm.destroy(); }
+});
+test("G6 reputation history runtime: filters and summaries rebuild after reload without changing canonical score, history or clock", async () => {
+  const f = fixture(), id = await seedReputationHistory(f.adapter), before = await f.adapter.loadAll(), gm = f.make(); let expected: any;
+  const query = { id, reputationHistory: { trackId: "domain-manager:standing", sourceType: "mission", fromWorldTick: 10, toWorldTick: 60 }, historyOffset: 30, historyLimit: 30, reputationSourceOffset: 30, reputationSourceLimit: 30 };
+  try { await gm.initialize(); expected = unwrap(await gm.diplomacy.reputation.query(query)); assert.equal(expected.reputationHistory.total, 51);
+    assert.equal(expected.entries.length, 21); assert.equal(expected.tracks[0].score, 1); assert.equal(expected.reputationHistory.sources.total, 35);
+    assert.deepEqual(await f.adapter.loadAll(), before); assert.equal(f.time.tick, 10);
+  } finally { gm.destroy(); }
+  const reload = f.make(); try { await reload.initialize(); assert.deepEqual(unwrap(await reload.diplomacy.reputation.query(query)), expected); assert.deepEqual(await f.adapter.loadAll(), before);
+  } finally { reload.destroy(); }
+});
+test("G6 reputation history runtime: filters cannot enter list/other namespaces and exact-final entry page has no next button", async () => {
+  const f = fixture(), gm = f.make(), draft = reputationDraftFor();
+  try { await gm.initialize(); unwrap(await gm.diplomacy.reputation.create({ ...draft, reason: "Create" }));
+    for (const owner of [gm.diplomacy.relations, gm.diplomacy.agreements, gm.diplomacy.territory, gm.diplomacy.disputes, gm.diplomacy.proposals])
+      assert.equal((await owner.query({ id: draft.id, reputationHistory: {} })).ok, false);
+    assert.equal((await gm.diplomacy.reputation.query({ reputationHistory: {} })).ok, false);
+    assert.equal((await gm.diplomacy.reputation.query({ id: draft.id, reputationHistory: { fromWorldTick: 20, toWorldTick: 10 } })).ok, false);
+    for (let i = 0; i < 30; i++) unwrap(await gm.diplomacy.reputation.modify({ id: draft.id, expectedRevision: i, action: { kind: "adjust", trackId: "domain-manager:standing", delta: 1 }, reason: "Award" }));
+    const c = new DiplomacyApplicationController(gm.diplomacy); c.selectTab("reputation"); c.select(draft.id); unwrap(await c.load());
+    assert.equal(c.detail.entries.length, 30); assert.equal(c.detail.reputationHistory.total, 30); assert.ok(c.render().includes('data-dm-history="1" disabled'));
+    assert.equal((unwrap(await gm.diplomacy.reputation.query()) as any).reputationHistory, undefined);
+  } finally { gm.destroy(); }
+});
