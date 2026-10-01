@@ -1,0 +1,41 @@
+G6 reputation history validation — extracted GitHub Actions evidence
+Repository: STR4DZN/Nova-Base
+Code commit: b0bc32c596a05755c2354b79aaef74801fdf917a
+Workflow: .github/workflows/g6-reputation-history-validation.yml
+Run: 36858630332 (success)
+Job: 110357074624 (success)
+Artifact container: 11160037181 sha256:3a1ca7cc1f8947b7d44c5482ebae257af6c928a3acdc6275ec7d4d3df3e28d69
+Following lines are preserved from decoded job logs. Test runs in order: history-specific, runtime vertical, complete regression.
+
+2026-10-01T11:57:47.4867458Z node: v22.23.3
+2026-10-01T11:57:51.7185655Z > domain-manager@0.0.8 typecheck
+2026-10-01T11:57:51.7186018Z > tsc --noEmit
+2026-10-01T11:57:56.6078263Z # tests 21
+2026-10-01T11:57:56.6079301Z # pass 21
+2026-10-01T11:57:56.6079533Z # fail 0
+2026-10-01T11:57:56.6079771Z # cancelled 0
+2026-10-01T11:57:56.6080049Z # skipped 0
+2026-10-01T11:57:56.6080288Z # todo 0
+2026-10-01T11:57:58.5857437Z # tests 62
+2026-10-01T11:57:58.5858108Z # pass 62
+2026-10-01T11:57:58.5858444Z # fail 0
+2026-10-01T11:57:58.5858824Z # cancelled 0
+2026-10-01T11:57:58.5859337Z # skipped 0
+2026-10-01T11:57:58.5859670Z # todo 0
+2026-10-01T11:57:58.6989499Z > domain-manager@0.0.8 test
+2026-10-01T11:58:26.3448325Z # tests 1025
+2026-10-01T11:58:26.3448869Z # pass 1025
+2026-10-01T11:58:26.3449291Z # fail 0
+2026-10-01T11:58:26.3449565Z # cancelled 0
+2026-10-01T11:58:26.3449823Z # skipped 0
+2026-10-01T11:58:26.3450054Z # todo 0
+2026-10-01T11:58:26.4420898Z > domain-manager@0.0.8 build
+2026-10-01T11:58:26.4421193Z > node build.mjs
+2026-10-01T11:58:26.6500510Z > domain-manager@0.0.8 package
+2026-10-01T11:58:26.6500957Z > node scripts/package.mjs
+2026-10-01T11:58:26.9544248Z Package created: dist/domain-manager-v0.0.8.zip
+2026-10-01T11:58:27.0340618Z > domain-manager@0.0.8 validate:release
+2026-10-01T11:58:27.0341149Z > node scripts/validate-release.mjs
+2026-10-01T11:58:27.0620615Z Package validation passed
+2026-10-01T11:58:27.1286299Z Artifact validation passed
+2026-10-01T11:58:27.1286679Z Release URLs, versions and ZIP verified: v0.0.8

@@ -1,0 +1,163 @@
+{
+  "schemaVersion": 1,
+  "part": "G6 reputation history filters and source breakdown",
+  "localDate": "2026-10-01",
+  "timezone": "America/Sao_Paulo",
+  "repository": "STR4DZN/Nova-Base",
+  "branch": "feat/g6-continuous",
+  "baseCommit": "b5f58e4c7298c04b1147d1d8efa9c713fb4c810e",
+  "validatedCommit": "b0bc32c596a05755c2354b79aaef74801fdf917a",
+  "execution": {
+    "runId": 36858630332,
+    "jobId": 110357074624,
+    "runUrl": "https://github.com/STR4DZN/Nova-Base/actions/runs/36858630332",
+    "workflow": ".github/workflows/g6-reputation-history-validation.yml",
+    "conclusion": "success",
+    "runner": "ubuntu-latest",
+    "nodeVersion": "22.23.3",
+    "startedAt": "2026-10-01T11:57:35Z",
+    "completedAt": "2026-10-01T11:58:30Z"
+  },
+  "tests": {
+    "specific": {
+      "tests": 21,
+      "pass": 21,
+      "fail": 0,
+      "skipped": 0
+    },
+    "runtimeVertical": {
+      "tests": 62,
+      "pass": 62,
+      "fail": 0,
+      "skipped": 0,
+      "newTests": 5
+    },
+    "complete": {
+      "tests": 1025,
+      "pass": 1025,
+      "fail": 0,
+      "skipped": 0
+    },
+    "newTestsThisPart": 26
+  },
+  "local": {
+    "nodeVersion": "24.19.0",
+    "typecheck": "PASS",
+    "specific": {
+      "tests": 21,
+      "pass": 21,
+      "fail": 0,
+      "skipped": 0
+    },
+    "runtimeVertical": {
+      "tests": 62,
+      "pass": 62,
+      "fail": 0,
+      "skipped": 0
+    },
+    "complete": {
+      "tests": 1025,
+      "pass": 1025,
+      "fail": 0,
+      "skipped": 0
+    },
+    "build": "PASS",
+    "package": "PASS",
+    "validateRelease": "PASS",
+    "installableZipSha256": "515ec4cacddffb23bd4fd63086ddde8f080799e79f314da2c2ad49a7f2b6f0ca",
+    "initialTypecheckFailure": "TypedRef exposes optional id and uuid fields; presence of a property did not narrow its value to string",
+    "typecheckCorrection": "Read present UUID or the previously validated ID; distinguish ID/UUID mode without weakening validators",
+    "finalReviewCorrection": "Describe source type inferred from exact typed reference when sourceType is omitted; complete final-code regression passed"
+  },
+  "ciChecks": {
+    "typecheck": "PASS",
+    "build": "PASS",
+    "package": "PASS",
+    "validateRelease": "PASS"
+  },
+  "relatedWorkflows": [
+    {
+      "runId": 36858630779,
+      "workflow": ".github/workflows/g6-reputation-validation.yml",
+      "conclusion": "success"
+    },
+    {
+      "runId": 36858630227,
+      "workflow": ".github/workflows/g6-agreement-term-editor-validation.yml",
+      "conclusion": "success"
+    },
+    {
+      "runId": 36858630326,
+      "workflow": ".github/workflows/g6-agreement-dashboard-validation.yml",
+      "conclusion": "success"
+    },
+    {
+      "runId": 36858630289,
+      "workflow": ".github/workflows/g6-agreement-inspector-validation.yml",
+      "conclusion": "success"
+    },
+    {
+      "runId": 36858630310,
+      "workflow": ".github/workflows/g6-stance-validation.yml",
+      "conclusion": "success"
+    },
+    {
+      "runId": 36858630332,
+      "workflow": ".github/workflows/g6-reputation-history-validation.yml",
+      "conclusion": "success"
+    },
+    {
+      "runId": 36858630245,
+      "workflow": ".github/workflows/g6-agreement-negotiation-validation.yml",
+      "conclusion": "success"
+    }
+  ],
+  "artifact": {
+    "id": 11160037181,
+    "name": "g6-reputation-history-candidate",
+    "downloadUrl": "https://github.com/STR4DZN/Nova-Base/actions/runs/36858630332/artifacts/11160037181",
+    "sizeBytes": 845661,
+    "containerDigest": "sha256:3a1ca7cc1f8947b7d44c5482ebae257af6c928a3acdc6275ec7d4d3df3e28d69",
+    "digestScope": "GitHub artifact container with logs, report snapshot and installable ZIP",
+    "expiresAt": "2026-10-15T11:58:27Z",
+    "installableZip": "dist/domain-manager-v0.0.8.zip"
+  },
+  "covered": [
+    "detail-only filter schema and namespace/source pagination guards",
+    "track/kind/sourceType/exact ID or UUID/inclusive world tick filters",
+    "null legacy ticks included without bounds and excluded within intervals",
+    "filtered entries selected before pagination",
+    "independent complete filtered source aggregates and source pages",
+    "grouping by track/type/reference mode/value prevents scale or ID/UUID collisions",
+    "canonical applied deltas after clamp, exact reversal and configured decay",
+    "zero decay entries remain counted",
+    "exact BigInt sums returned as JSON decimal strings",
+    "current scores, definitions, receipts, clock and append history remain unchanged",
+    "GM-only raw history/source/counts and uniform Player/stranger probing denial",
+    "sanitized existing Player band and hidden track presentation",
+    "immutable detached history DTO and reload reconstruction",
+    "entry ID, track, kind, delta, before/after, source, reason, tick, time and reversal target",
+    "applied-filter labels, escaping and horizontal table scrolling",
+    "filter/drilldown/clear reset both pages and preserve selected record",
+    "invalid fields and failed reads preserve input; record/tab switch clears filters",
+    "exact-final thirty-entry page disables next",
+    "public API command ticket retry and authoritative command-source refs"
+  ],
+  "boundaries": {
+    "foundryRealExecuted": false,
+    "hostAndTransportDoubles": true,
+    "foundryDeferredUntilG6BlockComplete": true,
+    "gateG6Accepted": false,
+    "gateG7Started": false,
+    "releasePublishedThisPart": false,
+    "stoppedAfterThisPart": true,
+    "newStorageMigrationsOrIndexes": false
+  },
+  "nextPart": "Diplomacy overview with pending items and alerts",
+  "remaining": [
+    "other G6 forms/read models/owners/providers/integrations/diagnostics/scale",
+    "overview, Activity Feed and specialized source/status/expiry indexes",
+    "real Foundry validation after complete G6 implementation"
+  ],
+  "report": "docs/G6_REPUTATION_HISTORY_REPORT.md"
+}

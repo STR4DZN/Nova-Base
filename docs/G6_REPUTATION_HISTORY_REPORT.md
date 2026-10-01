@@ -23,9 +23,12 @@ A fonte apresentada é a referência canônica já registrada. O pipeline públi
 
 - **21/21 testes específicos** e **62/62 verticais** PASS; 26 novos nesta parte (21 específicos + 5 verticais).
 - **1025/1025 testes PASS**, 0 FAIL/0 skipped; 26 novos nesta parte.
-- TypeScript/build/package/validate:release **PASS localmente**, Node 24.19.0.
+- TypeScript/build/package/validate:release **PASS localmente e no GitHub Actions**, Node local 24.19.0.
 - SHA256 do ZIP local validado: `515ec4cacddffb23bd4fd63086ddde8f080799e79f314da2c2ad49a7f2b6f0ca`.
-- GitHub Actions: evidência será registrada após conclusão do workflow desta parte.
+- Commit de código validado: `b0bc32c596a05755c2354b79aaef74801fdf917a`.
+- Workflow [36858630332](https://github.com/STR4DZN/Nova-Base/actions/runs/36858630332), job `110357074624`: **SUCCESS**, Ubuntu + Node 22.23.3. Os sete workflows acionados no commit concluíram com SUCCESS.
+- [ZIP v0.0.8 e logs](https://github.com/STR4DZN/Nova-Base/actions/runs/36858630332/artifacts/11160037181), artifact `g6-reputation-history-candidate`, retenção de 14 dias. Hash do container: `sha256:3a1ca7cc1f8947b7d44c5482ebae257af6c928a3acdc6275ec7d4d3df3e28d69` (não é o hash isolado do ZIP instalável).
+- Evidência permanente: `docs/evidence/G6_REPUTATION_HISTORY_VALIDATION.json` e `docs/evidence/G6_REPUTATION_HISTORY_CI_SUMMARY.log`.
 
 Cobertura específica: schemas/escopo do namespace, combinação de filtros/intervalos inclusivos/ticks nulos, ID versus UUID, separação de trilhas/fontes, mais de duas páginas, BigInt acima de MAX_SAFE_INTEGER, campos canônicos e projeção GM/Player, DTO imutável, escaping, formulários, reset/preservação e bindings de aplicação/drilldown/paginação/limpeza.
 
