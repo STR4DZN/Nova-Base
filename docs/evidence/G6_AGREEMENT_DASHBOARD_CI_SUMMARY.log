@@ -1,0 +1,41 @@
+G6 agreement dashboard validation — extracted GitHub Actions evidence
+Repository: STR4DZN/Nova-Base
+Code commit: d56323e3bcf3012573db243b3d9f0e7dc3c107fd
+Workflow: .github/workflows/g6-agreement-dashboard-validation.yml
+Run: 36854669271 (success)
+Job: 110344222127 (success)
+Artifact container: 11157426662 sha256:620506f16b5b32dfe74566a4e00264d9b62d167b8eaf56467ec89ad05bbb1fba
+The following lines are preserved from decoded job logs. Tests run in order: dashboard-specific, runtime vertical, complete regression.
+
+2026-10-01T11:19:53.0478154Z node: v22.23.2
+2026-10-01T11:19:54.3860204Z > domain-manager@0.0.8 typecheck
+2026-10-01T11:19:54.3860863Z > tsc --noEmit
+2026-10-01T11:20:00.4119509Z # tests 17
+2026-10-01T11:20:00.4120750Z # pass 17
+2026-10-01T11:20:00.4121538Z # fail 0
+2026-10-01T11:20:00.4125744Z # cancelled 0
+2026-10-01T11:20:00.4126668Z # skipped 0
+2026-10-01T11:20:00.4127302Z # todo 0
+2026-10-01T11:20:02.0149500Z # tests 57
+2026-10-01T11:20:02.0150786Z # pass 57
+2026-10-01T11:20:02.0151247Z # fail 0
+2026-10-01T11:20:02.0151896Z # cancelled 0
+2026-10-01T11:20:02.0152551Z # skipped 0
+2026-10-01T11:20:02.0153142Z # todo 0
+2026-10-01T11:20:02.1475323Z > domain-manager@0.0.8 test
+2026-10-01T11:20:32.4031402Z # tests 999
+2026-10-01T11:20:32.4032096Z # pass 999
+2026-10-01T11:20:32.4033955Z # fail 0
+2026-10-01T11:20:32.4034280Z # cancelled 0
+2026-10-01T11:20:32.4034493Z # skipped 0
+2026-10-01T11:20:32.4034679Z # todo 0
+2026-10-01T11:20:32.5293074Z > domain-manager@0.0.8 build
+2026-10-01T11:20:32.5293598Z > node build.mjs
+2026-10-01T11:20:32.7901473Z > domain-manager@0.0.8 package
+2026-10-01T11:20:32.7901885Z > node scripts/package.mjs
+2026-10-01T11:20:33.1360461Z Package created: dist/domain-manager-v0.0.8.zip
+2026-10-01T11:20:33.2387361Z > domain-manager@0.0.8 validate:release
+2026-10-01T11:20:33.2387961Z > node scripts/validate-release.mjs
+2026-10-01T11:20:33.2715214Z Package validation passed
+2026-10-01T11:20:33.3577062Z Artifact validation passed
+2026-10-01T11:20:33.3577712Z Release URLs, versions and ZIP verified: v0.0.8

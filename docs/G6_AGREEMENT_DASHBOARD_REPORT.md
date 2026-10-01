@@ -22,9 +22,12 @@ Nenhum contador persistido, índice novo, migração, Scheduler ou executor novo
 
 - **999/999 testes PASS**, 0 FAIL/0 skipped; 21 novos nesta parte (17 específicos + 4 verticais).
 - **17/17 específicos** e **57/57 verticais** PASS.
-- TypeScript/build/package/validate:release **PASS localmente**, Node 24.19.0.
+- TypeScript/build/package/validate:release **PASS localmente e no GitHub Actions**, Node local 24.19.0.
 - SHA256 do ZIP local validado: `3dd578abb7c4a24167e19d7be88d67db645ceac1ee8721659fd48e000bb75ddb`.
-- GitHub Actions: evidência será registrada após a conclusão do workflow desta parte.
+- Commit de código validado: `d56323e3bcf3012573db243b3d9f0e7dc3c107fd`.
+- Workflow [36854669271](https://github.com/STR4DZN/Nova-Base/actions/runs/36854669271), job `110344222127`: **SUCCESS**, Ubuntu + Node 22.23.2. Os seis workflows acionados neste commit concluíram com SUCCESS.
+- [ZIP v0.0.8 e logs](https://github.com/STR4DZN/Nova-Base/actions/runs/36854669271/artifacts/11157426662), artifact `g6-agreement-dashboard-candidate`, retenção de 14 dias. Hash do container: `sha256:620506f16b5b32dfe74566a4e00264d9b62d167b8eaf56467ec89ad05bbb1fba` (não é o hash isolado do ZIP instalável).
+- Evidência permanente: `docs/evidence/G6_AGREEMENT_DASHBOARD_VALIDATION.json` e `docs/evidence/G6_AGREEMENT_DASHBOARD_CI_SUMMARY.log`.
 
 Cobertura específica: buckets completos/zeros/imutabilidade, grupo negociação, schema por namespace, mais de duas páginas, audiência e fences, composição busca/estado, ausência de dados privados, estado corrupto, UI e escaping, reset de seleção/rascunho, consulta separada de detalhes, indisponibilidade e bindings de clique/dropdown.
 
@@ -34,6 +37,6 @@ A primeira execução vertical encontrou três fixtures sem sourceRef, exigida p
 
 ## Limites e próxima parte
 
-Dashboard/details dos acordos está implementado e validado automaticamente nesta parte; confirmação visual/funcional em Foundry real permanece para o fim do bloco. A matriz G6 continua parcial nas demais UIs, providers, integrações, read models, diagnóstico e escala real.
+Dashboard por estado/filtros complementa os detalhes implementados nas partes anteriores, com validação automática; confirmação visual/funcional em Foundry real permanece para o fim do bloco. A matriz G6 continua parcial nas demais UIs, providers, integrações, read models, diagnóstico e escala real.
 
 **Próximo passo:** filtros e detalhamento das fontes no histórico de reputação. Parar após esta parte e aguardar autorização. Foundry real ao fim do G6; G7 não iniciado.

@@ -2,7 +2,7 @@
 
 **Atualização v0.0.8:** revisão G0–G6 corrigiu 13 defeitos, com 878/878 testes locais PASS. Novo smoke necessário; detalhes/evidências em `docs/G0_G6_REVIEW.md`. As lacunas desta matriz continuam explícitas.
 
-**Atualização por partes — dashboard dos acordos:** dashboard por lifecycle/grupo negociação e estados exatos, contagens após audiência/busca/fences antes de filtro/página, DTO mínimo e composição de filtros implementados. 999/999 testes PASS e TypeScript/build/package/validate:release PASS localmente; CI desta parte pendente. Relatório `docs/G6_AGREEMENT_DASHBOARD_REPORT.md`. Próxima parte: filtros e detalhamento das fontes no histórico de reputação. Foundry real ao fim do bloco G6.
+**Atualização por partes — dashboard dos acordos:** dashboard por lifecycle/grupo negociação e estados exatos, contagens após audiência/busca/fences antes de filtro/página, DTO mínimo e composição de filtros implementados. 999/999 testes PASS e TypeScript/build/package/validate:release PASS localmente e no GitHub Actions (workflow `36854669271` SUCCESS). Relatório `docs/G6_AGREEMENT_DASHBOARD_REPORT.md`. Próxima parte: filtros e detalhamento das fontes no histórico de reputação. Foundry real ao fim do bloco G6.
 
 **Atualização por partes — postura:** resolver derivado por eixos/direções, postura manual auditada e UI concluídos nesta parte; 895/895 testes PASS, TypeScript/build/package PASS em GitHub Actions. Ver `docs/G6_STANCE_REPORT.md`. Não fecha as demais linhas do Gate.
 
