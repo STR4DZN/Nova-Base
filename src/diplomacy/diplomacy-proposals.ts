@@ -6,6 +6,7 @@ import { lockKey } from "../mutations/lock-keys.js";
 import { diplomacyMutationDefinition } from "./diplomacy-mutation.js";
 import { DIPLOMACY_OWNERS, diplomacyIntentLocks, prepareOwnerIntent, validateOwnerIntent, type OwnerIntent, type OwnerCommandOptions } from "./owner-commands.js";
 import { diplomacyViewerControls, diplomacyViewerIsGm } from "./diplomacy-permissions.js";
+import { projectTerritoryState, type TerritoryState } from "../territory/territory-state.js";
 import { validateDiplomacyQuery } from "./diplomacy-query.js";
 export interface DiplomacyProposal {
   readonly id: string; readonly revision: number; readonly label: string; readonly visibility: "restricted";
@@ -42,6 +43,13 @@ export function registerDiplomacyProposals(o: OwnerCommandOptions): void {
     const controls = await diplomacyViewerControls(ctx, owner.parties(valid.value), o.domains, o.controllers);
     if (!diplomacyViewerIsGm(ctx) && (!controls || owner.identity(valid.value).visibility === "secret"))
       return failure("DM_SECURITY_PERMISSION_DENIED", "Proposer must control a visible participating Domain", "permission");
+    if (!diplomacyViewerIsGm(ctx) && intent.kind === "territory" && intent.mode === "modify"
+      && isRecord(intent.action) && intent.action.kind === "recognition") {
+      const claims = projectTerritoryState(valid.value as TerritoryState, v => v === "public" || v === "restricted" && controls)?.claims ?? [];
+      const value = intent.action.value;
+      if (!isRecord(value) || !claims.some(c => c.id === value.claimId))
+        return failure("DM_TERRITORY_RECOGNITION_UNAVAILABLE", "Recognition target unavailable", "not-found");
+    }
     // Validate the semantic proposal now; approval repeats this against freshly locked state.
     const prepared = await prepareOwnerIntent(intent, ctx, o); if (!prepared.ok) return prepared;
     const data: DiplomacyProposal = { id: p.id, revision: 0, label: owner.identity(valid.value).label, visibility: "restricted", lifecycle: "pending",
@@ -61,7 +69,7 @@ export function registerDiplomacyProposals(o: OwnerCommandOptions): void {
     && (p.editedIntent === undefined || validateOwnerIntent(p.editedIntent).ok) ? ok(p) : failure("DM_DIPLOMACY_PROPOSAL_INVALID", "Invalid proposal review");
   const decide = diplomacyMutationDefinition("proposal", o, ctx => {
     const p = ctx.command.payload, proposal = o.store.get("proposal", p.id)?.data as DiplomacyProposal | undefined;
-    return [lockKey.diplomacy("proposal", p.id), ...(proposal ? diplomacyIntentLocks(p.editedIntent ?? proposal.original, o) : [])];
+    return [lockKey.diplomacy("proposal", p.id), ...(proposal && p.decision === "approve" ? diplomacyIntentLocks(p.editedIntent ?? proposal.original, o) : [])];
   }, async fresh => {
     if (!fresh.entity) return failure("DM_DIPLOMACY_NOT_FOUND", "Proposal unavailable", "not-found");
     const checked = validateDiplomacyProposal(fresh.entity.data); if (!checked.ok) return checked;
@@ -94,7 +102,18 @@ export function registerDiplomacyProposals(o: OwnerCommandOptions): void {
           if (value.visibility === "secret") return null;
           return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, redact(v)]));
         };
-        return ok({ ...proposal, decision: { ...proposal.decision, approvedIntent: redact(proposal.decision.approvedIntent) } }); }
+        const approved = proposal.decision.approvedIntent;
+        if (approved.kind === "territory" && approved.mode === "modify" && isRecord(approved.action) && approved.action.kind === "recognition") {
+          const row = o.store.get("territory", approved.id);
+          const available = o.recovery.fenceRegistry.assertKeysAvailable([lockKey.diplomacy("territory", approved.id), lockKey.territoryGraph()]);
+          const controls = row && await diplomacyViewerControls(ctx, DIPLOMACY_OWNERS.territory.parties(row.data), o.domains, o.controllers);
+          const canSee = (v: string) => v === "public" || v === "restricted" && !!controls;
+          const state = row && available.ok ? projectTerritoryState(row.data as TerritoryState, canSee) : null;
+          const value = approved.action.value;
+          if (!state || !isRecord(value) || !canSee(value.visibility as string) || !state.claims.some(c => c.id === value.claimId))
+            return ok({ ...proposal, decision: { ...proposal.decision, approvedIntent: null } });
+        }
+        return ok({ ...proposal, decision: { ...proposal.decision, approvedIntent: redact(approved) } }); }
       const available = visible.filter(x => o.recovery.fenceRegistry.assertKeysAvailable([lockKey.diplomacy("proposal", x.id)]).ok);
       return ok({ items: available.slice(p.offset ?? 0, (p.offset ?? 0) + (p.limit ?? 30)).map(x => ({ id: x.id, label: x.label, lifecycle: x.lifecycle, revision: x.revision })),
         total: available.length, offset: p.offset ?? 0, limit: p.limit ?? 30, isGm });

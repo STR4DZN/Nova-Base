@@ -1156,3 +1156,124 @@ test("G6 overview runtime: public agreement restricted terms admit controllers, 
     const before = await f.adapter.loadAll(), p = unwrap(await player.diplomacy.overview.query()); assert.equal(p.summary.overdue, 0); assert.equal(p.summary.breaches, 0); assert.equal(JSON.stringify(p).includes("Restricted deadline marker"), false); assert.deepEqual(await f.adapter.loadAll(), before);
   } finally { stranger.destroy(); player.destroy(); gm.destroy(); }
 });
+
+async function recognitionTerritory(gm: ReturnType<typeof composeDomainManagerRuntime>) {
+  const draft = createDiplomacyDraft("territory", "Recognition region", [], "public");
+  const source = { sourceRef: { type: "manual", id: "gm" }, startsAtWorldTick: 0, expiresAtWorldTick: null, claimType: "domain-manager:ownership", lifecycle: "active", contested: false, strength: null, inherited: false };
+  const data: any = draft.data; data.claims = [
+    { ...source, id: "visible-claim", visibility: "public", claimantRef: { type: "domain", uuid: domainUuid } },
+    { ...source, id: "secret-claim-marker", visibility: "secret", claimantRef: { type: "narrative", id: "private guild" } },
+    { ...source, id: "restricted-claim", visibility: "restricted", claimantRef: { type: "domain", uuid: domainUuid } }
+  ];
+  data.claims = data.claims.map((c: any) => ({ ...c, sourceRef: { ...c.sourceRef } }));
+  unwrap(await gm.diplomacy.territory.create({ id: draft.id, data, reason: "Create recognition fixture" })); return draft.id;
+}
+const recognitionAction = (claimId = "visible-claim", patch = {}) => ({ kind: "recognition", value: { id: crypto.randomUUID(), claimId,
+  recognizingRef: { type: "domain", uuid: domainUuid }, position: "positive", sourceRef: { type: "manual", id: "recognition" },
+  visibility: "public", startsAtWorldTick: 10, expiresAtWorldTick: null, ...patch } });
+test("G6 recognition security: guessed secret claim and missing claim produce the same rejection before proposal preparation", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player");
+  try { await gm.initialize(); const id = await recognitionTerritory(gm), before = await f.adapter.loadAll(); let error: any;
+    for (const claimId of ["secret-claim-marker", "missing-claim-marker"]) {
+      const result = await player.diplomacy.proposals.submit({ id: crypto.randomUUID(), intent: { kind: "territory", mode: "modify", id,
+        expectedRevision: 0, action: recognitionAction(claimId), reason: "Request recognition" } });
+      assert.equal(result.ok, false); if (!result.ok) { if (error) assert.deepEqual(result.error, error); error = result.error; }
+    }
+    assert.deepEqual(await f.adapter.loadAll(), before);
+  } finally { player.destroy(); gm.destroy(); }
+});
+const recognitionUiFields = (patch = {}) => ({ recognitionClaimId: "visible-claim", recognitionPartyType: "domain", recognitionPartyRef: domainUuid,
+  recognitionDomainUuid: "", recognitionPosition: "unknown", recognitionVisibility: "public", recognitionStarts: "", recognitionExpires: "", reason: "Declare position", ...patch });
+test("G6 recognition runtime: GM form registers three contextual positions and read-only window counts preserve claims", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player");
+  try { await gm.initialize(); const id = await recognitionTerritory(gm), ui = new DiplomacyApplicationController(gm.diplomacy); ui.selectTab("territory"); ui.select(id); unwrap(await ui.load());
+    const claims = structuredClone(ui.detail.claims);
+    for (const [position, starts, expires] of [["positive", "0", "10"], ["negative", "10", "20"], ["unknown", "15", ""]]) {
+      unwrap(await ui.submitRecognition(recognitionUiFields({ recognitionPosition: position, recognitionStarts: starts, recognitionExpires: expires, recognitionRevision: String(ui.detail.revision) }))); unwrap(await ui.load());
+    }
+    assert.equal(ui.detail.recognitions.length, 3); assert.equal(ui.detail.revision, 3); assert.deepEqual(ui.detail.claims, claims); assert.equal(ui.detail.worldTick, 10);
+    const p: any = unwrap(await player.diplomacy.territory.query({ id })); assert.equal(p.recognitions.length, 3); assert.equal(p.claims.length, 2);
+    const before = await f.adapter.loadAll(), h = ui.render(); assert.ok(h.includes("0 reconhecem · 1 não reconhecem · 0 sem posição")); assert.ok(h.includes("Expirada")); assert.ok(h.includes("Agendada"));
+    f.time.tick = 15; unwrap(await ui.load()); assert.ok(ui.render().includes("0 reconhecem · 1 não reconhecem · 1 sem posição")); assert.deepEqual(await f.adapter.loadAll(), before);
+  } finally { player.destroy(); gm.destroy(); }
+});
+test("G6 recognition runtime: Player submits visible claim, GM UI edits context on approval without rewriting original", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player"), stranger = f.make("stranger");
+  try { await gm.initialize(); const id = await recognitionTerritory(gm), ui = new DiplomacyApplicationController(player.diplomacy); ui.selectTab("territory"); ui.select(id); unwrap(await ui.load());
+    assert.equal(ui.render().includes("secret-claim-marker"), false); unwrap(await ui.submitRecognition(recognitionUiFields({ recognitionPosition: "positive", recognitionRevision: "0" })));
+    const list: any = unwrap(await player.diplomacy.proposals.query()), proposalId = list.items[0].id, requested: any = unwrap(await player.diplomacy.proposals.query({ id: proposalId }));
+    assert.equal((unwrap(await gm.diplomacy.territory.query({ id })) as any).recognitions.length, 0); assert.equal((await stranger.diplomacy.proposals.query({ id: proposalId })).ok, false);
+    const review = new DiplomacyApplicationController(gm.diplomacy); review.selectTab("proposals"); review.select(proposalId); unwrap(await review.load());
+    assert.ok(review.recognitionReviewTarget); assert.equal(review.recognitionReviewTarget.worldTick, 10); assert.ok(review.render().includes("Revisar reconhecimento")); assert.ok(review.render().includes("Reconhecimento solicitado"));
+    unwrap(await review.review("approve", "Revised explicit decision", { ...recognitionUiFields({ recognitionPartyType: "narrative", recognitionPartyRef: "Council", recognitionPosition: "negative", recognitionStarts: "0", recognitionExpires: "50", recognitionVisibility: "restricted" }), recognitionReview: "on" }));
+    const approved: any = unwrap(await player.diplomacy.proposals.query({ id: proposalId })); assert.deepEqual(approved.original, requested.original); assert.equal(approved.decision.approvedIntent.action.value.position, "negative");
+    const target: any = unwrap(await player.diplomacy.territory.query({ id })); assert.equal(target.recognitions[0].recognizingRef.id, "Council"); assert.equal(target.recognitions[0].id, requested.original.action.value.id); assert.equal(target.recognitions[0].startsAtWorldTick, 0);
+    assert.equal((unwrap(await stranger.diplomacy.territory.query({ id })) as any).recognitions.length, 0); unwrap(await review.load()); assert.ok(review.render().includes("Reconhecimento aprovado")); assert.equal(review.render().includes("Aprovar reconhecimento"), false);
+  } finally { stranger.destroy(); player.destroy(); gm.destroy(); }
+});
+test("G6 recognition runtime: stale form and stale approval retain draft until explicit revision refresh", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player");
+  try { await gm.initialize(); const id = await recognitionTerritory(gm), ui = new DiplomacyApplicationController(player.diplomacy); ui.selectTab("territory"); ui.select(id); unwrap(await ui.load());
+    unwrap(await gm.diplomacy.territory.modify({ id, expectedRevision: 0, action: { kind: "contest-claim", id: "visible-claim" }, reason: "Concurrent edit" }));
+    assert.equal((await ui.submitRecognition(recognitionUiFields({ recognitionRevision: "0" }))).ok, false); unwrap(await ui.load()); assert.equal(ui.territoryRecognitionFields.recognitionRevision, "0"); assert.equal((await ui.submitRecognition(recognitionUiFields({ recognitionRevision: "0" }))).ok, false);
+    ui.resetRecognitionDraft(); unwrap(await ui.submitRecognition(recognitionUiFields({ recognitionRevision: "1" })));
+    const list: any = unwrap(await player.diplomacy.proposals.query()), proposalId = list.items[0].id;
+    unwrap(await gm.diplomacy.territory.modify({ id, expectedRevision: 1, action: { kind: "contest-claim", id: "restricted-claim" }, reason: "Another edit" }));
+    const review = new DiplomacyApplicationController(gm.diplomacy); review.selectTab("proposals"); review.select(proposalId); unwrap(await review.load());
+    const fields = { ...recognitionUiFields({ recognitionPosition: "positive" }), recognitionReview: "on" };
+    assert.equal((await review.review("approve", "Needs refresh", fields)).ok, false); assert.equal(review.recognitionReviewFields.recognitionPosition, "positive"); assert.equal((unwrap(await gm.diplomacy.proposals.query({ id: proposalId })) as any).lifecycle, "pending");
+    assert.equal((await review.review("approve", "Bad revision", { ...fields, targetRevision: "-1" })).ok, false);
+    unwrap(await review.review("approve", "Accept current revision after review", { ...fields, targetRevision: "2" }));
+    assert.equal((unwrap(await gm.diplomacy.territory.query({ id })) as any).revision, 3); assert.equal((unwrap(await gm.diplomacy.territory.query({ id })) as any).recognitions.length, 1);
+  } finally { player.destroy(); gm.destroy(); }
+});
+test("G6 recognition runtime: GM edited secret claim cannot leak through public approved recognition or proposal after reload", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player"); let proposalId = "", id = "";
+  try { await gm.initialize(); id = await recognitionTerritory(gm);
+    unwrap(await player.diplomacy.proposals.submit({ id: "recognition-secret-review", intent: { kind: "territory", mode: "modify", id, expectedRevision: 0, action: recognitionAction(), reason: "Visible request" } })); proposalId = "recognition-secret-review";
+    const review = new DiplomacyApplicationController(gm.diplomacy); review.selectTab("proposals"); review.select(proposalId); unwrap(await review.load());
+    unwrap(await review.review("approve", "Explicit revision", { ...recognitionUiFields({ recognitionClaimId: "secret-claim-marker", recognitionPosition: "negative", recognitionStarts: "10" }), recognitionReview: "on" }));
+    const p: any = unwrap(await player.diplomacy.proposals.query({ id: proposalId })), t: any = unwrap(await player.diplomacy.territory.query({ id }));
+    assert.equal(p.lifecycle, "approved"); assert.equal(p.decision.approvedIntent, null); assert.equal(JSON.stringify(p).includes("secret-claim-marker"), false); assert.equal(t.recognitions.length, 0);
+    assert.equal((unwrap(await gm.diplomacy.proposals.query({ id: proposalId })) as any).decision.approvedIntent.action.value.claimId, "secret-claim-marker");
+  } finally { player.destroy(); gm.destroy(); }
+  const reload = f.make(), controller = f.make("player"); try { await reload.initialize(); const before = await f.adapter.loadAll(), p: any = unwrap(await controller.diplomacy.proposals.query({ id: proposalId })); assert.equal(p.decision.approvedIntent, null); assert.equal(JSON.stringify(p).includes("secret-claim-marker"), false); assert.equal((unwrap(await controller.diplomacy.territory.query({ id })) as any).recognitions.length, 0); assert.deepEqual(await f.adapter.loadAll(), before); }
+  finally { controller.destroy(); reload.destroy(); }
+});
+test("G6 recognition runtime: controller permissions and fresh party/reference validation block direct or unsupported mutations", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player"), stranger = f.make("stranger");
+  try { await gm.initialize(); const id = await recognitionTerritory(gm), before = await f.adapter.loadAll();
+    assert.equal((await player.diplomacy.territory.modify({ id, expectedRevision: 0, action: recognitionAction(), reason: "Direct" })).ok, false);
+    assert.equal((await stranger.diplomacy.proposals.submit({ id: "stranger-recognition", intent: { kind: "territory", mode: "modify", id, expectedRevision: 0, action: recognitionAction(), reason: "Request" } })).ok, false);
+    for (const recognizingRef of [{ type: "domain", uuid: "JournalEntry.missing" }, { type: "actor", uuid: "Actor.missing" }, { type: "notable", id: "missing", domainUuid }]) {
+      assert.equal((await gm.diplomacy.territory.modify({ id, expectedRevision: 0, action: recognitionAction("visible-claim", { recognizingRef }), reason: "Invalid party" })).ok, false);
+    }
+    assert.deepEqual(await f.adapter.loadAll(), before);
+    unwrap(await player.diplomacy.proposals.submit({ id: "restricted-recognition", intent: { kind: "territory", mode: "modify", id, expectedRevision: 0, action: recognitionAction("restricted-claim"), reason: "Visible restricted claim" } }));
+    assert.equal((unwrap(await player.diplomacy.proposals.query({ id: "restricted-recognition" })) as any).lifecycle, "pending");
+  } finally { stranger.destroy(); player.destroy(); gm.destroy(); }
+});
+test("G6 recognition runtime: exact submit/approval ticket replay appends one declaration and reload keeps request and history", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player"); let id = "", submit: any, approve: any;
+  try { await gm.initialize(); id = await recognitionTerritory(gm); submit = unwrap(player.diplomacy.commands.prepare("diplomacy:submit-proposal", { id: "recognition-retry", intent: { kind: "territory", mode: "modify", id, expectedRevision: 0, action: recognitionAction(), reason: "One request" } }));
+    unwrap(await player.diplomacy.commands.execute(submit)); unwrap(await player.diplomacy.commands.retry(submit));
+    assert.equal((unwrap(await player.diplomacy.proposals.query()) as any).total, 1);
+    approve = unwrap(gm.diplomacy.commands.prepare("diplomacy:decide-proposal", { id: "recognition-retry", expectedRevision: 0, decision: "approve", reason: "One decision" }));
+    unwrap(await gm.diplomacy.commands.execute(approve)); unwrap(await gm.diplomacy.commands.retry(approve)); const t: any = unwrap(await gm.diplomacy.territory.query({ id })); assert.equal(t.recognitions.length, 1); assert.equal(t.events.length, 1); assert.equal(t.revision, 1);
+  } finally { player.destroy(); gm.destroy(); }
+  const reload = f.make(), original = f.make("player"); try { await reload.initialize(); const before = await f.adapter.loadAll(); unwrap(await original.diplomacy.commands.retry(submit)); unwrap(await reload.diplomacy.commands.retry(approve));
+    assert.equal((unwrap(await reload.diplomacy.territory.query({ id })) as any).recognitions.length, 1); const p: any = unwrap(await original.diplomacy.proposals.query({ id: "recognition-retry" })); assert.equal(p.original.action.value.position, "positive"); assert.equal(p.lifecycle, "approved"); assert.deepEqual(await f.adapter.loadAll(), before);
+  } finally { original.destroy(); reload.destroy(); }
+});
+test("G6 recognition runtime: unavailable fenced target disables approval but rejection touches only proposal owner", async () => {
+  const { lockKey } = await import("../../src/mutations/lock-keys.js"); const f = fixture(), gm = f.make(), player = f.make("player");
+  try { await gm.initialize(); const id = await recognitionTerritory(gm);
+    unwrap(await player.diplomacy.proposals.submit({ id: "recognition-reject-fence", intent: { kind: "territory", mode: "modify", id, expectedRevision: 0, action: recognitionAction(), reason: "Request" } }));
+    const before: any = unwrap(await gm.diplomacy.territory.query({ id })); gm.recovery.fenceRegistry.installFence({ transactionId: "recognition-block", lockKeys: [lockKey.diplomacy("territory", id), lockKey.territoryGraph()], reason: "Needs recovery" });
+    const ui = new DiplomacyApplicationController(gm.diplomacy); ui.selectTab("proposals"); ui.select("recognition-reject-fence"); unwrap(await ui.load()); assert.equal(ui.recognitionReviewTarget, null); assert.ok(ui.render().includes('disabled>Aprovar reconhecimento')); assert.ok(ui.render().includes('value="reject" formnovalidate'));
+    assert.equal((await ui.review("approve", "Unavailable", { ...recognitionUiFields(), recognitionReview: "on" })).ok, false);
+    unwrap(await ui.review("reject", "Rejected without changing target", { recognitionReview: "on", recognitionPosition: "bad" }));
+    const p: any = unwrap(await gm.diplomacy.proposals.query({ id: "recognition-reject-fence" })); assert.equal(p.lifecycle, "rejected"); assert.equal(p.decision.approvedIntent, null);
+    gm.recovery.fenceRegistry.removeFence("recognition-block"); assert.deepEqual(unwrap(await gm.diplomacy.territory.query({ id })), before);
+  } finally { player.destroy(); gm.destroy(); }
+});

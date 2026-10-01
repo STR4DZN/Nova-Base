@@ -2,7 +2,7 @@ import type { PublicDiplomacyApi, PublicDiplomacyOwnerApi } from "../../../diplo
 import { createDiplomacyDraft } from "../../../diplomacy/diplomacy-drafts.js";
 import type { OwnerIntent } from "../../../diplomacy/owner-commands.js";
 import type { RelationPartyRef } from "../../../relations/types/relation-types.js";
-import { failure } from "../../../core/validation/value-validation.js";
+import { failure, isTimestamp, isText } from "../../../core/validation/value-validation.js";
 import { ok, type Result } from "../../../core/contracts/result.js";
 import { defaultReputationTrackFields, reputationTrackDefinitionFields, parseReputationTrackFields,
   renderReputationTrackFields } from "./reputation-track-form.js";
@@ -21,6 +21,7 @@ import type { ReputationHistoryFilter } from "../../../reputation/reputation-his
 import { parseReputationHistoryFields, reputationHistoryFields, renderReputationHistory } from "./reputation-history-view.js";
 import { validateDiplomacyOverviewQuery, type DiplomacyOverviewFilter } from "../../../diplomacy/diplomacy-overview.js";
 import { renderDiplomacyOverview } from "./diplomacy-overview-view.js";
+import { parseRecognitionFields, recognitionFields, renderRecognitionFields, renderRecognitionRequest, renderTerritoryRecognitions } from "./territory-recognition-form.js";
 export type DiplomacyTab = "overview" | "relations" | "reputation" | "agreements" | "territory" | "disputes" | "proposals";
 const labels: Record<DiplomacyTab, string> = { overview: "Painel geral", relations: "Relações", reputation: "Reputação", agreements: "Acordos", territory: "Território", disputes: "Disputas", proposals: "Propostas" };
 const kinds: Record<Exclude<DiplomacyTab, "proposals" | "overview">, OwnerIntent["kind"]> = { relations: "relation", reputation: "reputation", agreements: "agreement", territory: "territory", disputes: "dispute" };
@@ -45,6 +46,8 @@ export class DiplomacyApplicationController {
   reputationConfigurationFields: Record<string, string> = {};
   reputationHistoryFilter: ReputationHistoryFilter = {}; reputationHistoryFormFields: Record<string, string> = {};
   reputationSourceOffset = 0;
+  territoryRecognitionFields: Record<string, string> = {}; recognitionReviewFields: Record<string, string> = {};
+  recognitionReviewTarget: any = null; #recognitionDraftId: string | null = null;
   agreementFormFields: Record<string, string> = {};
   agreementLifecycle: AgreementLifecycleFilter | "" = "";
   agreementTermEditor: { kind: AgreementTermEditorKind; agreementId: string; revision: number; proposalId: string | null;
@@ -55,7 +58,7 @@ export class DiplomacyApplicationController {
   #previewInput: string | null = null; #previewIntent: OwnerIntent | null = null;
   treeAxis: "locatedInUuid" | "administrativeParentUuid" | null = null; treeParent: string | null = null;
   constructor(readonly api: PublicDiplomacyApi) {}
-  selectTab(tab: DiplomacyTab): void { this.tab = tab; this.list = null; this.overviewFilter = "all"; this.expiryHorizonTicks = 10; this.recentHours = 24; this.offset = 0; this.selectedId = null; this.detail = null; this.historyOffset = 0; this.creating = false; this.preview = null; this.reputationTrackCount = 1; this.reputationFormFields = {}; this.reputationConfigurationFields = {}; this.resetReputationHistory(); this.agreementLifecycle = ""; this.agreementFormFields = {}; this.cancelAgreementTermEditor(); }
+  selectTab(tab: DiplomacyTab): void { this.resetRecognitionDraft(); this.recognitionReviewFields = {}; this.recognitionReviewTarget = null; this.tab = tab; this.list = null; this.overviewFilter = "all"; this.expiryHorizonTicks = 10; this.recentHours = 24; this.offset = 0; this.selectedId = null; this.detail = null; this.historyOffset = 0; this.creating = false; this.preview = null; this.reputationTrackCount = 1; this.reputationFormFields = {}; this.reputationConfigurationFields = {}; this.resetReputationHistory(); this.agreementLifecycle = ""; this.agreementFormFields = {}; this.cancelAgreementTermEditor(); }
   private resetReputationHistory(): void {
     this.reputationHistoryFilter = {}; this.reputationHistoryFormFields = {}; this.reputationSourceOffset = 0;
   }
@@ -88,7 +91,7 @@ export class DiplomacyApplicationController {
     this.search = value; this.offset = 0;
     if (this.tab === "agreements") this.resetAgreementSelection();
   }
-  select(id: string): void { if (this.selectedId !== id) { this.reputationConfigurationFields = {}; this.resetReputationHistory(); this.agreementFormFields = {}; this.cancelAgreementTermEditor(); } this.selectedId = id; this.historyOffset = 0; this.creating = false; this.preview = null; }
+  select(id: string): void { if (this.selectedId !== id) { this.resetRecognitionDraft(); this.recognitionReviewFields = {}; this.recognitionReviewTarget = null; this.reputationConfigurationFields = {}; this.resetReputationHistory(); this.agreementFormFields = {}; this.cancelAgreementTermEditor(); } this.selectedId = id; this.historyOffset = 0; this.creating = false; this.preview = null; }
   applyOverviewFilter(filter: unknown, expiryHorizonTicks = this.expiryHorizonTicks, recentHours = this.recentHours): Result<unknown> {
     if (this.tab !== "overview") return this.capture(failure("DM_DIPLOMACY_OVERVIEW_QUERY_INVALID", "Abra o painel geral."));
     const valid = validateDiplomacyOverviewQuery({ filter, expiryHorizonTicks, recentHours }); if (!valid.ok) return this.capture(valid);
@@ -101,7 +104,14 @@ export class DiplomacyApplicationController {
       return this.capture(failure("DM_DIPLOMACY_QUERY_INVALID", "Selecione um destaque visível."));
     this.selectTab(tab as DiplomacyTab); this.search = ""; this.treeAxis = null; this.treeParent = null; this.select(id); return this.capture(ok({}));
   }
+  resetRecognitionDraft(): void { this.territoryRecognitionFields = {}; this.#recognitionDraftId = null; }
+  async submitRecognition(fields: Record<string, string>): Promise<Result<unknown>> {
+    if (this.tab !== "territory" || !this.detail || this.selectedId !== this.detail.id)
+      return this.capture(failure("DM_DIPLOMACY_INTENT_INVALID", "Selecione um território disponível."));
+    return this.change({ ...fields, kind: "recognition" });
+  }
   async load(): Promise<Result<unknown>> {
+    this.recognitionReviewTarget = null;
     if (this.tab === "overview") {
       const result = await this.api.overview.query({ offset: this.offset, limit: 30, search: this.search, filter: this.overviewFilter,
         expiryHorizonTicks: this.expiryHorizonTicks, recentHours: this.recentHours });
@@ -110,11 +120,18 @@ export class DiplomacyApplicationController {
     const queried = await this.api[this.tab].query({ offset: this.offset, limit: 30, search: this.search,
       ...(this.tab === "agreements" && this.agreementLifecycle ? { agreementLifecycle: this.agreementLifecycle } : {}),
       ...(this.tab === "territory" && this.treeAxis ? { treeAxis: this.treeAxis, parentUuid: this.treeParent } : {}) });
-    if (!queried.ok) { this.error = queried.error.message; if (this.tab === "agreements" || this.tab === "reputation") { this.list = null; this.detail = null; } return queried; } this.list = queried.value;
+    if (!queried.ok) { this.error = queried.error.message; if (this.tab === "agreements" || this.tab === "reputation" || this.tab === "territory" || this.tab === "proposals") { this.list = null; this.detail = null; } return queried; } this.list = queried.value;
     if (this.selectedId) { const detail = await this.api[this.tab].query({ id: this.selectedId, historyOffset: this.historyOffset, historyLimit: 30,
       ...(this.tab === "reputation" && this.list?.isGm ? { ...(Object.keys(this.reputationHistoryFilter).length ? { reputationHistory: this.reputationHistoryFilter } : {}),
         reputationSourceOffset: this.reputationSourceOffset, reputationSourceLimit: 30 } : {}) });
-      if (!detail.ok) { this.error = detail.error.message; this.detail = null; return detail; } this.detail = detail.value; }
+      if (!detail.ok) { this.error = detail.error.message; this.detail = null; return detail; } this.detail = detail.value;
+      if (this.tab === "proposals" && this.list?.isGm && this.detail.lifecycle === "pending" && this.detail.original.kind === "territory"
+        && this.detail.original.mode === "modify" && this.detail.original.action?.kind === "recognition") {
+        const target = await this.api.territory.query({ id: this.detail.original.id, historyLimit: 0 });
+        if (target.ok) this.recognitionReviewTarget = target.value;
+        else this.error = "O território está indisponível para revisão. É possível rejeitar ou atualizar a consulta.";
+      }
+    }
     return ok(this.list);
   }
   async create(fields: Record<string, string>): Promise<Result<unknown>> {
@@ -291,6 +308,14 @@ export class DiplomacyApplicationController {
       return ok({ kind });
     }
     if (this.tab === "disputes") return ok({ kind, lifecycle: f.lifecycle, outcomeRef: f.outcome ? { type: "manual-outcome", id: f.outcome } : null });
+    if (kind === "recognition") {
+      const revision = f.recognitionRevision === undefined ? d.revision : f.recognitionRevision.trim() ? Number(f.recognitionRevision) : NaN;
+      if (!isTimestamp(revision) || revision !== d.revision)
+        return failure("DM_REVISION_CONFLICT", "O território mudou. O rascunho foi preservado; use a revisão atual antes de enviar.", "conflict");
+      if (!isText(f.reason?.trim())) return failure("DM_TERRITORY_RECOGNITION_REASON_INVALID", "Informe um motivo auditável.");
+      return parseRecognitionFields(f, d.claims ?? [], d.worldTick ?? this.list?.worldTick, this.#recognitionDraftId ??= crypto.randomUUID(),
+        { type: "manual", id: "diplomacy-recognition-form" });
+    }
     const source = { id: crypto.randomUUID(), sourceRef: { type: "manual", id: "gm-review" }, visibility: f.visibility,
       startsAtWorldTick: f.starts ? Number(f.starts) : this.list?.worldTick ?? 0, expiresAtWorldTick: f.expires ? Number(f.expires) : null };
     if (kind === "claim") return ok({ kind, value: { ...source, claimantRef: party(f.beneficiary), claimType: f.claimType, lifecycle: "active", contested: false, strength: null, inherited: false } });
@@ -366,6 +391,7 @@ export class DiplomacyApplicationController {
     this.#agreementTermPreviewInput = JSON.stringify(fields); return this.capture(ok(undefined));
   }
   async change(fields: Record<string, string>, previewOnly = false): Promise<Result<unknown>> {
+    if (this.tab === "territory" && fields.kind === "recognition") this.territoryRecognitionFields = { ...fields };
     if (this.tab === "agreements") {
       if (fields.termEditor === "on" && this.agreementTermEditor) this.agreementTermEditor.fields = { ...fields };
       else this.agreementFormFields = { ...fields };
@@ -374,7 +400,7 @@ export class DiplomacyApplicationController {
     if (this.tab === "agreements" && fields.termEditor === "on" && this.#agreementTermPreviewInput !== JSON.stringify(fields))
       return this.capture(failure("DM_AGREEMENT_TERM_PREVIEW_REQUIRED", "Confira as alterações dos termos antes de enviar."));
     let intent: OwnerIntent = { kind: kinds[this.tab as Exclude<DiplomacyTab, "proposals" | "overview">], mode: "modify", id: this.detail.id,
-      expectedRevision: fields.termEditor === "on" ? this.agreementTermEditor!.revision : this.detail.revision, action: built.value, reason: fields.reason };
+      expectedRevision: fields.termEditor === "on" ? this.agreementTermEditor!.revision : this.detail.revision, action: built.value, reason: fields.kind === "recognition" ? fields.reason.trim() : fields.reason };
     if (previewOnly) { const result = await this.api.previewTerritory(intent as any); this.capture(result);
       if (result.ok) { this.preview = result.value; this.#previewInput = JSON.stringify(fields); this.#previewIntent = intent; } else this.preview = null; return result; }
     if (this.tab === "territory" && ["transfer", "reparent"].includes(fields.kind) && this.list?.isGm
@@ -383,12 +409,26 @@ export class DiplomacyApplicationController {
     if (this.preview && this.#previewIntent && this.#previewInput === JSON.stringify(fields)) intent = this.#previewIntent;
     const result = this.list?.isGm ? await (this.api[this.tab] as PublicDiplomacyOwnerApi).modify(intent as any)
       : await this.api.proposals.submit({ id: crypto.randomUUID(), intent });
-    this.capture(result); if (result.ok) { this.preview = null; if (this.tab === "agreements") { this.agreementFormFields = {}; if (fields.termEditor === "on") this.cancelAgreementTermEditor(); } } return result;
+    this.capture(result); if (result.ok) { this.preview = null; if (this.tab === "territory" && fields.kind === "recognition") this.resetRecognitionDraft(); if (this.tab === "agreements") { this.agreementFormFields = {}; if (fields.termEditor === "on") this.cancelAgreementTermEditor(); } } return result;
   }
   async review(decision: "approve" | "reject", reason: string, fields: Record<string, string> = {}): Promise<Result<unknown>> {
     let editedIntent: OwnerIntent | undefined;
+    if (fields.recognitionReview === "on") {
+      this.recognitionReviewFields = { ...fields };
+      reason = reason.trim();
+      if (!isText(reason)) return this.capture(failure("DM_TERRITORY_RECOGNITION_REASON_INVALID", "Informe o motivo da decisão."));
+      if (decision === "approve") {
+        if (!this.list?.isGm || this.tab !== "proposals" || this.detail?.original.kind !== "territory"
+          || this.detail?.original.mode !== "modify" || this.detail?.original.action?.kind !== "recognition" || !this.recognitionReviewTarget)
+          return this.capture(failure("DM_TERRITORY_RECOGNITION_UNAVAILABLE", "Atualize o território antes de aprovar.", "not-found"));
+        const original = this.detail.original.action.value;
+        const parsed = parseRecognitionFields(fields, this.recognitionReviewTarget.claims, this.recognitionReviewTarget.worldTick, original.id, original.sourceRef);
+        if (!parsed.ok) return this.capture(parsed);
+        editedIntent = { ...structuredClone(this.detail.original), action: parsed.value };
+      }
+    }
     if (decision === "approve" && (fields.amount || fields.targetRevision)) {
-      editedIntent = structuredClone(this.detail.original);
+      editedIntent ??= structuredClone(this.detail.original);
       const action = editedIntent!.action as any;
       if (fields.amount) {
         const delta = Number(fields.amount); if (!Number.isSafeInteger(delta)) return this.capture(failure("DM_DIPLOMACY_INTENT_INVALID", "A alteração deve ser inteira."));
@@ -396,9 +436,13 @@ export class DiplomacyApplicationController {
         else if (action?.kind === "adjust") action.delta = delta;
         else return this.capture(failure("DM_DIPLOMACY_INTENT_INVALID", "Este pedido exige revisão pela API semântica."));
       }
-      if (fields.targetRevision) editedIntent = { ...editedIntent!, expectedRevision: Number(fields.targetRevision) };
+      if (fields.targetRevision) {
+        const revision = Number(fields.targetRevision);
+        if (!isTimestamp(revision)) return this.capture(failure("DM_REVISION_CONFLICT", "Informe uma revisão inteira não negativa.", "conflict"));
+        editedIntent = { ...editedIntent!, expectedRevision: revision };
+      }
     }
-    const result = await this.api.proposals.decide({ id: this.detail.id, expectedRevision: this.detail.revision, decision, reason, ...(editedIntent ? { editedIntent } : {}) }); this.capture(result); return result;
+    const result = await this.api.proposals.decide({ id: this.detail.id, expectedRevision: this.detail.revision, decision, reason, ...(editedIntent ? { editedIntent } : {}) }); this.capture(result); if (result.ok) this.recognitionReviewFields = {}; return result;
   }
   capture<T>(result: Result<T>): Result<T> { this.error = result.ok ? "" : result.error.message; return result; }
   render(): string {
@@ -468,6 +512,7 @@ export class DiplomacyApplicationController {
       <p>Localização: ${escapeHtml(d.territory.locatedInUuid ?? "raiz")} · hierarquia administrativa: ${escapeHtml(d.territory.administrativeParentUuid ?? "raiz")}</p>`;
       if (this.treeAxis) blocks += `<button type="button" data-dm-children="${escapeAttribute(d.id)}">Abrir filhos neste ramo</button>`;
       for (const [key, name] of [["claims", "Reivindicações"], ["presence", "Presença"], ["rights", "Direitos"], ["occupations", "Ocupações"]]) blocks += table(name, d[key] ?? [], [...columns, ["Estado", x => x.lifecycle ?? (x.active ? "active" : "inactive")]]);
+      blocks += renderTerritoryRecognitions(d, d.worldTick ?? this.list?.worldTick, Boolean(this.list?.isGm), this.territoryRecognitionFields);
       blocks += table("Influência efetiva", d.effectiveInfluence ?? [], [["Parte", x => refLabel(x.partyRef)], ["Eixo", x => x.axisId], ["Valor", x => x.value]]);
       blocks += table("Ligações", d.links ?? [], [["Destino", x => x.targetTerritoryUuid], ["Direção", x => x.direction], ["Estado", x => x.status]]);
     }
@@ -477,8 +522,21 @@ export class DiplomacyApplicationController {
       const a = d.original.action;
       if (a) blocks += `<p>Ação solicitada: ${escapeHtml(a.kind)} · revisão esperada: ${d.original.expectedRevision}</p>`
         + table("Alteração solicitada", a.deltas ?? (a.delta !== undefined ? [{ axisId: a.trackId, value: a.delta }] : []), [["Eixo", x => x.axisId], ["Alteração", x => x.value]]);
+      if (a?.kind === "recognition" && a.value) blocks += renderRecognitionRequest(a.value);
+      if ((d.decision?.approvedIntent?.action as any)?.kind === "recognition" && (d.decision.approvedIntent.action as any).value)
+        blocks += renderRecognitionRequest((d.decision.approvedIntent.action as any).value, "Reconhecimento aprovado");
+      else if (a?.kind === "recognition" && d.lifecycle === "approved" && !d.decision?.approvedIntent)
+        blocks += "<p>O conteúdo revisado não está disponível nesta visão.</p>";
       if (d.decision?.approvedIntent) blocks += `<p>Ação aprovada: ${escapeHtml((d.decision.approvedIntent.action as any)?.kind ?? "create")} · revisão esperada: ${d.decision.approvedIntent.expectedRevision ?? "nova"}</p>`;
-      if (this.list?.isGm && d.lifecycle === "pending") blocks += '<form data-dm-form="review"><label>Alteração revisada (incidente de um eixo ou ajuste de reputação; opcional)<input name="amount" type="number" step="1"></label><label>Revisão atual do alvo (se estiver aceitando uma mudança após outra edição; opcional)<input name="targetRevision" type="number" min="0" step="1"></label><label>Motivo<input name="reason" required></label><button name="decision" value="approve">Aprovar</button><button name="decision" value="reject">Rejeitar</button></form>';
+      if (this.list?.isGm && d.lifecycle === "pending" && d.original.kind === "territory" && a?.kind === "recognition") {
+        const f = { ...recognitionFields(a.value), ...this.recognitionReviewFields };
+        blocks += `<h3>Revisar reconhecimento</h3><p>A revisão preserva o pedido original. Revisão solicitada: ${d.original.expectedRevision}; atual: ${this.recognitionReviewTarget?.revision ?? "indisponível"}.</p>
+          <form data-dm-form="review"><input type="hidden" name="recognitionReview" value="on">
+          ${this.recognitionReviewTarget ? renderRecognitionFields(this.recognitionReviewTarget.claims, f) : "<p>Território indisponível para aprovação. Atualize ou rejeite o pedido.</p>"}
+          <label>Revisão atual do alvo (opcional; aceitar após conferir outra edição)<input name="targetRevision" type="number" min="0" step="1" value="${escapeAttribute(f.targetRevision ?? "")}"></label>
+          <label>Motivo da decisão<input name="reason" required value="${escapeAttribute(f.reason ?? "")}"></label>
+          <button name="decision" value="approve" ${this.recognitionReviewTarget ? "" : "disabled"}>Aprovar reconhecimento</button><button name="decision" value="reject" formnovalidate>Rejeitar</button></form>`;
+      } else if (this.list?.isGm && d.lifecycle === "pending") blocks += '<form data-dm-form="review"><label>Alteração revisada (incidente de um eixo ou ajuste de reputação; opcional)<input name="amount" type="number" step="1"></label><label>Revisão atual do alvo (se estiver aceitando uma mudança após outra edição; opcional)<input name="targetRevision" type="number" min="0" step="1"></label><label>Motivo<input name="reason" required></label><button name="decision" value="approve">Aprovar</button><button name="decision" value="reject">Rejeitar</button></form>';
       return blocks;
     }
     const history = d.history ?? d.entries ?? d.events ?? [];
@@ -593,6 +651,7 @@ export class DiplomacyApplication extends BaseApp {
       else if (button.dataset.dmReputationSourceTrack !== undefined) this.controller.filterReputationSource(button.dataset.dmReputationSourceTrack,
         button.dataset.dmReputationSourceType!, button.dataset.dmReputationSourceKind!, button.dataset.dmReputationSourceRef!);
       else if (button.dataset.dmReputationSourcePage) this.controller.reputationSourceOffset = Math.max(0, this.controller.reputationSourceOffset + Number(button.dataset.dmReputationSourcePage) * 30);
+      else if (button.dataset.dmRecognitionReset) this.controller.resetRecognitionDraft();
       else if (button.dataset.dmTermOpen) this.controller.openAgreementTermEditor(button.dataset.dmTermOpen as AgreementTermEditorKind, button.dataset.dmTermSource);
       else if (button.dataset.dmTermAdd) this.controller.addAgreementTerm(fields(button.closest("form")!));
       else if (button.dataset.dmTermRemove !== undefined) this.controller.removeAgreementTerm(Number(button.dataset.dmTermRemove), fields(button.closest("form")!));
@@ -620,6 +679,7 @@ export class DiplomacyApplication extends BaseApp {
       else if (form.dataset.dmForm === "overview-filter") this.controller.applyOverviewFilter(data.filter, data.expiryHorizonTicks?.trim() ? Number(data.expiryHorizonTicks) : NaN, data.recentHours?.trim() ? Number(data.recentHours) : NaN);
       else if (form.dataset.dmForm === "agreement-state") this.controller.selectAgreementLifecycle(data.agreementLifecycle);
       else if (form.dataset.dmForm === "create") await this.controller.create(data);
+      else if (form.dataset.dmForm === "territory-recognition") await this.controller.submitRecognition(data);
       else if (form.dataset.dmForm === "reputation-add-track") await this.controller.configureReputationTrack(data, false);
       else if (form.dataset.dmForm === "reputation-configure") await this.controller.configureReputationTrack(data, true);
       else if (form.dataset.dmForm === "reputation-history") this.controller.applyReputationHistory(data);

@@ -13,7 +13,7 @@ export const territoryOwner: DiplomacyOwner = {
   project(data, c) {
     const s = data as TerritoryState, projected = projectTerritoryState(s, c.canSee);
     if (!projected) return failure("DM_DIPLOMACY_NOT_FOUND", "Entity unavailable", "not-found");
-    return ok({ id: s.territory.uuid, label: s.territory.label, revision: s.territory.revision,
+    return ok({ id: s.territory.uuid, label: s.territory.label, revision: s.territory.revision, worldTick: c.worldTick,
       ...projected, events: historyWindow(projected.events, c), territory: { ...projected.territory, hierarchyHistory: historyWindow(projected.territory.hierarchyHistory, c) },
       effectiveInfluence: resolveTerritoryInfluence(projected, c.worldTick, c.canSee) });
   }
