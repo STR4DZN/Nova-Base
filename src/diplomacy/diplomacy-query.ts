@@ -1,3 +1,4 @@
+import { queryVisibleTerritoryClaims } from "./territory-claims-query.js";
 import { ok, type Result } from "../core/contracts/result.js";
 import { failure, isRecord, isTimestamp } from "../core/validation/value-validation.js";
 import type { AuthenticatedCommandContext } from "../commands/authenticated-command-context.js";
@@ -19,6 +20,7 @@ export interface DiplomacyQuery {
   readonly id?: string; readonly offset?: number; readonly limit?: number; readonly search?: string;
   readonly historyOffset?: number; readonly historyLimit?: number;
   readonly parentUuid?: string | null; readonly treeAxis?: "locatedInUuid" | "administrativeParentUuid";
+  readonly claimInheritanceAxis?: "locatedInUuid" | "administrativeParentUuid";
   readonly agreementLifecycle?: AgreementLifecycleFilter;
   readonly reputationHistory?: ReputationHistoryFilter;
   readonly reputationSourceOffset?: number; readonly reputationSourceLimit?: number;
@@ -33,6 +35,8 @@ export function validateDiplomacyQuery(raw: unknown, kind?: DiplomacyKind): Resu
     || (raw.treeAxis !== undefined && !["locatedInUuid", "administrativeParentUuid"].includes(raw.treeAxis as string))
     || (raw.agreementLifecycle !== undefined && (kind !== "agreement" || raw.id !== undefined || !isAgreementLifecycleFilter(raw.agreementLifecycle))))
     return failure("DM_DIPLOMACY_QUERY_INVALID", "Invalid query pagination or agreement state filter");
+  if (raw.claimInheritanceAxis !== undefined && (kind !== "territory" || raw.id === undefined || !["locatedInUuid", "administrativeParentUuid"].includes(raw.claimInheritanceAxis as string)))
+    return failure("DM_DIPLOMACY_QUERY_INVALID", "Claim inheritance axis requires a territory detail query");
   if (["reputationHistory", "reputationSourceOffset", "reputationSourceLimit"].some(k => raw[k] !== undefined)) {
     if (kind !== "reputation" || raw.id === undefined
       || raw.reputationSourceOffset !== undefined && !isTimestamp(raw.reputationSourceOffset)
@@ -46,7 +50,7 @@ export async function queryDiplomacyOwner(ctx: AuthenticatedCommandContext<Diplo
   store: DiplomacyEntityStore, domains: DomainReadRepository, controllers: DomainControllerProvider, recovery: RecoveryService,
   worldTick: number): Promise<Result<unknown>> {
   const isGm = diplomacyViewerIsGm(ctx), p = ctx.command.payload;
-  const rows = p.id ? [store.get(kind, p.id)].filter(x => x !== null) : kind === "territory" && Object.hasOwn(p, "parentUuid")
+  const rows = p.id ? [kind === "territory" ? await store.freshRead(kind, p.id) : store.get(kind, p.id)].filter(x => x !== null) : kind === "territory" && Object.hasOwn(p, "parentUuid")
     ? store.children(p.parentUuid ?? null, p.treeAxis ?? "locatedInUuid") : store.list(kind), visible: unknown[] = [];
   const offset = p.offset ?? 0, limit = p.limit ?? 30; let count = 0;
   const agreementStates: AgreementLifecycle[] = [];
@@ -61,6 +65,11 @@ export async function queryDiplomacyOwner(ctx: AuthenticatedCommandContext<Diplo
   if (p.parentUuid && !isGm && !await territoryVisible(p.parentUuid)) return failure("DM_DIPLOMACY_NOT_FOUND", "Tree branch unavailable", "not-found");
   for (const row of rows) {
     if (!row) continue;
+    if (kind === "territory" && p.id) {
+      const valid = validateTerritoryState(row.data);
+      if (!valid.ok || valid.value.territory.uuid !== row.id || valid.value.territory.revision !== row.revision)
+        return failure("DM_DIPLOMACY_NOT_FOUND", "Entity unavailable", "not-found");
+    }
     const identity = owner.identity(row.data), controlled = identity.visibility === "restricted" || p.id
       ? await diplomacyViewerControls(ctx, owner.parties(row.data), domains, controllers) : false;
     const canSee = (v: string) => isGm || v === "public" || v === "restricted" && controlled;
@@ -81,6 +90,13 @@ export async function queryDiplomacyOwner(ctx: AuthenticatedCommandContext<Diplo
         ...(kind === "reputation" ? { reputationHistory: p.reputationHistory, reputationSourceOffset: p.reputationSourceOffset, reputationSourceLimit: p.reputationSourceLimit } : {}) });
       if (!detail.ok) return detail;
       let projected: any = detail.value;
+      if (kind === "territory") {
+        const axis = p.claimInheritanceAxis ?? "locatedInUuid";
+        const claims = await queryVisibleTerritoryClaims(row.data as import("../territory/territory-state.js").TerritoryState, axis, worldTick,
+          ctx, store, domains, controllers, recovery);
+        if (!claims.ok) return claims;
+        projected = { ...projected, claimInheritanceAxis: axis, effectiveClaims: claims.value };
+      }
       if (!isGm && kind === "territory") {
         const t = projected.territory, links = [];
         for (const l of projected.links) if (await territoryVisible(l.targetTerritoryUuid)) links.push(l);

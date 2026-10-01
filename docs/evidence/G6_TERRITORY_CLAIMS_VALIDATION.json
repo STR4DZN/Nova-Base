@@ -1,0 +1,32 @@
+{
+  "date": "2026-10-01",
+  "part": "G6 inherited territory claims inspector",
+  "branch": "feat/g6-continuous",
+  "local": {
+    "node": "24.19.0",
+    "specific": 8,
+    "runtime": 123,
+    "full": 1175,
+    "new_tests": 20,
+    "fail": 0,
+    "skipped": 0,
+    "typecheck": "PASS",
+    "build": "PASS",
+    "package": "PASS",
+    "validate_release": "PASS",
+    "zip_sha256": "f958d3b92262daa4e23c2d7e80af6dc9f298c11188c423db4c9d757bcc0367b4"
+  },
+  "ci": {
+    "conclusion": "pending"
+  },
+  "foundry_real": "deferred until G6 complete",
+  "release_published": false,
+  "g7_started": false,
+  "next_step": "Preview impacts on inherited claims when changing territory hierarchy",
+  "limitations": [
+    "Available visible ancestry only; inaccessible origins stop traversal",
+    "Visible cycles contribute local claims only; diagnostics deferred",
+    "No copying inherited claims into local mutation references",
+    "No inherited hierarchy impact preview in this part"
+  ]
+}

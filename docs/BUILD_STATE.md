@@ -658,7 +658,7 @@ Candidata v0.0.8: 13 defeitos reproduzidos/corrigidos; 878/878 testes locais PAS
 
 ## Próxima ação canônica
 
-- **Gate G6 — Relations / Reputation / Agreements / Territory: ocupação territorial implementada nesta parte**, após a aceitação do Gate G5. **1155/1155 testes PASS**, específicos 16/16 e verticais 111/111; TypeScript/build/package/validate:release PASS localmente. GitHub Actions PASS: commit `7746af52868005dcaf54ca791c3e12eaaddc8d2e`, workflow `36899199164`; 12 workflows aprovados. Relatório `docs/G6_TERRITORY_OCCUPATION_REPORT.md`. **PARAR AQUI**. Próxima parte: exibir reivindicações territoriais herdadas no inspector, com origem e distinção das locais; aguardar autorização. Foundry real somente após concluir o bloco G6. Gate G6 parcial; não iniciar G7.
+- **Gate G6 — Relations / Reputation / Agreements / Territory: reivindicações herdadas no inspector implementadas nesta parte**, após a aceitação do Gate G5. **1175/1175 testes PASS**, específicos 8/8 e verticais 123/123; TypeScript/build/package/validate:release PASS localmente. CI pendente. Relatório `docs/G6_TERRITORY_CLAIMS_REPORT.md`. **PARAR AQUI**. Próxima parte: prévia dos impactos sobre reivindicações herdadas ao alterar a hierarquia territorial; aguardar autorização. Foundry real somente após concluir o bloco G6. Gate G6 parcial; não iniciar G7.
 
 ## G6.4–G6.5 — Acordos e obrigações — 2026-09-29
 

@@ -13,6 +13,25 @@ import { DiplomacyApplicationController } from "../../src/ui/domain-patterns/dip
 import { InMemoryLedgerStorageAdapter } from "../../src/economy/storage/ledger-storage-adapter.js";
 const unwrap = <T>(r: Result<T>): T => { if (!r.ok) assert.fail(JSON.stringify(r.error)); return r.value; };
 const domainUuid = "JournalEntry.domainG6";
+const inheritedClaim = (id: string, patch = {}) => ({ id, sourceRef: { type: "manual", id: "gm" }, visibility: "public",
+  startsAtWorldTick: 0, expiresAtWorldTick: null, claimantRef: { type: "narrative", id: "guild" }, claimType: "domain-manager:ownership",
+  lifecycle: "active", contested: false, strength: null, inherited: true, ...patch });
+async function claimsTerritories(r: ReturnType<typeof composeDomainManagerRuntime>) {
+  const add = async (label: string, claims: any[], patch = {}, visibility = "public") => {
+    const d = createDiplomacyDraft("territory", label, [], visibility as any), data: any = d.data;
+    data.claims = claims; Object.assign(data.territory, patch); unwrap(await r.diplomacy.territory.create({ ...d, reason: "Create claims source" })); return d.id;
+  };
+  const root = await add("Root origin", [inheritedClaim("root", { claimType: "domain-manager:control" })]);
+  const physical = await add("Physical origin", [inheritedClaim("same", { contested: true }), inheritedClaim("no-propagation", { inherited: false }),
+    inheritedClaim("expired", { expiresAtWorldTick: 10 }), inheritedClaim("future", { startsAtWorldTick: 11 }),
+    inheritedClaim("ended", { lifecycle: "ended" }), inheritedClaim("private-claim-marker", { visibility: "restricted" }),
+    inheritedClaim("secret-claim-marker", { visibility: "secret" })], { locatedInUuid: root });
+  const administrative = await add("Administrative origin", [inheritedClaim("admin")]);
+  const child = await add("Child", [inheritedClaim("same", { inherited: false, claimantRef: { type: "domain", uuid: domainUuid } }),
+    inheritedClaim("local-private", { visibility: "restricted", inherited: false, claimantRef: { type: "domain", uuid: domainUuid } })],
+    { locatedInUuid: physical, administrativeParentUuid: administrative });
+  return { root, physical, administrative, child, add };
+}
 function fixture(adapter = new InMemoryDiplomacyStorageAdapter(), transactions = new InMemoryTransactionStorageAdapter()) {
   const record = { schemaVersion: 1, revision: 0, definition: { identity: { aliases: [], summary: "Test", description: "Test" },
     classification: { kind: "base", scale: "small", tags: [] }, hierarchy: { parentDomainUuid: null },
@@ -1560,4 +1579,123 @@ test('G6 occupation runtime: approved dependency turns private and end proposal 
  const f=fixture(),gm=f.make(),player=f.make('player');try{await gm.initialize();const id=await occupationTerritory(gm);unwrap(await player.diplomacy.proposals.submit({id:'occupation-dependency-private',intent:{kind:'territory',mode:'modify',id,expectedRevision:0,reason:'Create',action:occupationAction({id:'depends'})}}));unwrap(await gm.diplomacy.proposals.decide({id:'occupation-dependency-private',expectedRevision:0,decision:'approve',reason:'Approved'}));const row:any=await f.adapter.read('territory',id);row.data.presence[0].visibility='secret';await f.adapter.write(row);const before=await f.adapter.loadAll();assert.equal((unwrap(await player.diplomacy.proposals.query({id:'occupation-dependency-private'})) as any).decision.approvedIntent,null);assert.equal((unwrap(await player.diplomacy.territory.query({id})) as any).occupations.length,0);
  for(const target of ['depends','missing'])assert.equal((await player.diplomacy.proposals.submit({id:crypto.randomUUID(),intent:{kind:'territory',mode:'modify',id,expectedRevision:1,reason:'End',action:{kind:'end-occupation',id:target}}})).ok,false);assert.deepEqual(await f.adapter.loadAll(),before);
  }finally{player.destroy();gm.destroy();}
+});
+test("G6 claims runtime: physical default preserves competing local and inherited claims with origin revisions", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player");
+  try { await gm.initialize(); const ids = await claimsTerritories(gm), before = await f.adapter.loadAll();
+    const d: any = unwrap(await player.publicApi.diplomacy.territory.query({ id: ids.child }));
+    assert.equal(d.claimInheritanceAxis, "locatedInUuid"); assert.deepEqual(d.effectiveClaims.map((r: any) => [r.sourceTerritoryUuid, r.claim.id, r.inherited]),
+      [[ids.child, "same", false], [ids.child, "local-private", false], [ids.physical, "same", true], [ids.root, "root", true]]);
+    assert.equal(d.effectiveClaims[2].sourceTerritoryLabel, "Physical origin"); assert.equal(d.effectiveClaims[2].sourceRevision, 0);
+    assert.equal(d.effectiveClaims[2].claim.contested, true); assert.equal(d.effectiveClaims[0].claim.inherited, false);
+    assert.equal(d.claims.length, 2); assert.equal(d.rights.length, 0); assert.equal(d.occupations.length, 0); assert.equal(d.effectiveClaims.some((r: any) => r.winner), false);
+    assert.deepEqual(await f.adapter.loadAll(), before);
+  } finally { player.destroy(); gm.destroy(); }
+});
+test("G6 claims runtime: administrative ancestry is independent and GM sees private claims only on selected path", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player");
+  try { await gm.initialize(); const ids = await claimsTerritories(gm);
+    const admin: any = unwrap(await player.diplomacy.territory.query({ id: ids.child, claimInheritanceAxis: "administrativeParentUuid" }));
+    assert.deepEqual(admin.effectiveClaims.map((r: any) => r.claim.id), ["same", "local-private", "admin"]);
+    const physical: any = unwrap(await gm.diplomacy.territory.query({ id: ids.child }));
+    assert.deepEqual(physical.effectiveClaims.map((r: any) => r.claim.id), ["same", "local-private", "same", "private-claim-marker", "secret-claim-marker", "root"]);
+    assert.equal((await player.diplomacy.territory.query({ id: ids.child, claimInheritanceAxis: "both" as any })).ok, false);
+    assert.equal((await player.diplomacy.territory.query({ claimInheritanceAxis: "locatedInUuid" })).ok, false);
+  } finally { player.destroy(); gm.destroy(); }
+});
+test("G6 claims runtime: ancestor audience is evaluated independently of child controller", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player"), stranger = f.make("stranger");
+  try { await gm.initialize(); const ids = await claimsTerritories(gm);
+    const p: any = unwrap(await player.diplomacy.territory.query({ id: ids.child })); assert.equal(JSON.stringify(p).includes("private-claim-marker"), false);
+    const s: any = unwrap(await stranger.diplomacy.territory.query({ id: ids.child })); assert.equal(JSON.stringify(s).includes("local-private"), false);
+    const row: any = await f.adapter.read("territory", ids.physical); row.data.claims[5].claimantRef = { type: "domain", uuid: domainUuid }; await f.adapter.write(row);
+    const owned: any = unwrap(await player.diplomacy.territory.query({ id: ids.child })); assert.ok(owned.effectiveClaims.some((r: any) => r.claim.id === "private-claim-marker"));
+    assert.equal(JSON.stringify(owned).includes("secret-claim-marker"), false); assert.equal(JSON.stringify(unwrap(await stranger.diplomacy.territory.query({ id: ids.child }))).includes("private-claim-marker"), false);
+  } finally { stranger.destroy(); player.destroy(); gm.destroy(); }
+});
+test("G6 claims runtime: hidden middle origin stops traversal even when grandparent is public", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player");
+  try { await gm.initialize(); const ids = await claimsTerritories(gm); const row: any = await f.adapter.read("territory", ids.physical);
+    row.data.territory.visibility = "secret"; row.data.territory.label = "secret-origin-marker"; await f.adapter.write(row);
+    const d: any = unwrap(await player.diplomacy.territory.query({ id: ids.child })); assert.equal(d.effectiveClaims.length, 2); assert.equal(d.territory.locatedInUuid, null);
+    for (const marker of [ids.physical, ids.root, "secret-origin-marker", "root", "private-claim-marker"]) assert.equal(JSON.stringify(d).includes(marker), false);
+    assert.ok((unwrap(await gm.diplomacy.territory.query({ id: ids.child })) as any).effectiveClaims.some((r: any) => r.sourceTerritoryUuid === ids.root));
+  } finally { player.destroy(); gm.destroy(); }
+});
+test("G6 claims runtime: changed persistent visibility and labels override the cached ancestor", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player");
+  try { await gm.initialize(); const ids = await claimsTerritories(gm); unwrap(await player.diplomacy.territory.query({ id: ids.child }));
+    const row: any = await f.adapter.read("territory", ids.physical); row.data.claims[0].visibility = "secret"; row.data.territory.label = "Renamed origin"; await f.adapter.write(row);
+    const d: any = unwrap(await player.diplomacy.territory.query({ id: ids.child })); assert.equal(d.effectiveClaims.some((r: any) => r.sourceTerritoryUuid === ids.physical), false);
+    row.data.claims[0].visibility = "public"; await f.adapter.write(row);
+    assert.equal((unwrap(await player.diplomacy.territory.query({ id: ids.child })) as any).effectiveClaims.find((r: any) => r.sourceTerritoryUuid === ids.physical).sourceTerritoryLabel, "Renamed origin");
+    const target: any = await f.adapter.read("territory", ids.child); target.data.territory.visibility = "secret"; await f.adapter.write(target);
+    assert.equal((await player.diplomacy.territory.query({ id: ids.child })).ok, false);
+  } finally { player.destroy(); gm.destroy(); }
+});
+test("G6 claims runtime: unavailable ancestor fences truncate only that lineage without exposing recovery metadata", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player");
+  try { await gm.initialize(); const ids = await claimsTerritories(gm), { lockKey } = await import("../../src/mutations/lock-keys.js");
+    gm.recovery.fenceRegistry.installFence({ transactionId: "private-recovery-marker", lockKeys: [lockKey.diplomacy("territory", ids.physical)], reason: "secret-reason-marker" });
+    const d: any = unwrap(await player.diplomacy.territory.query({ id: ids.child })); assert.equal(d.effectiveClaims.length, 2); assert.equal(JSON.stringify(d).includes("private-recovery-marker"), false);
+    assert.equal((unwrap(await player.diplomacy.territory.query({ id: ids.child, claimInheritanceAxis: "administrativeParentUuid" })) as any).effectiveClaims.length, 3);
+    gm.recovery.fenceRegistry.installFence({ transactionId: "graph-fence", lockKeys: [lockKey.territoryGraph()], reason: "Needs recovery" }); assert.equal((await player.diplomacy.territory.query({ id: ids.child })).ok, false);
+  } finally { player.destroy(); gm.destroy(); }
+});
+test("G6 claims runtime: missing, corrupt and mismatched origins never fabricate inherited data", async () => {
+  for (const mode of ["missing", "corrupt", "identity", "revision"]) {
+    const f = fixture(), gm = f.make(), player = f.make("player");
+    try { await gm.initialize(); const ids = await claimsTerritories(gm);
+      if (mode === "missing") await f.adapter.remove("territory", ids.physical);
+      else { const row: any = await f.adapter.read("territory", ids.physical); if (mode === "corrupt") row.data.claims = "corrupt";
+        if (mode === "identity") row.data.territory.uuid = ids.administrative;
+        if (mode === "revision") row.data.territory.revision = 1;
+        await f.adapter.write(row); }
+      const before = await f.adapter.loadAll(), d: any = unwrap(await player.diplomacy.territory.query({ id: ids.child })); assert.equal(d.effectiveClaims.length, 2); assert.deepEqual(await f.adapter.loadAll(), before);
+    } finally { player.destroy(); gm.destroy(); }
+  }
+});
+test("G6 claims runtime: cycles return local sources only and do not hang or repair storage", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player");
+  try { await gm.initialize(); const ids = await claimsTerritories(gm), row: any = await f.adapter.read("territory", ids.root);
+    row.data.territory.locatedInUuid = ids.child; await f.adapter.write(row); const before = await f.adapter.loadAll();
+    const d: any = unwrap(await player.diplomacy.territory.query({ id: ids.child })); assert.equal(d.effectiveClaims.length, 2); assert.ok(d.effectiveClaims.every((r: any) => !r.inherited)); assert.deepEqual(await f.adapter.loadAll(), before);
+  } finally { player.destroy(); gm.destroy(); }
+});
+test("G6 claims runtime: authoritative clock observes inclusive starts and exclusive ends without mutations", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player");
+  try { await gm.initialize(); const ids = await claimsTerritories(gm), before = await f.adapter.loadAll();
+    const query = async () => (unwrap(await player.diplomacy.territory.query({ id: ids.child })) as any).effectiveClaims.map((r: any) => r.claim.id);
+    assert.equal((await query()).includes("expired"), false); assert.equal((await query()).includes("future"), false);
+    f.time.tick = 9; assert.equal((await query()).includes("expired"), true); f.time.tick = 11; assert.equal((await query()).includes("future"), true);
+    assert.deepEqual(await f.adapter.loadAll(), before);
+  } finally { player.destroy(); gm.destroy(); }
+});
+test("G6 claims runtime: reparent changes derived origins while local claims and audited revisions remain native", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player");
+  try { await gm.initialize(); const ids = await claimsTerritories(gm);
+    unwrap(await gm.diplomacy.territory.modify({ id: ids.child, expectedRevision: 0, action: { kind: "reparent", parents: { locatedInUuid: ids.administrative, administrativeParentUuid: ids.physical } }, reason: "Change hierarchy" }));
+    const d: any = unwrap(await player.diplomacy.territory.query({ id: ids.child })); assert.equal(d.revision, 1); assert.deepEqual(d.effectiveClaims.map((r: any) => r.claim.id), ["same", "local-private", "admin"]);
+    const row: any = await f.adapter.read("territory", ids.child); assert.equal(row.data.claims.length, 2); assert.equal(row.data.territory.hierarchyHistory.length, 1);
+    const before = await f.adapter.loadAll(); unwrap(await player.diplomacy.territory.query({ id: ids.child })); assert.deepEqual(await f.adapter.loadAll(), before);
+  } finally { player.destroy(); gm.destroy(); }
+});
+test("G6 claims runtime: inherited IDs cannot become local recognition or occupation references", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player");
+  try { await gm.initialize(); const ids = await claimsTerritories(gm), ui = new DiplomacyApplicationController(player.diplomacy);
+    ui.selectTab("territory"); ui.select(ids.child); unwrap(await ui.load()); assert.equal(ui.detail.claims.some((c: any) => c.id === "root"), false);
+    const before = await f.adapter.loadAll(); assert.equal((await player.diplomacy.proposals.submit({ id: "inherited-local-recognition", intent: { kind: "territory", mode: "modify", id: ids.child, expectedRevision: 0, reason: "Wrong origin",
+      action: { kind: "recognition", value: { id: "wrong", sourceRef: { type: "manual", id: "player" }, visibility: "public", startsAtWorldTick: 10, expiresAtWorldTick: null, claimId: "root", recognizingRef: { type: "domain", uuid: domainUuid }, position: "positive" } } } })).ok, false);
+    assert.equal((await player.diplomacy.proposals.submit({ id: "inherited-local-occupation", intent: { kind: "territory", mode: "modify", id: ids.child, expectedRevision: 0, reason: "Wrong origin",
+      action: occupationAction({ presenceIds: [], controlClaimIds: ["root"] }) } })).ok, false);
+    assert.deepEqual(await f.adapter.loadAll(), before); assert.equal(ui.openClaimOrigin(ids.root).ok, true); unwrap(await ui.load()); assert.equal(ui.detail.id, ids.root);
+  } finally { player.destroy(); gm.destroy(); }
+});
+test("G6 claims runtime: reload recalculates derivation without storing projections or creating audit entries", async () => {
+  const f = fixture(), first = f.make(); let ids: Awaited<ReturnType<typeof claimsTerritories>>;
+  try { await first.initialize(); ids = await claimsTerritories(first); unwrap(await first.diplomacy.territory.query({ id: ids.child })); } finally { first.destroy(); }
+  const reload = f.make(), player = f.make("player");
+  try { await reload.initialize(); const before = await f.adapter.loadAll(); const d: any = unwrap(await player.diplomacy.territory.query({ id: ids!.child })); assert.equal(d.effectiveClaims.length, 4);
+    assert.equal(d.events.length, 0); assert.equal(JSON.stringify(before).includes("effectiveClaims"), false); assert.deepEqual(await f.adapter.loadAll(), before);
+  } finally { player.destroy(); reload.destroy(); }
 });

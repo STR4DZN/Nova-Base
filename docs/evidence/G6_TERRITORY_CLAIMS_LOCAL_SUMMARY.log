@@ -1,0 +1,65 @@
+Local validation: 2026-10-01 / Node 24.19.0
+claims UI: 8 PASS, 0 FAIL, 0 SKIP
+runtime vertical: 123 PASS, 0 FAIL, 0 SKIP
+
+typecheck
+npm warn Unknown env config "http-proxy". This will stop working in the next major version of npm.
+
+> domain-manager@0.0.8 typecheck
+> tsc --noEmit
+
+
+runtime
+✔ G6 claims runtime: authoritative clock observes inclusive starts and exclusive ends without mutations (11.596527ms)
+✔ G6 claims runtime: reparent changes derived origins while local claims and audited revisions remain native (11.920275ms)
+✔ G6 claims runtime: inherited IDs cannot become local recognition or occupation references (11.842158ms)
+✔ G6 claims runtime: reload recalculates derivation without storing projections or creating audit entries (12.098039ms)
+ℹ tests 123
+ℹ suites 0
+ℹ pass 123
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 4334.10523
+
+full
+✔ G3.6 - Workforce: Formula calculates capacity, committed, reserved, available correctly (1.699685ms)
+✔ G3.6 - Workforce: Inactive or disbanded operational groups contribute 0 capacity (0.243733ms)
+✔ G3.6 - Workforce: Anti-double-count between linked operational groups and population groups (0.263998ms)
+✔ G3.6 - Workforce: Expired reservation automatically releases reserved capacity (0.263844ms)
+ℹ tests 1175
+ℹ suites 0
+ℹ pass 1175
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 43407.489334
+
+build
+npm warn Unknown env config "http-proxy". This will stop working in the next major version of npm.
+
+> domain-manager@0.0.8 build
+> node build.mjs
+
+
+package
+npm warn Unknown env config "http-proxy". This will stop working in the next major version of npm.
+
+> domain-manager@0.0.8 package
+> node scripts/package.mjs
+
+Package created: dist/domain-manager-v0.0.8.zip
+
+artifact
+npm warn Unknown env config "http-proxy". This will stop working in the next major version of npm.
+
+> domain-manager@0.0.8 validate:release
+> node scripts/validate-release.mjs
+
+Package validation passed
+Artifact validation passed
+Release URLs, versions and ZIP verified: v0.0.8
+
+ZIP SHA256 f958d3b92262daa4e23c2d7e80af6dc9f298c11188c423db4c9d757bcc0367b4

@@ -1,3 +1,4 @@
+import { CLAIM_INHERITANCE_AXES, renderTerritoryClaims } from "./territory-claims-view.js";
 import { OCCUPATION_ACTIONS, occupationFields, parseOccupationFields, parseOccupationEnd, renderTerritoryOccupations, renderOccupationFields, renderOccupationEnd, renderOccupationRequest } from "./territory-occupation-form.js";
 import { INFLUENCE_ACTIONS, influenceFields, parseInfluenceFields, parseInfluenceOperation, editInfluenceRows, renderTerritoryInfluence, renderInfluenceRequest } from "./territory-influence-form.js";
 import type { PublicDiplomacyApi, PublicDiplomacyOwnerApi } from "../../../diplomacy/public-diplomacy-api.js";
@@ -63,8 +64,17 @@ export class DiplomacyApplicationController {
   #agreementTermPreviewInput: string | null = null;
   #previewInput: string | null = null; #previewIntent: OwnerIntent | null = null;
   treeAxis: "locatedInUuid" | "administrativeParentUuid" | null = null; treeParent: string | null = null;
+  claimInheritanceAxis: "locatedInUuid" | "administrativeParentUuid" = "locatedInUuid";
+  applyClaimInheritanceAxis(axis: string): Result<void> {
+    if (this.tab !== "territory" || !CLAIM_INHERITANCE_AXES.some(([key]) => key === axis)) return this.capture(failure("DM_DIPLOMACY_QUERY_INVALID", "Selecione uma hierarquia territorial válida."));
+    this.claimInheritanceAxis = axis as typeof this.claimInheritanceAxis; this.detail = null; return this.capture(ok(undefined));
+  }
+  openClaimOrigin(id: string): Result<void> {
+    if (this.tab !== "territory" || !this.detail?.effectiveClaims?.some((r: any) => r.sourceTerritoryUuid === id)) return this.capture(failure("DM_DIPLOMACY_NOT_FOUND", "Selecione uma origem visível.", "not-found"));
+    this.select(id); this.detail = null; return this.capture(ok(undefined));
+  }
   constructor(readonly api: PublicDiplomacyApi) {}
-  selectTab(tab: DiplomacyTab): void { this.resetOccupationContext(); this.resetInfluenceDrafts(); this.resetLinkContext(); this.resetRecognitionDraft(); this.recognitionReviewFields = {}; this.recognitionReviewTarget = null; this.tab = tab; this.list = null; this.overviewFilter = "all"; this.expiryHorizonTicks = 10; this.recentHours = 24; this.offset = 0; this.selectedId = null; this.detail = null; this.historyOffset = 0; this.creating = false; this.preview = null; this.reputationTrackCount = 1; this.reputationFormFields = {}; this.reputationConfigurationFields = {}; this.resetReputationHistory(); this.agreementLifecycle = ""; this.agreementFormFields = {}; this.cancelAgreementTermEditor(); }
+  selectTab(tab: DiplomacyTab): void { this.claimInheritanceAxis = "locatedInUuid"; this.resetOccupationContext(); this.resetInfluenceDrafts(); this.resetLinkContext(); this.resetRecognitionDraft(); this.recognitionReviewFields = {}; this.recognitionReviewTarget = null; this.tab = tab; this.list = null; this.overviewFilter = "all"; this.expiryHorizonTicks = 10; this.recentHours = 24; this.offset = 0; this.selectedId = null; this.detail = null; this.historyOffset = 0; this.creating = false; this.preview = null; this.reputationTrackCount = 1; this.reputationFormFields = {}; this.reputationConfigurationFields = {}; this.resetReputationHistory(); this.agreementLifecycle = ""; this.agreementFormFields = {}; this.cancelAgreementTermEditor(); }
   private resetReputationHistory(): void {
     this.reputationHistoryFilter = {}; this.reputationHistoryFormFields = {}; this.reputationSourceOffset = 0;
   }
@@ -170,6 +180,7 @@ export class DiplomacyApplicationController {
       ...(this.tab === "territory" && this.treeAxis ? { treeAxis: this.treeAxis, parentUuid: this.treeParent } : {}) });
     if (!queried.ok) { this.error = queried.error.message; if (this.tab === "agreements" || this.tab === "reputation" || this.tab === "territory" || this.tab === "proposals") { this.list = null; this.detail = null; } return queried; } this.list = queried.value;
     if (this.selectedId) { const detail = await this.api[this.tab].query({ id: this.selectedId, historyOffset: this.historyOffset, historyLimit: 30,
+      ...(this.tab === "territory" ? { claimInheritanceAxis: this.claimInheritanceAxis } : {}),
       ...(this.tab === "reputation" && this.list?.isGm ? { ...(Object.keys(this.reputationHistoryFilter).length ? { reputationHistory: this.reputationHistoryFilter } : {}),
         reputationSourceOffset: this.reputationSourceOffset, reputationSourceLimit: 30 } : {}) });
       if (!detail.ok) { this.error = detail.error.message; this.detail = null; return detail; } this.detail = detail.value;
@@ -626,7 +637,8 @@ export class DiplomacyApplicationController {
     if (d.territory) { blocks += `<p>Propriedade, administração, controle e presença possuem registros independentes. Transferências preservam as reivindicações concorrentes.</p>
       <p>Localização: ${escapeHtml(d.territory.locatedInUuid ?? "raiz")} · hierarquia administrativa: ${escapeHtml(d.territory.administrativeParentUuid ?? "raiz")}</p>`;
       if (this.treeAxis) blocks += `<button type="button" data-dm-children="${escapeAttribute(d.id)}">Abrir filhos neste ramo</button>`;
-      for (const [key, name] of [["claims", "Reivindicações"], ["presence", "Presença"], ["rights", "Direitos"]]) blocks += table(name, d[key] ?? [], [...columns, ["Estado", x => x.lifecycle ?? (x.active ? "active" : "inactive")]]);
+      for (const [key, name] of [["claims", "Reivindicações locais (registros)"], ["presence", "Presença"], ["rights", "Direitos"]]) blocks += table(name, d[key] ?? [], [...columns, ["Estado", x => x.lifecycle ?? (x.active ? "active" : "inactive")]]);
+      blocks += renderTerritoryClaims(d.effectiveClaims ?? [], d.claimInheritanceAxis ?? this.claimInheritanceAxis, d.worldTick ?? this.list?.worldTick);
       blocks += renderTerritoryOccupations(d, d.worldTick ?? this.list?.worldTick, Boolean(this.list?.isGm), this.occupationDraft, this.occupationEndDraft);
       blocks += renderTerritoryRecognitions(d, d.worldTick ?? this.list?.worldTick, Boolean(this.list?.isGm), this.territoryRecognitionFields);
       blocks += renderTerritoryInfluence(d, d.worldTick ?? this.list?.worldTick, Boolean(this.list?.isGm), this.influenceDrafts.influence ?? {}, this.influenceDrafts["add-influence-modifier"] ?? {}, this.influenceDrafts["end-influence"] ?? this.influenceDrafts["end-influence-modifier"] ?? {});
@@ -772,7 +784,7 @@ export class DiplomacyApplication extends BaseApp {
   readonly controller: DiplomacyApplicationController; readonly #bound = new WeakSet<object>();
   constructor(options: { api: PublicDiplomacyApi }) { super(options); this.controller = new DiplomacyApplicationController(options.api); }
   async _prepareContext(): Promise<unknown> { await this.controller.load(); return {}; }
-  _renderHTML(): string { return `<style>.dm-diplomacy-app .dm-diplomacy-columns{display:grid;grid-template-columns:240px 1fr;gap:16px}.dm-diplomacy-app aside button,.dm-diplomacy-app label{display:block;margin:6px 0}.dm-diplomacy-app table{width:100%;text-align:left;border-collapse:collapse}.dm-diplomacy-app td,.dm-diplomacy-app th{padding:6px;border-bottom:1px solid #7775}.dm-diplomacy-app input,.dm-diplomacy-app textarea{max-width:100%}.dm-diplomacy-app pre{white-space:pre-wrap;overflow-wrap:anywhere}.dm-diplomacy-app [role=alert]{color:#b3261e}.dm-diplomacy-app .dm-agreement-summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px}.dm-diplomacy-app .dm-agreement-summary strong{display:block;font-size:1.4em}.dm-diplomacy-app .dm-agreement-summary [aria-pressed=true]{outline:2px solid currentColor}.dm-diplomacy-app .dm-reputation-history-table{overflow-x:auto;max-width:100%}.dm-diplomacy-app .dm-reputation-history-table td{overflow-wrap:anywhere}.dm-diplomacy-app main{min-width:0}</style>${this.controller.render()}`; }
+  _renderHTML(): string { return `<style>.dm-diplomacy-app .dm-diplomacy-columns{display:grid;grid-template-columns:240px 1fr;gap:16px}.dm-diplomacy-app aside button,.dm-diplomacy-app label{display:block;margin:6px 0}.dm-diplomacy-app table{width:100%;text-align:left;border-collapse:collapse}.dm-diplomacy-app td,.dm-diplomacy-app th{padding:6px;border-bottom:1px solid #7775}.dm-diplomacy-app input,.dm-diplomacy-app textarea{max-width:100%}.dm-diplomacy-app pre{white-space:pre-wrap;overflow-wrap:anywhere}.dm-diplomacy-app [role=alert]{color:#b3261e}.dm-diplomacy-app .dm-agreement-summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px}.dm-diplomacy-app .dm-agreement-summary strong{display:block;font-size:1.4em}.dm-diplomacy-app .dm-agreement-summary [aria-pressed=true]{outline:2px solid currentColor}.dm-diplomacy-app .dm-reputation-history-table{overflow-x:auto;max-width:100%}.dm-diplomacy-app .dm-reputation-history-table td{overflow-wrap:anywhere}.dm-diplomacy-app .dm-territory-claims-table{overflow-x:auto;max-width:100%}.dm-diplomacy-app .dm-territory-claims-table small{display:block;overflow-wrap:anywhere}.dm-diplomacy-app main{min-width:0}</style>${this.controller.render()}`; }
   _replaceHTML(html: string, content: HTMLElement): void { content.innerHTML = html; }
   _onRender(): void { const element = this.element; if (!element || this.#bound.has(element)) return; this.#bound.add(element);
     const fields = (form: HTMLFormElement): Record<string, string> => { const result: Record<string, string> = {}; new FormData(form).forEach((v, k) => { result[k] = form.dataset.dmForm === "agreement-terms" ? String(v) : String(v).trim(); }); if (form.dataset.dmForm?.startsWith("territory-influence")) form.querySelectorAll<HTMLInputElement>('input[type="checkbox"]').forEach(input => { if (!input.checked) result[input.name] = ""; });
@@ -832,6 +844,7 @@ export class DiplomacyApplication extends BaseApp {
       else if (button.dataset.dmId) this.controller.select(button.dataset.dmId);
       else if (button.dataset.dmPage) this.controller.offset = Math.max(0, this.controller.offset + Number(button.dataset.dmPage) * 30);
       else if (button.dataset.dmHistory) this.controller.historyOffset = Math.max(0, this.controller.historyOffset + Number(button.dataset.dmHistory) * 30);
+      else if (button.dataset.dmClaimOrigin) this.controller.openClaimOrigin(button.dataset.dmClaimOrigin);
       else if (button.dataset.dmOccupationReviewReset) this.controller.resetOccupationReviewReferences(fields(button.closest("form")!));
       else if (button.dataset.dmOccupationReset) this.controller.resetOccupationDrafts();
       else if (button.dataset.dmInfluenceReset) this.controller.resetInfluenceDrafts();
@@ -855,6 +868,7 @@ export class DiplomacyApplication extends BaseApp {
       else if (form.dataset.dmForm === "link-destinations") this.controller.applyDestinationSearch(data.destinationSearch);
       else if (form.dataset.dmForm === "territory-link") await this.controller.submitLink(data);
       else if (form.dataset.dmForm === "territory-link-status") await this.controller.submitLink(data, true);
+      else if (form.dataset.dmForm === "claim-inheritance") this.controller.applyClaimInheritanceAxis(data.claimInheritanceAxis);
       else if (form.dataset.dmForm === "territory-occupation") await this.controller.submitOccupation(data);
       else if (form.dataset.dmForm === "territory-occupation-end") await this.controller.submitOccupation(data, true);
       else if (form.dataset.dmForm?.startsWith("territory-influence")) await this.controller.submitInfluence(data, form.dataset.dmForm === "territory-influence" ? "influence" : form.dataset.dmForm === "territory-influence-modifier" ? "add-influence-modifier" : data.endKind || "end-influence-modifier");
