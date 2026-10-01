@@ -22,7 +22,7 @@ A consulta do próprio território também usa estado fresco, evitando derivar d
 
 O primeiro teste vertical de reparent esperava o evento na coleção genérica de estado. A auditoria nativa de reparent fica em `territory.hierarchyHistory`; a assertiva foi corrigida para verificar essa coleção, mantendo a revisão e a ausência de cópias de claims. Primeira execução: 122/123 PASS; execução final: 123/123 PASS. Não foi identificado defeito de produto nessa falha.
 
-8 testes de interface e 123 testes verticais G6. **Regressão final 1175/1175 PASS** (20 novos), zero falhas/skips. TypeScript/build/package/validate:release PASS localmente. CI pendente; resultado será registrado em `docs/evidence/G6_TERRITORY_CLAIMS_VALIDATION.json`. Workflow específico preserva logs e ZIP sem publicar release.
+8 testes de interface e 123 testes verticais G6. **Regressão final 1175/1175 PASS** (20 novos), zero falhas/skips. TypeScript/build/package/validate:release PASS localmente. GitHub Actions PASS: commit `c59eab694716ffb620ed7df89f1ec7a5dc62f4ad`, workflow `36904323664`; 13 workflows aprovados. Evidência: `docs/evidence/G6_TERRITORY_CLAIMS_VALIDATION.json`. Workflow específico preserva logs e ZIP sem publicar release.
 
 Cobertura: dois eixos/default físico; provenance e policy distintas; fontes concorrentes/contestadas; audiência independente GM/Player/terceiro; mudança de visibilidade no armazenamento versus índice antigo; ancestral privado com avô público; fences de origem/grafo; fonte ausente/inválida/identidade ou revisão incoerente; ciclos; limites temporais; reparent auditado; recarga sem writes/eventos; IDs herdados rejeitados como referências locais de reconhecimento/ocupação; escape HTML; drafts e bindings; origem indisponível rejeitada; falha sem DTO antigo.
 

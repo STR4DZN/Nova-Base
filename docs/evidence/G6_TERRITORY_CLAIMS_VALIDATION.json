@@ -17,7 +17,86 @@
     "zip_sha256": "f958d3b92262daa4e23c2d7e80af6dc9f298c11188c423db4c9d757bcc0367b4"
   },
   "ci": {
-    "conclusion": "pending"
+    "node": "22.23.3",
+    "conclusion": "success",
+    "run_id": 36904323664,
+    "job_id": 110510936131,
+    "tests": [
+      8,
+      123,
+      1175
+    ],
+    "fail": 0,
+    "skipped": 0,
+    "workflows": [
+      {
+        "id": 36904323604,
+        "name": "Validate G6 territory recognition",
+        "conclusion": "success"
+      },
+      {
+        "id": 36904323500,
+        "name": "Validate G6 agreement dashboard",
+        "conclusion": "success"
+      },
+      {
+        "id": 36904323664,
+        "name": "Validate G6 territory claims",
+        "conclusion": "success"
+      },
+      {
+        "id": 36904323598,
+        "name": "Validate G6 reputation history",
+        "conclusion": "success"
+      },
+      {
+        "id": 36904323723,
+        "name": "Validate G6 territory influence",
+        "conclusion": "success"
+      },
+      {
+        "id": 36904323854,
+        "name": "Validate G6 diplomacy overview",
+        "conclusion": "success"
+      },
+      {
+        "id": 36904323836,
+        "name": "Validate G6 agreement term editor",
+        "conclusion": "success"
+      },
+      {
+        "id": 36904323705,
+        "name": "Validate G6 territory occupation",
+        "conclusion": "success"
+      },
+      {
+        "id": 36904323540,
+        "name": "Validate G6 territory links",
+        "conclusion": "success"
+      },
+      {
+        "id": 36904323617,
+        "name": "Validate G6 agreement inspector",
+        "conclusion": "success"
+      },
+      {
+        "id": 36904323812,
+        "name": "Validate G6 agreement negotiation",
+        "conclusion": "success"
+      },
+      {
+        "id": 36904323701,
+        "name": "Validate G6 reputation configuration",
+        "conclusion": "success"
+      },
+      {
+        "id": 36904323512,
+        "name": "Validate G6 relation stance",
+        "conclusion": "success"
+      }
+    ],
+    "artifact_id": 11182204489,
+    "url": "https://github.com/STR4DZN/Nova-Base/actions/runs/36904323664"
   },
   "foundry_real": "deferred until G6 complete",
   "release_published": false,
@@ -28,5 +107,6 @@
     "Visible cycles contribute local claims only; diagnostics deferred",
     "No copying inherited claims into local mutation references",
     "No inherited hierarchy impact preview in this part"
-  ]
+  ],
+  "validated_source_commit": "c59eab694716ffb620ed7df89f1ec7a5dc62f4ad"
 }

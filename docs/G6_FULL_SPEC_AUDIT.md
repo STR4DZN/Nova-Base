@@ -2,7 +2,7 @@
 
 **Atualização v0.0.8:** revisão G0–G6 corrigiu 13 defeitos, com 878/878 testes locais PASS. Novo smoke necessário; detalhes/evidências em `docs/G0_G6_REVIEW.md`. As lacunas desta matriz continuam explícitas.
 
-**Atualização por partes — reivindicações herdadas:** inspector com origem/revisão, distinção local/herdada e eixos físico/administrativo separados. Leitura fresca e audiência por origem, sem copiar registros. 1175/1175 testes PASS, TypeScript/build/pacote PASS localmente; CI pendente. Relatório `docs/G6_TERRITORY_CLAIMS_REPORT.md`. Próxima parte: prévia dos impactos herdados de alterações hierárquicas. Foundry real ao fim do G6.
+**Atualização por partes — reivindicações herdadas:** inspector com origem/revisão, distinção local/herdada e eixos físico/administrativo separados. Leitura fresca e audiência por origem, sem copiar registros. 1175/1175 testes PASS, TypeScript/build/pacote PASS localmente e no CI (workflow `36904323664`, 13 workflows). Relatório `docs/G6_TERRITORY_CLAIMS_REPORT.md`. Próxima parte: prévia dos impactos herdados de alterações hierárquicas. Foundry real ao fim do G6.
 
 **Atualização por partes — ocupação territorial:** criação/encerramento, referências visíveis multi-select, estados/vigência e revisão GM estruturada implementados. Três defeitos de privacidade reproduzidos/corrigidos. Transições intermediárias/policies continuam parciais. 1155/1155 testes PASS, TypeScript/build/pacote PASS localmente e no CI (workflow `36899199164`, 12 workflows). Relatório `docs/G6_TERRITORY_OCCUPATION_REPORT.md`. Próxima parte: reivindicações herdadas no inspector. Foundry real ao fim do G6.
 

@@ -9,6 +9,13 @@
 - Schema Domain: `1`
 - Data de conclusão do Gate G5: `2026-09-21`
 
+## Parte G6 — Reivindicações herdadas no inspector — 2026-10-01
+
+- Inspector apresenta reivindicações vigentes locais/herdadas com origem e revisão, policy de propagação separada e escolha independente de hierarquia física/administrativa. Navegação admitida para a origem sem copiar claims para coleções locais.
+- Estado fresco e audiência por origem: controle do filho não concede acesso aos pais. Ancestral privado/ausente/inválido/fenced interrompe a cadeia; ciclo visível contribui somente fontes locais. Relógio autoritativo e recarga sem writes/eventos.
+- **1175/1175 testes PASS** (20 novos), específicos 8/8 e verticais 123/123; TypeScript/build/package/validate:release PASS localmente. GitHub Actions PASS: commit `c59eab694716ffb620ed7df89f1ec7a5dc62f4ad`, workflow `36904323664`; 13 workflows aprovados. Relatório `docs/G6_TERRITORY_CLAIMS_REPORT.md`; evidência `docs/evidence/G6_TERRITORY_CLAIMS_VALIDATION.json`. Nenhuma release publicada.
+- **PARAR AQUI. Próximo passo:** prévia dos impactos sobre reivindicações herdadas ao alterar a hierarquia territorial; aguardar autorização. Foundry real ao fim do bloco G6. G6 parcial; G7 não iniciado.
+
 ## Parte G6 — Ocupação territorial — 2026-10-01
 
 - Criação e encerramento auditado pela interface, referências visíveis de presença/controle, resumo de estado/vigência, propostas Player e revisão estruturada GM preservando original/identidade.
@@ -658,7 +665,7 @@ Candidata v0.0.8: 13 defeitos reproduzidos/corrigidos; 878/878 testes locais PAS
 
 ## Próxima ação canônica
 
-- **Gate G6 — Relations / Reputation / Agreements / Territory: reivindicações herdadas no inspector implementadas nesta parte**, após a aceitação do Gate G5. **1175/1175 testes PASS**, específicos 8/8 e verticais 123/123; TypeScript/build/package/validate:release PASS localmente. CI pendente. Relatório `docs/G6_TERRITORY_CLAIMS_REPORT.md`. **PARAR AQUI**. Próxima parte: prévia dos impactos sobre reivindicações herdadas ao alterar a hierarquia territorial; aguardar autorização. Foundry real somente após concluir o bloco G6. Gate G6 parcial; não iniciar G7.
+- **Gate G6 — Relations / Reputation / Agreements / Territory: reivindicações herdadas no inspector implementadas nesta parte**, após a aceitação do Gate G5. **1175/1175 testes PASS**, específicos 8/8 e verticais 123/123; TypeScript/build/package/validate:release PASS localmente. GitHub Actions PASS: commit `c59eab694716ffb620ed7df89f1ec7a5dc62f4ad`, workflow `36904323664`; 13 workflows aprovados. Relatório `docs/G6_TERRITORY_CLAIMS_REPORT.md`. **PARAR AQUI**. Próxima parte: prévia dos impactos sobre reivindicações herdadas ao alterar a hierarquia territorial; aguardar autorização. Foundry real somente após concluir o bloco G6. Gate G6 parcial; não iniciar G7.
 
 ## G6.4–G6.5 — Acordos e obrigações — 2026-09-29
 
