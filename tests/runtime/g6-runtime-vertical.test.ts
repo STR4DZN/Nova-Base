@@ -16,6 +16,8 @@ const domainUuid = "JournalEntry.domainG6";
 const inheritedClaim = (id: string, patch = {}) => ({ id, sourceRef: { type: "manual", id: "gm" }, visibility: "public",
   startsAtWorldTick: 0, expiresAtWorldTick: null, claimantRef: { type: "narrative", id: "guild" }, claimType: "domain-manager:ownership",
   lifecycle: "active", contested: false, strength: null, inherited: true, ...patch });
+const hierarchyInput = (ids: { child: string; administrative: string }, patch = {}) => ({ id: ids.child, expectedRevision: 0, reason: "Move hierarchy",
+  action: { kind: "reparent", parents: { locatedInUuid: ids.administrative, administrativeParentUuid: null } }, ...patch });
 async function claimsTerritories(r: ReturnType<typeof composeDomainManagerRuntime>) {
   const add = async (label: string, claims: any[], patch = {}, visibility = "public") => {
     const d = createDiplomacyDraft("territory", label, [], visibility as any), data: any = d.data;
@@ -253,7 +255,8 @@ test("G6.9 UI: territorial preview binds the confirmed payload and stale/edited 
   try { await r.initialize(); c.selectTab("territory"); unwrap(await c.load()); unwrap(await c.create({ label: "Region", visibility: "public", reason: "Create" })); unwrap(await c.load());
     const fields = { kind: "reparent", physical: "", administrative: "", reason: "Confirm roots" };
     assert.equal((await c.change(fields)).ok, false); unwrap(await c.change(fields, true));
-    assert.equal((await c.change({ ...fields, reason: "Edited after preview" })).ok, false); unwrap(await c.change(fields));
+    assert.equal((await c.change({ ...fields, reason: "Edited after preview" })).ok, false);
+    assert.equal((await c.change(fields)).ok, false); unwrap(await c.change(fields, true)); unwrap(await c.change(fields));
   } finally { r.destroy(); }
 });
 test("G6.9 agreements: real economic owner executes once on activation, remains once after suspend/resume and restart", async () => {
@@ -1698,4 +1701,136 @@ test("G6 claims runtime: reload recalculates derivation without storing projecti
   try { await reload.initialize(); const before = await f.adapter.loadAll(); const d: any = unwrap(await player.diplomacy.territory.query({ id: ids!.child })); assert.equal(d.effectiveClaims.length, 4);
     assert.equal(d.events.length, 0); assert.equal(JSON.stringify(before).includes("effectiveClaims"), false); assert.deepEqual(await f.adapter.loadAll(), before);
   } finally { player.destroy(); reload.destroy(); }
+});
+test("G6 claim impact runtime: GM preview shows both axes and exact inherited before/after without any writes", async () => {
+  const f = fixture(), gm = f.make();
+  try { await gm.initialize(); const ids = await claimsTerritories(gm), before = await f.adapter.loadAll(), preview: any = unwrap(await gm.diplomacy.previewTerritory(hierarchyInput(ids)));
+    assert.equal(preview.claimInheritanceImpact.worldTick, 10); assert.equal(preview.facilityOwnershipChanges, 0); assert.equal(preview.changes.length, 1);
+    const physical = preview.claimInheritanceImpact.axes[0].territories[0]; assert.equal(physical.localCount, 2);
+    assert.deepEqual(physical.removed.map((r: any) => r.claim.id), ["same", "private-claim-marker", "secret-claim-marker", "root"]);
+    assert.deepEqual(physical.added.map((r: any) => r.claim.id), ["admin"]); assert.equal(physical.retained.length, 0);
+    assert.equal(preview.claimInheritanceImpact.axes[1].territories[0].removed[0].claim.id, "admin"); assert.equal(preview.previewSnapshot.worldTick, 10);
+    assert.deepEqual(await f.adapter.loadAll(), before);
+  } finally { gm.destroy(); }
+});
+test("G6 claim impact runtime: each changed axis includes only its target and actual descendants", async () => {
+  const f = fixture(), gm = f.make();
+  try { await gm.initialize(); const ids = await claimsTerritories(gm), physical = await ids.add("Physical child", [], { locatedInUuid: ids.child }),
+    grandchild = await ids.add("Physical grandchild", [], { locatedInUuid: physical }), admin = await ids.add("Administrative child", [], { administrativeParentUuid: ids.child });
+    const preview: any = unwrap(await gm.diplomacy.previewTerritory(hierarchyInput(ids))); assert.deepEqual(preview.claimInheritanceImpact.axes[0].territories.map((r: any) => r.territoryUuid), [ids.child, physical, grandchild]);
+    assert.deepEqual(preview.claimInheritanceImpact.axes[1].territories.map((r: any) => r.territoryUuid), [ids.child, admin]);
+    assert.equal(preview.changes.some((c: any) => c.id === physical), false);
+  } finally { gm.destroy(); }
+});
+test("G6 claim impact runtime: preview remains GM-only; authenticated Player or third party cannot forge access to secret sources", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player"), stranger = f.make("stranger");
+  try { await gm.initialize(); const ids = await claimsTerritories(gm), before = await f.adapter.loadAll();
+    for (const r of [player, stranger]) { assert.equal((await r.publicApi.diplomacy.previewTerritory(hierarchyInput(ids))).ok, false);
+      const forged = unwrap(await r.commandBus.execute(command("territory:preview", { ...hierarchyInput(ids), isGm: true, senderUserId: "gm" }))); assert.equal(forged.status, "rejected"); assert.equal(JSON.stringify(forged).includes("secret-claim-marker"), false); }
+    assert.deepEqual(await f.adapter.loadAll(), before);
+  } finally { stranger.destroy(); player.destroy(); gm.destroy(); }
+});
+test("G6 claim impact runtime: ancestor mutation invalidates confirmation despite unchanged target revision", async () => {
+  const f = fixture(), gm = f.make();
+  try { await gm.initialize(); const ids = await claimsTerritories(gm), input = hierarchyInput(ids), preview: any = unwrap(await gm.diplomacy.previewTerritory(input));
+    unwrap(await gm.diplomacy.territory.modify({ id: ids.physical, expectedRevision: 0, reason: "End source", action: { kind: "end-claim", id: "same" } }));
+    const before = await f.adapter.loadAll(), result = await gm.diplomacy.territory.modify({ ...input, previewSnapshot: preview.previewSnapshot }); assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.error.code, "DM_TERRITORY_PREVIEW_STALE"); assert.deepEqual(await f.adapter.loadAll(), before); assert.equal((await f.adapter.read("territory", ids.child))!.revision, 0);
+  } finally { gm.destroy(); }
+});
+test("G6 claim impact runtime: unversioned persisted source visibility change invalidates old preview", async () => {
+  const f = fixture(), gm = f.make();
+  try { await gm.initialize(); const ids = await claimsTerritories(gm), input = hierarchyInput(ids), preview: any = unwrap(await gm.diplomacy.previewTerritory(input));
+    const row: any = await f.adapter.read("territory", ids.physical); row.data.claims[0].visibility = "secret"; await f.adapter.write(row);
+    const before = await f.adapter.loadAll(), result = await gm.diplomacy.territory.modify({ ...input, previewSnapshot: preview.previewSnapshot }); assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.error.code, "DM_TERRITORY_PREVIEW_STALE"); assert.deepEqual(await f.adapter.loadAll(), before);
+  } finally { gm.destroy(); }
+});
+test("G6 claim impact runtime: clock drift requires a new preview at the authoritative tick", async () => {
+  const f = fixture(), gm = f.make();
+  try { await gm.initialize(); const ids = await claimsTerritories(gm), input = hierarchyInput(ids), preview: any = unwrap(await gm.diplomacy.previewTerritory(input)), before = await f.adapter.loadAll(); f.time.tick = 11;
+    const result = await gm.diplomacy.territory.modify({ ...input, previewSnapshot: preview.previewSnapshot }); assert.equal(result.ok, false); if (!result.ok) assert.equal(result.error.code, "DM_TERRITORY_PREVIEW_STALE"); assert.deepEqual(await f.adapter.loadAll(), before);
+    const fresh: any = unwrap(await gm.diplomacy.previewTerritory(input)); assert.equal(fresh.claimInheritanceImpact.axes[0].territories[0].before.some((r: any) => r.claim.id === "future"), true);
+    unwrap(await gm.diplomacy.territory.modify({ ...input, previewSnapshot: fresh.previewSnapshot }));
+  } finally { gm.destroy(); }
+});
+test("G6 claim impact runtime: external unindexed territorial catalog addition invalidates snapshot", async () => {
+  const f = fixture(), gm = f.make();
+  try { await gm.initialize(); const ids = await claimsTerritories(gm), input = hierarchyInput(ids), preview: any = unwrap(await gm.diplomacy.previewTerritory(input)), d = createDiplomacyDraft("territory", "External addition", [], "public");
+    await f.adapter.write({ schemaVersion: 1, kind: "territory", id: d.id, revision: 0, data: d.data, receipts: [] }); const before = await f.adapter.loadAll();
+    const result = await gm.diplomacy.territory.modify({ ...input, previewSnapshot: preview.previewSnapshot }); assert.equal(result.ok, false); if (!result.ok) assert.equal(result.error.code, "DM_TERRITORY_PREVIEW_STALE"); assert.deepEqual(await f.adapter.loadAll(), before);
+  } finally { gm.destroy(); }
+});
+test("G6 claim impact runtime: no-op retains revisions and hierarchy audit with no affected axes", async () => {
+  const f = fixture(), gm = f.make();
+  try { await gm.initialize(); const ids = await claimsTerritories(gm), input = hierarchyInput(ids, { action: { kind: "reparent", parents: { locatedInUuid: ids.physical, administrativeParentUuid: ids.administrative } } }),
+    preview: any = unwrap(await gm.diplomacy.previewTerritory(input)); assert.ok(preview.claimInheritanceImpact.axes.every((a: any) => !a.changed && a.territories.length === 0));
+    const result: any = unwrap(await gm.diplomacy.territory.modify({ ...input, previewSnapshot: preview.previewSnapshot })); assert.equal(result.changed, false);
+    const row: any = await f.adapter.read("territory", ids.child); assert.equal(row.revision, 0); assert.equal(row.data.territory.hierarchyHistory.length, 0);
+  } finally { gm.destroy(); }
+});
+test("G6 claim impact runtime: root detachment writes only target hierarchy and recalculates descendants without copied claims", async () => {
+  const f = fixture(), gm = f.make();
+  try { await gm.initialize(); const ids = await claimsTerritories(gm), child = await ids.add("Descendant", [], { locatedInUuid: ids.child }), before: any[] = [...await f.adapter.loadAll()],
+    input = hierarchyInput(ids, { action: { kind: "reparent", parents: { locatedInUuid: null, administrativeParentUuid: null } } }), preview: any = unwrap(await gm.diplomacy.previewTerritory(input));
+    assert.equal(preview.claimInheritanceImpact.axes[0].territories[0].after.length, 0); unwrap(await gm.diplomacy.territory.modify({ ...input, previewSnapshot: preview.previewSnapshot }));
+    for (const row of await f.adapter.loadAll()) { const old: any = before.find(x => x.id === row.id); if (row.id !== ids.child) assert.deepEqual(row, old); else { const data: any = row.data; assert.deepEqual(data.claims, old.data.claims); assert.equal(data.territory.hierarchyHistory.length, 1); assert.equal(row.revision, 1); } }
+    assert.equal((unwrap(await gm.diplomacy.territory.query({ id: child })) as any).effectiveClaims.length, 0);
+  } finally { gm.destroy(); }
+});
+test("G6 claim impact runtime: ancestor recovery fence blocks new preview and old-snapshot confirmation", async () => {
+  const f = fixture(), gm = f.make();
+  try { await gm.initialize(); const ids = await claimsTerritories(gm), input = hierarchyInput(ids), preview: any = unwrap(await gm.diplomacy.previewTerritory(input)), { lockKey } = await import("../../src/mutations/lock-keys.js"), before = await f.adapter.loadAll();
+    gm.recovery.fenceRegistry.installFence({ transactionId: "claim-impact-fence", lockKeys: [lockKey.diplomacy("territory", ids.physical)], reason: "Recover source" });
+    assert.equal((await gm.diplomacy.previewTerritory(input)).ok, false); assert.equal((await gm.diplomacy.territory.modify({ ...input, previewSnapshot: preview.previewSnapshot })).ok, false); assert.deepEqual(await f.adapter.loadAll(), before);
+  } finally { gm.destroy(); }
+});
+test("G6 claim impact runtime: corrupt, inconsistent or missing ancestry fails closed without preparing misleading impacts", async () => {
+  for (const mode of ["corrupt", "identity", "revision", "missing"]) {
+    const f = fixture(), gm = f.make();
+    try { await gm.initialize(); const ids = await claimsTerritories(gm);
+      if (mode === "missing") await f.adapter.remove("territory", ids.physical);
+      else { const row: any = await f.adapter.read("territory", ids.physical); if (mode === "corrupt") row.data.claims = "bad"; if (mode === "identity") row.data.territory.uuid = ids.root; if (mode === "revision") row.data.territory.revision = 1; await f.adapter.write(row); }
+      const before = await f.adapter.loadAll(); assert.equal((await gm.diplomacy.previewTerritory(hierarchyInput(ids))).ok, false); assert.deepEqual(await f.adapter.loadAll(), before);
+    } finally { gm.destroy(); }
+  }
+});
+test("G6 claim impact runtime: changed target revision cannot be bypassed with an old snapshot", async () => {
+  const f = fixture(), gm = f.make();
+  try { await gm.initialize(); const ids = await claimsTerritories(gm), input = hierarchyInput(ids), preview: any = unwrap(await gm.diplomacy.previewTerritory(input));
+    unwrap(await gm.diplomacy.territory.modify({ id: ids.child, expectedRevision: 0, reason: "Contest target", action: { kind: "contest-claim", id: "same", contested: true } })); const before = await f.adapter.loadAll();
+    const result = await gm.diplomacy.territory.modify({ ...input, previewSnapshot: preview.previewSnapshot }); assert.equal(result.ok, false); if (!result.ok) assert.equal(result.error.code, "DM_REVISION_CONFLICT"); assert.deepEqual(await f.adapter.loadAll(), before);
+  } finally { gm.destroy(); }
+});
+test("G6 claim impact runtime: GM interface previews, preserves fields, confirms and keeps inherited changes derived", async () => {
+  const f = fixture(), gm = f.make();
+  try { await gm.initialize(); const ids = await claimsTerritories(gm), ui = new DiplomacyApplicationController(gm.diplomacy), fields = { kind: "reparent", physical: ids.administrative, administrative: "", reason: "Move hierarchy" };
+    ui.selectTab("territory"); ui.select(ids.child); unwrap(await ui.load()); assert.equal((await ui.change(fields)).ok, false); unwrap(await ui.change(fields, true)); unwrap(await ui.load());
+    assert.ok(ui.actionForm().includes('value="reparent" selected')); assert.ok(ui.actionForm().includes(`value="${ids.administrative}"`)); assert.ok(ui.actionForm().includes("Prévia da hierarquia"));
+    unwrap(await ui.change(fields)); unwrap(await ui.load()); assert.equal(ui.detail.revision, 1); assert.equal(ui.detail.claims.length, 2); assert.equal(ui.detail.effectiveClaims.length, 3);
+    const row: any = await f.adapter.read("territory", ids.child); assert.equal(row.data.previewSnapshot, undefined); assert.equal(row.data.claimInheritanceImpact, undefined); assert.equal(row.data.territory.hierarchyHistory.length, 1);
+  } finally { gm.destroy(); }
+});
+test("G6 claim impact runtime: exact confirmation ticket retries once despite later clock drift and reload", async () => {
+  const f = fixture(), first = f.make(); let ticket: any, child = "";
+  try { await first.initialize(); const ids = await claimsTerritories(first), input = hierarchyInput(ids), preview: any = unwrap(await first.diplomacy.previewTerritory(input)); child = ids.child;
+    ticket = unwrap(first.diplomacy.commands.prepare("territory:modify", { ...input, previewSnapshot: preview.previewSnapshot })); assert.equal(unwrap(await first.diplomacy.commands.execute(ticket)).status, "executed");
+    f.time.tick = 20; assert.equal(unwrap(await first.diplomacy.commands.retry(ticket)).status, "executed");
+  } finally { first.destroy(); }
+  const reload = f.make(); try { await reload.initialize(); assert.equal(unwrap(await reload.diplomacy.commands.retry(ticket)).status, "executed"); const row: any = await f.adapter.read("territory", child); assert.equal(row.revision, 1); assert.equal(row.data.territory.hierarchyHistory.length, 1); } finally { reload.destroy(); }
+});
+test("G6 claim impact runtime: Player reparent proposal remains immutable and needs a GM decision", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player");
+  try { await gm.initialize(); const ids = await claimsTerritories(gm), ui = new DiplomacyApplicationController(player.diplomacy), fields = { kind: "reparent", physical: ids.administrative, administrative: "", reason: "Propose hierarchy" };
+    ui.selectTab("territory"); ui.select(ids.child); unwrap(await ui.load()); unwrap(await ui.change(fields)); assert.equal((await f.adapter.read("territory", ids.child))!.revision, 0);
+    const proposals: any = unwrap(await player.diplomacy.proposals.query()), detail: any = unwrap(await player.diplomacy.proposals.query({ id: proposals.items[0].id })); assert.equal(detail.original.previewSnapshot, undefined); assert.equal(detail.original.action.parents.locatedInUuid, ids.administrative);
+  } finally { player.destroy(); gm.destroy(); }
+});
+test("G6 claim impact runtime: preview snapshot binds action and reason; same revision cannot silently reuse another plan", async () => {
+  const f = fixture(), gm = f.make();
+  try { await gm.initialize(); const ids = await claimsTerritories(gm), input = hierarchyInput(ids), preview: any = unwrap(await gm.diplomacy.previewTerritory(input)), before = await f.adapter.loadAll();
+    for (const patch of [{ reason: "Other" }, { action: { kind: "reparent", parents: { locatedInUuid: null, administrativeParentUuid: null } } }]) {
+      const result = await gm.diplomacy.territory.modify({ ...input, ...patch, previewSnapshot: preview.previewSnapshot }); assert.equal(result.ok, false); if (!result.ok) assert.equal(result.error.code, "DM_TERRITORY_PREVIEW_STALE"); }
+    assert.deepEqual(await f.adapter.loadAll(), before);
+  } finally { gm.destroy(); }
 });

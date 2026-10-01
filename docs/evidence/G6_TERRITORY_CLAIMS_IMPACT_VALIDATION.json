@@ -1,0 +1,33 @@
+{
+  "date": "2026-10-01",
+  "part": "G6 inherited territory claim impact preview",
+  "branch": "feat/g6-continuous",
+  "local": {
+    "node": "24.19.0",
+    "specific": 15,
+    "runtime": 139,
+    "full": 1206,
+    "new_tests": 31,
+    "fail": 0,
+    "skipped": 0,
+    "typecheck": "PASS",
+    "build": "PASS",
+    "package": "PASS",
+    "validate_release": "PASS",
+    "zip_sha256": "bde8cd42d7e16f8ad7f762be8c75d510aca4eb12638f5bbdb9b02ae8fb64b533"
+  },
+  "ci": {
+    "conclusion": "pending"
+  },
+  "foundry_real": "deferred until G6 complete",
+  "release_published": false,
+  "g7_started": false,
+  "next_step": "Effective territory rights in inspector with origin, timing and conditions separate from capability grants",
+  "limitations": [
+    "GM-only preview; Player sends ordinary proposal",
+    "Direct legacy commands without previewSnapshot remain supported",
+    "Conservative full territorial catalog fingerprint; no scale benchmark",
+    "No impact preview for rights or other inherited states in this part",
+    "Structured GM review of hierarchy proposals deferred"
+  ]
+}

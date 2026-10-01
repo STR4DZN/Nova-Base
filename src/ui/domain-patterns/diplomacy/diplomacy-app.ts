@@ -1,4 +1,6 @@
 import { CLAIM_INHERITANCE_AXES, renderTerritoryClaims } from "./territory-claims-view.js";
+import { renderTerritoryPreview } from "./territory-claims-preview.js";
+import { isTerritoryPreviewSnapshot } from "../../../diplomacy/territory-preview-snapshot.js";
 import { OCCUPATION_ACTIONS, occupationFields, parseOccupationFields, parseOccupationEnd, renderTerritoryOccupations, renderOccupationFields, renderOccupationEnd, renderOccupationRequest } from "./territory-occupation-form.js";
 import { INFLUENCE_ACTIONS, influenceFields, parseInfluenceFields, parseInfluenceOperation, editInfluenceRows, renderTerritoryInfluence, renderInfluenceRequest } from "./territory-influence-form.js";
 import type { PublicDiplomacyApi, PublicDiplomacyOwnerApi } from "../../../diplomacy/public-diplomacy-api.js";
@@ -65,6 +67,12 @@ export class DiplomacyApplicationController {
   #previewInput: string | null = null; #previewIntent: OwnerIntent | null = null;
   treeAxis: "locatedInUuid" | "administrativeParentUuid" | null = null; treeParent: string | null = null;
   claimInheritanceAxis: "locatedInUuid" | "administrativeParentUuid" = "locatedInUuid";
+  territoryHierarchyFields: Record<string, string> = {};
+  updateTerritoryHierarchyDraft(fields: Record<string, string>): void {
+    if (this.tab !== "territory") return;
+    this.territoryHierarchyFields = fields.kind === "reparent" ? { ...fields } : {};
+    if (this.#previewInput !== JSON.stringify(fields)) this.preview = null;
+  }
   applyClaimInheritanceAxis(axis: string): Result<void> {
     if (this.tab !== "territory" || !CLAIM_INHERITANCE_AXES.some(([key]) => key === axis)) return this.capture(failure("DM_DIPLOMACY_QUERY_INVALID", "Selecione uma hierarquia territorial válida."));
     this.claimInheritanceAxis = axis as typeof this.claimInheritanceAxis; this.detail = null; return this.capture(ok(undefined));
@@ -74,7 +82,7 @@ export class DiplomacyApplicationController {
     this.select(id); this.detail = null; return this.capture(ok(undefined));
   }
   constructor(readonly api: PublicDiplomacyApi) {}
-  selectTab(tab: DiplomacyTab): void { this.claimInheritanceAxis = "locatedInUuid"; this.resetOccupationContext(); this.resetInfluenceDrafts(); this.resetLinkContext(); this.resetRecognitionDraft(); this.recognitionReviewFields = {}; this.recognitionReviewTarget = null; this.tab = tab; this.list = null; this.overviewFilter = "all"; this.expiryHorizonTicks = 10; this.recentHours = 24; this.offset = 0; this.selectedId = null; this.detail = null; this.historyOffset = 0; this.creating = false; this.preview = null; this.reputationTrackCount = 1; this.reputationFormFields = {}; this.reputationConfigurationFields = {}; this.resetReputationHistory(); this.agreementLifecycle = ""; this.agreementFormFields = {}; this.cancelAgreementTermEditor(); }
+  selectTab(tab: DiplomacyTab): void { this.territoryHierarchyFields = {}; this.claimInheritanceAxis = "locatedInUuid"; this.resetOccupationContext(); this.resetInfluenceDrafts(); this.resetLinkContext(); this.resetRecognitionDraft(); this.recognitionReviewFields = {}; this.recognitionReviewTarget = null; this.tab = tab; this.list = null; this.overviewFilter = "all"; this.expiryHorizonTicks = 10; this.recentHours = 24; this.offset = 0; this.selectedId = null; this.detail = null; this.historyOffset = 0; this.creating = false; this.preview = null; this.reputationTrackCount = 1; this.reputationFormFields = {}; this.reputationConfigurationFields = {}; this.resetReputationHistory(); this.agreementLifecycle = ""; this.agreementFormFields = {}; this.cancelAgreementTermEditor(); }
   private resetReputationHistory(): void {
     this.reputationHistoryFilter = {}; this.reputationHistoryFormFields = {}; this.reputationSourceOffset = 0;
   }
@@ -107,7 +115,7 @@ export class DiplomacyApplicationController {
     this.search = value; this.offset = 0;
     if (this.tab === "agreements") this.resetAgreementSelection();
   }
-  select(id: string): void { if (this.selectedId !== id) { this.resetOccupationContext(); this.resetInfluenceDrafts(); this.resetLinkContext(); this.resetRecognitionDraft(); this.recognitionReviewFields = {}; this.recognitionReviewTarget = null; this.reputationConfigurationFields = {}; this.resetReputationHistory(); this.agreementFormFields = {}; this.cancelAgreementTermEditor(); } this.selectedId = id; this.historyOffset = 0; this.creating = false; this.preview = null; }
+  select(id: string): void { if (this.selectedId !== id) { this.territoryHierarchyFields = {}; this.resetOccupationContext(); this.resetInfluenceDrafts(); this.resetLinkContext(); this.resetRecognitionDraft(); this.recognitionReviewFields = {}; this.recognitionReviewTarget = null; this.reputationConfigurationFields = {}; this.resetReputationHistory(); this.agreementFormFields = {}; this.cancelAgreementTermEditor(); } this.selectedId = id; this.historyOffset = 0; this.creating = false; this.preview = null; }
   applyOverviewFilter(filter: unknown, expiryHorizonTicks = this.expiryHorizonTicks, recentHours = this.recentHours): Result<unknown> {
     if (this.tab !== "overview") return this.capture(failure("DM_DIPLOMACY_OVERVIEW_QUERY_INVALID", "Abra o painel geral."));
     const valid = validateDiplomacyOverviewQuery({ filter, expiryHorizonTicks, recentHours }); if (!valid.ok) return this.capture(valid);
@@ -484,6 +492,7 @@ export class DiplomacyApplicationController {
     this.#agreementTermPreviewInput = JSON.stringify(fields); return this.capture(ok(undefined));
   }
   async change(fields: Record<string, string>, previewOnly = false): Promise<Result<unknown>> {
+    if (this.tab === "territory" && (fields.kind === "reparent" || this.territoryHierarchyFields.kind === "reparent")) this.updateTerritoryHierarchyDraft(fields);
     if (this.tab === "territory" && fields.kind === "occupation") this.occupationDraft = { ...fields };
     if (this.tab === "territory" && fields.kind === "end-occupation") this.occupationEndDraft = { ...fields };
     if (this.tab === "territory" && fields.kind === "link") this.territoryLinkFields = { ...fields };
@@ -500,13 +509,23 @@ export class DiplomacyApplicationController {
     let intent: OwnerIntent = { kind: kinds[this.tab as Exclude<DiplomacyTab, "proposals" | "overview">], mode: "modify", id: this.detail.id,
       expectedRevision: fields.termEditor === "on" ? this.agreementTermEditor!.revision : this.detail.revision, action: built.value, reason: ["recognition", "link", "update-link", ...OCCUPATION_ACTIONS].includes(fields.kind) ? fields.reason.trim() : fields.reason };
     if (previewOnly) { const result = await this.api.previewTerritory(intent as any); this.capture(result);
-      if (result.ok) { this.preview = result.value; this.#previewInput = JSON.stringify(fields); this.#previewIntent = intent; } else this.preview = null; return result; }
+      if (result.ok) {
+        if (fields.kind === "reparent" && (!result.value.claimInheritanceImpact || !isTerritoryPreviewSnapshot(result.value.previewSnapshot))) {
+          this.preview = null; return this.capture(failure("DM_DIPLOMACY_PREVIEW_REQUIRED", "A prévia de herança está indisponível. Atualize a consulta."));
+        }
+        this.preview = result.value; this.#previewInput = JSON.stringify(fields);
+        this.#previewIntent = fields.kind === "reparent" ? { ...intent, previewSnapshot: result.value.previewSnapshot } : intent;
+      } else this.preview = null; return result; }
     if (this.tab === "territory" && ["transfer", "reparent"].includes(fields.kind) && this.list?.isGm
       && (!this.preview || this.#previewInput !== JSON.stringify(fields) || this.#previewIntent?.expectedRevision !== this.detail.revision))
       return this.capture(failure("DM_DIPLOMACY_PREVIEW_REQUIRED", "Confira a prévia antes de confirmar a alteração territorial."));
     if (this.preview && this.#previewIntent && this.#previewInput === JSON.stringify(fields)) intent = this.#previewIntent;
     const result = this.list?.isGm ? await (this.api[this.tab] as PublicDiplomacyOwnerApi).modify(intent as any)
       : await this.api.proposals.submit({ id: crypto.randomUUID(), intent });
+    if (this.tab === "territory" && fields.kind === "reparent") {
+      if (result.ok) this.territoryHierarchyFields = {};
+      if (!result.ok && ["DM_TERRITORY_PREVIEW_STALE", "DM_REVISION_CONFLICT"].includes(result.error.code)) this.preview = null;
+    }
     this.capture(result); if (result.ok) { if (fields.kind === "occupation") { this.occupationDraft = {}; this.#occupationDraftId = null; } if (fields.kind === "end-occupation") this.occupationEndDraft = {}; if (INFLUENCE_ACTIONS.includes(fields.kind as any)) { delete this.influenceDrafts[fields.kind.startsWith("end-influence") ? "end-influence" : fields.kind]; delete this.#influenceDraftIds[fields.kind]; } this.preview = null; if (this.tab === "territory" && fields.kind === "link") { this.territoryLinkFields = {}; this.#linkDraftId = null; } if (this.tab === "territory" && fields.kind === "update-link") this.territoryLinkStatusFields = {}; if (this.tab === "territory" && fields.kind === "recognition") this.resetRecognitionDraft(); if (this.tab === "agreements") { this.agreementFormFields = {}; if (fields.termEditor === "on") this.cancelAgreementTermEditor(); } } return result;
   }
   async review(decision: "approve" | "reject", reason: string, fields: Record<string, string> = {}): Promise<Result<unknown>> {
@@ -755,8 +774,9 @@ export class DiplomacyApplicationController {
     else fields = `<label>Decisão<select name="lifecycle">${["latent", "active", "escalated", "frozen", "settled", "abandoned", "superseded"].map(x => `<option>${x}</option>`).join("")}</select></label>${input("outcome", "Referência do resultado explícito do GM")}`;
     const html = `<h3>${this.list?.isGm ? "Ação" : "Propor mudança ao GM"}</h3><form data-dm-form="change"><label>Operação<select name="kind">${choices}</select></label>${fields}<label>Motivo<input name="reason" required></label>
       ${this.tab === "territory" && this.list?.isGm ? '<button type="button" data-dm-preview="true">Conferir prévia</button>' : ""}<button>${this.list?.isGm ? "Confirmar ação" : "Enviar proposta"}</button></form>
-      ${this.preview ? `<p role="status">Prévia validada: ${this.preview.changes.length} território(s). Nenhuma propriedade de instalação será alterada.</p>` : ""}`;
-    return this.tab === "agreements" ? restoreAgreementFields(html, this.agreementFormFields) : html;
+      ${renderTerritoryPreview(this.preview)}`;
+    return this.tab === "agreements" ? restoreAgreementFields(html, this.agreementFormFields)
+      : this.tab === "territory" ? restoreAgreementFields(html, this.territoryHierarchyFields) : html;
   }
 }
 function restoreAgreementFields(html: string, fields: Record<string, string>): string {
@@ -795,6 +815,11 @@ export class DiplomacyApplication extends BaseApp {
     element.addEventListener("input", (e: Event) => {
       const form = (e.target as HTMLElement)?.closest?.('form') as HTMLFormElement | null;
       if (!form) return;
+      if (form.dataset.dmForm === "change" && this.controller.tab === "territory" && (fields(form).kind === "reparent" || this.controller.territoryHierarchyFields.kind === "reparent")) {
+        this.controller.updateTerritoryHierarchyDraft(fields(form));
+        const preview = element.querySelector?.("[data-dm-territory-preview-result]");
+        if (preview && !this.controller.preview) preview.textContent = "Os campos mudaram. Confira novamente a prévia antes de confirmar.";
+      }
       if (form.dataset.dmForm === "territory-occupation") this.controller.occupationDraft = fields(form);
       else if (form.dataset.dmForm === "territory-occupation-end") this.controller.occupationEndDraft = fields(form);
       else if (form.dataset.dmForm === "review" && form.querySelector?.('[name="occupationReview"]')) this.controller.occupationReviewFields = fields(form);

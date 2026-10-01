@@ -1,0 +1,77 @@
+Local validation: 2026-10-01 / Node 24.19.0
+
+specific
+✔ G6 claim preview UI: edits invalidate preview and block confirmation while preserving draft (3.453343ms)
+✔ G6 claim preview UI: stale backend rejection clears preview; incomplete preview cannot authorize confirmation (4.81206ms)
+✔ G6 claim preview UI: context switch clears draft and Player submits an ordinary proposal (2.544614ms)
+✔ G6 claim preview bindings: input invalidation, preview render and submit retain form intent (5.06899ms)
+ℹ tests 15
+ℹ suites 0
+ℹ pass 15
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 205.532606
+
+runtime
+✔ G6 claim impact runtime: GM interface previews, preserves fields, confirms and keeps inherited changes derived (16.317671ms)
+✔ G6 claim impact runtime: exact confirmation ticket retries once despite later clock drift and reload (13.7969ms)
+✔ G6 claim impact runtime: Player reparent proposal remains immutable and needs a GM decision (13.698769ms)
+✔ G6 claim impact runtime: preview snapshot binds action and reason; same revision cannot silently reuse another plan (18.513879ms)
+ℹ tests 139
+ℹ suites 0
+ℹ pass 139
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 4221.75057
+
+full
+✔ G3.6 - Workforce: Formula calculates capacity, committed, reserved, available correctly (1.536289ms)
+✔ G3.6 - Workforce: Inactive or disbanded operational groups contribute 0 capacity (0.288917ms)
+✔ G3.6 - Workforce: Anti-double-count between linked operational groups and population groups (0.251059ms)
+✔ G3.6 - Workforce: Expired reservation automatically releases reserved capacity (0.260918ms)
+ℹ tests 1206
+ℹ suites 0
+ℹ pass 1206
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 41839.880309
+
+typecheck
+npm warn Unknown env config "http-proxy". This will stop working in the next major version of npm.
+
+> domain-manager@0.0.8 typecheck
+> tsc --noEmit
+
+
+build
+npm warn Unknown env config "http-proxy". This will stop working in the next major version of npm.
+
+> domain-manager@0.0.8 build
+> node build.mjs
+
+
+package
+npm warn Unknown env config "http-proxy". This will stop working in the next major version of npm.
+
+> domain-manager@0.0.8 package
+> node scripts/package.mjs
+
+Package created: dist/domain-manager-v0.0.8.zip
+
+artifact
+npm warn Unknown env config "http-proxy". This will stop working in the next major version of npm.
+
+> domain-manager@0.0.8 validate:release
+> node scripts/validate-release.mjs
+
+Package validation passed
+Artifact validation passed
+Release URLs, versions and ZIP verified: v0.0.8
+
+ZIP SHA256 bde8cd42d7e16f8ad7f762be8c75d510aca4eb12638f5bbdb9b02ae8fb64b533

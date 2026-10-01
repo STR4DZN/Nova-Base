@@ -10,10 +10,11 @@ import type { DiplomacyQuery } from "./diplomacy-query.js";
 import { DIPLOMACY_NAMESPACES } from "./owner-commands.js";
 import type { OwnerIntent } from "./owner-commands.js";
 import { DiplomacyApplication } from "../ui/domain-patterns/diplomacy/diplomacy-app.js";
+import type { TerritoryPreviewSnapshot } from "./territory-preview-snapshot.js";
 export interface PublicDiplomacyOwnerApi {
   query(query?: DiplomacyQuery): Promise<Result<any>>;
   create(input: { readonly id: string; readonly data: unknown; readonly reason: string }): Promise<Result<any>>;
-  modify(input: { readonly id: string; readonly expectedRevision: number; readonly action: unknown; readonly reason: string }): Promise<Result<any>>;
+  modify(input: { readonly id: string; readonly expectedRevision: number; readonly action: unknown; readonly reason: string; readonly previewSnapshot?: TerritoryPreviewSnapshot }): Promise<Result<any>>;
 }
 export interface PublicDiplomacyApi {
   readonly commands: {
