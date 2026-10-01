@@ -1,0 +1,38 @@
+{
+  "date": "2026-10-01",
+  "part": "G6 territorial occupation forms",
+  "branch": "feat/g6-continuous",
+  "local": {
+    "node": "24.19.0",
+    "specific": 16,
+    "runtime": 111,
+    "full": 1155,
+    "new_tests": 30,
+    "fail": 0,
+    "skipped": 0,
+    "typecheck": "PASS",
+    "build": "PASS",
+    "package": "PASS",
+    "validate_release": "PASS",
+    "zip_sha256": "a35131a4104e5e7babb59ea9056266f8d6b838c7395dbeeb2a348d9cf729a30b"
+  },
+  "reproduced_before_fix": {
+    "runtime_tests": 100,
+    "pass": 97,
+    "fail": 3,
+    "defects": [
+      "Private presence/control references admitted in Player proposal",
+      "Hidden occupation ID admitted for ending",
+      "Private reference exposed in GM-edited approval"
+    ]
+  },
+  "ci": "pending",
+  "foundry_real": "deferred until G6 complete",
+  "release_published": false,
+  "g7_started": false,
+  "next_step": "Inherited claims in territory inspector with origin and local distinction",
+  "limitations": [
+    "No transitions between intermediate states of existing occupations",
+    "No automatic occupation policies; dependencies and ownership independent"
+  ]
+}

@@ -1,0 +1,10 @@
+✔ G3.6 - Workforce: Expired reservation automatically releases reserved capacity (0.275904ms)
+ℹ tests 1155
+ℹ suites 0
+ℹ pass 1155
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 49585.210635
+TypeScript/build/package/validate:release PASS

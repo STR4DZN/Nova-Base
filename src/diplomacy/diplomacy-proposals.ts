@@ -1,3 +1,4 @@
+import { territoryOccupationIntentVisible } from "./territory-occupation-visibility.js";
 import { ok, type Result } from "../core/contracts/result.js";
 import { failure, immutable, isJsonData, isRecord, isText, isTimestamp, revisionGuard } from "../core/validation/value-validation.js";
 import { createTransactionalHandler } from "../commands/command-registry.js";
@@ -56,6 +57,9 @@ export function registerDiplomacyProposals(o: OwnerCommandOptions): void {
     if (!diplomacyViewerIsGm(ctx) && intent.kind === "territory"
       && !await territoryLinkIntentVisible(intent, valid.value as TerritoryState, ctx, o, false))
       return failure("DM_TERRITORY_LINK_UNAVAILABLE", "Link reference unavailable", "not-found");
+    if (!diplomacyViewerIsGm(ctx) && intent.kind === "territory"
+      && !await territoryOccupationIntentVisible(intent, valid.value as TerritoryState, ctx, o, false))
+      return failure("DM_TERRITORY_OCCUPATION_UNAVAILABLE", "Occupation reference unavailable", "not-found");
     // Validate the semantic proposal now; approval repeats this against freshly locked state.
     const prepared = await prepareOwnerIntent(intent, ctx, o); if (!prepared.ok) return prepared;
     const data: DiplomacyProposal = { id: p.id, revision: 0, label: owner.identity(valid.value).label, visibility: "restricted", lifecycle: "pending",
@@ -123,6 +127,11 @@ export function registerDiplomacyProposals(o: OwnerCommandOptions): void {
         if (approved.kind === "territory" && (approved.mode === "create" || isRecord(approved.action) && ["link", "update-link", "influence", "add-influence-modifier", "end-influence", "end-influence-modifier"].includes(approved.action.kind as string))) {
           const source = await visibleTerritory(approved.id, ctx, o);
           if (!source || !await territoryLinkIntentVisible(approved, source, ctx, o))
+            return ok({ ...proposal, decision: { ...proposal.decision, approvedIntent: null } });
+        }
+        if (approved.kind === "territory" && (approved.mode === "create" || isRecord(approved.action) && ["occupation", "end-occupation"].includes(approved.action.kind as string))) {
+          const source = await visibleTerritory(approved.id, ctx, o);
+          if (!source || !await territoryOccupationIntentVisible(approved, source, ctx, o))
             return ok({ ...proposal, decision: { ...proposal.decision, approvedIntent: null } });
         }
         return ok({ ...proposal, decision: { ...proposal.decision, approvedIntent: redact(approved) } }); }

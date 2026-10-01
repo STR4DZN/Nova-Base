@@ -1,3 +1,4 @@
+import { OCCUPATION_ACTIONS, occupationFields, parseOccupationFields, parseOccupationEnd, renderTerritoryOccupations, renderOccupationFields, renderOccupationEnd, renderOccupationRequest } from "./territory-occupation-form.js";
 import { INFLUENCE_ACTIONS, influenceFields, parseInfluenceFields, parseInfluenceOperation, editInfluenceRows, renderTerritoryInfluence, renderInfluenceRequest } from "./territory-influence-form.js";
 import type { PublicDiplomacyApi, PublicDiplomacyOwnerApi } from "../../../diplomacy/public-diplomacy-api.js";
 import { createDiplomacyDraft } from "../../../diplomacy/diplomacy-drafts.js";
@@ -63,7 +64,7 @@ export class DiplomacyApplicationController {
   #previewInput: string | null = null; #previewIntent: OwnerIntent | null = null;
   treeAxis: "locatedInUuid" | "administrativeParentUuid" | null = null; treeParent: string | null = null;
   constructor(readonly api: PublicDiplomacyApi) {}
-  selectTab(tab: DiplomacyTab): void { this.resetInfluenceDrafts(); this.resetLinkContext(); this.resetRecognitionDraft(); this.recognitionReviewFields = {}; this.recognitionReviewTarget = null; this.tab = tab; this.list = null; this.overviewFilter = "all"; this.expiryHorizonTicks = 10; this.recentHours = 24; this.offset = 0; this.selectedId = null; this.detail = null; this.historyOffset = 0; this.creating = false; this.preview = null; this.reputationTrackCount = 1; this.reputationFormFields = {}; this.reputationConfigurationFields = {}; this.resetReputationHistory(); this.agreementLifecycle = ""; this.agreementFormFields = {}; this.cancelAgreementTermEditor(); }
+  selectTab(tab: DiplomacyTab): void { this.resetOccupationContext(); this.resetInfluenceDrafts(); this.resetLinkContext(); this.resetRecognitionDraft(); this.recognitionReviewFields = {}; this.recognitionReviewTarget = null; this.tab = tab; this.list = null; this.overviewFilter = "all"; this.expiryHorizonTicks = 10; this.recentHours = 24; this.offset = 0; this.selectedId = null; this.detail = null; this.historyOffset = 0; this.creating = false; this.preview = null; this.reputationTrackCount = 1; this.reputationFormFields = {}; this.reputationConfigurationFields = {}; this.resetReputationHistory(); this.agreementLifecycle = ""; this.agreementFormFields = {}; this.cancelAgreementTermEditor(); }
   private resetReputationHistory(): void {
     this.reputationHistoryFilter = {}; this.reputationHistoryFormFields = {}; this.reputationSourceOffset = 0;
   }
@@ -96,7 +97,7 @@ export class DiplomacyApplicationController {
     this.search = value; this.offset = 0;
     if (this.tab === "agreements") this.resetAgreementSelection();
   }
-  select(id: string): void { if (this.selectedId !== id) { this.resetInfluenceDrafts(); this.resetLinkContext(); this.resetRecognitionDraft(); this.recognitionReviewFields = {}; this.recognitionReviewTarget = null; this.reputationConfigurationFields = {}; this.resetReputationHistory(); this.agreementFormFields = {}; this.cancelAgreementTermEditor(); } this.selectedId = id; this.historyOffset = 0; this.creating = false; this.preview = null; }
+  select(id: string): void { if (this.selectedId !== id) { this.resetOccupationContext(); this.resetInfluenceDrafts(); this.resetLinkContext(); this.resetRecognitionDraft(); this.recognitionReviewFields = {}; this.recognitionReviewTarget = null; this.reputationConfigurationFields = {}; this.resetReputationHistory(); this.agreementFormFields = {}; this.cancelAgreementTermEditor(); } this.selectedId = id; this.historyOffset = 0; this.creating = false; this.preview = null; }
   applyOverviewFilter(filter: unknown, expiryHorizonTicks = this.expiryHorizonTicks, recentHours = this.recentHours): Result<unknown> {
     if (this.tab !== "overview") return this.capture(failure("DM_DIPLOMACY_OVERVIEW_QUERY_INVALID", "Abra o painel geral."));
     const valid = validateDiplomacyOverviewQuery({ filter, expiryHorizonTicks, recentHours }); if (!valid.ok) return this.capture(valid);
@@ -108,6 +109,20 @@ export class DiplomacyApplicationController {
       || !this.list?.items?.some((r: any) => kinds[tab as keyof typeof kinds] === r.kind && r.id === id || tab === "proposals" && r.kind === "proposal" && r.id === id))
       return this.capture(failure("DM_DIPLOMACY_QUERY_INVALID", "Selecione um destaque visível."));
     this.selectTab(tab as DiplomacyTab); this.search = ""; this.treeAxis = null; this.treeParent = null; this.select(id); return this.capture(ok({}));
+  }
+  occupationDraft: Record<string, string> = {}; occupationEndDraft: Record<string, string> = {};
+  occupationReviewFields: Record<string, string> = {}; occupationReviewTarget: any = null;
+  #occupationDraftId: string | null = null;
+  resetOccupationDrafts(): void { this.occupationDraft = {}; this.occupationEndDraft = {}; this.#occupationDraftId = null; }
+  private resetOccupationContext(): void { this.resetOccupationDrafts(); this.occupationReviewFields = {}; this.occupationReviewTarget = null; }
+  resetOccupationReviewReferences(f: Record<string, string>): void {
+    this.occupationReviewFields = { ...f, occupationPresenceIds: "[]", occupationControlIds: "[]" };
+    delete this.occupationReviewFields.occupationReferencesUnavailable;
+  }
+  async submitOccupation(f: Record<string, string>, end = false): Promise<Result<unknown>> {
+    if (this.tab !== "territory" || !this.detail || this.selectedId !== this.detail.id)
+      return this.capture(failure("DM_DIPLOMACY_INTENT_INVALID", "Selecione um território disponível."));
+    return this.change({ ...f, kind: end ? "end-occupation" : "occupation" });
   }
   influenceDrafts: Record<string, Record<string, string>> = {};
   #influenceDraftIds: Record<string, string> = {};
@@ -144,7 +159,7 @@ export class DiplomacyApplicationController {
     }
   }
   async load(): Promise<Result<unknown>> {
-    this.recognitionReviewTarget = null; this.linkReviewTarget = null; this.linkDestinations = []; this.linkDestinationPage = null;
+    this.occupationReviewTarget = null; this.recognitionReviewTarget = null; this.linkReviewTarget = null; this.linkDestinations = []; this.linkDestinationPage = null;
     if (this.tab === "overview") {
       const result = await this.api.overview.query({ offset: this.offset, limit: 30, search: this.search, filter: this.overviewFilter,
         expiryHorizonTicks: this.expiryHorizonTicks, recentHours: this.recentHours });
@@ -170,6 +185,12 @@ export class DiplomacyApplicationController {
       && this.detail.original.mode === "modify" && ["link", "update-link"].includes(this.detail.original.action?.kind)) {
       const target = await this.api.territory.query({ id: this.detail.original.id, historyLimit: 0 });
       if (target.ok) { this.linkReviewTarget = target.value; if (this.detail.original.action.kind === "link") await this.loadLinkDestinations(this.detail.original.id); }
+      else this.error = "O território está indisponível para revisão. É possível rejeitar ou atualizar a consulta.";
+    }
+    if (this.tab === "proposals" && this.list?.isGm && this.detail?.lifecycle === "pending" && this.detail.original.kind === "territory"
+      && this.detail.original.mode === "modify" && OCCUPATION_ACTIONS.includes(this.detail.original.action?.kind)) {
+      const target = await this.api.territory.query({ id: this.detail.original.id, historyLimit: 0 });
+      if (target.ok) this.occupationReviewTarget = target.value;
       else this.error = "O território está indisponível para revisão. É possível rejeitar ou atualizar a consulta.";
     }
     return ok(this.list);
@@ -355,6 +376,13 @@ export class DiplomacyApplicationController {
       return kind === "update-link" ? parseLinkStatus(f, d.links ?? []) : parseLinkFields(f, d.id, this.linkDestinations, d.worldTick ?? this.list?.worldTick,
         this.#linkDraftId ??= crypto.randomUUID(), { type: "manual", id: "diplomacy-link-form" });
     }
+    if (OCCUPATION_ACTIONS.includes(kind as any)) {
+      const revision = f.occupationRevision === undefined ? d.revision : f.occupationRevision.trim() ? Number(f.occupationRevision) : NaN;
+      if (!isTimestamp(revision) || revision !== d.revision) return failure("DM_REVISION_CONFLICT", "O território mudou. Revise ou limpe o rascunho antes de enviar.", "conflict");
+      if (!isText(f.reason?.trim())) return failure("DM_TERRITORY_OCCUPATION_REASON_INVALID", "Informe um motivo auditável.");
+      return kind === "end-occupation" ? parseOccupationEnd(f, d.occupations ?? []) : parseOccupationFields(f, d.presence ?? [], d.claims ?? [],
+        d.worldTick ?? this.list?.worldTick, this.#occupationDraftId ??= crypto.randomUUID(), { type: "manual", id: "diplomacy-occupation-form" });
+    }
     if (INFLUENCE_ACTIONS.includes(kind as any)) {
       const revision = f.influenceRevision === undefined ? d.revision : f.influenceRevision.trim() ? Number(f.influenceRevision) : NaN;
       if (!isTimestamp(revision) || revision !== d.revision) return failure("DM_REVISION_CONFLICT", "O território mudou. Revise o rascunho antes de enviar.", "conflict");
@@ -445,6 +473,8 @@ export class DiplomacyApplicationController {
     this.#agreementTermPreviewInput = JSON.stringify(fields); return this.capture(ok(undefined));
   }
   async change(fields: Record<string, string>, previewOnly = false): Promise<Result<unknown>> {
+    if (this.tab === "territory" && fields.kind === "occupation") this.occupationDraft = { ...fields };
+    if (this.tab === "territory" && fields.kind === "end-occupation") this.occupationEndDraft = { ...fields };
     if (this.tab === "territory" && fields.kind === "link") this.territoryLinkFields = { ...fields };
     if (this.tab === "territory" && fields.kind === "update-link") this.territoryLinkStatusFields = { ...fields };
     if (this.tab === "territory" && fields.kind === "recognition") this.territoryRecognitionFields = { ...fields };
@@ -457,7 +487,7 @@ export class DiplomacyApplicationController {
     if (this.tab === "agreements" && fields.termEditor === "on" && this.#agreementTermPreviewInput !== JSON.stringify(fields))
       return this.capture(failure("DM_AGREEMENT_TERM_PREVIEW_REQUIRED", "Confira as alterações dos termos antes de enviar."));
     let intent: OwnerIntent = { kind: kinds[this.tab as Exclude<DiplomacyTab, "proposals" | "overview">], mode: "modify", id: this.detail.id,
-      expectedRevision: fields.termEditor === "on" ? this.agreementTermEditor!.revision : this.detail.revision, action: built.value, reason: ["recognition", "link", "update-link"].includes(fields.kind) ? fields.reason.trim() : fields.reason };
+      expectedRevision: fields.termEditor === "on" ? this.agreementTermEditor!.revision : this.detail.revision, action: built.value, reason: ["recognition", "link", "update-link", ...OCCUPATION_ACTIONS].includes(fields.kind) ? fields.reason.trim() : fields.reason };
     if (previewOnly) { const result = await this.api.previewTerritory(intent as any); this.capture(result);
       if (result.ok) { this.preview = result.value; this.#previewInput = JSON.stringify(fields); this.#previewIntent = intent; } else this.preview = null; return result; }
     if (this.tab === "territory" && ["transfer", "reparent"].includes(fields.kind) && this.list?.isGm
@@ -466,10 +496,24 @@ export class DiplomacyApplicationController {
     if (this.preview && this.#previewIntent && this.#previewInput === JSON.stringify(fields)) intent = this.#previewIntent;
     const result = this.list?.isGm ? await (this.api[this.tab] as PublicDiplomacyOwnerApi).modify(intent as any)
       : await this.api.proposals.submit({ id: crypto.randomUUID(), intent });
-    this.capture(result); if (result.ok) { if (INFLUENCE_ACTIONS.includes(fields.kind as any)) { delete this.influenceDrafts[fields.kind.startsWith("end-influence") ? "end-influence" : fields.kind]; delete this.#influenceDraftIds[fields.kind]; } this.preview = null; if (this.tab === "territory" && fields.kind === "link") { this.territoryLinkFields = {}; this.#linkDraftId = null; } if (this.tab === "territory" && fields.kind === "update-link") this.territoryLinkStatusFields = {}; if (this.tab === "territory" && fields.kind === "recognition") this.resetRecognitionDraft(); if (this.tab === "agreements") { this.agreementFormFields = {}; if (fields.termEditor === "on") this.cancelAgreementTermEditor(); } } return result;
+    this.capture(result); if (result.ok) { if (fields.kind === "occupation") { this.occupationDraft = {}; this.#occupationDraftId = null; } if (fields.kind === "end-occupation") this.occupationEndDraft = {}; if (INFLUENCE_ACTIONS.includes(fields.kind as any)) { delete this.influenceDrafts[fields.kind.startsWith("end-influence") ? "end-influence" : fields.kind]; delete this.#influenceDraftIds[fields.kind]; } this.preview = null; if (this.tab === "territory" && fields.kind === "link") { this.territoryLinkFields = {}; this.#linkDraftId = null; } if (this.tab === "territory" && fields.kind === "update-link") this.territoryLinkStatusFields = {}; if (this.tab === "territory" && fields.kind === "recognition") this.resetRecognitionDraft(); if (this.tab === "agreements") { this.agreementFormFields = {}; if (fields.termEditor === "on") this.cancelAgreementTermEditor(); } } return result;
   }
   async review(decision: "approve" | "reject", reason: string, fields: Record<string, string> = {}): Promise<Result<unknown>> {
     let editedIntent: OwnerIntent | undefined;
+    if (fields.occupationReview === "on") {
+      this.occupationReviewFields = { ...fields }; reason = reason.trim();
+      if (!isText(reason)) return this.capture(failure("DM_TERRITORY_OCCUPATION_REASON_INVALID", "Informe o motivo da decisão."));
+      if (decision === "approve") {
+        const original = this.detail?.original;
+        if (!this.list?.isGm || this.tab !== "proposals" || original?.kind !== "territory" || original.mode !== "modify"
+          || !OCCUPATION_ACTIONS.includes(original.action?.kind) || !this.occupationReviewTarget)
+          return this.capture(failure("DM_TERRITORY_OCCUPATION_UNAVAILABLE", "Atualize o território antes de aprovar.", "not-found"));
+        const parsed = original.action.kind === "end-occupation" ? parseOccupationEnd({ occupationId: original.action.id }, this.occupationReviewTarget.occupations)
+          : parseOccupationFields(fields, this.occupationReviewTarget.presence, this.occupationReviewTarget.claims, this.occupationReviewTarget.worldTick, original.action.value.id, original.action.value.sourceRef);
+        if (!parsed.ok) return this.capture(parsed);
+        editedIntent = { ...structuredClone(original), action: parsed.value };
+      }
+    }
     if (fields.linkReview === "on") {
       this.linkReviewFields = { ...fields }; reason = reason?.trim();
       if (!isText(reason)) return this.capture(failure("DM_TERRITORY_LINK_REASON_INVALID", "Informe o motivo da decisão."));
@@ -513,7 +557,7 @@ export class DiplomacyApplicationController {
         editedIntent = { ...editedIntent!, expectedRevision: revision };
       }
     }
-    const result = await this.api.proposals.decide({ id: this.detail.id, expectedRevision: this.detail.revision, decision, reason, ...(editedIntent ? { editedIntent } : {}) }); this.capture(result); if (result.ok) { this.recognitionReviewFields = {}; this.linkReviewFields = {}; } return result;
+    const result = await this.api.proposals.decide({ id: this.detail.id, expectedRevision: this.detail.revision, decision, reason, ...(editedIntent ? { editedIntent } : {}) }); this.capture(result); if (result.ok) { this.occupationReviewFields = {}; this.recognitionReviewFields = {}; this.linkReviewFields = {}; } return result;
   }
   capture<T>(result: Result<T>): Result<T> { this.error = result.ok ? "" : result.error.message; return result; }
   render(): string {
@@ -582,7 +626,8 @@ export class DiplomacyApplicationController {
     if (d.territory) { blocks += `<p>Propriedade, administração, controle e presença possuem registros independentes. Transferências preservam as reivindicações concorrentes.</p>
       <p>Localização: ${escapeHtml(d.territory.locatedInUuid ?? "raiz")} · hierarquia administrativa: ${escapeHtml(d.territory.administrativeParentUuid ?? "raiz")}</p>`;
       if (this.treeAxis) blocks += `<button type="button" data-dm-children="${escapeAttribute(d.id)}">Abrir filhos neste ramo</button>`;
-      for (const [key, name] of [["claims", "Reivindicações"], ["presence", "Presença"], ["rights", "Direitos"], ["occupations", "Ocupações"]]) blocks += table(name, d[key] ?? [], [...columns, ["Estado", x => x.lifecycle ?? (x.active ? "active" : "inactive")]]);
+      for (const [key, name] of [["claims", "Reivindicações"], ["presence", "Presença"], ["rights", "Direitos"]]) blocks += table(name, d[key] ?? [], [...columns, ["Estado", x => x.lifecycle ?? (x.active ? "active" : "inactive")]]);
+      blocks += renderTerritoryOccupations(d, d.worldTick ?? this.list?.worldTick, Boolean(this.list?.isGm), this.occupationDraft, this.occupationEndDraft);
       blocks += renderTerritoryRecognitions(d, d.worldTick ?? this.list?.worldTick, Boolean(this.list?.isGm), this.territoryRecognitionFields);
       blocks += renderTerritoryInfluence(d, d.worldTick ?? this.list?.worldTick, Boolean(this.list?.isGm), this.influenceDrafts.influence ?? {}, this.influenceDrafts["add-influence-modifier"] ?? {}, this.influenceDrafts["end-influence"] ?? this.influenceDrafts["end-influence-modifier"] ?? {});
       blocks += renderTerritoryLinks(d, d.worldTick ?? this.list?.worldTick, Boolean(this.list?.isGm), this.linkDestinations, this.linkDestinationPage,
@@ -592,6 +637,9 @@ export class DiplomacyApplicationController {
       blocks += `<h3>Pedido original</h3><p>${escapeHtml(d.original.kind)} · ${escapeHtml(d.original.mode)} · ${escapeHtml(d.original.id)}</p><p>${escapeHtml(d.original.reason)}</p>
         <p>Solicitante: ${escapeHtml(d.requesterUserId)}</p>${d.decision ? `<h3>Decisão</h3><p>${escapeHtml(d.decision.reason)} · ${escapeHtml(d.decision.reviewerUserId)}</p>` : ""}`;
       const a = d.original.action;
+      if (OCCUPATION_ACTIONS.includes(a?.kind)) blocks += renderOccupationRequest(a);
+      const approvedOccupation = d.decision?.approvedIntent?.action;
+      if (OCCUPATION_ACTIONS.includes(approvedOccupation?.kind)) blocks += renderOccupationRequest(approvedOccupation, "Ocupação aprovada");
       if (INFLUENCE_ACTIONS.includes(a?.kind)) blocks += renderInfluenceRequest(a);
       const approvedInfluence = d.decision?.approvedIntent?.action;
       if (INFLUENCE_ACTIONS.includes(approvedInfluence?.kind)) blocks += renderInfluenceRequest(approvedInfluence, "Influência aprovada");
@@ -626,6 +674,14 @@ export class DiplomacyApplicationController {
           ${available ? a.kind === "link" ? renderLinkFields(this.linkDestinations, f) : renderLinkStatusFields(this.linkReviewTarget.links.filter((l: any) => l.id === a.id), f) : "<p>Território ou destinos indisponíveis para aprovação. Atualize ou rejeite o pedido.</p>"}
           <label>Revisão atual do alvo (opcional após conferir outra edição)<input name="targetRevision" type="number" min="0" step="1" value="${escapeAttribute(f.targetRevision ?? "")}"></label>
           <label>Motivo da decisão<input name="reason" required value="${escapeAttribute(f.reason ?? "")}"></label><button name="decision" value="approve" ${available ? "" : "disabled"}>Aprovar ligação</button><button name="decision" value="reject" formnovalidate>Rejeitar</button></form>`;
+      } else if (this.list?.isGm && d.lifecycle === "pending" && d.original.kind === "territory" && OCCUPATION_ACTIONS.includes(a?.kind)) {
+        const f: Record<string, string> = { ...(a.kind === "occupation" ? occupationFields(a.value) : { occupationId: a.id }), ...this.occupationReviewFields }, target = this.occupationReviewTarget;
+        blocks += `<h3>Revisar ocupação territorial</h3><p>Pedido original preservado. Revisão solicitada: ${d.original.expectedRevision}; atual: ${target?.revision ?? "indisponível"}.</p>
+          <form data-dm-form="review"><input type="hidden" name="occupationReview" value="on">
+          ${target ? a.kind === "occupation" ? renderOccupationFields(target.presence, target.claims, f) : renderOccupationEnd(target.occupations, f, a.id) : "<p>Território indisponível para aprovação. Atualize ou rejeite o pedido.</p>"}
+          ${a.kind === "occupation" ? '<button type="button" data-dm-occupation-review-reset="true">Limpar referências da revisão</button>' : ""}
+          <label>Revisão atual do alvo (opcional após conferir outra edição)<input name="targetRevision" type="number" min="0" step="1" value="${escapeAttribute(f.targetRevision ?? "")}"></label>
+          <label>Motivo da decisão<input name="reason" required value="${escapeAttribute(f.reason ?? "")}"></label><button name="decision" value="approve" ${target ? "" : "disabled"}>Aprovar ocupação</button><button name="decision" value="reject" formnovalidate>Rejeitar</button></form>`;
       } else if (this.list?.isGm && d.lifecycle === "pending") blocks += '<form data-dm-form="review"><label>Alteração revisada (incidente de um eixo ou ajuste de reputação; opcional)<input name="amount" type="number" step="1"></label><label>Revisão atual do alvo (se estiver aceitando uma mudança após outra edição; opcional)<input name="targetRevision" type="number" min="0" step="1"></label><label>Motivo<input name="reason" required></label><button name="decision" value="approve">Aprovar</button><button name="decision" value="reject">Rejeitar</button></form>';
       return blocks;
     }
@@ -719,11 +775,18 @@ export class DiplomacyApplication extends BaseApp {
   _renderHTML(): string { return `<style>.dm-diplomacy-app .dm-diplomacy-columns{display:grid;grid-template-columns:240px 1fr;gap:16px}.dm-diplomacy-app aside button,.dm-diplomacy-app label{display:block;margin:6px 0}.dm-diplomacy-app table{width:100%;text-align:left;border-collapse:collapse}.dm-diplomacy-app td,.dm-diplomacy-app th{padding:6px;border-bottom:1px solid #7775}.dm-diplomacy-app input,.dm-diplomacy-app textarea{max-width:100%}.dm-diplomacy-app pre{white-space:pre-wrap;overflow-wrap:anywhere}.dm-diplomacy-app [role=alert]{color:#b3261e}.dm-diplomacy-app .dm-agreement-summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px}.dm-diplomacy-app .dm-agreement-summary strong{display:block;font-size:1.4em}.dm-diplomacy-app .dm-agreement-summary [aria-pressed=true]{outline:2px solid currentColor}.dm-diplomacy-app .dm-reputation-history-table{overflow-x:auto;max-width:100%}.dm-diplomacy-app .dm-reputation-history-table td{overflow-wrap:anywhere}.dm-diplomacy-app main{min-width:0}</style>${this.controller.render()}`; }
   _replaceHTML(html: string, content: HTMLElement): void { content.innerHTML = html; }
   _onRender(): void { const element = this.element; if (!element || this.#bound.has(element)) return; this.#bound.add(element);
-    const fields = (form: HTMLFormElement): Record<string, string> => { const result: Record<string, string> = {}; new FormData(form).forEach((v, k) => { result[k] = form.dataset.dmForm === "agreement-terms" ? String(v) : String(v).trim(); }); if (form.dataset.dmForm?.startsWith("territory-influence")) form.querySelectorAll<HTMLInputElement>('input[type="checkbox"]').forEach(input => { if (!input.checked) result[input.name] = ""; }); return result; };
+    const fields = (form: HTMLFormElement): Record<string, string> => { const result: Record<string, string> = {}; new FormData(form).forEach((v, k) => { result[k] = form.dataset.dmForm === "agreement-terms" ? String(v) : String(v).trim(); }); if (form.dataset.dmForm?.startsWith("territory-influence")) form.querySelectorAll<HTMLInputElement>('input[type="checkbox"]').forEach(input => { if (!input.checked) result[input.name] = ""; });
+      if (form.dataset.dmForm === "territory-occupation" || form.dataset.dmForm === "review" && result.occupationReview === "on") {
+        for (const key of ["occupationPresenceIds", "occupationControlIds"]) result[key] = JSON.stringify(new FormData(form).getAll(key).map(String));
+      }
+      return result; };
     element.addEventListener("input", (e: Event) => {
       const form = (e.target as HTMLElement)?.closest?.('form') as HTMLFormElement | null;
       if (!form) return;
-      if (form.dataset.dmForm?.startsWith("territory-influence")) {
+      if (form.dataset.dmForm === "territory-occupation") this.controller.occupationDraft = fields(form);
+      else if (form.dataset.dmForm === "territory-occupation-end") this.controller.occupationEndDraft = fields(form);
+      else if (form.dataset.dmForm === "review" && form.querySelector?.('[name="occupationReview"]')) this.controller.occupationReviewFields = fields(form);
+      else if (form.dataset.dmForm?.startsWith("territory-influence")) {
         const f = fields(form), kind = form.dataset.dmForm === "territory-influence" ? "influence" : form.dataset.dmForm === "territory-influence-modifier" ? "add-influence-modifier" : f.endKind || "end-influence-modifier";
         this.controller.influenceDrafts[kind.startsWith("end-influence") ? "end-influence" : kind] = f;
       }
@@ -769,6 +832,8 @@ export class DiplomacyApplication extends BaseApp {
       else if (button.dataset.dmId) this.controller.select(button.dataset.dmId);
       else if (button.dataset.dmPage) this.controller.offset = Math.max(0, this.controller.offset + Number(button.dataset.dmPage) * 30);
       else if (button.dataset.dmHistory) this.controller.historyOffset = Math.max(0, this.controller.historyOffset + Number(button.dataset.dmHistory) * 30);
+      else if (button.dataset.dmOccupationReviewReset) this.controller.resetOccupationReviewReferences(fields(button.closest("form")!));
+      else if (button.dataset.dmOccupationReset) this.controller.resetOccupationDrafts();
       else if (button.dataset.dmInfluenceReset) this.controller.resetInfluenceDrafts();
       else if (button.dataset.dmInfluenceRows) {
         const f = fields(button.closest("form")!), result = editInfluenceRows(f, button.dataset.dmInfluenceRows as any, button.dataset.dmInfluenceOperation as any, Number(button.dataset.dmInfluenceIndex ?? -1));
@@ -790,6 +855,8 @@ export class DiplomacyApplication extends BaseApp {
       else if (form.dataset.dmForm === "link-destinations") this.controller.applyDestinationSearch(data.destinationSearch);
       else if (form.dataset.dmForm === "territory-link") await this.controller.submitLink(data);
       else if (form.dataset.dmForm === "territory-link-status") await this.controller.submitLink(data, true);
+      else if (form.dataset.dmForm === "territory-occupation") await this.controller.submitOccupation(data);
+      else if (form.dataset.dmForm === "territory-occupation-end") await this.controller.submitOccupation(data, true);
       else if (form.dataset.dmForm?.startsWith("territory-influence")) await this.controller.submitInfluence(data, form.dataset.dmForm === "territory-influence" ? "influence" : form.dataset.dmForm === "territory-influence-modifier" ? "add-influence-modifier" : data.endKind || "end-influence-modifier");
       else if (form.dataset.dmForm === "territory-recognition") await this.controller.submitRecognition(data);
       else if (form.dataset.dmForm === "reputation-add-track") await this.controller.configureReputationTrack(data, false);

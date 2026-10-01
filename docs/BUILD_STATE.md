@@ -9,6 +9,13 @@
 - Schema Domain: `1`
 - Data de conclusão do Gate G5: `2026-09-21`
 
+## Parte G6 — Ocupação territorial — 2026-10-01
+
+- Criação e encerramento auditado pela interface, referências visíveis de presença/controle, resumo de estado/vigência, propostas Player e revisão estruturada GM preservando original/identidade.
+- Três falhas de privacidade reproduzidas e corrigidas: referências privadas aceitas; end de ocupação secreta; referência privada exposta em aprovação editada. Consulta usa estado fresco. Seleção múltipla preservada; referências indisponíveis exigem reset explícito.
+- **1155/1155 testes PASS**, específicos 16/16 e verticais 111/111; TypeScript/build/package/validate:release PASS localmente. CI pendente. Relatório `docs/G6_TERRITORY_OCCUPATION_REPORT.md`; evidência `docs/evidence/G6_TERRITORY_OCCUPATION_VALIDATION.json`. Nenhuma release publicada.
+- **PARAR AQUI. Próximo passo:** exibir reivindicações territoriais herdadas no inspector, com origem e distinção das locais; aguardar autorização. Foundry real ao fim do bloco G6. G6 parcial; G7 não iniciado.
+
 ## Parte G6 — Influência territorial — 2026-10-01
 
 - Formulários com vários eixos, limites, decadência, modificadores e vigência; detalhes/cálculo por eixo; propostas Player, aprovação/rejeição GM e encerramento auditado sem apagar histórico.
@@ -651,7 +658,7 @@ Candidata v0.0.8: 13 defeitos reproduzidos/corrigidos; 878/878 testes locais PAS
 
 ## Próxima ação canônica
 
-- **Gate G6 — Relations / Reputation / Agreements / Territory: influência territorial implementada nesta parte**, após a aceitação do Gate G5. **1125/1125 testes PASS**; TypeScript/build/package/validate:release PASS localmente; GitHub Actions PASS (workflow `36896312954`, 11 workflows); relatório `docs/G6_TERRITORY_INFLUENCE_REPORT.md`. **PARAR AQUI**. Próxima parte: formulários de ocupação territorial, com referências visíveis de presença e controle e encerramento auditado; aguardar autorização. Foundry real somente após concluir o bloco G6. Gate G6 parcial; não iniciar G7.
+- **Gate G6 — Relations / Reputation / Agreements / Territory: ocupação territorial implementada nesta parte**, após a aceitação do Gate G5. **1155/1155 testes PASS**, específicos 16/16 e verticais 111/111; TypeScript/build/package/validate:release PASS localmente. CI pendente. Relatório `docs/G6_TERRITORY_OCCUPATION_REPORT.md`. **PARAR AQUI**. Próxima parte: exibir reivindicações territoriais herdadas no inspector, com origem e distinção das locais; aguardar autorização. Foundry real somente após concluir o bloco G6. Gate G6 parcial; não iniciar G7.
 
 ## G6.4–G6.5 — Acordos e obrigações — 2026-09-29
 
