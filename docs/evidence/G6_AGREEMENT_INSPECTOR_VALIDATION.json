@@ -1,0 +1,111 @@
+{
+  "schemaVersion": 1,
+  "part": "G6 agreement inspector UI",
+  "localDate": "2026-10-01",
+  "timezone": "Etc/UTC",
+  "repository": "STR4DZN/Nova-Base",
+  "branch": "feat/g6-continuous",
+  "baseCommit": "79f69842aecd927761a604c6922c8ff23107dd9f",
+  "validatedCommit": "cee2e48758539a2c76ea312d66404e84c4f1127b",
+  "execution": {
+    "runId": 36801837066,
+    "jobId": 110177667830,
+    "runUrl": "https://github.com/STR4DZN/Nova-Base/actions/runs/36801837066",
+    "workflow": ".github/workflows/g6-agreement-inspector-validation.yml",
+    "conclusion": "success",
+    "runner": "ubuntu-latest",
+    "nodeVersion": "22.23.3",
+    "startedAt": "2026-10-01T01:35:42Z",
+    "completedAt": "2026-10-01T01:36:29Z"
+  },
+  "tests": {
+    "specific": {
+      "tests": 14,
+      "pass": 14,
+      "fail": 0,
+      "skipped": 0
+    },
+    "runtimeVertical": {
+      "tests": 48,
+      "pass": 48,
+      "fail": 0,
+      "skipped": 0,
+      "newTests": 4
+    },
+    "complete": {
+      "tests": 956,
+      "pass": 956,
+      "fail": 0,
+      "skipped": 0
+    },
+    "newTestsThisPart": 18
+  },
+  "local": {
+    "nodeVersion": "24.19.0",
+    "typecheck": "PASS",
+    "complete": {
+      "tests": 956,
+      "pass": 956,
+      "fail": 0,
+      "skipped": 0
+    },
+    "build": "PASS",
+    "package": "PASS",
+    "validateRelease": "PASS",
+    "installableZipSha256": "de8149e81250092d6bf01af0e02d2cbc775074485a0009579046a97e02136c80",
+    "initialRuntimeVertical": {
+      "tests": 48,
+      "pass": 47,
+      "fail": 1
+    },
+    "initialFailure": "Test fixture queried storage using bare ID instead of kind/id composite key",
+    "correction": "Read the stored agreement by kind and id, preserve all business assertions, rerun 48 vertical tests"
+  },
+  "ciChecks": {
+    "typecheck": "PASS",
+    "build": "PASS",
+    "package": "PASS",
+    "validateRelease": "PASS"
+  },
+  "artifact": {
+    "id": 11136421715,
+    "name": "g6-agreement-inspector-candidate",
+    "downloadUrl": "https://github.com/STR4DZN/Nova-Base/actions/runs/36801837066/artifacts/11136421715",
+    "sizeBytes": 812612,
+    "containerDigest": "sha256:601d8d36000e78e05b32ab868a3cb30c1fbe9df384c96df119a351c23fcc66d6",
+    "digestScope": "GitHub artifact container with logs, report snapshot and installable ZIP",
+    "expiresAt": "2026-10-15T01:36:26Z",
+    "installableZip": "dist/domain-manager-v0.0.8.zip"
+  },
+  "covered": [
+    "read-only authority-tick deadlines and inclusive grace",
+    "exact safe integer deadline sum",
+    "allegation/confirmation/contest distinction",
+    "original historical obligation snapshots and applicable generations",
+    "visible evidence and authority timestamp",
+    "private terms/evidence/audit filtered before rendering",
+    "GM amendment snapshots and sanitized full comparison",
+    "paged obligation events and amendments",
+    "exact obligation selection, revisions and failed form preservation",
+    "Player evidence proposal with GM approval",
+    "durable retry/reload without duplicate evidence",
+    "consequences declared without automatic execution"
+  ],
+  "boundaries": {
+    "foundryRealExecuted": false,
+    "hostAndTransportDoubles": true,
+    "foundryDeferredUntilG6BlockComplete": true,
+    "gateG6Accepted": false,
+    "gateG7Started": false,
+    "releasePublishedThisPart": false,
+    "stoppedAfterThisPart": true
+  },
+  "nextPart": "Complete multiple-term agreement editor preserving existing terms",
+  "remaining": [
+    "dashboard by lifecycle",
+    "complete multiple-term editor",
+    "other G6 owners/providers/integrations/scale",
+    "real Foundry validation after G6 implementation"
+  ],
+  "report": "docs/G6_AGREEMENT_INSPECTOR_REPORT.md"
+}

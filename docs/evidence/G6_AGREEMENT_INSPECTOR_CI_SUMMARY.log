@@ -1,0 +1,23 @@
+Validation excerpt; full logs in GitHub Actions artifact.
+Commit: cee2e48758539a2c76ea312d66404e84c4f1127b
+Run: https://github.com/STR4DZN/Nova-Base/actions/runs/36801837066
+Job: 110177667830
+TypeScript/targeted tests step: SUCCESS
+Complete regression/build/package/validate:release step: SUCCESS
+
+2026-10-01T01:35:53.7606698Z # tests 14
+2026-10-01T01:35:53.7607377Z # pass 14
+2026-10-01T01:35:53.7607694Z # fail 0
+2026-10-01T01:35:53.7608387Z # skipped 0
+2026-10-01T01:35:55.0996058Z # tests 48
+2026-10-01T01:35:55.0997351Z # pass 48
+2026-10-01T01:35:55.0998169Z # fail 0
+2026-10-01T01:35:55.1006151Z # skipped 0
+2026-10-01T01:36:25.2206084Z # tests 956
+2026-10-01T01:36:25.2226364Z # pass 956
+2026-10-01T01:36:25.2226707Z # fail 0
+2026-10-01T01:36:25.2227232Z # skipped 0
+2026-10-01T01:36:26.1031697Z Package validation passed
+2026-10-01T01:36:26.1890438Z Artifact validation passed
+2026-10-01T01:36:26.1891115Z Release URLs, versions and ZIP verified: v0.0.8
+2026-10-01T01:36:26.7938980Z SHA256 digest of uploaded artifact zip is 601d8d36000e78e05b32ab868a3cb30c1fbe9df384c96df119a351c23fcc66d6

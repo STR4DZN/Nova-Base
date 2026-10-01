@@ -17,7 +17,13 @@ Vencimento não confirma quebra nem encerra acordo. Evidência não confirma pag
 
 - **956/956 testes PASS**, 0 FAIL, 0 skipped; 18 novos nesta parte (14 específicos + 4 verticais).
 - **14/14 específicos** e **48/48 verticais** PASS.
-- TypeScript/build/package/validate:release PASS localmente, Node 24.19.0. CI será registrada após execução.
+- TypeScript/build/package/validate:release **PASS localmente e no GitHub Actions**, Node local 24.19.0.
+- Commit de código validado: `cee2e48758539a2c76ea312d66404e84c4f1127b`.
+- Workflow [36801837066](https://github.com/STR4DZN/Nova-Base/actions/runs/36801837066), job `110177667830`: **SUCCESS**, Ubuntu + Node 22.23.3.
+- [ZIP v0.0.8 e logs](https://github.com/STR4DZN/Nova-Base/actions/runs/36801837066/artifacts/11136421715), artifact `g6-agreement-inspector-candidate`, retenção de 14 dias. Hash do container de evidências: `sha256:601d8d36000e78e05b32ab868a3cb30c1fbe9df384c96df119a351c23fcc66d6` (não é o hash isolado do ZIP instalável).
+- Hash SHA256 do ZIP local validado: `de8149e81250092d6bf01af0e02d2cbc775074485a0009579046a97e02136c80`.
+- Evidência permanente: `docs/evidence/G6_AGREEMENT_INSPECTOR_VALIDATION.json` e `docs/evidence/G6_AGREEMENT_INSPECTOR_CI_SUMMARY.log`.
+
 
 Na preparação dos testes verticais, a leitura do adapter usou inicialmente uma chave de ID simples, mas o armazenamento utiliza chave composta kind/id. A fixture foi corrigida; as asserções de revisão e consequências permaneceram, e os 48 testes verticais passaram.
 
