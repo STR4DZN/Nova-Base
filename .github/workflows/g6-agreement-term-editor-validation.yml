@@ -1,0 +1,60 @@
+name: Validate G6 agreement term editor
+
+on:
+  push:
+    branches: [feat/g6-continuous]
+    paths:
+      - 'src/agreements/**'
+      - 'src/diplomacy/owner-commands.ts'
+      - 'src/diplomacy/diplomacy-proposals.ts'
+      - 'src/ui/domain-patterns/diplomacy/agreement-negotiation-view.ts'
+      - 'src/ui/domain-patterns/diplomacy/agreement-inspector-view.ts'
+      - 'src/ui/domain-patterns/diplomacy/agreement-term-editor.ts'
+      - 'src/diplomacy/diplomacy-drafts.ts'
+      - 'src/ui/domain-patterns/diplomacy/diplomacy-app.ts'
+      - 'tests/agreements/agreement-term-editor-ui.test.ts'
+      - 'tests/runtime/g6-runtime-vertical.test.ts'
+      - '.github/workflows/g6-agreement-term-editor-validation.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: g6-agreement-term-editor-validation
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install locked dependencies
+        run: npm ci
+      - name: TypeScript and targeted agreement term editor tests
+        shell: bash
+        run: |
+          mkdir -p validation-evidence
+          npm run typecheck 2>&1 | tee validation-evidence/typecheck.log
+          node tests/run-tests.mjs agreement-term-editor-ui.test 2>&1 | tee validation-evidence/agreements.log
+          node tests/run-tests.mjs g6-runtime-vertical.test 2>&1 | tee validation-evidence/runtime.log
+      - name: Complete regression and installable candidate validation
+        shell: bash
+        run: |
+          npm test 2>&1 | tee validation-evidence/all-tests.log
+          npm run build 2>&1 | tee validation-evidence/build.log
+          npm run package 2>&1 | tee validation-evidence/package.log
+          npm run validate:release 2>&1 | tee validation-evidence/artifact.log
+      - name: Preserve evidence and reviewable candidate
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: g6-agreement-term-editor-candidate
+          path: |
+            validation-evidence/
+            dist/domain-manager-v0.0.8.zip
+            docs/G6_AGREEMENT_TERM_EDITOR_REPORT.md
+          retention-days: 14

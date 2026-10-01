@@ -91,11 +91,11 @@ test("G6 agreement UI: Player renewal is a proposal and never calls owner mutati
   const { c, calls } = controller(false); unwrap(await c.change({ kind: "renew", renewExpires: "200", reason: "Please" }));
   assert.equal(calls.length, 1); assert.ok(calls[0].intent); assert.equal(calls[0].intent.action.automatic, false);
 });
-test("G6 agreement UI: failed forms preserve operation, dates, text, reason and checkboxes with escaping", async () => {
+test("G6 agreement UI: failed action form preserves operation, renewal date, evidence text and checkboxes with escaping", async () => {
   const { c } = controller(true, { ok: false, error: { code: "FAIL", message: "Rejected", severity: "error" } } as any);
-  const fields = { kind: "amend", title: '"<script>bad</script>', text: "</textarea><script>bad</script>", partyId: "party-1", sourceId: "offer", proposalExpires: "50", expires: "200", reason: "Review", inherited: "on", visibility: "restricted" };
+  const fields = { kind: "renew", text: "</textarea><script>bad</script>", partyId: "party-1", sourceId: "offer", renewExpires: "200", reason: "Review", applyConsequences: "on", visibility: "restricted" };
   assert.equal((await c.change(fields)).ok, false); const html = c.actionForm();
-  assert.ok(html.includes('value="amend" selected')); assert.ok(html.includes('value="offer" selected')); assert.ok(html.includes('value="50"')); assert.ok(html.includes('value="Review"')); assert.ok(html.includes('name="inherited" checked')); assert.equal(html.includes("<script>"), false);
+  assert.ok(html.includes('value="renew" selected')); assert.ok(html.includes('value="offer" selected')); assert.ok(html.includes('value="200"')); assert.ok(html.includes('value="Review"')); assert.ok(html.includes('name="applyConsequences" checked')); assert.equal(html.includes("<script>"), false);
   c.selectTab("relations"); assert.deepEqual(c.agreementFormFields, {});
 });
 test("G6 agreement UI: empty negotiation and 100 rounds remain truthful and read-only", () => {

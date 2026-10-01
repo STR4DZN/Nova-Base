@@ -5,6 +5,7 @@ import { isJsonData, failure, immutable, isNamespaced, isRecord, isText, isTimes
   revisionGuard } from "../core/validation/value-validation.js";
 import type { RelationParty, RelationVisibility } from "../relations/types/relation-types.js";
 import { validateRelationPartyRef } from "../relations/types/relation-validation.js";
+import { mergeAgreementTermSelection } from "./agreement-term-selection.js";
 
 export const AGREEMENT_LIFECYCLES = ["draft", "proposed", "pendingApproval", "active", "suspended", "breached", "expired", "terminated"] as const;
 export type AgreementLifecycle = typeof AGREEMENT_LIFECYCLES[number];
@@ -70,8 +71,8 @@ export function validateAgreementDefinition(raw: unknown): Result<AgreementDefin
 const validDuration = (x: unknown): x is AgreementDuration => isRecord(x)
   && (x.startsAtWorldTick === null || isTimestamp(x.startsAtWorldTick)) && (x.expiresAtWorldTick === null || isTimestamp(x.expiresAtWorldTick))
   && (x.startsAtWorldTick === null || x.expiresAtWorldTick === null || x.expiresAtWorldTick > x.startsAtWorldTick);
-function validateTerms(raw: unknown, d: AgreementDefinition, partyIds: readonly string[], registry: AgreementTermRegistry): Result<readonly AgreementTerm[]> {
-  if (!Array.isArray(raw)) return failure("DM_AGREEMENT_TERMS_INVALID", "Terms must be an array");
+export function validateAgreementTerms(raw: unknown, d: Pick<AgreementDefinition, "allowedTermTypes">, partyIds: readonly string[], registry: AgreementTermRegistry): Result<readonly AgreementTerm[]> {
+  if (!Array.isArray(raw) || !isJsonData(raw)) return failure("DM_AGREEMENT_TERMS_INVALID", "Terms must be a JSON array");
   const ids = new Set<string>();
   for (const t of raw) {
     if (!isRecord(t) || !isText(t.id) || ids.has(t.id) || !d.allowedTermTypes.includes(t.type as string) || !isText(t.title)
@@ -99,7 +100,7 @@ export function validateAgreementInstance(raw: unknown, d: AgreementDefinition, 
     const key = JSON.stringify([ref.value.type, ref.value.uuid ?? ref.value.id, ref.value.domainUuid ?? null]);
     if (refs.has(key)) return failure("DM_AGREEMENT_PARTY_INVALID", "Party reference duplicated"); parties.add(p.id); refs.add(key);
   }
-  const ids = [...parties], terms = validateTerms(raw.terms, d, ids, registry); if (!terms.ok) return terms;
+  const ids = [...parties], terms = validateAgreementTerms(raw.terms, d, ids, registry); if (!terms.ok) return terms;
   const proposalIds = new Set<string>(); let open = 0;
   for (const p of raw.proposals) {
     if (!isRecord(p) || !isText(p.id) || proposalIds.has(p.id) || !isTimestamp(p.revision) || (p.purpose !== "initial" && p.purpose !== "amendment")
@@ -114,7 +115,7 @@ export function validateAgreementInstance(raw: unknown, d: AgreementDefinition, 
         || r.acceptedPartyIds.some(x => !parties.has(x)) || r.rejectedPartyIds.some(x => !parties.has(x))
         || new Set([...r.acceptedPartyIds, ...r.rejectedPartyIds]).size !== r.acceptedPartyIds.length + r.rejectedPartyIds.length)
         return failure("DM_AGREEMENT_ROUND_INVALID", "Invalid proposal snapshot, votes or chronology");
-      const checked = validateTerms(r.terms, d, ids, registry); if (!checked.ok) return checked; lastAt = r.at;
+      const checked = validateAgreementTerms(r.terms, d, ids, registry); if (!checked.ok) return checked; lastAt = r.at;
     }
     const final = p.rounds.at(-1)!;
     if ((p.lifecycle === "accepted" || p.lifecycle === "enacted") && (final.acceptedPartyIds.length !== ids.length || final.rejectedPartyIds.length))
@@ -126,7 +127,7 @@ export function validateAgreementInstance(raw: unknown, d: AgreementDefinition, 
     if (!isRecord(a) || !isText(a.id) || amendmentIds.has(a.id) || (a.proposalId !== null && !proposalIds.has(a.proposalId as string))
       || !isTimestamp(a.appliedAt) || a.appliedAt < raw.createdAt || a.appliedAt > raw.updatedAt || !validDuration(a.beforeDuration) || !validDuration(a.afterDuration))
       return failure("DM_AGREEMENT_AMENDMENT_INVALID", "Invalid amendment snapshot");
-    const before = validateTerms(a.beforeTerms, d, ids, registry), after = validateTerms(a.afterTerms, d, ids, registry);
+    const before = validateAgreementTerms(a.beforeTerms, d, ids, registry), after = validateAgreementTerms(a.afterTerms, d, ids, registry);
     if (!before.ok) return before; if (!after.ok) return after; amendmentIds.add(a.id);
   }
   const eventIds = new Set<string>(); let lastAt = raw.createdAt;
@@ -146,9 +147,9 @@ export interface AgreementChangeContext {
 }
 export type AgreementAction =
   | { readonly kind: "propose" | "amend"; readonly proposalId: string; readonly partyId: string; readonly terms: readonly AgreementTerm[];
-      readonly duration: AgreementDuration; readonly proposalExpiresAtWorldTick: number | null; readonly amendmentId?: string }
+      readonly duration: AgreementDuration; readonly proposalExpiresAtWorldTick: number | null; readonly amendmentId?: string; readonly baseTermIds?: readonly string[] }
   | { readonly kind: "counter"; readonly proposalId: string; readonly expectedProposalRevision: number; readonly partyId: string;
-      readonly terms: readonly AgreementTerm[]; readonly duration: AgreementDuration }
+      readonly terms: readonly AgreementTerm[]; readonly duration: AgreementDuration; readonly baseTermIds?: readonly string[] }
   | { readonly kind: "accept" | "reject"; readonly proposalId: string; readonly expectedProposalRevision: number; readonly partyId: string }
   | { readonly kind: "activate"; readonly proposalId: string; readonly expectedProposalRevision: number; readonly amendmentId?: string }
   | { readonly kind: "suspend" | "resume" | "breach" | "expire" | "terminate" }
@@ -182,22 +183,26 @@ export function changeAgreement(a: AgreementInstance, d: AgreementDefinition, re
       || !a.parties.some(p => p.id === action.partyId) || !validDuration(action.duration)
       || (action.proposalExpiresAtWorldTick !== null && (!isTimestamp(action.proposalExpiresAtWorldTick) || action.proposalExpiresAtWorldTick <= c.worldTick)))
       return failure("DM_AGREEMENT_PROPOSAL_CONFLICT", "Invalid proposal, source lifecycle, party or deadline", "conflict");
-    const terms = validateTerms(action.terms, d, a.parties.map(p => p.id), registry); if (!terms.ok) return terms;
+    const selected = action.baseTermIds === undefined ? ok(action.terms) : mergeAgreementTermSelection(a.terms, action.terms, action.baseTermIds);
+    if (!selected.ok) return selected;
+    const terms = validateAgreementTerms(selected.value, d, a.parties.map(p => p.id), registry); if (!terms.ok) return terms;
     if (action.kind === "amend" && !d.amendmentRequiresApproval) {
       if (!isText(action.amendmentId) || a.amendments.some(x => x.id === action.amendmentId)) return failure("DM_AGREEMENT_AMENDMENT_INVALID", "Amendment requires unique audit ID");
-      next = { ...next, terms: action.terms, duration: action.duration, amendments: [...a.amendments, { id: action.amendmentId,
-        proposalId: null, beforeTerms: a.terms, afterTerms: action.terms, beforeDuration: a.duration, afterDuration: action.duration, appliedAt: c.at }] };
+      next = { ...next, terms: terms.value, duration: action.duration, amendments: [...a.amendments, { id: action.amendmentId,
+        proposalId: null, beforeTerms: a.terms, afterTerms: terms.value, beforeDuration: a.duration, afterDuration: action.duration, appliedAt: c.at }] };
     } else next = { ...next, lifecycle: action.kind === "propose" ? "proposed" : a.lifecycle, proposals: [...a.proposals, {
       id: action.proposalId, revision: 0, purpose: action.kind === "propose" ? "initial" : "amendment", lifecycle: "open",
       expiresAtWorldTick: action.proposalExpiresAtWorldTick, rounds: [{ round: 1, offeredByPartyId: action.partyId, at: c.at,
-        terms: action.terms, duration: action.duration, acceptedPartyIds: [], rejectedPartyIds: [] }] }] };
+        terms: terms.value, duration: action.duration, acceptedPartyIds: [], rejectedPartyIds: [] }] }] };
   } else if (action.kind === "counter") {
     if (proposal!.lifecycle !== "open" || !a.parties.some(p => p.id === action.partyId) || !validDuration(action.duration))
       return failure("DM_AGREEMENT_COUNTER_INVALID", "Counter requires an open proposal and valid party/duration");
-    const terms = validateTerms(action.terms, d, a.parties.map(p => p.id), registry); if (!terms.ok) return terms;
+    const selected = action.baseTermIds === undefined ? ok(action.terms) : mergeAgreementTermSelection(proposal!.rounds.at(-1)!.terms, action.terms, action.baseTermIds);
+    if (!selected.ok) return selected;
+    const terms = validateAgreementTerms(selected.value, d, a.parties.map(p => p.id), registry); if (!terms.ok) return terms;
     if (proposal!.rounds.length === Number.MAX_SAFE_INTEGER) return failure("DM_AGREEMENT_ROUND_OVERFLOW", "Too many proposal rounds");
     setProposal({ ...proposal!, revision: proposal!.revision + 1, rounds: [...proposal!.rounds, { round: proposal!.rounds.length + 1,
-      terms: action.terms, duration: action.duration, offeredByPartyId: action.partyId, at: c.at, acceptedPartyIds: [], rejectedPartyIds: [] }] });
+      terms: terms.value, duration: action.duration, offeredByPartyId: action.partyId, at: c.at, acceptedPartyIds: [], rejectedPartyIds: [] }] });
     if (proposal!.purpose === "initial") next = { ...next, lifecycle: "proposed" };
   } else if (action.kind === "accept" || action.kind === "reject") {
     if (proposal!.lifecycle !== "open" || !a.parties.some(p => p.id === action.partyId)) return failure("DM_AGREEMENT_VOTE_INVALID", "Vote requires an open proposal and valid party");
