@@ -22,7 +22,12 @@ Nenhum armazenamento, transporte, Scheduler ou executor de efeitos novo. `baseTe
 
 - **978/978 testes PASS**, 0 FAIL, 0 skipped; 22 novos nesta parte (17 específicos + 5 verticais).
 - **17/17 específicos** e **53/53 verticais** PASS; 15/15 de negociação continuam PASS.
-- TypeScript/build/package/validate:release PASS localmente, Node 24.19.0. CI será registrada após execução.
+- TypeScript/build/package/validate:release **PASS localmente e no GitHub Actions**, Node local 24.19.0.
+- Commit de código validado: `6fbafd44395fbb76ed0c746070d253ffe0992d95`.
+- Workflow [36805799751](https://github.com/STR4DZN/Nova-Base/actions/runs/36805799751), job `110189735042`: **SUCCESS**, Ubuntu + Node 22.23.3.
+- [ZIP v0.0.8 e logs](https://github.com/STR4DZN/Nova-Base/actions/runs/36805799751/artifacts/11137402007), artifact `g6-agreement-term-editor-candidate`, retenção de 14 dias. Hash do container: `sha256:e5857cdafa21251e75771c1170a31eeadbe2824a77725224ec9b4c29aa457e98` (não é o hash isolado do ZIP instalável).
+- Hash SHA256 do ZIP local validado: `4cad5441cc1b7e764e56137f9698d7c52d7d4658a9080cfe15a168f3ad1405e6`.
+- Evidência permanente: `docs/evidence/G6_AGREEMENT_TERM_EDITOR_VALIDATION.json` e `docs/evidence/G6_AGREEMENT_TERM_EDITOR_CI_SUMMARY.log`.
 
 Durante a implementação, o typecheck encontrou perda de narrowing ao reatribuir a union de ações; o merge foi movido para variáveis locais, mantendo a ação original. Duas fixtures específicas inicialmente tinham título com espaços nas extremidades e uma capacidade sem IDs, proibidos pelo schema existente; foram corrigidas sem relaxar validators. O teste anterior de emenda direta foi migrado para o novo editor, mantendo as verificações de auditoria/antes/depois; a preservação do formulário geral agora verifica renovação/evidências e a preservação de múltiplos termos tem testes próprios.
 

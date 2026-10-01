@@ -14,7 +14,7 @@
 - Escopo desta parte: editar vários termos sem perder os existentes; concluir, validar automaticamente, registrar e parar. Foundry real ao fim do G6.
 - Cópia de termos/duração, add/remove/move com IDs estáveis, payload JSON completo em campos avançados e prévia obrigatória sanitizada. Erros/conflitos preservam rascunho; edição vinculada às revisões do acordo/proposta.
 - Seleção explícita resolvida no owner existente preserva termos privados não incluídos no DTO Player. Aprovação/rounds/ativação/efeitos continuam no pipeline existente; consulta e prévia não executam operações.
-- **978/978 testes PASS** (22 novos), específicos 17/17 e verticais 53/53. TypeScript/build/package/validate:release PASS localmente; CI pendente. Relatório `docs/G6_AGREEMENT_TERM_EDITOR_REPORT.md`.
+- **978/978 testes PASS** (22 novos), específicos 17/17 e verticais 53/53. TypeScript/build/package/validate:release PASS localmente e no GitHub Actions. Commit validado `6fbafd44395fbb76ed0c746070d253ffe0992d95`; workflow `36805799751` SUCCESS. Relatório `docs/G6_AGREEMENT_TERM_EDITOR_REPORT.md`; evidência `docs/evidence/G6_AGREEMENT_TERM_EDITOR_VALIDATION.json`. ZIP/logs no artifact; nenhuma release publicada.
 - **PARAR AQUI. Próximo passo:** dashboard dos acordos por estado/filtros; aguardar autorização. G6 parcial; G7 não iniciado.
 
 ## Parte G6 — Detalhes dos acordos pela UI — 2026-10-01
@@ -605,7 +605,7 @@ Candidata v0.0.8: 13 defeitos reproduzidos/corrigidos; 878/878 testes locais PAS
 
 ## Próxima ação canônica
 
-- **Gate G6 — Relations / Reputation / Agreements / Territory: editor de múltiplos termos dos acordos implementado nesta parte**, após a aceitação do Gate G5. **978/978 testes PASS**, TypeScript/build/package/validate:release PASS local; CI pendente. Relatório `docs/G6_AGREEMENT_TERM_EDITOR_REPORT.md`. **PARAR AQUI**. Próxima parte: dashboard dos acordos por estado/filtros de ciclo de vida; aguardar autorização. Teste real no Foundry somente após concluir o bloco G6, conforme instrução. Gate G6 permanece parcial; não iniciar G7.
+- **Gate G6 — Relations / Reputation / Agreements / Territory: editor de múltiplos termos dos acordos implementado nesta parte**, após a aceitação do Gate G5. **978/978 testes PASS**, TypeScript/build/package/validate:release PASS local e CI. Relatório `docs/G6_AGREEMENT_TERM_EDITOR_REPORT.md`; evidência `docs/evidence/G6_AGREEMENT_TERM_EDITOR_VALIDATION.json`. **PARAR AQUI**. Próxima parte: dashboard dos acordos por estado/filtros de ciclo de vida; aguardar autorização. Teste real no Foundry somente após concluir o bloco G6, conforme instrução. Gate G6 permanece parcial; não iniciar G7.
 - Publicação solicitada pelo usuário em 2026-09-30 e concluída na conta verificada `STR4DZN/Nova-Base`, branch `feat/g6-continuous`. Workflow `36718651288` PASS; prerelease `v0.0.7` com manifest, ZIP e roteiro de teste disponíveis. Publicação não significa homologação do G6.
 - Gates G0–G5 aceitos pelo usuário; smoke da candidata G6 aprovado pelo usuário em 2026-09-30. G6 aguarda conclusão das pendências normativas antes da aceitação integral. **Não iniciar G7**.
 - Candidata G6 `0.0.7` publicada. Manifest: `https://github.com/STR4DZN/Nova-Base/releases/download/v0.0.7/module.json`. Manifest e ZIP públicos foram baixados e comparados byte a byte com os artefatos validados. Evidência: `docs/evidence/G6_RELEASE_PUBLICATION.json`.

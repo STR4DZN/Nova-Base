@@ -1,0 +1,132 @@
+{
+  "schemaVersion": 1,
+  "part": "G6 agreement multiple-term editor UI",
+  "localDate": "2026-09-30",
+  "timezone": "America/Sao_Paulo",
+  "repository": "STR4DZN/Nova-Base",
+  "branch": "feat/g6-continuous",
+  "baseCommit": "be33a782672a4a4ef128fb1b5795dbd0435f1d98",
+  "validatedCommit": "6fbafd44395fbb76ed0c746070d253ffe0992d95",
+  "execution": {
+    "runId": 36805799751,
+    "jobId": 110189735042,
+    "runUrl": "https://github.com/STR4DZN/Nova-Base/actions/runs/36805799751",
+    "workflow": ".github/workflows/g6-agreement-term-editor-validation.yml",
+    "conclusion": "success",
+    "runner": "ubuntu-latest",
+    "nodeVersion": "22.23.3",
+    "startedAt": "2026-10-01T02:26:06Z",
+    "completedAt": "2026-10-01T02:26:52Z"
+  },
+  "tests": {
+    "specific": {
+      "tests": 17,
+      "pass": 17,
+      "fail": 0,
+      "skipped": 0
+    },
+    "runtimeVertical": {
+      "tests": 53,
+      "pass": 53,
+      "fail": 0,
+      "skipped": 0,
+      "newTests": 5
+    },
+    "complete": {
+      "tests": 978,
+      "pass": 978,
+      "fail": 0,
+      "skipped": 0
+    },
+    "newTestsThisPart": 22
+  },
+  "local": {
+    "nodeVersion": "24.19.0",
+    "typecheck": "PASS",
+    "specific": {
+      "tests": 17,
+      "pass": 17,
+      "fail": 0,
+      "skipped": 0
+    },
+    "negotiation": {
+      "tests": 15,
+      "pass": 15,
+      "fail": 0,
+      "skipped": 0
+    },
+    "runtimeVertical": {
+      "tests": 53,
+      "pass": 53,
+      "fail": 0,
+      "skipped": 0
+    },
+    "complete": {
+      "tests": 978,
+      "pass": 978,
+      "fail": 0,
+      "skipped": 0
+    },
+    "build": "PASS",
+    "package": "PASS",
+    "validateRelease": "PASS",
+    "installableZipSha256": "4cad5441cc1b7e764e56137f9698d7c52d7d4658a9080cfe15a168f3ad1405e6",
+    "initialSpecific": {
+      "tests": 17,
+      "pass": 15,
+      "fail": 2
+    },
+    "initialSpecificFailure": "Two fixtures violated existing title trimming and nonempty capability list validators",
+    "fixtureCorrection": "Use valid title and capability IDs; preserve validators and exact description/payload assertions",
+    "initialTypecheckFailure": "Reassigning the discriminated action union lost narrowing inside callbacks",
+    "typecheckCorrection": "Resolve merged term selection in local variables without mutating action",
+    "migratedTests": "Direct amendment now uses multiple-term editor; general action failure uses renewal/evidence while editor failure preservation has dedicated coverage"
+  },
+  "ciChecks": {
+    "typecheck": "PASS",
+    "build": "PASS",
+    "package": "PASS",
+    "validateRelease": "PASS"
+  },
+  "artifact": {
+    "id": 11137402007,
+    "name": "g6-agreement-term-editor-candidate",
+    "downloadUrl": "https://github.com/STR4DZN/Nova-Base/actions/runs/36805799751/artifacts/11137402007",
+    "sizeBytes": 826344,
+    "containerDigest": "sha256:e5857cdafa21251e75771c1170a31eeadbe2824a77725224ec9b4c29aa457e98",
+    "digestScope": "GitHub artifact container with evidence, report snapshot and installable ZIP",
+    "expiresAt": "2026-10-15T02:26:50Z",
+    "installableZip": "dist/domain-manager-v0.0.8.zip"
+  },
+  "covered": [
+    "multiple native terms with complete structured payloads and stable IDs",
+    "preserved null/empty/whitespace description and extra fields",
+    "add/remove/reorder retaining raw invalid input",
+    "advanced payload fields hidden initially",
+    "proposal/counter/amendment from exact source snapshot",
+    "canonical selected slots preserving unselected private terms",
+    "collision/duplicate/unknown selection guards",
+    "mandatory sanitized diff of terms/order/duration",
+    "bound agreement/proposal revisions and preserved stale draft",
+    "Player proposal, GM approval and original intent",
+    "unchanged grants and no effects before activation",
+    "exact ticket retry/reload without duplicate proposal",
+    "UI event routing and stale preview invalidation"
+  ],
+  "boundaries": {
+    "foundryRealExecuted": false,
+    "hostAndTransportDoubles": true,
+    "foundryDeferredUntilG6BlockComplete": true,
+    "gateG6Accepted": false,
+    "gateG7Started": false,
+    "releasePublishedThisPart": false,
+    "stoppedAfterThisPart": true
+  },
+  "nextPart": "Agreement lifecycle dashboard and state filters",
+  "remaining": [
+    "agreement lifecycle dashboard",
+    "other G6 forms/read models/owners/providers/integrations/scale",
+    "real Foundry validation after G6 implementation"
+  ],
+  "report": "docs/G6_AGREEMENT_TERM_EDITOR_REPORT.md"
+}

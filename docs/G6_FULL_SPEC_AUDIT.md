@@ -10,7 +10,7 @@
 
 **Atualização por partes — detalhes dos acordos:** vencimentos/tolerância, cumprimento, evidências visíveis, obrigações atuais/históricas e emendas GM com snapshots/diff implementados; 956/956 testes PASS e TypeScript/build/package/validate:release PASS localmente e no GitHub Actions. Relatório `docs/G6_AGREEMENT_INSPECTOR_REPORT.md`. Editor concluído na parte seguinte; ver `docs/G6_AGREEMENT_TERM_EDITOR_REPORT.md`.
 
-**Atualização por partes — editor de múltiplos termos:** editor avançado nativo com snapshots completos, inclusão/remoção/ordem, prévia obrigatória, rascunho/revisões e seleção canônica preservando termos privados implementado. 978/978 testes PASS e TypeScript/build/package/validate:release PASS localmente; CI pendente. Relatório `docs/G6_AGREEMENT_TERM_EDITOR_REPORT.md`. Próxima parte: dashboard dos acordos por estado/filtros.
+**Atualização por partes — editor de múltiplos termos:** editor avançado nativo com snapshots completos, inclusão/remoção/ordem, prévia obrigatória, rascunho/revisões e seleção canônica preservando termos privados implementado. 978/978 testes PASS e TypeScript/build/package/validate:release PASS localmente e no GitHub Actions. Relatório `docs/G6_AGREEMENT_TERM_EDITOR_REPORT.md`. Próxima parte: dashboard dos acordos por estado/filtros.
 
 Data: 2026-10-01. Projeto: `STR4DZN/Nova-Base`, branch `feat/g6-continuous`. Escopo: Gate G6, sem iniciar G7. Esta auditoria substitui a interpretação anterior de que faltava apenas smoke para fechar todo o plano.
 
