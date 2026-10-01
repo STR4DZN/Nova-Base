@@ -1,0 +1,36 @@
+G6 diplomacy overview validation — extracted GitHub Actions evidence
+Repository: STR4DZN/Nova-Base
+Code commit: d48b83cc150051fdb31c50c26386169c0fd987fd
+Workflow: .github/workflows/g6-diplomacy-overview-validation.yml
+Run: 36861469777 (success)
+Job: 110366455248 (success)
+Artifact container: 11161623971 sha256:e7c7a14733d644c0ff41d85c18561e8535330a5705cfb73bf425d605479fc08a
+Following lines are preserved from decoded job logs. Test runs in order: overview-specific, runtime vertical, complete regression.
+
+2026-10-01T12:24:00.1837969Z node: v22.23.2
+2026-10-01T12:24:01.2341160Z > domain-manager@0.0.8 typecheck
+2026-10-01T12:24:01.2341451Z > tsc --noEmit
+2026-10-01T12:24:05.0660575Z # tests 17
+2026-10-01T12:24:05.0661862Z # pass 17
+2026-10-01T12:24:05.0662206Z # fail 0
+2026-10-01T12:24:05.0662533Z # cancelled 0
+2026-10-01T12:24:05.0662899Z # skipped 0
+2026-10-01T12:24:05.0663238Z # todo 0
+2026-10-01T12:24:06.8219774Z # tests 69
+2026-10-01T12:24:06.8220314Z # pass 69
+2026-10-01T12:24:06.8220508Z # fail 0
+2026-10-01T12:24:06.8220698Z # cancelled 0
+2026-10-01T12:24:06.8220887Z # skipped 0
+2026-10-01T12:24:06.8221064Z # todo 0
+2026-10-01T12:24:32.7072769Z # tests 1049
+2026-10-01T12:24:32.7073149Z # pass 1049
+2026-10-01T12:24:32.7073320Z # fail 0
+2026-10-01T12:24:32.7073528Z # cancelled 0
+2026-10-01T12:24:32.7073717Z # skipped 0
+2026-10-01T12:24:32.7073888Z # todo 0
+2026-10-01T12:24:32.8157585Z > domain-manager@0.0.8 build
+2026-10-01T12:24:33.0035694Z > domain-manager@0.0.8 package
+2026-10-01T12:24:33.3193054Z > domain-manager@0.0.8 validate:release
+2026-10-01T12:24:33.3435784Z Package validation passed
+2026-10-01T12:24:33.3933705Z Artifact validation passed
+2026-10-01T12:24:33.3934096Z Release URLs, versions and ZIP verified: v0.0.8

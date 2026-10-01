@@ -14,7 +14,7 @@
 - Escopo: overview dos seis owners, com pendências/alertas, mudanças recentes GM, filtros/janelas e drilldown seguro. Concluir, validar automaticamente, registrar e parar. Foundry real ao fim do bloco G6.
 - Cards/linhas só depois de audiência/busca/fences, antes de categoria/página. Inbox GM/remetente; obrigações atuais visíveis; tick da autoridade para vigência/carência, horas reais para auditoria GM. Sem mutar lifecycle nem confirmar quebra por atraso.
 - API pública imutável `diplomacy.overview.query`, aba Painel geral e inspectores existentes. DTO mínimo sem intenções, refs ou termos privados. Consulta falha remove cards antigos.
-- **1049/1049 testes PASS** (24 novos), específicos 17/17 e verticais 69/69. TypeScript/build/package/validate:release PASS localmente; CI pendente do commit. Relatório `docs/G6_DIPLOMACY_OVERVIEW_REPORT.md`. G6/§5.1 parcial nas dependências Crisis/Activity Feed/índices/escala; nenhuma release publicada.
+- **1049/1049 testes PASS** (24 novos), específicos 17/17 e verticais 69/69. TypeScript/build/package/validate:release PASS localmente e no GitHub Actions. Commit validado `d48b83cc150051fdb31c50c26386169c0fd987fd`; workflow `36861469777` SUCCESS (oito workflows PASS). Evidência `docs/evidence/G6_DIPLOMACY_OVERVIEW_VALIDATION.json`. Relatório `docs/G6_DIPLOMACY_OVERVIEW_REPORT.md`; ZIP/logs no artifact `g6-diplomacy-overview-candidate` da candidata v0.0.8. G6/§5.1 parcial nas dependências Crisis/Activity Feed/índices/escala; nenhuma release publicada.
 - **PARAR AQUI. Próximo passo:** formulários de reconhecimento territorial, com seleção das reivindicações visíveis e proposta/revisão pela autoridade; aguardar autorização. G6 parcial; G7 não iniciado.
 
 ## Parte G6 — Filtros e fontes do histórico de reputação — 2026-10-01
@@ -629,7 +629,7 @@ Candidata v0.0.8: 13 defeitos reproduzidos/corrigidos; 878/878 testes locais PAS
 
 ## Próxima ação canônica
 
-- **Gate G6 — Relations / Reputation / Agreements / Territory: painel geral da diplomacia implementado nesta parte**, após a aceitação do Gate G5. **1049/1049 testes PASS** (24 novos), específicos 17/17 e verticais 69/69. TypeScript/build/package/validate:release PASS localmente; CI pendente do commit. Relatório `docs/G6_DIPLOMACY_OVERVIEW_REPORT.md`. **PARAR AQUI**. Próxima parte: formulários de reconhecimento territorial, com seleção das reivindicações visíveis e proposta/revisão pela autoridade; aguardar autorização. Teste real no Foundry somente após concluir o bloco G6, conforme instrução. Gate G6 permanece parcial; não iniciar G7.
+- **Gate G6 — Relations / Reputation / Agreements / Territory: painel geral da diplomacia implementado nesta parte**, após a aceitação do Gate G5. **1049/1049 testes PASS** (24 novos), específicos 17/17 e verticais 69/69. TypeScript/build/package/validate:release PASS localmente e no GitHub Actions. Commit validado `d48b83cc150051fdb31c50c26386169c0fd987fd`; workflow `36861469777` SUCCESS (oito workflows PASS). Evidência `docs/evidence/G6_DIPLOMACY_OVERVIEW_VALIDATION.json`. Relatório `docs/G6_DIPLOMACY_OVERVIEW_REPORT.md`; ZIP/logs no artifact `g6-diplomacy-overview-candidate` da candidata v0.0.8. **PARAR AQUI**. Próxima parte: formulários de reconhecimento territorial, com seleção das reivindicações visíveis e proposta/revisão pela autoridade; aguardar autorização. Teste real no Foundry somente após concluir o bloco G6, conforme instrução. Gate G6 permanece parcial; não iniciar G7.
 
 ## G6.4–G6.5 — Acordos e obrigações — 2026-09-29
 

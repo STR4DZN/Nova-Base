@@ -29,7 +29,10 @@ Escopo: esta parte de G6.9, Rodada 08 §5.1/§5.7. Concluir, validar automaticam
 - **17/17 específicos** e **69/69 verticais** PASS na regressão completa.
 - **TypeScript, build, package e validate:release PASS** localmente, Node 24.19.0.
 - SHA256 do ZIP local validado: `cb3bba42de4cd00ce6108424f68dc8dfb7781a45d565c6eae0d1dd9b5846f990`.
-- Validação independente no GitHub Actions pendente do commit desta parte.
+- Commit de código validado: `d48b83cc150051fdb31c50c26386169c0fd987fd`.
+- Workflow [36861469777](https://github.com/STR4DZN/Nova-Base/actions/runs/36861469777), job `110366455248`: **SUCCESS**, Ubuntu + Node 22.23.2. Os oito workflows acionados concluíram com SUCCESS. CI confirma 17/17 específicos, 69/69 verticais e 1049/1049 na regressão completa, além de typecheck/build/package/validate:release.
+- [ZIP v0.0.8 e logs](https://github.com/STR4DZN/Nova-Base/actions/runs/36861469777/artifacts/11161623971), artifact `g6-diplomacy-overview-candidate`, retenção de 14 dias. Hash do container: `sha256:e7c7a14733d644c0ff41d85c18561e8535330a5705cfb73bf425d605479fc08a` (não é o hash isolado do ZIP instalável).
+- Evidência permanente: `docs/evidence/G6_DIPLOMACY_OVERVIEW_VALIDATION.json` e `docs/evidence/G6_DIPLOMACY_OVERVIEW_CI_SUMMARY.log`.
 
 Cobertura adicionada: 17 testes específicos e sete cenários verticais (24 novos), incluindo seis owners, controller/stranger/GM, inbox, terms públicos/restritos/secretos, satisfação, fences, mais de duas páginas, recarga, clocks, imutabilidade e bindings de UI.
 

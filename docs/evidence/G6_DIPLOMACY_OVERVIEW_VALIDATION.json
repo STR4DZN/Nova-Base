@@ -1,0 +1,159 @@
+{
+  "schemaVersion": 1,
+  "part": "G6 diplomacy overview with pending items and alerts",
+  "localDate": "2026-10-01",
+  "timezone": "America/Sao_Paulo",
+  "repository": "STR4DZN/Nova-Base",
+  "branch": "feat/g6-continuous",
+  "baseCommit": "4dd1fe0ffd719d3cbc881a67cfba4682d1b46654",
+  "validatedCommit": "d48b83cc150051fdb31c50c26386169c0fd987fd",
+  "execution": {
+    "runId": 36861469777,
+    "jobId": 110366455248,
+    "runUrl": "https://github.com/STR4DZN/Nova-Base/actions/runs/36861469777",
+    "workflow": ".github/workflows/g6-diplomacy-overview-validation.yml",
+    "conclusion": "success",
+    "runner": "ubuntu-latest",
+    "nodeVersion": "22.23.2",
+    "startedAt": "2026-10-01T12:23:55Z",
+    "completedAt": "2026-10-01T12:24:36Z"
+  },
+  "tests": {
+    "specific": {
+      "tests": 17,
+      "pass": 17,
+      "fail": 0,
+      "skipped": 0
+    },
+    "runtimeVertical": {
+      "tests": 69,
+      "pass": 69,
+      "fail": 0,
+      "skipped": 0,
+      "newTests": 7
+    },
+    "complete": {
+      "tests": 1049,
+      "pass": 1049,
+      "fail": 0,
+      "skipped": 0
+    },
+    "newTestsThisPart": 24
+  },
+  "local": {
+    "nodeVersion": "24.19.0",
+    "typecheck": "PASS",
+    "specific": {
+      "tests": 17,
+      "pass": 17,
+      "fail": 0,
+      "skipped": 0
+    },
+    "runtimeVertical": {
+      "tests": 69,
+      "pass": 69,
+      "fail": 0,
+      "skipped": 0,
+      "verification": "All 69 runtime tests passed within the complete final-code regression; initial dedicated runtime pass had 68 before the restricted-term regression was added"
+    },
+    "complete": {
+      "tests": 1049,
+      "pass": 1049,
+      "fail": 0,
+      "skipped": 0
+    },
+    "docsValidator": "PASS",
+    "build": "PASS",
+    "package": "PASS",
+    "validateRelease": "PASS",
+    "installableZipSha256": "cb3bba42de4cd00ce6108424f68dc8dfb7781a45d565c6eae0d1dd9b5846f990",
+    "initialFixtureFailure": "Escaping fixture had a noncanonical lifecycle, so no alert row was derived",
+    "fixtureCorrection": "Give the renderer fixture an explicit confirmed breach to exercise escaping"
+  },
+  "ciChecks": {
+    "typecheck": "PASS",
+    "build": "PASS",
+    "package": "PASS",
+    "validateRelease": "PASS"
+  },
+  "relatedWorkflows": [
+    {
+      "runId": 36861469589,
+      "workflow": ".github/workflows/g6-agreement-inspector-validation.yml",
+      "conclusion": "success"
+    },
+    {
+      "runId": 36861469628,
+      "workflow": ".github/workflows/g6-reputation-validation.yml",
+      "conclusion": "success"
+    },
+    {
+      "runId": 36861469704,
+      "workflow": ".github/workflows/g6-agreement-dashboard-validation.yml",
+      "conclusion": "success"
+    },
+    {
+      "runId": 36861469530,
+      "workflow": ".github/workflows/g6-agreement-negotiation-validation.yml",
+      "conclusion": "success"
+    },
+    {
+      "runId": 36861469549,
+      "workflow": ".github/workflows/g6-agreement-term-editor-validation.yml",
+      "conclusion": "success"
+    },
+    {
+      "runId": 36861469777,
+      "workflow": ".github/workflows/g6-diplomacy-overview-validation.yml",
+      "conclusion": "success"
+    },
+    {
+      "runId": 36861469779,
+      "workflow": ".github/workflows/g6-reputation-history-validation.yml",
+      "conclusion": "success"
+    },
+    {
+      "runId": 36861469627,
+      "workflow": ".github/workflows/g6-stance-validation.yml",
+      "conclusion": "success"
+    }
+  ],
+  "artifact": {
+    "id": 11161623971,
+    "name": "g6-diplomacy-overview-candidate",
+    "url": "https://github.com/STR4DZN/Nova-Base/actions/runs/36861469777/artifacts/11161623971",
+    "sizeBytes": 857327,
+    "containerDigest": "sha256:e7c7a14733d644c0ff41d85c18561e8535330a5705cfb73bf425d605479fc08a",
+    "createdAt": "2026-10-01T12:24:34Z",
+    "expiresAt": "2026-10-15T12:24:33Z",
+    "retentionDays": 14,
+    "containerDigestIsInstallableZipHash": false
+  },
+  "scope": {
+    "owners": [
+      "Relations",
+      "Reputation",
+      "Agreements",
+      "Territory",
+      "Disputes",
+      "Proposals"
+    ],
+    "recentAudit": "GM-only latest canonical update per entity, including reputation configuration",
+    "audience": "Authenticated GM, public records, controlled restricted records; proposal GM or original requester",
+    "attention": "Visible current obligation breaches and deadlines, persisted agreement breach/expiry alerts, open disputes and pending proposals",
+    "clocks": "Explicit authority world tick for deadlines, authenticated receipt real time for GM recent window",
+    "readOnly": true,
+    "noPersistedCounters": true,
+    "noSecretTermPayloads": true,
+    "recoveryFencesBeforeDerivatives": true,
+    "crisisProvider": "Unavailable future dependency; no fabricated card/zero",
+    "activityFeed": "Not implemented by this part",
+    "scale": "Scan-based read model; no real Foundry scale benchmark"
+  },
+  "foundryRealTestPerformed": false,
+  "foundryRealTestScheduled": "Only after the whole G6 implementation block",
+  "releasePublished": false,
+  "gateG6Accepted": false,
+  "gateG7Started": false,
+  "nextPart": "Territory recognition forms with visible claim selection and authority proposal/review"
+}
