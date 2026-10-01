@@ -1066,3 +1066,93 @@ test("G6 reputation history runtime: filters cannot enter list/other namespaces 
     assert.equal((unwrap(await gm.diplomacy.reputation.query()) as any).reputationHistory, undefined);
   } finally { gm.destroy(); }
 });
+
+test("G6 overview runtime: immutable public facade aggregates six owners with authenticated requester inbox", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player"), stranger = f.make("stranger");
+  try { await gm.initialize(); const rel = relation(); unwrap(await gm.diplomacy.relations.create({ id: rel.state.relation.id, data: rel, reason: "Create" }));
+    const rep = createDiplomacyDraft("reputation", "Standing", [{ type: "domain", uuid: domainUuid }, { type: "narrative", id: "guild" }], "public");
+    unwrap(await gm.diplomacy.reputation.create({ ...rep, reason: "Create" }));
+    const territory = createDiplomacyDraft("territory", "Region", [], "public"); unwrap(await gm.diplomacy.territory.create({ ...territory, reason: "Create" }));
+    const dispute = createDiplomacyDraft("dispute", "Boundary", [{ type: "domain", uuid: domainUuid }, { type: "narrative", id: "guild" }], "restricted", [territory.id]);
+    unwrap(await gm.diplomacy.disputes.create({ ...dispute, reason: "Create" }));
+    const a = await prepareAgreement(gm, []); unwrap(await a.activate());
+    unwrap(await player.diplomacy.proposals.submit({ id: "overview-request", intent: { kind: "relation", mode: "modify", id: rel.state.relation.id, expectedRevision: 0, action: incident, reason: "Private intent marker" } }));
+    assert.ok(gm.registry.get("diplomacy:overview")); assert.ok(Object.isFrozen(gm.publicApi.diplomacy.overview));
+    const all = unwrap(await gm.diplomacy.overview.query({ expiryHorizonTicks: 90 })), own = unwrap(await player.diplomacy.overview.query({ expiryHorizonTicks: 90 })), other = unwrap(await stranger.diplomacy.overview.query({ expiryHorizonTicks: 90 }));
+    assert.deepEqual(all.summary.records, { relation: 1, reputation: 1, agreement: 1, territory: 1, dispute: 1, proposal: 1 });
+    assert.equal(all.summary.proposals, 1); assert.equal(own.summary.proposals, 1); assert.equal(other.summary.proposals, 0); assert.equal(other.summary.disputes, 0);
+    assert.equal(own.summary.expiring, 1); assert.equal(own.summary.changes, null); assert.equal(JSON.stringify(own).includes("Private intent marker"), false);
+    for (const item of own.items) assert.equal(Object.hasOwn(item, "changedAtReal"), false);
+    assert.equal(JSON.stringify(other).includes("overview-request"), false);
+  } finally { stranger.destroy(); player.destroy(); gm.destroy(); }
+});
+test("G6 overview runtime: restricted and secret records cannot affect Player counts or private search", async () => {
+  const f = fixture(); await seedDashboardAgreement(f.adapter, "active", "Public"); await seedDashboardAgreement(f.adapter, "breached", "Controlled", "restricted");
+  const secret = await seedDashboardAgreement(f.adapter, "breached", "Secret probe marker", "secret"); await seedDashboardAgreement(f.adapter, "breached", "Other", "restricted", false);
+  const gm = f.make(), player = f.make("player"), stranger = f.make("stranger");
+  try { await gm.initialize(); const a = unwrap(await gm.diplomacy.overview.query()), b = unwrap(await player.diplomacy.overview.query()), c = unwrap(await stranger.diplomacy.overview.query());
+    assert.equal(a.summary.breaches, 3); assert.equal(b.summary.breaches, 1); assert.equal(c.summary.breaches, 0); assert.equal(b.summary.records.agreement, 2); assert.equal(c.summary.records.agreement, 1);
+    assert.equal(JSON.stringify(b).includes(secret), false); assert.equal(JSON.stringify(b).includes("Secret probe marker"), false);
+    for (const search of ["Secret probe marker", "Missing record marker"]) { const d = unwrap(await player.diplomacy.overview.query({ search })); assert.equal(d.total, 0); assert.equal(d.summary.attention, 0); assert.equal(d.summary.records.agreement, 0); }
+    for (const query of [{ isGm: true }, { senderUserId: "gm" }, { id: secret }, { agreementLifecycle: "active" }, { recentHours: 0 }])
+      assert.equal((await player.diplomacy.overview.query(query as any)).ok, false);
+    const ticket = unwrap(player.diplomacy.commands.prepare("diplomacy:overview", { filter: "breaches" })); assert.equal(unwrap(await player.diplomacy.commands.execute(ticket)).status, "executed");
+  } finally { stranger.destroy(); player.destroy(); gm.destroy(); }
+});
+test("G6 overview runtime: visible current obligations determine overdue and breach, without secret term counts", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player"), stranger = f.make("stranger");
+  try { await gm.initialize(); const a = await prepareAgreement(gm, [inspectorObligation("Secret obligation marker", { overduePolicy: "allege-breach" }, "secret")]); unwrap(await a.activate());
+    f.time.tick = 26; const before = await f.adapter.loadAll();
+    assert.equal(unwrap(await gm.diplomacy.overview.query()).summary.overdue, 1); assert.equal(unwrap(await gm.diplomacy.overview.query()).summary.breaches, 0);
+    assert.equal(unwrap(await player.diplomacy.overview.query()).summary.overdue, 0); assert.equal(unwrap(await stranger.diplomacy.overview.query()).summary.overdue, 0);
+    assert.deepEqual(await f.adapter.loadAll(), before);
+    const d: any = unwrap(await gm.diplomacy.agreements.query({ id: a.id })), obligation = d.obligations[0];
+    unwrap(await a.modify({ kind: "obligation", obligationId: obligation.id, expectedObligationRevision: obligation.revision, action: { kind: "decide", lifecycle: "breached" } }));
+    assert.equal(unwrap(await gm.diplomacy.overview.query()).summary.breaches, 1); assert.equal(unwrap(await player.diplomacy.overview.query()).summary.breaches, 0);
+    const publicAgreement = await prepareAgreement(gm, [inspectorObligation("Public obligation")]); unwrap(await publicAgreement.activate());
+    f.time.tick = 25; assert.equal(unwrap(await stranger.diplomacy.overview.query()).summary.overdue, 0);
+    f.time.tick = 26; const s = unwrap(await stranger.diplomacy.overview.query()); assert.equal(s.summary.overdue, 1); assert.equal(s.summary.breaches, 0);
+    assert.equal(JSON.stringify(s).includes("Secret obligation marker"), false); assert.equal(JSON.stringify(s).includes("test:coin"), false);
+  } finally { stranger.destroy(); player.destroy(); gm.destroy(); }
+});
+test("G6 overview runtime: recovery entity and graph fences exclude records and derivatives until recovery", async () => {
+  const { lockKey } = await import("../../src/mutations/lock-keys.js"); const f = fixture(); const id = await seedDashboardAgreement(f.adapter, "breached", "Blocked"); const gm = f.make();
+  try { await gm.initialize(); const territory = createDiplomacyDraft("territory", "Region", [], "public"); unwrap(await gm.diplomacy.territory.create({ ...territory, reason: "Create" }));
+    const dispute = createDiplomacyDraft("dispute", "Boundary", [{ type: "domain", uuid: domainUuid }, { type: "narrative", id: "guild" }], "public", [territory.id]); unwrap(await gm.diplomacy.disputes.create({ ...dispute, reason: "Create" }));
+    const before = await f.adapter.loadAll(); gm.recovery.fenceRegistry.installFence({ transactionId: "block", lockKeys: [lockKey.diplomacy("agreement", id), lockKey.territoryGraph()], reason: "Needs recovery" });
+    const d = unwrap(await gm.diplomacy.overview.query({ expiryHorizonTicks: 100 })); assert.equal(d.summary.records.agreement, 0); assert.equal(d.summary.records.territory, 0); assert.equal(d.summary.records.dispute, 0); assert.equal(d.summary.breaches, 0); assert.equal(d.summary.expiring, 0);
+    gm.recovery.fenceRegistry.removeFence("block"); assert.equal(unwrap(await gm.diplomacy.overview.query()).summary.disputes, 1); assert.deepEqual(await f.adapter.loadAll(), before);
+  } finally { gm.destroy(); }
+});
+test("G6 overview runtime: GM canonical changes and controller drilldown reload without owner mutation", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player"); let id = "";
+  try { await gm.initialize(); const rep = createDiplomacyDraft("reputation", "Standing", [{ type: "domain", uuid: domainUuid }, { type: "narrative", id: "guild" }], "public"); id = rep.id;
+    unwrap(await gm.diplomacy.reputation.create({ ...rep, reason: "Create" })); unwrap(await gm.diplomacy.reputation.modify({ id, expectedRevision: 0, action: { kind: "adjust", trackId: "domain-manager:standing", delta: 5 }, reason: "Hidden history marker" }));
+    const before = await f.adapter.loadAll(), c = new DiplomacyApplicationController(gm.diplomacy); c.selectTab("overview"); unwrap(c.applyOverviewFilter("changes")); unwrap(await c.load());
+    assert.equal(c.list.summary.changes, 1); assert.equal(c.list.items[0].id, id); assert.ok(c.list.items[0].changedAtReal > 0);
+    unwrap(c.openOverviewItem("reputation", id)); unwrap(await c.load()); assert.equal(c.detail.tracks[0].score, 5);
+    const p = unwrap(await player.diplomacy.overview.query({ filter: "changes" })); assert.equal(p.total, 0); assert.equal(p.summary.changes, null); assert.equal(JSON.stringify(p).includes("Hidden history marker"), false);
+    assert.deepEqual(await f.adapter.loadAll(), before);
+  } finally { player.destroy(); gm.destroy(); }
+  const reload = f.make(); try { await reload.initialize(); assert.equal(unwrap(await reload.diplomacy.overview.query({ filter: "changes" })).items[0].id, id); }
+  finally { reload.destroy(); }
+});
+test("G6 overview runtime: multiple pages retain search-scoped cards, expiry alerts and active lifecycle after reload", async () => {
+  const f = fixture(); for (let i = 0; i < 35; i++) await seedDashboardAgreement(f.adapter, "active", `Trade ${i}`); await seedDashboardAgreement(f.adapter, "active", "Other"); f.time.tick = 100;
+  const before = await f.adapter.loadAll(), gm = f.make(); let counts: any;
+  try { await gm.initialize(); const c = new DiplomacyApplicationController(gm.diplomacy); c.selectTab("overview"); c.setSearch("trade"); unwrap(c.applyOverviewFilter("expiring", 0)); unwrap(await c.load());
+    assert.equal(c.list.items.length, 30); assert.equal(c.list.summary.expiring, 35); c.offset = 30; unwrap(await c.load()); assert.equal(c.list.items.length, 5); assert.equal(c.list.total, 35); assert.equal(c.list.summary.expiring, 35);
+    assert.ok(c.list.items.every((x: any) => x.reasons.includes("expiry-due") && x.lifecycle === "active")); counts = c.list.summary; assert.deepEqual(await f.adapter.loadAll(), before);
+  } finally { gm.destroy(); }
+  const reload = f.make(); try { await reload.initialize(); const d = unwrap(await reload.diplomacy.overview.query({ search: "trade", filter: "expiring", offset: 30, expiryHorizonTicks: 0 })); assert.deepEqual(d.summary, counts); assert.equal(d.items.length, 5); assert.deepEqual(await f.adapter.loadAll(), before); }
+  finally { reload.destroy(); }
+});
+test("G6 overview runtime: public agreement restricted terms admit controllers, hide strangers and omit satisfied deadlines", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player"), stranger = f.make("stranger");
+  try { await gm.initialize(); const a = await prepareAgreement(gm, [inspectorObligation("Restricted deadline marker", {}, "restricted")]); unwrap(await a.activate());
+    f.time.tick = 26; assert.equal(unwrap(await player.diplomacy.overview.query()).summary.overdue, 1); assert.equal(unwrap(await stranger.diplomacy.overview.query()).summary.overdue, 0);
+    const d: any = unwrap(await gm.diplomacy.agreements.query({ id: a.id })), obligation = d.obligations[0];
+    unwrap(await a.modify({ kind: "obligation", obligationId: obligation.id, expectedObligationRevision: obligation.revision, action: { kind: "decide", lifecycle: "satisfied" } }));
+    const before = await f.adapter.loadAll(), p = unwrap(await player.diplomacy.overview.query()); assert.equal(p.summary.overdue, 0); assert.equal(p.summary.breaches, 0); assert.equal(JSON.stringify(p).includes("Restricted deadline marker"), false); assert.deepEqual(await f.adapter.loadAll(), before);
+  } finally { stranger.destroy(); player.destroy(); gm.destroy(); }
+});

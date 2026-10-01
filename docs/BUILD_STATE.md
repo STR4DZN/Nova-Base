@@ -9,6 +9,14 @@
 - Schema Domain: `1`
 - Data de conclusão do Gate G5: `2026-09-21`
 
+## Parte G6 — Painel geral da diplomacia — 2026-10-01
+
+- Escopo: overview dos seis owners, com pendências/alertas, mudanças recentes GM, filtros/janelas e drilldown seguro. Concluir, validar automaticamente, registrar e parar. Foundry real ao fim do bloco G6.
+- Cards/linhas só depois de audiência/busca/fences, antes de categoria/página. Inbox GM/remetente; obrigações atuais visíveis; tick da autoridade para vigência/carência, horas reais para auditoria GM. Sem mutar lifecycle nem confirmar quebra por atraso.
+- API pública imutável `diplomacy.overview.query`, aba Painel geral e inspectores existentes. DTO mínimo sem intenções, refs ou termos privados. Consulta falha remove cards antigos.
+- **1049/1049 testes PASS** (24 novos), específicos 17/17 e verticais 69/69. TypeScript/build/package/validate:release PASS localmente; CI pendente do commit. Relatório `docs/G6_DIPLOMACY_OVERVIEW_REPORT.md`. G6/§5.1 parcial nas dependências Crisis/Activity Feed/índices/escala; nenhuma release publicada.
+- **PARAR AQUI. Próximo passo:** formulários de reconhecimento territorial, com seleção das reivindicações visíveis e proposta/revisão pela autoridade; aguardar autorização. G6 parcial; G7 não iniciado.
+
 ## Parte G6 — Filtros e fontes do histórico de reputação — 2026-10-01
 
 - Escopo: filtros por trilha/tipo/fonte/ID ou UUID/ticks e breakdown GM de todos os lançamentos filtrados antes de paginação; concluir, validar automaticamente, registrar e parar. Foundry real ao fim do bloco G6.
@@ -621,16 +629,7 @@ Candidata v0.0.8: 13 defeitos reproduzidos/corrigidos; 878/878 testes locais PAS
 
 ## Próxima ação canônica
 
-- **Gate G6 — Relations / Reputation / Agreements / Territory: filtros e fontes do histórico de reputação implementados nesta parte**, após a aceitação do Gate G5. **1025/1025 testes PASS** (26 novos), específicos 21/21 e verticais 62/62. TypeScript/build/package/validate:release PASS localmente e no GitHub Actions. Commit validado `b0bc32c596a05755c2354b79aaef74801fdf917a`; workflow `36858630332` SUCCESS. Evidência `docs/evidence/G6_REPUTATION_HISTORY_VALIDATION.json`. Relatório `docs/G6_REPUTATION_HISTORY_REPORT.md`. **PARAR AQUI**. Próxima parte: painel geral da diplomacia com pendências e alertas; aguardar autorização. Teste real no Foundry somente após concluir o bloco G6, conforme instrução. Gate G6 permanece parcial; não iniciar G7.
-- Publicação solicitada pelo usuário em 2026-09-30 e concluída na conta verificada `STR4DZN/Nova-Base`, branch `feat/g6-continuous`. Workflow `36718651288` PASS; prerelease `v0.0.7` com manifest, ZIP e roteiro de teste disponíveis. Publicação não significa homologação do G6.
-- Gates G0–G5 aceitos pelo usuário; smoke da candidata G6 aprovado pelo usuário em 2026-09-30. G6 aguarda conclusão das pendências normativas antes da aceitação integral. **Não iniciar G7**.
-- Candidata G6 `0.0.7` publicada. Manifest: `https://github.com/STR4DZN/Nova-Base/releases/download/v0.0.7/module.json`. Manifest e ZIP públicos foram baixados e comparados byte a byte com os artefatos validados. Evidência: `docs/evidence/G6_RELEASE_PUBLICATION.json`.
-
-
-
-
-
-
+- **Gate G6 — Relations / Reputation / Agreements / Territory: painel geral da diplomacia implementado nesta parte**, após a aceitação do Gate G5. **1049/1049 testes PASS** (24 novos), específicos 17/17 e verticais 69/69. TypeScript/build/package/validate:release PASS localmente; CI pendente do commit. Relatório `docs/G6_DIPLOMACY_OVERVIEW_REPORT.md`. **PARAR AQUI**. Próxima parte: formulários de reconhecimento territorial, com seleção das reivindicações visíveis e proposta/revisão pela autoridade; aguardar autorização. Teste real no Foundry somente após concluir o bloco G6, conforme instrução. Gate G6 permanece parcial; não iniciar G7.
 
 ## G6.4–G6.5 — Acordos e obrigações — 2026-09-29
 

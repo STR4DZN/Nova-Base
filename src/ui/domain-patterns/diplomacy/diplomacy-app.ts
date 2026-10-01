@@ -19,10 +19,12 @@ import { isAgreementLifecycleFilter, type AgreementLifecycleFilter } from "../..
 import { renderAgreementDashboard, renderAgreementListItem } from "./agreement-dashboard-view.js";
 import type { ReputationHistoryFilter } from "../../../reputation/reputation-history.js";
 import { parseReputationHistoryFields, reputationHistoryFields, renderReputationHistory } from "./reputation-history-view.js";
-export type DiplomacyTab = "relations" | "reputation" | "agreements" | "territory" | "disputes" | "proposals";
-const labels: Record<DiplomacyTab, string> = { relations: "Relações", reputation: "Reputação", agreements: "Acordos", territory: "Território", disputes: "Disputas", proposals: "Propostas" };
-const kinds: Record<Exclude<DiplomacyTab, "proposals">, OwnerIntent["kind"]> = { relations: "relation", reputation: "reputation", agreements: "agreement", territory: "territory", disputes: "dispute" };
-const actions: Record<Exclude<DiplomacyTab, "proposals">, readonly [string, string][]> = {
+import { validateDiplomacyOverviewQuery, type DiplomacyOverviewFilter } from "../../../diplomacy/diplomacy-overview.js";
+import { renderDiplomacyOverview } from "./diplomacy-overview-view.js";
+export type DiplomacyTab = "overview" | "relations" | "reputation" | "agreements" | "territory" | "disputes" | "proposals";
+const labels: Record<DiplomacyTab, string> = { overview: "Painel geral", relations: "Relações", reputation: "Reputação", agreements: "Acordos", territory: "Território", disputes: "Disputas", proposals: "Propostas" };
+const kinds: Record<Exclude<DiplomacyTab, "proposals" | "overview">, OwnerIntent["kind"]> = { relations: "relation", reputation: "reputation", agreements: "agreement", territory: "territory", disputes: "dispute" };
+const actions: Record<Exclude<DiplomacyTab, "proposals" | "overview">, readonly [string, string][]> = {
   relations: [["incident", "Registrar incidente / reversão"], ["modifier", "Adicionar modificador temporário"], ["end-modifier", "Encerrar modificador"], ["end", "Encerrar relação"], ["stance", "Definir / limpar postura manual"]],
   reputation: [["adjust", "Ajustar reputação"], ["decay", "Aplicar decadência configurada"]],
   agreements: [["propose", "Propor termos"], ["amend", "Propor emenda"], ["counter", "Contrapropor termos"], ["accept", "Aceitar proposta de termos"], ["reject", "Rejeitar termos"], ["activate", "Ativar termos aceitos"], ["suspend", "Suspender"], ["resume", "Retomar"], ["breach", "Registrar quebra"], ["expire", "Expirar acordo"], ["renew", "Renovar acordo"], ["expire-proposal", "Expirar proposta de termos"], ["terminate", "Encerrar"], ["obligation:evidence", "Adicionar evidência"], ["obligation:allege", "Alegar descumprimento"], ["obligation:contest", "Contestar alegação"], ["obligation:decide", "Decidir obrigação"]],
@@ -37,6 +39,7 @@ function table(title: string, rows: readonly any[], columns: readonly [string, (
 }
 export class DiplomacyApplicationController {
   tab: DiplomacyTab = "relations"; offset = 0; search = ""; historyOffset = 0; selectedId: string | null = null;
+  overviewFilter: DiplomacyOverviewFilter = "all"; expiryHorizonTicks = 10; recentHours = 24;
   list: any = null; detail: any = null; error = ""; creating = false; preview: any = null;
   reputationTrackCount = 1; reputationFormFields: Record<string, string> = {};
   reputationConfigurationFields: Record<string, string> = {};
@@ -52,7 +55,7 @@ export class DiplomacyApplicationController {
   #previewInput: string | null = null; #previewIntent: OwnerIntent | null = null;
   treeAxis: "locatedInUuid" | "administrativeParentUuid" | null = null; treeParent: string | null = null;
   constructor(readonly api: PublicDiplomacyApi) {}
-  selectTab(tab: DiplomacyTab): void { this.tab = tab; this.offset = 0; this.selectedId = null; this.detail = null; this.historyOffset = 0; this.creating = false; this.preview = null; this.reputationTrackCount = 1; this.reputationFormFields = {}; this.reputationConfigurationFields = {}; this.resetReputationHistory(); this.agreementLifecycle = ""; this.agreementFormFields = {}; this.cancelAgreementTermEditor(); }
+  selectTab(tab: DiplomacyTab): void { this.tab = tab; this.list = null; this.overviewFilter = "all"; this.expiryHorizonTicks = 10; this.recentHours = 24; this.offset = 0; this.selectedId = null; this.detail = null; this.historyOffset = 0; this.creating = false; this.preview = null; this.reputationTrackCount = 1; this.reputationFormFields = {}; this.reputationConfigurationFields = {}; this.resetReputationHistory(); this.agreementLifecycle = ""; this.agreementFormFields = {}; this.cancelAgreementTermEditor(); }
   private resetReputationHistory(): void {
     this.reputationHistoryFilter = {}; this.reputationHistoryFormFields = {}; this.reputationSourceOffset = 0;
   }
@@ -86,7 +89,24 @@ export class DiplomacyApplicationController {
     if (this.tab === "agreements") this.resetAgreementSelection();
   }
   select(id: string): void { if (this.selectedId !== id) { this.reputationConfigurationFields = {}; this.resetReputationHistory(); this.agreementFormFields = {}; this.cancelAgreementTermEditor(); } this.selectedId = id; this.historyOffset = 0; this.creating = false; this.preview = null; }
+  applyOverviewFilter(filter: unknown, expiryHorizonTicks = this.expiryHorizonTicks, recentHours = this.recentHours): Result<unknown> {
+    if (this.tab !== "overview") return this.capture(failure("DM_DIPLOMACY_OVERVIEW_QUERY_INVALID", "Abra o painel geral."));
+    const valid = validateDiplomacyOverviewQuery({ filter, expiryHorizonTicks, recentHours }); if (!valid.ok) return this.capture(valid);
+    this.overviewFilter = valid.value.filter!; this.expiryHorizonTicks = expiryHorizonTicks; this.recentHours = recentHours;
+    this.offset = 0; this.list = null; return this.capture(ok({}));
+  }
+  openOverviewItem(tab: unknown, id: unknown): Result<unknown> {
+    if (this.tab !== "overview" || typeof tab !== "string" || tab === "overview" || !Object.hasOwn(labels, tab) || typeof id !== "string"
+      || !this.list?.items?.some((r: any) => kinds[tab as keyof typeof kinds] === r.kind && r.id === id || tab === "proposals" && r.kind === "proposal" && r.id === id))
+      return this.capture(failure("DM_DIPLOMACY_QUERY_INVALID", "Selecione um destaque visível."));
+    this.selectTab(tab as DiplomacyTab); this.search = ""; this.treeAxis = null; this.treeParent = null; this.select(id); return this.capture(ok({}));
+  }
   async load(): Promise<Result<unknown>> {
+    if (this.tab === "overview") {
+      const result = await this.api.overview.query({ offset: this.offset, limit: 30, search: this.search, filter: this.overviewFilter,
+        expiryHorizonTicks: this.expiryHorizonTicks, recentHours: this.recentHours });
+      this.detail = null; this.list = result.ok ? result.value : null; return this.capture(result);
+    }
     const queried = await this.api[this.tab].query({ offset: this.offset, limit: 30, search: this.search,
       ...(this.tab === "agreements" && this.agreementLifecycle ? { agreementLifecycle: this.agreementLifecycle } : {}),
       ...(this.tab === "territory" && this.treeAxis ? { treeAxis: this.treeAxis, parentUuid: this.treeParent } : {}) });
@@ -98,7 +118,7 @@ export class DiplomacyApplicationController {
     return ok(this.list);
   }
   async create(fields: Record<string, string>): Promise<Result<unknown>> {
-    if (this.tab === "proposals") return failure("DM_DIPLOMACY_INTENT_INVALID", "Selecione o tipo de registro para criar uma proposta.");
+    if (this.tab === "proposals" || this.tab === "overview") return failure("DM_DIPLOMACY_INTENT_INVALID", "Selecione o tipo de registro para criar uma proposta.");
     if (this.tab === "reputation") this.reputationFormFields = { ...fields };
     const parties = [fields.subject, fields.audience, ...fields.additionalParties?.split(",") ?? []].filter(Boolean).map(x => party(x.trim())), draft = createDiplomacyDraft(kinds[this.tab], fields.label, parties,
       fields.visibility as any, fields.territories?.split(",").map(x => x.trim()).filter(Boolean));
@@ -191,7 +211,7 @@ export class DiplomacyApplicationController {
       + this.detail.tracks.map((t: any) => render(this.detail.definitions.find((d: any) => d.id === t.definitionId && d.version === t.definitionVersion))).join("") + "</section>";
   }
   buildAction(f: Record<string, string>): Result<unknown> {
-    if (!this.detail || this.tab === "proposals") return failure("DM_DIPLOMACY_INTENT_INVALID", "Selecione um registro.");
+    if (!this.detail || this.tab === "proposals" || this.tab === "overview") return failure("DM_DIPLOMACY_INTENT_INVALID", "Selecione um registro.");
     const n = Number(f.amount), kind = f.kind, d = this.detail;
     if (["incident", "modifier", "adjust", "presence"].includes(kind) && (!f.amount || !Number.isSafeInteger(n))) return failure("DM_DIPLOMACY_INTENT_INVALID", "Informe uma quantidade inteira.");
     if (this.tab === "relations") {
@@ -353,7 +373,7 @@ export class DiplomacyApplicationController {
     const built = this.buildAction(fields); if (!built.ok) { this.capture(built); return built; }
     if (this.tab === "agreements" && fields.termEditor === "on" && this.#agreementTermPreviewInput !== JSON.stringify(fields))
       return this.capture(failure("DM_AGREEMENT_TERM_PREVIEW_REQUIRED", "Confira as alterações dos termos antes de enviar."));
-    let intent: OwnerIntent = { kind: kinds[this.tab as Exclude<DiplomacyTab, "proposals">], mode: "modify", id: this.detail.id,
+    let intent: OwnerIntent = { kind: kinds[this.tab as Exclude<DiplomacyTab, "proposals" | "overview">], mode: "modify", id: this.detail.id,
       expectedRevision: fields.termEditor === "on" ? this.agreementTermEditor!.revision : this.detail.revision, action: built.value, reason: fields.reason };
     if (previewOnly) { const result = await this.api.previewTerritory(intent as any); this.capture(result);
       if (result.ok) { this.preview = result.value; this.#previewInput = JSON.stringify(fields); this.#previewIntent = intent; } else this.preview = null; return result; }
@@ -383,6 +403,9 @@ export class DiplomacyApplicationController {
   capture<T>(result: Result<T>): Result<T> { this.error = result.ok ? "" : result.error.message; return result; }
   render(): string {
     const tabs = Object.entries(labels).map(([key, name]) => `<button type="button" data-dm-tab="${key}" aria-pressed="${this.tab === key}">${name}</button>`).join("");
+    if (this.tab === "overview") return `<div class="dm-diplomacy"><nav>${tabs}</nav>${this.error ? `<p role="alert">${escapeHtml(this.error)}</p>` : ""}
+      <form data-dm-form="search"><input name="search" aria-label="Pesquisar" value="${escapeAttribute(this.search)}"><button>Pesquisar</button></form>
+      ${renderDiplomacyOverview(this.list, this.overviewFilter, this.expiryHorizonTicks, this.recentHours)}</div>`;
     const list = (this.list?.items ?? []).map((r: any) => this.tab === "agreements" ? renderAgreementListItem(r, this.selectedId)
       : `<button type="button" data-dm-id="${escapeAttribute(r.id)}">${escapeHtml(r.label)} <small>${escapeHtml(r.lifecycle)}</small></button>`).join("");
     return `<div class="dm-diplomacy"><nav>${tabs}</nav><p>Resumo → explicação → detalhes → ação. As alterações são confirmadas pela autoridade do mundo.</p>
@@ -491,7 +514,7 @@ export class DiplomacyApplicationController {
   }
   actionForm(): string {
     const d = this.detail, input = (name: string, label: string) => `<label>${label}<input name="${name}" ${this.tab === "agreements" && ["starts", "expires", "proposalExpires", "renewExpires"].includes(name) ? 'type="number" step="1" min="0"' : ""}></label>`;
-    const choices = actions[this.tab as Exclude<DiplomacyTab, "proposals">].filter(([key]) => (key !== "stance" || d.stancePolicy === "manual")
+    const choices = actions[this.tab as Exclude<DiplomacyTab, "proposals" | "overview">].filter(([key]) => (key !== "stance" || d.stancePolicy === "manual")
       && (this.tab !== "agreements" || !["propose", "amend", "counter"].includes(key))).map(([key, label]) => `<option value="${key}">${label}</option>`).join("");
     let fields = "";
     if (this.tab === "relations" || this.tab === "reputation") {
@@ -577,6 +600,8 @@ export class DiplomacyApplication extends BaseApp {
       else if (button.dataset.dmTermPreview) this.controller.previewAgreementTerms(fields(button.closest("form")!));
       else if (button.dataset.dmTermCancel) this.controller.cancelAgreementTermEditor();
       else if (button.dataset.dmObligation) this.controller.selectAgreementObligation(button.dataset.dmObligation);
+      else if (button.dataset.dmOverviewFilter !== undefined) this.controller.applyOverviewFilter(button.dataset.dmOverviewFilter);
+      else if (button.dataset.dmOverviewTab) this.controller.openOverviewItem(button.dataset.dmOverviewTab, button.dataset.dmOverviewId);
       else if (button.dataset.dmTab) this.controller.selectTab(button.dataset.dmTab as DiplomacyTab);
       else if (button.dataset.dmAgreementState !== undefined) this.controller.selectAgreementLifecycle(button.dataset.dmAgreementState);
       else if (button.dataset.dmId) this.controller.select(button.dataset.dmId);
@@ -592,6 +617,7 @@ export class DiplomacyApplication extends BaseApp {
     });
     element.addEventListener("submit", async (e: SubmitEvent) => { const form = e.target as HTMLFormElement; if (!form.dataset.dmForm) return; e.preventDefault(); const data = fields(form);
       if (form.dataset.dmForm === "search") this.controller.setSearch(data.search);
+      else if (form.dataset.dmForm === "overview-filter") this.controller.applyOverviewFilter(data.filter, data.expiryHorizonTicks?.trim() ? Number(data.expiryHorizonTicks) : NaN, data.recentHours?.trim() ? Number(data.recentHours) : NaN);
       else if (form.dataset.dmForm === "agreement-state") this.controller.selectAgreementLifecycle(data.agreementLifecycle);
       else if (form.dataset.dmForm === "create") await this.controller.create(data);
       else if (form.dataset.dmForm === "reputation-add-track") await this.controller.configureReputationTrack(data, false);

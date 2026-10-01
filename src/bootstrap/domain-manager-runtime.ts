@@ -117,6 +117,7 @@ import {
 } from "../mutations/child-handler-contract.js";
 import { DiplomacyEntityStore, FoundryDiplomacyStorageAdapter, type DiplomacyStorageAdapter } from "../diplomacy/diplomacy-store.js";
 import { createPublicDiplomacyApi, type PublicDiplomacyApi } from "../diplomacy/public-diplomacy-api.js";
+import { registerDiplomacyOverview } from "../diplomacy/diplomacy-overview.js";
 import { registerOwnerCommands, DIPLOMACY_OWNERS } from "../diplomacy/owner-commands.js";
 import { registerDiplomacyRecovery } from "../diplomacy/diplomacy-mutation.js";
 import { registerDiplomacyCapabilityCommand } from "../diplomacy/capability-command.js";
@@ -464,6 +465,7 @@ export function composeDomainManagerRuntime(
     conditionSatisfied: options.diplomacyConditionSatisfied,
     registry, domains: readOnlyDomains, controllers: controllerProvider, worldTick };
   registerOwnerCommands(diplomacyOptions);
+  registerDiplomacyOverview(diplomacyOptions);
   registerDiplomacyRecovery(diplomacyOptions);
   registerDiplomacyCapabilityCommand(diplomacyOptions);
   registerDiplomacyProposals(diplomacyOptions);

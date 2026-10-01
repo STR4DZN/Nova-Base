@@ -5,6 +5,7 @@ import type { CommandBus } from "../commands/command-bus.js";
 import { err, ok, type Result } from "../core/contracts/result.js";
 import { createPublicError } from "../core/contracts/public-error.js";
 import type { DiplomacyKind } from "./diplomacy-store.js";
+import type { DiplomacyOverviewQuery, DiplomacyOverview } from "./diplomacy-overview.js";
 import type { DiplomacyQuery } from "./diplomacy-query.js";
 import { DIPLOMACY_NAMESPACES } from "./owner-commands.js";
 import type { OwnerIntent } from "./owner-commands.js";
@@ -21,6 +22,7 @@ export interface PublicDiplomacyApi {
     retry(ticket: DomainCommand<unknown>): Promise<Result<TransportReceipt>>;
     status(commandId: CommandId): Promise<Result<TransportReceipt>>;
   };
+  readonly overview: { query(query?: DiplomacyOverviewQuery): Promise<Result<DiplomacyOverview>> };
   open(): Promise<DiplomacyApplication>;
   readonly relations: PublicDiplomacyOwnerApi; readonly reputation: PublicDiplomacyOwnerApi;
   readonly agreements: PublicDiplomacyOwnerApi; readonly territory: PublicDiplomacyOwnerApi; readonly disputes: PublicDiplomacyOwnerApi;
@@ -34,7 +36,7 @@ export interface PublicDiplomacyApi {
 }
 export function createPublicDiplomacyApi(bus: CommandBus): PublicDiplomacyApi {
   const allowedTypes = new Set([...Object.values(DIPLOMACY_NAMESPACES).flatMap(namespace => ["query", "create", "modify"].map(mode => `${namespace}:${mode}`)),
-    "territory:preview", "diplomacy:submit-proposal", "diplomacy:decide-proposal", "diplomacy:query-proposals", "diplomacy:capabilities"]);
+    "diplomacy:overview", "territory:preview", "diplomacy:submit-proposal", "diplomacy:decide-proposal", "diplomacy:query-proposals", "diplomacy:capabilities"]);
   const execute = async (ticket: DomainCommand<unknown>): Promise<Result<TransportReceipt>> =>
     isRecord(ticket) && allowedTypes.has(ticket.type as string) ? bus.execute(ticket)
       : failure("DM_DIPLOMACY_INTENT_INVALID", "Unsupported diplomacy command");
@@ -56,7 +58,7 @@ export function createPublicDiplomacyApi(bus: CommandBus): PublicDiplomacyApi {
       create: (p: Parameters<PublicDiplomacyOwnerApi["create"]>[0]) => send(`${namespace}:create`, p),
       modify: (p: Parameters<PublicDiplomacyOwnerApi["modify"]>[0]) => send(`${namespace}:modify`, p) });
   };
-  const api: PublicDiplomacyApi = Object.freeze({ commands, open: () => new DiplomacyApplication({ api }).render(true),
+  const api: PublicDiplomacyApi = Object.freeze({ commands, overview: Object.freeze({ query: (p: DiplomacyOverviewQuery = {}) => send("diplomacy:overview", p) }), open: () => new DiplomacyApplication({ api }).render(true),
     relations: owner("relation"), reputation: owner("reputation"), agreements: owner("agreement"), territory: owner("territory"), disputes: owner("dispute"),
     previewTerritory: (p: { id: string; expectedRevision: number; action: unknown; reason: string }) => send("territory:preview", p),
     proposals: Object.freeze({ query: (p: DiplomacyQuery = {}) => send("diplomacy:query-proposals", p),
