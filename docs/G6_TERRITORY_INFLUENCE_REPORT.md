@@ -22,7 +22,7 @@ Os casos de segurança acima são verificações de prevenção para as novas op
 
 ## Validação
 
-14 testes específicos; 97 testes verticais do G6; regressão completa: 1125 testes. TypeScript, build, package e validate:release. Evidência em `docs/evidence/G6_TERRITORY_INFLUENCE_VALIDATION.json`. **PASS local: 1125/1125, zero falhas/skips; TypeScript/build/package/validate:release PASS. CI pendente.** Workflow específico conserva logs e ZIP sem publicar release.
+14 testes específicos; 97 testes verticais do G6; regressão completa: 1125 testes. TypeScript, build, package e validate:release. Evidência em `docs/evidence/G6_TERRITORY_INFLUENCE_VALIDATION.json`. **PASS local: 1125/1125, zero falhas/skips; TypeScript/build/package/validate:release PASS. GitHub Actions PASS: commit `a391b3e2ba875da5ee3982f938e326947c96f57e`, workflow `36896312954`; 11 workflows aprovados.** Workflow específico conserva logs e ZIP sem publicar release.
 
 Cobertura: parsing/partes/namespace/limites/inteiros/zero/janelas, eixos duplicados, decadência, modificadores órfãos, preservação de linhas, escape HTML, drafts/revisão, bindings/checkbox/alternância, GM/Player/terceiro, aprovação editada privada, índice antigo, comandos repetidos e recarga sem efeitos duplicados.
 

@@ -13,7 +13,7 @@
 
 - Formulários com vários eixos, limites, decadência, modificadores e vigência; detalhes/cálculo por eixo; propostas Player, aprovação/rejeição GM e encerramento auditado sem apagar histórico.
 - Admissão de fonte/modificador secreto, aprovação privada e leitura fresca protegidas. Rascunhos preservados em erro e vinculados à revisão; checkboxes e alternância de encerramento testados.
-- **1125/1125 testes PASS**, incluindo 14 específicos e 97 verticais; TypeScript/build/package/validate:release PASS localmente. CI pendente. Relatório `docs/G6_TERRITORY_INFLUENCE_REPORT.md`; evidência `docs/evidence/G6_TERRITORY_INFLUENCE_VALIDATION.json`. Nenhuma release publicada.
+- **1125/1125 testes PASS**, incluindo 14 específicos e 97 verticais; TypeScript/build/package/validate:release PASS localmente. GitHub Actions PASS: commit `a391b3e2ba875da5ee3982f938e326947c96f57e`, workflow `36896312954`; 11 workflows aprovados. Relatório `docs/G6_TERRITORY_INFLUENCE_REPORT.md`; evidência `docs/evidence/G6_TERRITORY_INFLUENCE_VALIDATION.json`. Nenhuma release publicada.
 - **PARAR AQUI. Próximo passo:** formulários de ocupação territorial, com referências visíveis de presença e controle e encerramento auditado; aguardar autorização. Foundry real ao fim do bloco G6. G6 parcial; G7 não iniciado.
 
 ## Parte G6 — Ligações territoriais — 2026-10-01
@@ -651,7 +651,7 @@ Candidata v0.0.8: 13 defeitos reproduzidos/corrigidos; 878/878 testes locais PAS
 
 ## Próxima ação canônica
 
-- **Gate G6 — Relations / Reputation / Agreements / Territory: influência territorial implementada nesta parte**, após a aceitação do Gate G5. **1125/1125 testes PASS**; TypeScript/build/package/validate:release PASS localmente; CI pendente; relatório `docs/G6_TERRITORY_INFLUENCE_REPORT.md`. **PARAR AQUI**. Próxima parte: formulários de ocupação territorial, com referências visíveis de presença e controle e encerramento auditado; aguardar autorização. Foundry real somente após concluir o bloco G6. Gate G6 parcial; não iniciar G7.
+- **Gate G6 — Relations / Reputation / Agreements / Territory: influência territorial implementada nesta parte**, após a aceitação do Gate G5. **1125/1125 testes PASS**; TypeScript/build/package/validate:release PASS localmente; GitHub Actions PASS (workflow `36896312954`, 11 workflows); relatório `docs/G6_TERRITORY_INFLUENCE_REPORT.md`. **PARAR AQUI**. Próxima parte: formulários de ocupação territorial, com referências visíveis de presença e controle e encerramento auditado; aguardar autorização. Foundry real somente após concluir o bloco G6. Gate G6 parcial; não iniciar G7.
 
 ## G6.4–G6.5 — Acordos e obrigações — 2026-09-29
 

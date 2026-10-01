@@ -15,9 +15,80 @@
     "validate_release": "PASS",
     "zip_sha256": "5c721db91c76f1ec45d9c5fa5a50c727d821d91387b0a32fcc02d3e71b7b65b9"
   },
-  "ci": "pending",
+  "ci": {
+    "conclusion": "success",
+    "run_id": 36896312954,
+    "job_id": 110484062498,
+    "tests": [
+      14,
+      97,
+      1125
+    ],
+    "fail": 0,
+    "skipped": 0,
+    "workflows": [
+      {
+        "id": 36896312928,
+        "name": "Validate G6 agreement term editor",
+        "conclusion": "success"
+      },
+      {
+        "id": 36896312954,
+        "name": "Validate G6 territory influence",
+        "conclusion": "success"
+      },
+      {
+        "id": 36896312434,
+        "name": "Validate G6 territory links",
+        "conclusion": "success"
+      },
+      {
+        "id": 36896312627,
+        "name": "Validate G6 reputation configuration",
+        "conclusion": "success"
+      },
+      {
+        "id": 36896312417,
+        "name": "Validate G6 agreement negotiation",
+        "conclusion": "success"
+      },
+      {
+        "id": 36896312645,
+        "name": "Validate G6 reputation history",
+        "conclusion": "success"
+      },
+      {
+        "id": 36896312773,
+        "name": "Validate G6 agreement dashboard",
+        "conclusion": "success"
+      },
+      {
+        "id": 36896312500,
+        "name": "Validate G6 agreement inspector",
+        "conclusion": "success"
+      },
+      {
+        "id": 36896312399,
+        "name": "Validate G6 diplomacy overview",
+        "conclusion": "success"
+      },
+      {
+        "id": 36896312551,
+        "name": "Validate G6 territory recognition",
+        "conclusion": "success"
+      },
+      {
+        "id": 36896312600,
+        "name": "Validate G6 relation stance",
+        "conclusion": "success"
+      }
+    ],
+    "artifact_id": 11180240161,
+    "url": "https://github.com/STR4DZN/Nova-Base/actions/runs/36896312954"
+  },
   "foundry_real": "deferred until G6 complete",
   "release_published": false,
   "g7_started": false,
-  "next_step": "Territorial occupation forms with visible presence/control references and audited ending"
+  "next_step": "Territorial occupation forms with visible presence/control references and audited ending",
+  "validated_source_commit": "a391b3e2ba875da5ee3982f938e326947c96f57e"
 }
