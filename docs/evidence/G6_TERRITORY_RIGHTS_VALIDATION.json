@@ -17,7 +17,97 @@
     "zip_sha256": "1c29e22f7a10078d20565746b44779f16f947593af303787fac411313eb30c0f"
   },
   "ci": {
-    "conclusion": "pending"
+    "node": "22.23.3",
+    "conclusion": "success",
+    "run_id": 36928136663,
+    "job_id": 110590436324,
+    "tests": [
+      9,
+      155,
+      1231
+    ],
+    "fail": 0,
+    "skipped": 0,
+    "workflows": [
+      {
+        "id": 36928136713,
+        "name": "Validate G6 territory influence",
+        "conclusion": "success"
+      },
+      {
+        "id": 36928136663,
+        "name": "Validate G6 territory rights",
+        "conclusion": "success"
+      },
+      {
+        "id": 36928136533,
+        "name": "Validate G6 territory links",
+        "conclusion": "success"
+      },
+      {
+        "id": 36928136687,
+        "name": "Validate G6 territory recognition",
+        "conclusion": "success"
+      },
+      {
+        "id": 36928136665,
+        "name": "Validate G6 diplomacy overview",
+        "conclusion": "success"
+      },
+      {
+        "id": 36928136589,
+        "name": "Validate G6 territory claim impacts",
+        "conclusion": "success"
+      },
+      {
+        "id": 36928136567,
+        "name": "Validate G6 relation stance",
+        "conclusion": "success"
+      },
+      {
+        "id": 36928136752,
+        "name": "Validate G6 agreement inspector",
+        "conclusion": "success"
+      },
+      {
+        "id": 36928136629,
+        "name": "Validate G6 agreement term editor",
+        "conclusion": "success"
+      },
+      {
+        "id": 36928136569,
+        "name": "Validate G6 agreement negotiation",
+        "conclusion": "success"
+      },
+      {
+        "id": 36928136598,
+        "name": "Validate G6 reputation configuration",
+        "conclusion": "success"
+      },
+      {
+        "id": 36928136747,
+        "name": "Validate G6 territory occupation",
+        "conclusion": "success"
+      },
+      {
+        "id": 36928136874,
+        "name": "Validate G6 reputation history",
+        "conclusion": "success"
+      },
+      {
+        "id": 36928136617,
+        "name": "Validate G6 territory claims",
+        "conclusion": "success"
+      },
+      {
+        "id": 36928136670,
+        "name": "Validate G6 agreement dashboard",
+        "conclusion": "success"
+      }
+    ],
+    "artifact_id": 11195560044,
+    "artifact_container_digest": "sha256:fce7f389b1872c0ac2fe708761eccfbc7653ee5c155228d36bef1544d0b8d63a",
+    "url": "https://github.com/STR4DZN/Nova-Base/actions/runs/36928136663"
   },
   "foundry_real": "deferred until G6 complete",
   "release_published": false,
@@ -28,5 +118,6 @@
     "No general access-policy enforcement in all consumers",
     "Existing capability query contract remains unchanged",
     "No scale benchmark or external provider extension"
-  ]
+  ],
+  "validated_source_commit": "80aeb5d17762a450362be89ab755d089a535d129"
 }

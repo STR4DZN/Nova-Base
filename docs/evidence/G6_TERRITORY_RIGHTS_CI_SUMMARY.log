@@ -1,0 +1,26 @@
+Validated source commit: 80aeb5d17762a450362be89ab755d089a535d129
+Workflow run: 36928136663
+Job: 110590436324
+Conclusion: success
+Node: 22.23.3
+Tests: 9 specific / 155 runtime / 1231 complete regression; fail 0, skip 0
+TypeScript, build, package, validate:release: PASS
+All 15 triggered workflows: success
+Artifact: g6-territory-rights-candidate / 11195560044
+Artifact container digest: sha256:fce7f389b1872c0ac2fe708761eccfbc7653ee5c155228d36bef1544d0b8d63a
+The container digest includes evidence files; it is distinct from the local installable ZIP SHA256.
+2026-10-01T21:21:46.2645194Z # tests 9
+2026-10-01T21:21:46.2657700Z # pass 9
+2026-10-01T21:21:46.2657859Z # fail 0
+2026-10-01T21:21:46.2658264Z # skipped 0
+2026-10-01T21:21:48.8239678Z # tests 155
+2026-10-01T21:21:48.8240319Z # pass 155
+2026-10-01T21:21:48.8240508Z # fail 0
+2026-10-01T21:21:48.8240846Z # skipped 0
+2026-10-01T21:22:14.1745219Z # tests 1231
+2026-10-01T21:22:14.1745569Z # pass 1231
+2026-10-01T21:22:14.1745697Z # fail 0
+2026-10-01T21:22:14.1754685Z # skipped 0
+2026-10-01T21:22:14.7333296Z Package validation passed
+2026-10-01T21:22:14.7794668Z Artifact validation passed
+2026-10-01T21:22:14.7795013Z Release URLs, versions and ZIP verified: v0.0.8

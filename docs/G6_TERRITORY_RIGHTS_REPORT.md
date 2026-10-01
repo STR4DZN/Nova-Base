@@ -31,7 +31,7 @@ Primeira suíte vertical: 150/153 PASS. Três fixtures novas usavam referência 
 
 ## Validação
 
-**1231/1231 testes PASS** (25 novos), específicos 9/9 e verticais 155/155; zero falhas/skips. TypeScript/build/package/validate:release PASS localmente. GitHub Actions pendente. Evidência canônica: `docs/evidence/G6_TERRITORY_RIGHTS_VALIDATION.json`. Workflow próprio preserva logs e ZIP da candidata sem publicar release.
+**1231/1231 testes PASS** (25 novos), específicos 9/9 e verticais 155/155; zero falhas/skips. TypeScript/build/package/validate:release PASS localmente. GitHub Actions PASS: commit `80aeb5d17762a450362be89ab755d089a535d129`, workflow `36928136663`; 15 workflows aprovados. Evidência canônica: `docs/evidence/G6_TERRITORY_RIGHTS_VALIDATION.json`. Workflow próprio preserva logs e ZIP da candidata sem publicar release.
 
 Cobertura inclui herança física/administrativa independente, concorrência de IDs, empty grants, private/restricted/secret, audiência de cada fonte e termo, tempos da autoridade, condições sem provider/false/throw/não booleanas, sanitização/memoização, propostas pendentes, suspensão/retomada, fonte revogada preservada e leitura após alterações externas. Fences, fonte ausente/corrupta/incoerente, ciclo, navegação/bindings, HTML escapado e ausência de cópias/writes econômicos estão cobertos.
 
