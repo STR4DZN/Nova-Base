@@ -2035,3 +2035,190 @@ test("G6 rights runtime: audited revocation refreshes derived status without del
     assert.equal(d.territoryRights.entries.find((r: any) => r.origin.id === ids.child && r.rightId === "same").status, "effective");
   } finally { player.destroy(); gm.destroy(); }
 });
+
+async function rightImpactWorld(gm: ReturnType<typeof composeDomainManagerRuntime>, conditional = false) {
+  const ids = await rightsTerritories(gm), next = await ids.add("Next rights branch", [territorialRight("same")], { locatedInUuid: ids.root });
+  const physicalChild = await ids.add("Affected rights child", [territorialRight("desc-local")], { locatedInUuid: ids.child });
+  const adminChild = await ids.add("Other axis child", [], { administrativeParentUuid: ids.child });
+  const treaties = [];
+  for (const [scope, termId] of [[ids.physical, "old"], [next, "new"], [ids.root, "common"], [ids.child, "local"]]) {
+    const draft = createDiplomacyDraft("agreement", "Rights treaty", [{ type: "domain", uuid: domainUuid }, { type: "narrative", id: "guild" }], "public");
+    unwrap(await gm.diplomacy.agreements.create({ ...draft, reason: "Create rights treaty" }));
+    let revision = 0;
+    const modify = async (action: unknown) => { const result = await gm.diplomacy.agreements.modify({ id: draft.id, expectedRevision: revision, action, reason: "GM decision" });
+      if (result.ok) revision = (result.value as any).revision; return result; };
+    unwrap(await modify({ kind: "propose", proposalId: "offer", partyId: "party-0", terms: [rightTerm(scope, termId, conditional && ["old", "new"].includes(termId) ? { conditionRefs: [{ type: "requirement", id: "permit" }] } : {})], duration: { startsAtWorldTick: null, expiresAtWorldTick: 100 }, proposalExpiresAtWorldTick: null }));
+    unwrap(await modify({ kind: "accept", proposalId: "offer", expectedProposalRevision: 0, partyId: "party-0" }));
+    unwrap(await modify({ kind: "accept", proposalId: "offer", expectedProposalRevision: 1, partyId: "party-1" }));
+    const treaty = { id: draft.id, modify, activate: () => modify({ kind: "activate", proposalId: "offer", expectedProposalRevision: 2, amendmentId: "activation" }) };
+    unwrap(await treaty.activate()); treaties.push(treaty);
+  }
+  const input = { id: ids.child, expectedRevision: 0, reason: "Move rights ancestry", action: { kind: "reparent", parents: { locatedInUuid: next, administrativeParentUuid: ids.administrative } } };
+  return { ...ids, next, physicalChild, adminChild, treaties, input };
+}
+test("G6 rights impact runtime: GM preview includes Territory and Agreement provenance for each physical descendant", async () => {
+  const f = fixture(), gm = f.make();
+  try { await gm.initialize(); const w = await rightImpactWorld(gm), before = await f.adapter.loadAll(), p: any = unwrap(await gm.diplomacy.previewTerritory(w.input));
+    const axis = p.rightInheritanceImpact.axes[0]; assert.deepEqual(axis.territories.map((r: any) => r.territoryUuid), [w.child, w.physicalChild]);
+    const target = axis.territories[0]; assert.equal(target.localCount, 3); assert.equal(target.removed.length, 4); assert.equal(target.added.length, 2); assert.equal(target.retained.length, 2);
+    assert.ok(target.removed.some((r: any) => r.origin.id === w.treaties[0].id && r.rightId === "old")); assert.ok(target.added.some((r: any) => r.origin.id === w.treaties[1].id));
+    assert.ok(target.retained.some((r: any) => r.origin.id === w.treaties[2].id)); assert.ok(target.removed.some((r: any) => r.rightId === "secret-right-marker"));
+    assert.ok(target.added.every((r: any) => r.grants.length === 0)); assert.equal(p.rightInheritanceImpact.axes[1].changed, false); assert.deepEqual(p.rightInheritanceImpact.axes[1].territories, []);
+    assert.equal(p.changes.length, 1); assert.deepEqual(await f.adapter.loadAll(), before);
+  } finally { gm.destroy(); }
+});
+test("G6 rights impact runtime: confirmation changes only primary hierarchy and inspector matches inherited preview", async () => {
+  const f = fixture(), gm = f.make();
+  try { await gm.initialize(); const w = await rightImpactWorld(gm), p: any = unwrap(await gm.diplomacy.previewTerritory(w.input)), before = await f.adapter.loadAll(), ledgerBefore = await f.ledger.loadSnapshot();
+    unwrap(await gm.diplomacy.territory.modify({ ...w.input, previewSnapshot: p.previewSnapshot }));
+    const key = (r: any) => JSON.stringify([r.origin.kind, r.origin.id, r.sourceTerritoryUuid, r.rightId]);
+    for (const t of p.rightInheritanceImpact.axes[0].territories) {
+      const d: any = unwrap(await gm.diplomacy.territory.query({ id: t.territoryUuid }));
+      assert.deepEqual(d.territoryRights.entries.filter((r: any) => r.inherited && r.status === "effective").map(key).sort(), t.after.map(key).sort());
+      const original: any = before.find(e => e.kind === "territory" && e.id === t.territoryUuid); assert.deepEqual(d.rights, original.data.rights);
+    }
+    const after = await f.adapter.loadAll(); for (const original of before) if (original.id !== w.child) assert.deepEqual(after.find(e => e.id === original.id && e.kind === original.kind), original);
+    const d: any = unwrap(await gm.diplomacy.territory.query({ id: w.child })); assert.equal(d.revision, 1); assert.equal(d.territory.hierarchyHistory.length, 1); assert.equal(d.territory.locatedInUuid, w.next); assert.equal(d.rights.length, 2);
+    assert.deepEqual(await f.ledger.loadSnapshot(), ledgerBefore);
+  } finally { gm.destroy(); }
+});
+test("G6 rights impact runtime: Player and third party cannot preview or forge GM metadata", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player"), stranger = f.make("stranger");
+  try { await gm.initialize(); const w = await rightImpactWorld(gm), before = await f.adapter.loadAll();
+    for (const r of [player, stranger]) {
+      assert.equal((await r.diplomacy.previewTerritory(w.input)).ok, false);
+      const receipt = unwrap(await r.commandBus.execute(command("territory:preview", { ...w.input, isGm: true, senderUserId: "gm" })));
+      assert.equal(receipt.status, "rejected"); assert.equal(JSON.stringify(receipt).includes(w.treaties[0].id), false);
+      assert.equal(JSON.stringify(receipt).includes("secret-right-marker"), false);
+    }
+    assert.deepEqual(await f.adapter.loadAll(), before);
+  } finally { stranger.destroy(); player.destroy(); gm.destroy(); }
+});
+test("G6 rights impact runtime: source revocation invalidates reviewed rights with primary revision unchanged", async () => {
+  const f = fixture(), gm = f.make();
+  try { await gm.initialize(); const w = await rightImpactWorld(gm), p: any = unwrap(await gm.diplomacy.previewTerritory(w.input));
+    unwrap(await gm.diplomacy.territory.modify({ id: w.physical, expectedRevision: 0, action: { kind: "revoke-right", id: "same" }, reason: "Revoke ancestor" }));
+    const before = await f.adapter.loadAll(), result = await gm.diplomacy.territory.modify({ ...w.input, previewSnapshot: p.previewSnapshot });
+    assert.equal(result.ok, false); if (!result.ok) assert.equal(result.error.code, "DM_TERRITORY_PREVIEW_STALE"); assert.deepEqual(await f.adapter.loadAll(), before);
+    const current: any = unwrap(await gm.diplomacy.previewTerritory(w.input)); assert.equal(current.rightInheritanceImpact.axes[0].territories[0].removed.some((r: any) => r.origin.id === w.physical && r.rightId === "same"), false);
+  } finally { gm.destroy(); }
+});
+test("G6 rights impact runtime: treaty suspension invalidates confirmation and fresh preview excludes its rights", async () => {
+  const f = fixture(), gm = f.make();
+  try { await gm.initialize(); const w = await rightImpactWorld(gm), p: any = unwrap(await gm.diplomacy.previewTerritory(w.input)); unwrap(await w.treaties[1].modify({ kind: "suspend" }));
+    const before = await f.adapter.loadAll(), result = await gm.diplomacy.territory.modify({ ...w.input, previewSnapshot: p.previewSnapshot }); assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.error.code, "DM_TERRITORY_PREVIEW_STALE"); assert.deepEqual(await f.adapter.loadAll(), before);
+    const fresh: any = unwrap(await gm.diplomacy.previewTerritory(w.input)); assert.equal(fresh.rightInheritanceImpact.axes[0].territories[0].added.some((r: any) => r.origin.id === w.treaties[1].id), false);
+  } finally { gm.destroy(); }
+});
+test("G6 rights impact runtime: condition changes in either direction invalidate snapshot without source or clock drift", async () => {
+  for (const initial of [true, false]) {
+    let satisfied = initial, calls = 0; const f = fixture(undefined, undefined, () => { calls++; return satisfied; }), gm = f.make();
+    try { await gm.initialize(); const w = await rightImpactWorld(gm, true); calls = 0;
+      const p: any = unwrap(await gm.diplomacy.previewTerritory(w.input)); assert.equal(calls, 1); satisfied = !initial; calls = 0;
+      const before = await f.adapter.loadAll(), result = await gm.diplomacy.territory.modify({ ...w.input, previewSnapshot: p.previewSnapshot });
+      assert.equal(result.ok, false); if (!result.ok) assert.equal(result.error.code, "DM_TERRITORY_PREVIEW_STALE"); assert.equal(calls, 1); assert.deepEqual(await f.adapter.loadAll(), before);
+      const fresh: any = unwrap(await gm.diplomacy.previewTerritory(w.input)); assert.equal(fresh.rightInheritanceImpact.axes[0].territories[0].added.some((r: any) => r.origin.id === w.treaties[1].id), !initial);
+    } finally { gm.destroy(); }
+  }
+});
+test("G6 rights impact runtime: clock boundary and missing condition provider affect rights but never grants or source writes", async () => {
+  const f = fixture(), gm = f.make();
+  try { await gm.initialize(); const w = await rightImpactWorld(gm, true), row: any = await f.adapter.read("territory", w.next); row.data.rights[0].expiresAtWorldTick = 11; await f.adapter.write(row);
+    const p: any = unwrap(await gm.diplomacy.previewTerritory(w.input)); assert.equal(p.rightInheritanceImpact.axes[0].territories[0].added.length, 1); f.time.tick = 11;
+    const before = await f.adapter.loadAll(); assert.equal((await gm.diplomacy.territory.modify({ ...w.input, previewSnapshot: p.previewSnapshot })).ok, false); assert.deepEqual(await f.adapter.loadAll(), before);
+    const fresh: any = unwrap(await gm.diplomacy.previewTerritory(w.input)); assert.equal(fresh.rightInheritanceImpact.axes[0].territories[0].added.length, 0);
+  } finally { gm.destroy(); }
+});
+test("G6 rights impact runtime: fresh agreement payload, visibility and external additions invalidate stale catalog snapshot", async () => {
+  for (const mode of ["payload", "visibility", "addition"]) {
+    const f = fixture(), gm = f.make();
+    try { await gm.initialize(); const w = await rightImpactWorld(gm), p: any = unwrap(await gm.diplomacy.previewTerritory(w.input)), row: any = await f.adapter.read("agreement", w.treaties[1].id);
+      if (mode === "payload") row.data.state.agreement.terms[0].payload.grants = ["test:changed"];
+      if (mode === "visibility") row.data.state.agreement.terms[0].visibility = "secret";
+      if (mode === "addition") { row.id = "external-right-impact-treaty"; row.data.state.agreement.id = row.id; }
+      await f.adapter.write(row); const before = await f.adapter.loadAll(), result = await gm.diplomacy.territory.modify({ ...w.input, previewSnapshot: p.previewSnapshot });
+      assert.equal(result.ok, false); if (!result.ok) assert.equal(result.error.code, "DM_TERRITORY_PREVIEW_STALE"); assert.deepEqual(await f.adapter.loadAll(), before);
+      const fresh: any = unwrap(await gm.diplomacy.previewTerritory(w.input)); if (mode === "addition") assert.ok(fresh.rightInheritanceImpact.axes[0].territories[0].added.some((r: any) => r.origin.id === row.id));
+    } finally { gm.destroy(); }
+  }
+});
+test("G6 rights impact runtime: fenced, missing, corrupt or incoherent Agreement blocks incomplete review and confirmation", async () => {
+  for (const mode of ["missing", "corrupt", "identity", "revision", "fence"]) {
+    const f = fixture(), gm = f.make();
+    try { await gm.initialize(); const w = await rightImpactWorld(gm), p: any = unwrap(await gm.diplomacy.previewTerritory(w.input));
+      if (mode === "missing") await f.adapter.remove("agreement", w.treaties[0].id);
+      else if (mode === "fence") { const { lockKey } = await import("../../src/mutations/lock-keys.js"); gm.recovery.fenceRegistry.installFence({ transactionId: "right-impact-fence", lockKeys: [lockKey.diplomacy("agreement", w.treaties[0].id)], reason: "Needs recovery" }); }
+      else { const row: any = await f.adapter.read("agreement", w.treaties[0].id); if (mode === "corrupt") row.data.state.agreement.terms[0].payload.conditionRefs = 1;
+        if (mode === "identity") row.data.state.agreement.id = "wrong"; if (mode === "revision") row.data.state.agreement.revision += 1; await f.adapter.write(row); }
+      const before = await f.adapter.loadAll(); assert.equal((await gm.diplomacy.territory.modify({ ...w.input, previewSnapshot: p.previewSnapshot })).ok, false); assert.deepEqual(await f.adapter.loadAll(), before);
+      if (mode !== "missing") assert.equal((await gm.diplomacy.previewTerritory(w.input)).ok, false);
+    } finally { gm.destroy(); }
+  }
+});
+test("G6 rights impact runtime: administrative-only changes and detach preserve independent physical derivation", async () => {
+  const f = fixture(), gm = f.make();
+  try { await gm.initialize(); const w = await rightImpactWorld(gm), input = { ...w.input, action: { kind: "reparent", parents: { locatedInUuid: w.physical, administrativeParentUuid: null } } };
+    const p: any = unwrap(await gm.diplomacy.previewTerritory(input)); assert.deepEqual(p.rightInheritanceImpact.axes[0].territories, []);
+    assert.deepEqual(p.rightInheritanceImpact.axes[1].territories.map((r: any) => r.territoryUuid), [w.child, w.adminChild]);
+    const physicalBefore = await rightsReport(gm, w.child); unwrap(await gm.diplomacy.territory.modify({ ...input, previewSnapshot: p.previewSnapshot }));
+    assert.deepEqual((await rightsReport(gm, w.child)).entries.map((r: any) => [r.origin.id, r.rightId, r.inherited]), physicalBefore.entries.map((r: any) => [r.origin.id, r.rightId, r.inherited]));
+  } finally { gm.destroy(); }
+});
+test("G6 rights impact runtime: pending amendments invalidate the snapshot without replacing current rights", async () => {
+  const f = fixture(), gm = f.make();
+  try { await gm.initialize(); const w = await rightImpactWorld(gm), p: any = unwrap(await gm.diplomacy.previewTerritory(w.input));
+    unwrap(await w.treaties[1].modify({ kind: "amend", proposalId: "pending-impact", partyId: "party-0", terms: [rightTerm(w.next, "not-active")], duration: { startsAtWorldTick: null, expiresAtWorldTick: 100 }, proposalExpiresAtWorldTick: null }));
+    assert.equal((await gm.diplomacy.territory.modify({ ...w.input, previewSnapshot: p.previewSnapshot })).ok, false);
+    const fresh: any = unwrap(await gm.diplomacy.previewTerritory(w.input)); assert.equal(fresh.rightInheritanceImpact.axes[0].territories[0].added.some((r: any) => r.rightId === "not-active"), false);
+    assert.equal(fresh.rightInheritanceImpact.axes[0].territories[0].added.some((r: any) => r.rightId === "new"), true);
+  } finally { gm.destroy(); }
+});
+test("G6 rights impact runtime: exact command retry after reload does not recompute or write another hierarchy event", async () => {
+  let conditions = true; const f = fixture(undefined, undefined, () => conditions), first = f.make(); let ticket: any, child: string;
+  try { await first.initialize(); const w = await rightImpactWorld(first, true), p: any = unwrap(await first.diplomacy.previewTerritory(w.input)); child = w.child;
+    ticket = unwrap(first.diplomacy.commands.prepare("territory:modify", { ...w.input, previewSnapshot: p.previewSnapshot })); unwrap(await first.diplomacy.commands.execute(ticket));
+  } finally { first.destroy(); }
+  conditions = false; const reload = f.make();
+  try { await reload.initialize(); const before = await f.adapter.loadAll(); assert.equal(unwrap(await reload.diplomacy.commands.retry(ticket)).status, "executed"); assert.deepEqual(await f.adapter.loadAll(), before);
+    const d: any = unwrap(await reload.diplomacy.territory.query({ id: child! })); assert.equal(d.revision, 1); assert.equal(d.territory.hierarchyHistory.length, 1);
+  } finally { reload.destroy(); }
+});
+test("G6 rights impact runtime: UI renders both reviews and confirms with the same bounded snapshot", async () => {
+  const f = fixture(), gm = f.make();
+  try { await gm.initialize(); const w = await rightImpactWorld(gm), c = new DiplomacyApplicationController(gm.diplomacy); c.selectTab("territory"); c.select(w.child); unwrap(await c.load());
+    const fields = { kind: "reparent", physical: w.next, administrative: w.administrative, reason: w.input.reason }; unwrap(await c.change(fields, true));
+    const html = c.actionForm(); assert.ok(html.includes("Impactos nos direitos herdados")); assert.ok(html.includes(w.treaties[0].id)); assert.ok(html.includes("Prévia da hierarquia"));
+    const snapshot = c.preview.previewSnapshot; assert.equal(html.includes(snapshot.fingerprint), false); unwrap(await c.change(fields)); assert.equal(c.preview, null); unwrap(await c.load()); assert.equal(c.detail.revision, 1);
+  } finally { gm.destroy(); }
+});
+test("G6 rights impact runtime: ordinary Player hierarchy proposal remains immutable and requires GM decision", async () => {
+  const f = fixture(), gm = f.make(), player = f.make("player");
+  try { await gm.initialize(); const w = await rightImpactWorld(gm), before: any = await f.adapter.read("territory", w.child);
+    unwrap(await player.diplomacy.proposals.submit({ id: "right-impact-request", intent: { kind: "territory", mode: "modify", ...w.input } }));
+    const proposal: any = unwrap(await player.diplomacy.proposals.query({ id: "right-impact-request" })); assert.equal(proposal.lifecycle, "pending"); assert.equal(proposal.original.previewSnapshot, undefined);
+    assert.deepEqual(await f.adapter.read("territory", w.child), before); assert.equal(JSON.stringify(proposal).includes("secret-right-marker"), false);
+    unwrap(await gm.diplomacy.proposals.decide({ id: proposal.id, expectedRevision: 0, decision: "approve", reason: "GM reviewed" }));
+    assert.equal((unwrap(await gm.diplomacy.territory.query({ id: w.child })) as any).revision, 1);
+  } finally { player.destroy(); gm.destroy(); }
+});
+test("G6 rights impact runtime: Agreement writers wait until reviewed reparent commits under the shared catalog lock", { timeout: 5000 }, async () => {
+  let reached!: () => void, release!: () => void;
+  const paused = new Promise<void>(resolve => reached = resolve), gate = new Promise<void>(resolve => release = resolve);
+  class PausedRead extends InMemoryDiplomacyStorageAdapter {
+    pauseId: string | null = null;
+    override async read(kind: import("../../src/diplomacy/diplomacy-store.js").DiplomacyKind, id: string) {
+      if (kind === "territory" && id === this.pauseId) { this.pauseId = null; reached(); await gate; }
+      return super.read(kind, id);
+    }
+  }
+  const adapter = new PausedRead(), f = fixture(adapter), gm = f.make();
+  try { await gm.initialize(); const w = await rightImpactWorld(gm), p: any = unwrap(await gm.diplomacy.previewTerritory(w.input)); adapter.pauseId = w.child;
+    const confirmation = gm.diplomacy.territory.modify({ ...w.input, previewSnapshot: p.previewSnapshot }); await paused;
+    let agreementFinished = false; const suspension = w.treaties[1].modify({ kind: "suspend" }).then(r => { agreementFinished = true; return r; });
+    await new Promise(resolve => setTimeout(resolve, 20)); assert.equal(agreementFinished, false); release();
+    unwrap(await confirmation); unwrap(await suspension);
+    assert.equal((unwrap(await gm.diplomacy.territory.query({ id: w.child })) as any).revision, 1);
+    const source = (await rightsReport(gm, w.child)).entries.find((r: any) => r.origin.id === w.treaties[1].id); assert.equal(source.status, "source-inactive");
+  } finally { release(); gm.destroy(); }
+});

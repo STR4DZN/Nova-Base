@@ -522,7 +522,7 @@ export class DiplomacyApplicationController {
       expectedRevision: fields.termEditor === "on" ? this.agreementTermEditor!.revision : this.detail.revision, action: built.value, reason: ["recognition", "link", "update-link", ...OCCUPATION_ACTIONS].includes(fields.kind) ? fields.reason.trim() : fields.reason };
     if (previewOnly) { const result = await this.api.previewTerritory(intent as any); this.capture(result);
       if (result.ok) {
-        if (fields.kind === "reparent" && (!result.value.claimInheritanceImpact || !isTerritoryPreviewSnapshot(result.value.previewSnapshot))) {
+        if (fields.kind === "reparent" && (!result.value.claimInheritanceImpact || !result.value.rightInheritanceImpact || !isTerritoryPreviewSnapshot(result.value.previewSnapshot))) {
           this.preview = null; return this.capture(failure("DM_DIPLOMACY_PREVIEW_REQUIRED", "A prévia de herança está indisponível. Atualize a consulta."));
         }
         this.preview = result.value; this.#previewInput = JSON.stringify(fields);

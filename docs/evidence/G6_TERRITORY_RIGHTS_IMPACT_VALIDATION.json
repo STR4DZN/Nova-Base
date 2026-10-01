@@ -1,0 +1,33 @@
+{
+  "date": "2026-10-01",
+  "part": "G6 inherited Territory and Agreement rights impact preview",
+  "branch": "feat/g6-continuous",
+  "local": {
+    "node": "24.19.0",
+    "specific": 13,
+    "runtime": 170,
+    "full": 1259,
+    "new_tests": 28,
+    "fail": 0,
+    "skipped": 0,
+    "typecheck": "PASS",
+    "build": "PASS",
+    "package": "PASS",
+    "validate_release": "PASS",
+    "zip_sha256": "fcd5b52a348f8dc24e1742b05c76c894b25e4c3d4019f702028b2b8bf0db1ad0"
+  },
+  "ci": {
+    "conclusion": "pending"
+  },
+  "foundry_real": "deferred until G6 complete",
+  "release_published": false,
+  "g7_started": false,
+  "next_step": "Structured territorial rights grant/revocation forms, timing/conditions/declared capabilities, Player proposals and GM review",
+  "limitations": [
+    "GM-only preview; ordinary Player proposals remain supported",
+    "Legacy commands without snapshot remain compatible",
+    "Conservative complete Agreement catalog snapshot and shared writer lock; no scale benchmark",
+    "Condition provider has no dependency lock/version contract",
+    "No general capability/access-policy enforcement or other inherited aggregate impact"
+  ]
+}

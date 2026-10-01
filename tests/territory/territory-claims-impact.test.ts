@@ -27,7 +27,7 @@ function fixture() {
   const g = graphs(), impact = g.impact(), target = g.before.find(s => s.territory.uuid === id("target"))!;
   const detail: any = { ...target, id: id("target"), revision: 0, worldTick: 10 };
   const intent: any = { kind: "territory", mode: "modify", id: id("target"), expectedRevision: 0, action: { kind: "reparent", parents: { locatedInUuid: id("new"), administrativeParentUuid: id("admin-old") } }, reason: "Move" };
-  const preview = { id: id("target"), changes: [{ id: id("target"), before: target, after: g.after.find(s => s.territory.uuid === id("target")) }], claimInheritanceImpact: impact, previewSnapshot: territoryPreviewSnapshot(intent, g.before, 10) };
+  const preview = { id: id("target"), changes: [{ id: id("target"), before: target, after: g.after.find(s => s.territory.uuid === id("target")) }], claimInheritanceImpact: impact, rightInheritanceImpact: { worldTick: 10, axes: [] }, previewSnapshot: territoryPreviewSnapshot(intent, g.before, 10) };
   const calls: any[] = []; let fail = false, badPreview = false;
   const api: any = { previewTerritory: async (p: any) => { calls.push(["preview", p]); return ok(badPreview ? { changes: [] } : preview); },
     territory: { query: async (p: any) => ok(p.id ? detail : { items: [], isGm: true, worldTick: 10 }), modify: async (p: any) => { calls.push(["modify", p]); return fail ? { ok: false, error: { code: "DM_TERRITORY_PREVIEW_STALE", message: "Refresh" } } : ok({}); } },

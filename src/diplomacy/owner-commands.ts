@@ -18,6 +18,7 @@ import { territoryOwner, disputeOwner } from "../territory/territory-owner.js";
 import { validateTerritoryGraph, previewTerritoryReparent, commitTerritoryReparent } from "../territory/territory-hierarchy.js";
 import { validateTerritoryState, type TerritoryState } from "../territory/territory-state.js";
 import { previewTerritoryClaimsImpact, type TerritoryClaimsImpactPreview } from "../territory/territory-claims-impact.js";
+import { previewTerritoryRightsImpact, rightConditionContext, type TerritoryRightsImpactPreview } from "../territory/territory-rights-impact.js";
 import { isTerritoryPreviewSnapshot, territoryPreviewSnapshot, type TerritoryPreviewSnapshot } from "./territory-preview-snapshot.js";
 import { previewTerritoryTransfer, commitTerritoryTransfer, type TerritoryTransferTarget } from "../territory/territory-transfer.js";
 import type { DiplomacyOwner, DiplomacyOwnerContext } from "./owner-contract.js";
@@ -52,6 +53,8 @@ export function diplomacyIntentLocks(intent: OwnerIntent, o: OwnerCommandOptions
   if (intent.mode === "create" || intent.kind === "reputation" && isRecord(intent.action)
     && ["add-track", "configure-track"].includes(intent.action.kind as string)) locks.add("diplomacy:catalog");
   if (intent.kind === "territory" || intent.kind === "dispute") locks.add(lockKey.territoryGraph());
+  // Reparent snapshots read the Agreement catalog; every Agreement writer shares this lock.
+  if (intent.kind === "agreement" || intent.kind === "territory" && (intent.action as any)?.kind === "reparent") locks.add("diplomacy:catalog");
   const scan = (x: unknown): void => {
     if (Array.isArray(x)) { x.forEach(scan); return; } if (!isRecord(x)) return;
     for (const [key, value] of Object.entries(x)) {
@@ -110,6 +113,7 @@ export async function prepareOwnerIntent(intent: OwnerIntent, ctx: Authenticated
     territories = o.store.list("territory").map(e => e.data as TerritoryState);
     if (reparent) before = o.store.get("territory", intent.id);
   }
+  let rightInheritanceImpact: TerritoryRightsImpactPreview | undefined;
   let claimInheritanceImpact: TerritoryClaimsImpactPreview | undefined, previewSnapshot: TerritoryPreviewSnapshot | undefined;
   let data: unknown, revision: number;
   if (intent.mode === "create") {
@@ -147,15 +151,30 @@ export async function prepareOwnerIntent(intent: OwnerIntent, ctx: Authenticated
     const stale = revisionGuard(before.revision, intent.expectedRevision!); if (stale) return stale;
     const c = mutationContext(ctx, before.revision, o, intent.reason), action = intent.action as Record<string, unknown>;
     if (intent.kind === "territory" && action.kind === "reparent") {
-      const snapshot = territoryPreviewSnapshot(intent, territories, c.worldTick);
-      if (intent.previewSnapshot && (snapshot.worldTick !== intent.previewSnapshot.worldTick || snapshot.fingerprint !== intent.previewSnapshot.fingerprint))
-        return failure("DM_TERRITORY_PREVIEW_STALE", "Os territórios ou o relógio mudaram. Confira uma nova prévia antes de confirmar.", "conflict");
       const plan = previewTerritoryReparent(territories.map(s => s.territory), intent.id, action.parents as any, c); if (!plan.ok) return plan;
       const changed = commitTerritoryReparent(territories.map(s => s.territory), plan.value); if (!changed.ok) return changed;
       data = { ...(before.data as TerritoryState), territory: changed.value.find(t => t.uuid === intent.id)! };
-      if (includeClaimPreview) {
-        const impacts = previewTerritoryClaimsImpact(territories, territories.map(s => s.territory.uuid === intent.id ? data as TerritoryState : s), intent.id, c.worldTick);
-        if (!impacts.ok) return impacts; claimInheritanceImpact = impacts.value; previewSnapshot = snapshot;
+      if (includeClaimPreview || intent.previewSnapshot) {
+        const agreements: AgreementOwnerData[] = [], ids = new Set(o.store.list("agreement").map(e => e.id));
+        for (const row of await o.store.adapter.loadAll()) if (row.kind === "agreement") ids.add(row.id);
+        const available = o.recovery.fenceRegistry.assertKeysAvailable([...ids].map(id => lockKey.diplomacy("agreement", id))); if (!available.ok) return available;
+        for (const id of ids) {
+          const row = await o.store.freshRead("agreement", id); if (!row) return failure("DM_AGREEMENT_STATE_INVALID", "Rights source unavailable");
+          const valid = agreementOwner.validate(row.data, territories); if (!valid.ok) return valid;
+          const source = valid.value as AgreementOwnerData;
+          if (row.id !== id || row.kind !== "agreement" || source.state.agreement.id !== id || source.state.agreement.revision !== row.revision)
+            return failure("DM_AGREEMENT_STATE_INVALID", "Rights source identity or revision differs from its durable envelope");
+          agreements.push(source);
+        }
+        const conditions = rightConditionContext(o.conditionSatisfied), after = territories.map(s => s.territory.uuid === intent.id ? data as TerritoryState : s);
+        const rights = previewTerritoryRightsImpact(territories, after, agreements, intent.id, c.worldTick, conditions); if (!rights.ok) return rights;
+        const snapshot = territoryPreviewSnapshot(intent, territories, c.worldTick, { agreements, conditions: conditions.evaluations() });
+        if (intent.previewSnapshot && (snapshot.worldTick !== intent.previewSnapshot.worldTick || snapshot.fingerprint !== intent.previewSnapshot.fingerprint))
+          return failure("DM_TERRITORY_PREVIEW_STALE", "Os territórios, acordos, condições ou relógio mudaram. Confira uma nova prévia antes de confirmar.", "conflict");
+        if (includeClaimPreview) {
+          const impacts = previewTerritoryClaimsImpact(territories, after, intent.id, c.worldTick); if (!impacts.ok) return impacts;
+          claimInheritanceImpact = impacts.value; rightInheritanceImpact = rights.value; previewSnapshot = snapshot;
+        }
       }
     } else if (intent.kind === "territory" && action.kind === "transfer") {
       if (!Array.isArray(action.targets) || !action.targets.some(t => isRecord(t) && t.territoryUuid === intent.id))
@@ -221,7 +240,7 @@ export async function prepareOwnerIntent(intent: OwnerIntent, ctx: Authenticated
   }
   const after: DiplomacyEntity = { schemaVersion: 1, kind: intent.kind, id: intent.id, revision, data, receipts: before?.receipts ?? [] };
   return ok({ writes: [{ before, after }], effects, result: { kind: intent.kind, id: intent.id, revision, changed: !before || revision !== before.revision,
-    ...(claimInheritanceImpact ? { claimInheritanceImpact, previewSnapshot } : {}) } });
+    ...(claimInheritanceImpact ? { claimInheritanceImpact, rightInheritanceImpact, previewSnapshot } : {}) } });
 }
 export function registerOwnerCommands(o: OwnerCommandOptions): void {
   o.registry.register({ type: "territory:preview", visibility: "public", permissionValidator: validateGmOnlyCommandPermission,
@@ -230,9 +249,9 @@ export function registerOwnerCommands(o: OwnerCommandOptions): void {
       const intent = { ...ctx.command.payload, kind: "territory", mode: "modify" } as OwnerIntent;
       const available = o.recovery.fenceRegistry.assertKeysAvailable(diplomacyIntentLocks(intent, o)); if (!available.ok) return available;
       const prepared = await prepareOwnerIntent(intent, ctx, o, true); if (!prepared.ok) return prepared;
-      const impact = prepared.value.result as { claimInheritanceImpact?: TerritoryClaimsImpactPreview; previewSnapshot?: TerritoryPreviewSnapshot };
+      const impact = prepared.value.result as { claimInheritanceImpact?: TerritoryClaimsImpactPreview; rightInheritanceImpact?: TerritoryRightsImpactPreview; previewSnapshot?: TerritoryPreviewSnapshot };
       return ok({ id: intent.id, expectedRevision: intent.expectedRevision, facilityOwnershipChanges: 0,
-        ...(impact.claimInheritanceImpact ? { claimInheritanceImpact: impact.claimInheritanceImpact, previewSnapshot: impact.previewSnapshot } : {}),
+        ...(impact.claimInheritanceImpact ? { claimInheritanceImpact: impact.claimInheritanceImpact, rightInheritanceImpact: impact.rightInheritanceImpact, previewSnapshot: impact.previewSnapshot } : {}),
         changes: prepared.value.writes.map(w => ({ id: w.after.id, before: w.before?.data ?? null, after: w.after.data })) });
     } });
   for (const [kind, owner] of Object.entries(DIPLOMACY_OWNERS) as [Exclude<DiplomacyKind, "proposal">, DiplomacyOwner][]) {
