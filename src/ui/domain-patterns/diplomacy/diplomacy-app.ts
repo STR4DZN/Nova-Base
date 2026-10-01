@@ -15,6 +15,8 @@ import { agreementTermFields, newAgreementTerm, parseAgreementTermEditor, reorde
 import type { AgreementTerm, AgreementDuration } from "../../../agreements/agreement-model.js";
 import { compareAgreementSnapshots, type AgreementNegotiationDifference } from "../../../agreements/agreement-negotiation.js";
 import { renderAgreementDifference } from "./agreement-negotiation-view.js";
+import { isAgreementLifecycleFilter, type AgreementLifecycleFilter } from "../../../agreements/agreement-dashboard.js";
+import { renderAgreementDashboard, renderAgreementListItem } from "./agreement-dashboard-view.js";
 export type DiplomacyTab = "relations" | "reputation" | "agreements" | "territory" | "disputes" | "proposals";
 const labels: Record<DiplomacyTab, string> = { relations: "Relações", reputation: "Reputação", agreements: "Acordos", territory: "Território", disputes: "Disputas", proposals: "Propostas" };
 const kinds: Record<Exclude<DiplomacyTab, "proposals">, OwnerIntent["kind"]> = { relations: "relation", reputation: "reputation", agreements: "agreement", territory: "territory", disputes: "dispute" };
@@ -37,6 +39,7 @@ export class DiplomacyApplicationController {
   reputationTrackCount = 1; reputationFormFields: Record<string, string> = {};
   reputationConfigurationFields: Record<string, string> = {};
   agreementFormFields: Record<string, string> = {};
+  agreementLifecycle: AgreementLifecycleFilter | "" = "";
   agreementTermEditor: { kind: AgreementTermEditorKind; agreementId: string; revision: number; proposalId: string | null;
     proposalRevision: number | null; baseTerms: readonly AgreementTerm[]; duration: AgreementDuration; count: number;
     fields: Record<string, string> } | null = null;
@@ -45,12 +48,27 @@ export class DiplomacyApplicationController {
   #previewInput: string | null = null; #previewIntent: OwnerIntent | null = null;
   treeAxis: "locatedInUuid" | "administrativeParentUuid" | null = null; treeParent: string | null = null;
   constructor(readonly api: PublicDiplomacyApi) {}
-  selectTab(tab: DiplomacyTab): void { this.tab = tab; this.offset = 0; this.selectedId = null; this.detail = null; this.historyOffset = 0; this.creating = false; this.preview = null; this.reputationTrackCount = 1; this.reputationFormFields = {}; this.reputationConfigurationFields = {}; this.agreementFormFields = {}; this.cancelAgreementTermEditor(); }
+  selectTab(tab: DiplomacyTab): void { this.tab = tab; this.offset = 0; this.selectedId = null; this.detail = null; this.historyOffset = 0; this.creating = false; this.preview = null; this.reputationTrackCount = 1; this.reputationFormFields = {}; this.reputationConfigurationFields = {}; this.agreementLifecycle = ""; this.agreementFormFields = {}; this.cancelAgreementTermEditor(); }
+  private resetAgreementSelection(): void {
+    this.offset = 0; this.selectedId = null; this.detail = null; this.historyOffset = 0; this.list = null;
+    this.creating = false; this.preview = null; this.agreementFormFields = {}; this.cancelAgreementTermEditor();
+  }
+  selectAgreementLifecycle(value: unknown): Result<unknown> {
+    if (this.tab !== "agreements" || value !== "" && !isAgreementLifecycleFilter(value))
+      return this.capture(failure("DM_DIPLOMACY_QUERY_INVALID", "Selecione um estado de acordo válido."));
+    if (this.agreementLifecycle !== value) { this.agreementLifecycle = value; this.resetAgreementSelection(); }
+    return this.capture(ok({}));
+  }
+  setSearch(value: string): void {
+    this.search = value; this.offset = 0;
+    if (this.tab === "agreements") this.resetAgreementSelection();
+  }
   select(id: string): void { if (this.selectedId !== id) { this.reputationConfigurationFields = {}; this.agreementFormFields = {}; this.cancelAgreementTermEditor(); } this.selectedId = id; this.historyOffset = 0; this.creating = false; this.preview = null; }
   async load(): Promise<Result<unknown>> {
     const queried = await this.api[this.tab].query({ offset: this.offset, limit: 30, search: this.search,
+      ...(this.tab === "agreements" && this.agreementLifecycle ? { agreementLifecycle: this.agreementLifecycle } : {}),
       ...(this.tab === "territory" && this.treeAxis ? { treeAxis: this.treeAxis, parentUuid: this.treeParent } : {}) });
-    if (!queried.ok) { this.error = queried.error.message; return queried; } this.list = queried.value;
+    if (!queried.ok) { this.error = queried.error.message; if (this.tab === "agreements") { this.list = null; this.detail = null; } return queried; } this.list = queried.value;
     if (this.selectedId) { const detail = await this.api[this.tab].query({ id: this.selectedId, historyOffset: this.historyOffset, historyLimit: 30 });
       if (!detail.ok) { this.error = detail.error.message; this.detail = null; return detail; } this.detail = detail.value; }
     return ok(this.list);
@@ -341,13 +359,14 @@ export class DiplomacyApplicationController {
   capture<T>(result: Result<T>): Result<T> { this.error = result.ok ? "" : result.error.message; return result; }
   render(): string {
     const tabs = Object.entries(labels).map(([key, name]) => `<button type="button" data-dm-tab="${key}" aria-pressed="${this.tab === key}">${name}</button>`).join("");
-    const list = (this.list?.items ?? []).map((r: any) => `<button type="button" data-dm-id="${escapeAttribute(r.id)}">${escapeHtml(r.label)} <small>${escapeHtml(r.lifecycle)}</small></button>`).join("");
+    const list = (this.list?.items ?? []).map((r: any) => this.tab === "agreements" ? renderAgreementListItem(r, this.selectedId)
+      : `<button type="button" data-dm-id="${escapeAttribute(r.id)}">${escapeHtml(r.label)} <small>${escapeHtml(r.lifecycle)}</small></button>`).join("");
     return `<div class="dm-diplomacy"><nav>${tabs}</nav><p>Resumo → explicação → detalhes → ação. As alterações são confirmadas pela autoridade do mundo.</p>
       ${this.error ? `<p role="alert">${escapeHtml(this.error)}</p>` : ""}<form data-dm-form="search"><input name="search" aria-label="Pesquisar" value="${escapeAttribute(this.search)}"><button>Pesquisar</button></form>
       ${this.tab === "territory" ? `<nav><button type="button" data-dm-tree="all">Lista</button><button type="button" data-dm-tree="locatedInUuid">Árvore física</button><button type="button" data-dm-tree="administrativeParentUuid">Árvore administrativa</button><button type="button" data-dm-root="true">Raízes</button></nav><p>Ramo atual: ${escapeHtml(this.treeParent ?? "raízes / lista")}</p>` : ""}
-      <div class="dm-diplomacy-columns"><aside><p>${this.list?.total ?? 0} registros visíveis</p>${list || "<p>Nenhum registro.</p>"}
+      <div class="dm-diplomacy-columns"><aside>${this.tab === "agreements" && !this.list ? "<p>Lista indisponível.</p>" : `<p>${this.list?.total ?? 0} ${this.tab === "agreements" ? "acordos neste filtro/pesquisa" : "registros visíveis"}</p>${list || (this.tab === "agreements" ? "<p>Nenhum acordo visível para este filtro/pesquisa.</p>" : "<p>Nenhum registro.</p>")}`}
       <button type="button" data-dm-page="-1" ${this.offset === 0 ? "disabled" : ""}>Anterior</button><button type="button" data-dm-page="1" ${this.offset + 30 >= (this.list?.total ?? 0) ? "disabled" : ""}>Próxima</button>
-      ${this.tab !== "proposals" ? '<button type="button" data-dm-create="true">Novo registro</button>' : ""}</aside><main>${this.creating ? this.createForm() : this.detail ? this.inspector() : "<p>Selecione um registro para ver a explicação e o histórico.</p>"}</main></div></div>`;
+      ${this.tab !== "proposals" ? '<button type="button" data-dm-create="true">Novo registro</button>' : ""}</aside><main>${this.tab === "agreements" && !this.creating ? renderAgreementDashboard(this.list?.agreementSummary, this.agreementLifecycle, this.search) : ""}${this.creating ? this.createForm() : this.detail ? this.inspector() : "<p>Selecione um registro para ver a explicação e o histórico.</p>"}</main></div></div>`;
   }
   createForm(): string {
     const input = (name: string, label: string, required = true) => `<label>${label}<input name="${name}" value="${escapeAttribute(this.tab === "reputation" ? this.reputationFormFields[name] ?? "" : "")}" ${required ? "required" : ""}></label>`;
@@ -500,7 +519,7 @@ export class DiplomacyApplication extends BaseApp {
   readonly controller: DiplomacyApplicationController; readonly #bound = new WeakSet<object>();
   constructor(options: { api: PublicDiplomacyApi }) { super(options); this.controller = new DiplomacyApplicationController(options.api); }
   async _prepareContext(): Promise<unknown> { await this.controller.load(); return {}; }
-  _renderHTML(): string { return `<style>.dm-diplomacy-app .dm-diplomacy-columns{display:grid;grid-template-columns:240px 1fr;gap:16px}.dm-diplomacy-app aside button,.dm-diplomacy-app label{display:block;margin:6px 0}.dm-diplomacy-app table{width:100%;text-align:left;border-collapse:collapse}.dm-diplomacy-app td,.dm-diplomacy-app th{padding:6px;border-bottom:1px solid #7775}.dm-diplomacy-app input,.dm-diplomacy-app textarea{max-width:100%}.dm-diplomacy-app pre{white-space:pre-wrap;overflow-wrap:anywhere}.dm-diplomacy-app [role=alert]{color:#b3261e}</style>${this.controller.render()}`; }
+  _renderHTML(): string { return `<style>.dm-diplomacy-app .dm-diplomacy-columns{display:grid;grid-template-columns:240px 1fr;gap:16px}.dm-diplomacy-app aside button,.dm-diplomacy-app label{display:block;margin:6px 0}.dm-diplomacy-app table{width:100%;text-align:left;border-collapse:collapse}.dm-diplomacy-app td,.dm-diplomacy-app th{padding:6px;border-bottom:1px solid #7775}.dm-diplomacy-app input,.dm-diplomacy-app textarea{max-width:100%}.dm-diplomacy-app pre{white-space:pre-wrap;overflow-wrap:anywhere}.dm-diplomacy-app [role=alert]{color:#b3261e}.dm-diplomacy-app .dm-agreement-summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px}.dm-diplomacy-app .dm-agreement-summary strong{display:block;font-size:1.4em}.dm-diplomacy-app .dm-agreement-summary [aria-pressed=true]{outline:2px solid currentColor}</style>${this.controller.render()}`; }
   _replaceHTML(html: string, content: HTMLElement): void { content.innerHTML = html; }
   _onRender(): void { const element = this.element; if (!element || this.#bound.has(element)) return; this.#bound.add(element);
     const fields = (form: HTMLFormElement): Record<string, string> => { const result: Record<string, string> = {}; new FormData(form).forEach((v, k) => { result[k] = form.dataset.dmForm === "agreement-terms" ? String(v) : String(v).trim(); }); return result; };
@@ -529,6 +548,7 @@ export class DiplomacyApplication extends BaseApp {
       else if (button.dataset.dmTermCancel) this.controller.cancelAgreementTermEditor();
       else if (button.dataset.dmObligation) this.controller.selectAgreementObligation(button.dataset.dmObligation);
       else if (button.dataset.dmTab) this.controller.selectTab(button.dataset.dmTab as DiplomacyTab);
+      else if (button.dataset.dmAgreementState !== undefined) this.controller.selectAgreementLifecycle(button.dataset.dmAgreementState);
       else if (button.dataset.dmId) this.controller.select(button.dataset.dmId);
       else if (button.dataset.dmPage) this.controller.offset = Math.max(0, this.controller.offset + Number(button.dataset.dmPage) * 30);
       else if (button.dataset.dmHistory) this.controller.historyOffset = Math.max(0, this.controller.historyOffset + Number(button.dataset.dmHistory) * 30);
@@ -541,7 +561,8 @@ export class DiplomacyApplication extends BaseApp {
       await this.render(true);
     });
     element.addEventListener("submit", async (e: SubmitEvent) => { const form = e.target as HTMLFormElement; if (!form.dataset.dmForm) return; e.preventDefault(); const data = fields(form);
-      if (form.dataset.dmForm === "search") { this.controller.search = data.search; this.controller.offset = 0; }
+      if (form.dataset.dmForm === "search") this.controller.setSearch(data.search);
+      else if (form.dataset.dmForm === "agreement-state") this.controller.selectAgreementLifecycle(data.agreementLifecycle);
       else if (form.dataset.dmForm === "create") await this.controller.create(data);
       else if (form.dataset.dmForm === "reputation-add-track") await this.controller.configureReputationTrack(data, false);
       else if (form.dataset.dmForm === "reputation-configure") await this.controller.configureReputationTrack(data, true);

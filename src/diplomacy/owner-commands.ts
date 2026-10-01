@@ -204,7 +204,7 @@ export function registerOwnerCommands(o: OwnerCommandOptions): void {
         schemaValidator: p => validateOwnerIntent({ ...(isRecord(p) ? p : {}), kind, mode }), mutationDefinition: definition,
         handler: createTransactionalHandler(o.coordinator, definition) });
     }
-    o.registry.register({ type: `${namespace}:query`, visibility: "public", schemaValidator: validateDiplomacyQuery,
+    o.registry.register({ type: `${namespace}:query`, visibility: "public", schemaValidator: raw => validateDiplomacyQuery(raw, kind),
       handler: ctx => queryDiplomacyOwner(ctx, kind, owner, o.store, o.domains, o.controllers, o.recovery, o.worldTick()) });
   }
 }

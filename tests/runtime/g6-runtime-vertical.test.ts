@@ -896,3 +896,82 @@ test("G6 term editor vertical: canonical selection rejects collisions/unknown ID
   const reload = f.make(); try { await reload.initialize(); unwrap(await reload.diplomacy.commands.retry(ticket)); assert.equal((unwrap(await reload.diplomacy.agreements.query({ id })) as any).proposals.length, 2);
   } finally { reload.destroy(); }
 });
+
+async function seedDashboardAgreement(adapter: InMemoryDiplomacyStorageAdapter, lifecycle: import("../../src/agreements/agreement-model.js").AgreementLifecycle, label: string, visibility = "public", controlled = true) {
+  const { agreementOwner } = await import("../../src/agreements/agreement-owner.js");
+  const d = createDiplomacyDraft("agreement", label, [{ type: "domain", uuid: controlled ? domainUuid : "JournalEntry.uncontrolled" }, { type: "narrative", id: "guild" }], visibility as any);
+  let data: any = unwrap(agreementOwner.validate(d.data, []));
+  const change = (action: unknown, tick = 10) => { const revision = data.state.agreement.revision;
+    data = unwrap(agreementOwner.change(data, action, { expectedRevision: revision, eventId: `event-${revision}`, at: data.state.agreement.updatedAt + 1, worldTick: tick, reason: "Seed persisted history", sourceRefs: [{ type: "manual", id: "gm" }] }, [])); };
+  if (!["draft", "terminated"].includes(lifecycle)) {
+    change({ kind: "propose", proposalId: "offer", partyId: "party-0", terms: [], duration: { startsAtWorldTick: null, expiresAtWorldTick: 100 }, proposalExpiresAtWorldTick: null });
+    if (lifecycle !== "proposed") change({ kind: "accept", proposalId: "offer", expectedProposalRevision: 0, partyId: "party-0" });
+    if (!["proposed", "pendingApproval"].includes(lifecycle)) {
+      change({ kind: "accept", proposalId: "offer", expectedProposalRevision: 1, partyId: "party-1" });
+      change({ kind: "activate", proposalId: "offer", expectedProposalRevision: 2, amendmentId: "activation" });
+      if (lifecycle === "suspended") change({ kind: "suspend" });
+      if (lifecycle === "breached") change({ kind: "breach" });
+      if (lifecycle === "expired") change({ kind: "expire" }, 100);
+    }
+  }
+  if (lifecycle === "terminated") change({ kind: "terminate" });
+  assert.equal(data.state.agreement.lifecycle, lifecycle);
+  await adapter.write({ schemaVersion: 1, kind: "agreement", id: d.id, revision: data.state.agreement.revision, data, receipts: [] });
+  return d.id;
+}
+test("G6 dashboard runtime: authoritative public API filters all persisted lifecycle states and negotiation group", async () => {
+  const f = fixture(); const { AGREEMENT_LIFECYCLES } = await import("../../src/agreements/agreement-model.js");
+  for (const state of AGREEMENT_LIFECYCLES) await seedDashboardAgreement(f.adapter, state, `Treaty ${state}`);
+  const gm = f.make(), player = f.make("player");
+  try { await gm.initialize();
+    const all: any = unwrap(await gm.diplomacy.agreements.query()); assert.equal(all.total, 8); assert.equal(all.agreementSummary.total, 8);
+    for (const state of AGREEMENT_LIFECYCLES) { const d: any = unwrap(await player.diplomacy.agreements.query({ agreementLifecycle: state }));
+      assert.equal(d.total, 1); assert.equal(d.items[0].lifecycle, state); assert.equal(d.agreementSummary.byLifecycle[state], 1); assert.equal(d.agreementSummary.total, 8); }
+    const group: any = unwrap(await player.diplomacy.agreements.query({ agreementLifecycle: "negotiation" })); assert.equal(group.total, 2);
+    assert.deepEqual(group.items.map((x: any) => x.lifecycle).sort(), ["pendingApproval", "proposed"]);
+    assert.equal((await player.diplomacy.agreements.query({ agreementLifecycle: "all" } as any)).ok, false);
+    assert.equal((await player.diplomacy.agreements.query({ id: all.items[0].id, agreementLifecycle: "draft" })).ok, false);
+    for (const owner of [player.diplomacy.relations, player.diplomacy.reputation, player.diplomacy.territory, player.diplomacy.disputes, player.diplomacy.proposals])
+      assert.equal((await owner.query({ agreementLifecycle: "active" })).ok, false);
+    assert.equal((unwrap(await player.diplomacy.relations.query()) as any).agreementSummary, undefined);
+    assert.equal((unwrap(await gm.diplomacy.agreements.query({ id: all.items[0].id })) as any).agreementSummary, undefined);
+  } finally { player.destroy(); gm.destroy(); }
+});
+test("G6 dashboard runtime: authenticated participant, stranger and GM receive only authorized aggregate counts", async () => {
+  const f = fixture(); await seedDashboardAgreement(f.adapter, "active", "Public"); await seedDashboardAgreement(f.adapter, "suspended", "Controlled", "restricted");
+  const secret = await seedDashboardAgreement(f.adapter, "terminated", "Private marker", "secret");
+  await seedDashboardAgreement(f.adapter, "breached", "Other participant", "restricted", false);
+  const gm = f.make(), player = f.make("player"), stranger = f.make("stranger");
+  try { await gm.initialize(); const a: any = unwrap(await gm.diplomacy.agreements.query()), b: any = unwrap(await player.diplomacy.agreements.query()), c: any = unwrap(await stranger.diplomacy.agreements.query());
+    assert.equal(a.agreementSummary.total, 4); assert.equal(b.agreementSummary.total, 2); assert.equal(c.agreementSummary.total, 1);
+    assert.equal(b.agreementSummary.byLifecycle.suspended, 1); assert.equal(b.agreementSummary.byLifecycle.breached, 0); assert.equal(b.agreementSummary.byLifecycle.terminated, 0);
+    assert.equal(JSON.stringify(b).includes(secret), false); assert.equal(JSON.stringify(b).includes("Private marker"), false);
+    assert.equal((unwrap(await player.diplomacy.agreements.query({ search: "Private marker" })) as any).agreementSummary.total, 0);
+    const filtered: any = unwrap(await player.diplomacy.agreements.query({ agreementLifecycle: "terminated" })); assert.equal(filtered.total, 0); assert.equal(filtered.agreementSummary.total, 2);
+  } finally { stranger.destroy(); player.destroy(); gm.destroy(); }
+});
+test("G6 dashboard runtime: controller pages and search compose; reads preserve history across authority reload", async () => {
+  const f = fixture(); for (let i = 0; i < 35; i++) await seedDashboardAgreement(f.adapter, "draft", `Trade ${i}`);
+  await seedDashboardAgreement(f.adapter, "active", "Other"); const before = await f.adapter.loadAll(), gm = f.make(); let expected: any;
+  try { await gm.initialize(); const c = new DiplomacyApplicationController(gm.diplomacy); c.selectTab("agreements"); c.setSearch("trade"); unwrap(c.selectAgreementLifecycle("draft"));
+    unwrap(await c.load()); assert.equal(c.list.items.length, 30); assert.equal(c.list.agreementSummary.total, 35); c.offset = 30; unwrap(await c.load());
+    assert.equal(c.list.items.length, 5); assert.equal(c.list.total, 35); assert.equal(c.list.agreementSummary.total, 35);
+    expected = c.list.agreementSummary; assert.deepEqual(await f.adapter.loadAll(), before);
+    assert.ok(c.render().includes("acordos neste filtro/pesquisa"));
+  } finally { gm.destroy(); }
+  const reload = f.make(); try { await reload.initialize(); const d: any = unwrap(await reload.diplomacy.agreements.query({ search: "trade", agreementLifecycle: "draft", offset: 30 }));
+    assert.deepEqual(d.agreementSummary, expected); assert.equal(d.items.length, 5); assert.deepEqual(await f.adapter.loadAll(), before);
+  } finally { reload.destroy(); }
+});
+test("G6 dashboard runtime: pending amendment and elapsed deadline leave registered active state unchanged", async () => {
+  const f = fixture(), gm = f.make();
+  try { await gm.initialize(); const p = await prepareAgreement(gm, []); unwrap(await p.activate());
+    unwrap(await p.modify({ kind: "amend", amendmentId: "pending", proposalId: "amend-offer", partyId: "party-0", terms: [], duration: { startsAtWorldTick: null, expiresAtWorldTick: 200 }, proposalExpiresAtWorldTick: 50 }));
+    const before = await f.adapter.loadAll(); f.time.tick = 500;
+    const d: any = unwrap(await gm.diplomacy.agreements.query({ agreementLifecycle: "active" })); assert.equal(d.total, 1); assert.equal(d.agreementSummary.byLifecycle.active, 1);
+    assert.equal(d.agreementSummary.byLifecycle.expired, 0); const negotiations: any = unwrap(await gm.diplomacy.agreements.query({ agreementLifecycle: "negotiation" })); assert.equal(negotiations.total, 0);
+    assert.deepEqual(await f.adapter.loadAll(), before); assert.equal(f.time.tick, 500);
+    const detail: any = unwrap(await gm.diplomacy.agreements.query({ id: p.id })); assert.equal(detail.proposals.at(-1).lifecycle, "open"); assert.equal(detail.lifecycle, "active");
+    unwrap(await p.modify({ kind: "expire" })); const expired: any = unwrap(await gm.diplomacy.agreements.query({ agreementLifecycle: "expired" })); assert.equal(expired.total, 1);
+  } finally { gm.destroy(); }
+});

@@ -10,19 +10,25 @@ import { diplomacyViewerControls, diplomacyViewerIsGm } from "./diplomacy-permis
 import { lockKey } from "../mutations/lock-keys.js";
 import { isJournalEntryUuid } from "../core/identity/refs.js";
 import { territoryOwner } from "../territory/territory-owner.js";
+import { isAgreementLifecycleFilter, matchesAgreementLifecycle, summarizeAgreementLifecycles,
+  type AgreementLifecycleFilter } from "../agreements/agreement-dashboard.js";
+import { AGREEMENT_LIFECYCLES, type AgreementLifecycle } from "../agreements/agreement-model.js";
 export interface DiplomacyQuery {
   readonly id?: string; readonly offset?: number; readonly limit?: number; readonly search?: string;
   readonly historyOffset?: number; readonly historyLimit?: number;
   readonly parentUuid?: string | null; readonly treeAxis?: "locatedInUuid" | "administrativeParentUuid";
+  readonly agreementLifecycle?: AgreementLifecycleFilter;
 }
-export function validateDiplomacyQuery(raw: unknown): Result<DiplomacyQuery> {
+export function validateDiplomacyQuery(raw: unknown, kind?: DiplomacyKind): Result<DiplomacyQuery> {
   if (!isRecord(raw) || (raw.id !== undefined && (typeof raw.id !== "string" || !raw.id))
     || (raw.offset !== undefined && !isTimestamp(raw.offset)) || (raw.limit !== undefined && (!isTimestamp(raw.limit) || raw.limit < 1 || raw.limit > 100))
     || (raw.historyOffset !== undefined && !isTimestamp(raw.historyOffset))
     || (raw.historyLimit !== undefined && (!isTimestamp(raw.historyLimit) || raw.historyLimit > 100))
     || (raw.search !== undefined && (typeof raw.search !== "string" || raw.search.length > 200))
     || (raw.parentUuid !== undefined && raw.parentUuid !== null && !isJournalEntryUuid(raw.parentUuid))
-    || (raw.treeAxis !== undefined && !["locatedInUuid", "administrativeParentUuid"].includes(raw.treeAxis as string))) return failure("DM_DIPLOMACY_QUERY_INVALID", "Invalid query pagination");
+    || (raw.treeAxis !== undefined && !["locatedInUuid", "administrativeParentUuid"].includes(raw.treeAxis as string))
+    || (raw.agreementLifecycle !== undefined && (kind !== "agreement" || raw.id !== undefined || !isAgreementLifecycleFilter(raw.agreementLifecycle))))
+    return failure("DM_DIPLOMACY_QUERY_INVALID", "Invalid query pagination or agreement state filter");
   return ok(raw as DiplomacyQuery);
 }
 export async function queryDiplomacyOwner(ctx: AuthenticatedCommandContext<DiplomacyQuery>, kind: DiplomacyKind, owner: DiplomacyOwner,
@@ -32,6 +38,7 @@ export async function queryDiplomacyOwner(ctx: AuthenticatedCommandContext<Diplo
   const rows = p.id ? [store.get(kind, p.id)].filter(x => x !== null) : kind === "territory" && Object.hasOwn(p, "parentUuid")
     ? store.children(p.parentUuid ?? null, p.treeAxis ?? "locatedInUuid") : store.list(kind), visible: unknown[] = [];
   const offset = p.offset ?? 0, limit = p.limit ?? 30; let count = 0;
+  const agreementStates: AgreementLifecycle[] = [];
   const territoryVisible = async (uuid: string): Promise<boolean> => {
     const row = store.get("territory", uuid); if (!row) return false;
     const state = row.data as import("../territory/territory-state.js").TerritoryState;
@@ -47,6 +54,13 @@ export async function queryDiplomacyOwner(ctx: AuthenticatedCommandContext<Diplo
     if (!canSee(identity.visibility) || p.search && !identity.label.toLocaleLowerCase().includes(p.search.toLocaleLowerCase())) continue;
     const fenced = recovery.fenceRegistry.assertKeysAvailable([lockKey.diplomacy(kind, row.id), ...(kind === "territory" || kind === "dispute" ? [lockKey.territoryGraph()] : [])]);
     if (!fenced.ok) { if (p.id) return fenced; continue; }
+    const lifecycle = kind === "agreement" ? (row.data as any).state?.agreement?.lifecycle
+      : (row.data as any).state?.relation?.lifecycle ?? (row.data as any).lifecycle ?? "active";
+    if (kind === "agreement" && !p.id) {
+      if (!AGREEMENT_LIFECYCLES.includes(lifecycle)) return failure("DM_AGREEMENT_STATE_INVALID", "Agreement state unavailable");
+      agreementStates.push(lifecycle);
+      if (!matchesAgreementLifecycle(lifecycle, p.agreementLifecycle)) continue;
+    }
     if (count++ < offset || visible.length >= limit) continue;
     if (p.id) {
       const detail = owner.project(row.data, { isGm, canSee, at: ctx.receivedAtReal, worldTick,
@@ -76,8 +90,9 @@ export async function queryDiplomacyOwner(ctx: AuthenticatedCommandContext<Diplo
       }
       visible.push(projected);
     } else visible.push({ id: identity.id, revision: identity.revision, label: identity.label,
-      lifecycle: (row.data as any).state?.relation?.lifecycle ?? (row.data as any).state?.agreement?.lifecycle ?? (row.data as any).lifecycle ?? "active" });
+      lifecycle });
   }
   if (p.id) return visible.length ? ok(visible[0]) : failure("DM_DIPLOMACY_NOT_FOUND", "Entity unavailable", "not-found");
-  return ok({ items: visible, total: count, offset, limit, isGm, worldTick });
+  return ok({ items: visible, total: count, offset, limit, isGm, worldTick,
+    ...(kind === "agreement" ? { agreementSummary: summarizeAgreementLifecycles(agreementStates) } : {}) });
 }
