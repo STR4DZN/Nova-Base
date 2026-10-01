@@ -38,13 +38,13 @@ Os 155 testes verticais existentes passaram após a implementação. Na primeira
 
 ## Validação
 
-**1259/1259 testes PASS** (28 novos), específicos 13/13 e verticais 170/170; zero falhas/skips. TypeScript/build/package/validate:release PASS localmente. GitHub Actions pendente. Evidência canônica: `docs/evidence/G6_TERRITORY_RIGHTS_IMPACT_VALIDATION.json`. Workflow próprio preserva logs e ZIP sem publicar release.
+**1259/1259 testes PASS** (28 novos), específicos 13/13 e verticais 170/170; zero falhas/skips. TypeScript/build/package/validate:release PASS localmente. GitHub Actions PASS: commit `4bfaf8611511e5799571430191923f43e366b611`, workflow `36933559755`; 16 workflows aprovados. Evidência canônica: `docs/evidence/G6_TERRITORY_RIGHTS_IMPACT_VALIDATION.json`. Workflow próprio preserva logs e ZIP sem publicar release.
 
 Cobertura inclui múltiplas origens/beneficiários, direitos sem capacidades, condições e vigência de ambas as fontes, dois eixos/subárvores/raiz/no-op, ciclos/invalidade, emendas pendentes, atualização fresca e catálogo externo, acesso GM/Player/terceiro/spoofing, ausência de writes na prévia e de cópias na confirmação. UI incompleta não confirma, HTML é escapado e fingerprint não aparece na interface. Recarga/retry e serialização com Agreement foram exercitados pelo runtime real composto de teste.
 
 ## Limites e próxima parte
 
-A leitura do catálogo e os locks são conservadores: mudanças em Agreement sem relação com o ramo também invalidam a prévia. Não houve benchmark de escala. O provider de condições existente não oferece locks/versionamento de suas dependências externas; os resultados ficam fixos durante cada preparação e são reavaliados na confirmação, sem prometer atomicidade com writers externos que ignorem o kernel. O desenho não substitui enforcement de access policy em todos os consumers nem calcula impactos completos de outros estados/aggregates herdados.
+A leitura do catálogo e os locks são conservadores: mudanças em Agreement sem relação com o ramo também invalidam a prévia. Não houve benchmark de escala. O provider de condições existente não oferece locks/versionamento de suas dependências externas; os resultados ficam fixos durante cada preparação e são reavaliados na confirmação, sem prometer atomicidade com writers externos que ignorem o kernel. Condições são observadas na autoridade antes do commit; o contrato atual não simula dependências que a própria nova hierarquia possa alterar. A consulta após o commit resolve novamente as condições sobre o estado persistido. O desenho não substitui enforcement de access policy em todos os consumers nem calcula impactos completos de outros estados/aggregates herdados.
 
 Foundry real somente ao concluir o bloco G6. Nenhuma release publicada; G7 não iniciado.
 

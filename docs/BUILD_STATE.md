@@ -13,7 +13,7 @@
 
 - Prévia GM de hierarquia compara direitos herdados de Territory/Agreement por eixo, alvo e descendentes. Origem/âmbito/beneficiário preservados, inclusive empty grants; locais e fontes comuns permanecem independentes.
 - Read model compartilhado com inspector, catálogo fresco/validado e snapshot de Agreements/condições. Writers de Agreement compartilham lock de catálogo com reparent; drift/fences impedem confirmar revisão incompleta. Sem cópias, consequences ou writes em descendentes/fontes.
-- 1259/1259 testes PASS (28 novos), específicos 13/13 e verticais 170/170; TypeScript/build/package/validate:release PASS localmente. GitHub Actions pendente. Relatório `docs/G6_TERRITORY_RIGHTS_IMPACT_REPORT.md`; evidência `docs/evidence/G6_TERRITORY_RIGHTS_IMPACT_VALIDATION.json`. Nenhuma release publicada.
+- 1259/1259 testes PASS (28 novos), específicos 13/13 e verticais 170/170; TypeScript/build/package/validate:release PASS localmente. GitHub Actions PASS: commit `4bfaf8611511e5799571430191923f43e366b611`, workflow `36933559755`; 16 workflows aprovados. Relatório `docs/G6_TERRITORY_RIGHTS_IMPACT_REPORT.md`; evidência `docs/evidence/G6_TERRITORY_RIGHTS_IMPACT_VALIDATION.json`. Nenhuma release publicada.
 - **PARAR AQUI. Próximo passo:** formulários estruturados de concessão e revogação de direitos territoriais, com vigência, condições, capacidades declaradas e propostas Player/revisão GM; aguardar autorização. Foundry real ao fim do bloco G6. G6 parcial; G7 não iniciado.
 
 ## Parte G6 — Direitos territoriais efetivos no inspector — 2026-10-01
@@ -686,7 +686,7 @@ Candidata v0.0.8: 13 defeitos reproduzidos/corrigidos; 878/878 testes locais PAS
 
 ## Próxima ação canônica
 
-- **Gate G6 — Relations / Reputation / Agreements / Territory: prévia dos impactos nos direitos herdados implementada nesta parte**, após a aceitação do Gate G5. 1259/1259 testes PASS (28 novos), específicos 13/13 e verticais 170/170; TypeScript/build/package/validate:release PASS localmente. GitHub Actions pendente. Relatório `docs/G6_TERRITORY_RIGHTS_IMPACT_REPORT.md`. **PARAR AQUI**. Próxima parte: formulários estruturados de concessão e revogação de direitos territoriais, com vigência, condições, capacidades declaradas e propostas Player/revisão GM; aguardar autorização. Foundry real somente após concluir o bloco G6. Gate G6 parcial; não iniciar G7.
+- **Gate G6 — Relations / Reputation / Agreements / Territory: prévia dos impactos nos direitos herdados implementada nesta parte**, após a aceitação do Gate G5. 1259/1259 testes PASS (28 novos), específicos 13/13 e verticais 170/170; TypeScript/build/package/validate:release PASS localmente. GitHub Actions PASS: commit `4bfaf8611511e5799571430191923f43e366b611`, workflow `36933559755`; 16 workflows aprovados. Relatório `docs/G6_TERRITORY_RIGHTS_IMPACT_REPORT.md`. **PARAR AQUI**. Próxima parte: formulários estruturados de concessão e revogação de direitos territoriais, com vigência, condições, capacidades declaradas e propostas Player/revisão GM; aguardar autorização. Foundry real somente após concluir o bloco G6. Gate G6 parcial; não iniciar G7.
 
 ## G6.4–G6.5 — Acordos e obrigações — 2026-09-29
 
